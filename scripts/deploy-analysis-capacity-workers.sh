@@ -17,6 +17,11 @@ readonly PAID_INITIAL_PREDEPLOY_OLD_SOURCE_SHA="3b28e55c8877276557f8a5a218fb2b96
 # V2 release-readiness contract.  A single source-of-truth label prevents an
 # operator from mistaking a capacity wrapper SHA for the reviewed V2 source SHA.
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
+# A PAUSED Cloud Tasks queue still accepts createTask, and the serving preflight
+# recovery endpoint enqueues with the OLD caller identity.  The recovery
+# scheduler must therefore have been paused for longer than the deployed Cloud
+# Run request timeout (600s) plus grace before an empty queue proves anything.
+readonly PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS=660
 
 mode="check"
 mode_was_explicit="false"
@@ -71,17 +76,23 @@ Modes:
   --allow-bootstrap-initial-transition is valid only with an explicit --apply
              when an existing exact serving bootstrap service is promoted to
              initial; only the known activation gate values may transition.
-  --allow-initial-identity-roll-forward is valid only with an explicit --apply
-             plus --reconcile-iam when an existing serving initial service must
-             adopt rotated task caller, enqueuer, and runtime identities. It
-             requires target and observed stage initial, an exact externally
-             supplied prior identity/source assertion set, a PAUSED and
-             observably empty target queue, pairwise-distinct desired workload
-             identities, and (preflight) an already-aligned Vercel producer
-             fingerprint. The allowance is predeploy-only: the staged revision
-             and the promoted revision are verified exactly.
+  --allow-initial-identity-roll-forward is preflight-only and valid only with an
+             explicit --apply plus --reconcile-iam when an existing serving
+             initial preflight service must adopt rotated task caller, enqueuer,
+             and runtime identities. Paid is refused outright: the active public
+             runtime publishes a producer fingerprint only for the preflight
+             producer contract. It requires target and observed stage initial,
+             an exact externally supplied prior identity/source assertion set,
+             the exact PAUSED and observably empty full target queue resource,
+             pairwise-distinct desired workload identities across both roles,
+             an existing invoker binding holding exactly the asserted prior task
+             caller and the current maintenance caller, and the complete
+             published Vercel evidence chain (READY production deployment SHA,
+             exact alias/origin binding, next-deploy env metadata, and active
+             producer fingerprint). The allowance is predeploy-only: the staged
+             revision and the promoted revision are verified exactly.
 
-Initial identity roll-forward assertions (required only with that flag):
+Initial identity roll-forward assertions (rejected without that flag):
   ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL
   ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL
     The exact prior enqueuer identity, or the literal absent when the observed
@@ -165,6 +176,13 @@ done
   || die "--role=preflight or --role=paid is required"
 [[ "${ANALYSIS_WORKLOAD_ROLE:-}" == "$role" ]] \
   || die "ANALYSIS_WORKLOAD_ROLE must equal --role"
+# The active public runtime publishes a producer-configuration fingerprint only
+# for the preflight producer contract, so preflight is the only role where a
+# rotated caller/target/audience can be proven live from published evidence
+# before the worker adopts it.  Paid identity rotation needs its own reviewed
+# evidence path and is refused here rather than accepted on weaker proof.
+[[ "$allow_initial_identity_roll_forward" != "true" || "$role" == "preflight" ]] \
+  || die "--allow-initial-identity-roll-forward is valid only for --role=preflight; the active public runtime publishes a producer fingerprint only for the preflight producer contract"
 
 stage="${ANALYSIS_CAPACITY_STAGE:-initial}"
 expansion_canary="${ANALYSIS_CAPACITY_EXPANSION_CANARY:-false}"
@@ -269,6 +287,23 @@ old_task_sa="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_E
 old_enqueuer="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL:-}"
 old_runtime="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:-}"
 old_source_sha_assertion="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA:-}"
+old_recovery_pause_epoch="${ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH:-}"
+# Snapshot of the prior state this run owns, captured once and re-proven at the
+# final mutation barrier immediately before the single IAM write.
+initial_identity_resource_version=""
+initial_identity_generation=""
+initial_identity_traffic_projection=""
+# Resolved and validated before any gcloud invocation so neither value can reach
+# a gcloud positional or flag unchecked.
+recovery_scheduler_job=""
+recovery_scheduler_location=""
+# Prior-state assertions only mean something under the explicit exceptional
+# flag.  Supplying one without it is an operator error, not an inert value.
+if [[ "$allow_initial_identity_roll_forward" != "true" ]]; then
+  [[ -z "$old_task_sa" && -z "$old_enqueuer" && -z "$old_runtime" \
+     && -z "$old_source_sha_assertion" && -z "$old_recovery_pause_epoch" ]] \
+    || die "initial identity roll-forward assertions require --allow-initial-identity-roll-forward"
+fi
 
 [[ -n "$project" && -n "$location" && -n "$region" && -n "$service" \
    && -n "$queue" && -n "$target" && -n "$audience" && -n "$task_sa" \
@@ -369,6 +404,9 @@ other_task_var="${other_prefix}_SERVICE_ACCOUNT_EMAIL"
 other_enqueuer_var="${other_prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL"
 other_runtime_var="PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL"
 [[ "$role" == "preflight" ]] && other_runtime_var="ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
+other_maintenance_var="PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
+[[ "$role" == "preflight" ]] && other_maintenance_var="ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
+other_maintenance="${!other_maintenance_var:-}"
 other_target="${!other_target_var:-}"
 other_audience="${!other_audience_var:-}"
 other_queue="${!other_queue_var:-}"
@@ -385,12 +423,46 @@ other_runtime="${!other_runtime_var:-}"
   || die "preflight and paid target origins must be distinct"
 [[ "${audience%/}" != "${other_audience%/}" ]] \
   || die "preflight and paid OIDC audiences must be distinct"
-identity_values=("$task_sa" "$enqueuer" "$runtime" "$other_task" "$other_enqueuer" "$other_runtime")
+[[ -n "$other_maintenance" ]] || die "the other workload maintenance identity is required"
+# The other-role tuple is trusted by the global distinctness proof below, so it
+# gets the same syntactic and project-ownership rules as the active role.  There
+# is deliberately no enqueuer project rule, matching the active-role contract.
+other_project_var="${other_prefix}_PROJECT"
+other_project="${!other_project_var:-}"
+[[ "$other_project" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] \
+  || die "the other workload project is required"
+[[ "$other_task" =~ $service_account_pattern ]] \
+  || die "invalid other workload task service account"
+[[ "$other_enqueuer" =~ $service_account_pattern ]] \
+  || die "invalid other workload enqueuer service account"
+[[ "$other_runtime" =~ $service_account_pattern ]] \
+  || die "invalid other workload runtime service account"
+[[ "$other_maintenance" =~ $service_account_pattern ]] \
+  || die "invalid other workload maintenance service account"
+[[ "${other_task#*@}" == "${other_project}.iam.gserviceaccount.com" ]] \
+  || die "other workload task service account must belong to the other workload project"
+[[ "${other_runtime#*@}" == "${other_project}.iam.gserviceaccount.com" ]] \
+  || die "other workload runtime service account must belong to the other workload project"
+[[ "${other_maintenance#*@}" == "${other_project}.iam.gserviceaccount.com" ]] \
+  || die "other workload maintenance service account must belong to the other workload project"
+# Global distinctness spans all eight desired workload identities of both roles.
+# A maintenance identity that aliases any caller, enqueuer, or runtime identity
+# would silently widen one role's invoker reach into the other role's service.
+identity_values=(
+  "$task_sa" "$enqueuer" "$runtime" "$maintenance"
+  "$other_task" "$other_enqueuer" "$other_runtime" "$other_maintenance"
+)
 for ((identity_index = 0; identity_index < ${#identity_values[@]}; identity_index += 1)); do
   for ((other_identity_index = identity_index + 1; other_identity_index < ${#identity_values[@]}; other_identity_index += 1)); do
     [[ "${identity_values[$identity_index]}" != "${identity_values[$other_identity_index]}" ]] \
-      || die "all preflight/paid task, enqueuer, and runtime identities must be distinct"
+      || die "all preflight/paid task, enqueuer, runtime, and maintenance identities must be distinct"
   done
+done
+# The dedicated build identity is a separate reviewed principal; it must never
+# double as any workload identity of either role.
+for desired_identity in "${identity_values[@]}"; do
+  [[ "$build_service_account" != "$desired_identity" ]] \
+    || die "build service account must be distinct from every desired workload identity"
 done
 
 command -v jq >/dev/null 2>&1 || die "jq is required before parsing strict JSON manifests"
@@ -505,6 +577,30 @@ if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
   [[ -n "$old_task_sa" && -n "$old_enqueuer" && -n "$old_runtime" \
      && -n "$old_source_sha_assertion" ]] \
     || die "initial identity roll-forward requires exact prior task, enqueuer, runtime, and source SHA assertions"
+  # The maintenance contract may put the recovery scheduler in its own location,
+  # so resolve it the same way configure-analysis-preflight-maintenance.sh does
+  # rather than assuming the Cloud Tasks queue location.  Both values are
+  # validated here, before any gcloud command can receive them.
+  recovery_scheduler_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
+  recovery_scheduler_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
+  # Bounded repetition above 255 is not portable in this regex engine, so the
+  # documented 500-character Scheduler job-id limit is checked separately.
+  [[ "$recovery_scheduler_job" =~ ^[A-Za-z][A-Za-z0-9_-]*$ \
+     && ${#recovery_scheduler_job} -le 500 ]] \
+    || die "initial identity roll-forward recovery scheduler job name is invalid"
+  [[ "$recovery_scheduler_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
+    || die "initial identity roll-forward recovery scheduler location is invalid"
+  [[ -n "$old_recovery_pause_epoch" ]] \
+    || die "initial identity roll-forward requires an exact preflight recovery scheduler pause epoch assertion"
+  [[ "$old_recovery_pause_epoch" =~ ^[1-9][0-9]{8,10}$ ]] \
+    || die "initial identity roll-forward pause epoch must be strict decimal epoch seconds"
+  roll_forward_now="$(date -u +%s)"
+  [[ "$roll_forward_now" =~ ^[0-9]+$ ]] \
+    || die "initial identity roll-forward could not read a trustworthy wall clock"
+  (( old_recovery_pause_epoch <= roll_forward_now )) \
+    || die "initial identity roll-forward pause epoch must not be in the future"
+  (( roll_forward_now - old_recovery_pause_epoch >= PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS )) \
+    || die "initial identity roll-forward requires the ${PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS}s recovery scheduler quiescence window to have elapsed since the asserted pause"
   [[ "$old_source_sha_assertion" =~ ^[0-9a-f]{40}$ ]] \
     || die "initial identity roll-forward prior source SHA must be one exact 40-character commit"
   [[ "$old_source_sha_assertion" != "$source_sha" ]] \
@@ -518,7 +614,9 @@ if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
       || die "initial identity roll-forward prior identities must be exact service accounts"
     [[ "${old_identity#*@}" == "${project}.iam.gserviceaccount.com" ]] \
       || die "initial identity roll-forward prior identities must belong to the task project"
-    for desired_identity in "${identity_values[@]}" "$maintenance" "$build_service_account"; do
+    # identity_values already spans all eight desired workload identities of
+    # both roles; the build identity is the remaining reviewed principal.
+    for desired_identity in "${identity_values[@]}" "$build_service_account"; do
       [[ "$old_identity" != "$desired_identity" ]] \
         || die "initial identity roll-forward prior identities must differ from every desired workload identity"
     done
@@ -1643,6 +1741,90 @@ expected_old_enqueuer_value() {
   printf '%s\n' "$old_enqueuer"
 }
 
+# BSD and GNU date disagree on parsing RFC3339, so use the Node runtime this
+# script already requires.  The regex runs first so a malformed value fails
+# closed rather than reaching a lenient parser.
+rfc3339_to_epoch() {
+  local value="$1"
+  [[ "$value" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.([0-9]+))?Z$ ]] \
+    || return 1
+  local whole_second="${BASH_REMATCH[1]}Z"
+  local fraction="${BASH_REMATCH[3]:-}"
+  local epoch
+  # Parse only the whole-second part.  Date.parse silently truncates RFC3339
+  # precision finer than milliseconds, so feeding it the fraction would treat
+  # ".000000001Z" as an exact second and admit an attempt up to a millisecond
+  # early.  The fraction is inspected as a string instead, at any precision.
+  epoch="$(node -e '
+    const parsed = Date.parse(process.argv[1]);
+    if (!Number.isFinite(parsed) || parsed % 1000 !== 0) process.exit(1);
+    process.stdout.write(String(parsed / 1000));
+  ' "$whole_second" 2>/dev/null)" || return 1
+  # Round UP: a ceiling makes the attempt look more recent, so no sub-second
+  # remainder can let an attempt clear the quiescence window early.
+  if [[ -n "$fraction" && "$fraction" == *[1-9]* ]]; then
+    epoch=$((epoch + 1))
+  fi
+  printf '%s' "$epoch"
+}
+
+# The reviewed recovery job is evidence in full: a job that is PAUSED but
+# reconfigured could be resumed into unreviewed behaviour at any moment, so the
+# entire contract is compared, not just its state.
+verify_preflight_recovery_scheduler_quiescent() {
+  local expected_job_name="projects/$project/locations/$recovery_scheduler_location/jobs/$recovery_scheduler_job"
+  local recovery_uri="${origin%/}/api/analysis/preflight/recover"
+  local job_json
+  local last_attempt
+  local last_attempt_epoch
+  local now
+  job_json="$(gcloud scheduler jobs describe "$recovery_scheduler_job" \
+    "--project=$project" \
+    "--location=$recovery_scheduler_location" \
+    '--format=json')" \
+    || die "initial identity roll-forward recovery scheduler could not be observed"
+  jq -e \
+    --arg name "$expected_job_name" \
+    --arg uri "$recovery_uri" \
+    --arg audience "${maintenance_audience%/}" \
+    --arg service_account "$maintenance" '
+      (.name // "") == $name
+      and (.state // "") == "PAUSED"
+      and .schedule == "* * * * *"
+      and .timeZone == "Etc/UTC"
+      and .httpTarget.uri == $uri
+      and .httpTarget.httpMethod == "POST"
+      and .httpTarget.oidcToken.serviceAccountEmail == $service_account
+      and .httpTarget.oidcToken.audience == $audience
+      and (.httpTarget.headers["Content-Type"] // "") == "application/json"
+      and (.httpTarget.body // "") == "e30="
+      and .attemptDeadline == "300s"
+      and ((.retryConfig.retryCount // 0) | tonumber) == 3
+      and .retryConfig.maxRetryDuration == "300s"
+      and .retryConfig.minBackoffDuration == "10s"
+      and .retryConfig.maxBackoffDuration == "60s"
+      and ((.retryConfig.maxDoublings // 0) | tonumber) == 3
+    ' <<<"$job_json" >/dev/null \
+    || die "initial identity roll-forward recovery scheduler must be observably PAUSED at the exact reviewed job resource and configuration"
+  now="$(date -u +%s)"
+  [[ "$now" =~ ^[0-9]+$ ]] \
+    || die "initial identity roll-forward could not read a trustworthy wall clock"
+  (( now - old_recovery_pause_epoch >= PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS )) \
+    || die "initial identity roll-forward requires the ${PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS}s recovery scheduler quiescence window to have elapsed since the asserted pause"
+  # A paused job has been observed to stop reporting lastAttemptTime seconds
+  # after a real attempt, so its absence proves nothing and the aged externally
+  # asserted pause above is the load-bearing evidence.  A value that IS present
+  # must still be older than the same window.
+  last_attempt="$(jq -r '.lastAttemptTime // empty' <<<"$job_json")"
+  if [[ -n "$last_attempt" ]]; then
+    last_attempt_epoch="$(rfc3339_to_epoch "$last_attempt")" \
+      || die "initial identity roll-forward recovery scheduler last attempt timestamp is malformed"
+    (( now - last_attempt_epoch >= PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS )) \
+      || die "initial identity roll-forward recovery scheduler last attempt is inside the quiescence window"
+  fi
+  log "verified: recovery scheduler is the exact PAUSED job and the asserted pause predates the ${PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS}s quiescence window"
+}
+
 verify_target_queue_is_paused_and_empty() {
   local queue_json
   local task_json
@@ -1651,8 +1833,10 @@ verify_target_queue_is_paused_and_empty() {
     "--location=$location" \
     '--format=json')" \
     || die "initial identity roll-forward target queue could not be observed"
-  jq -e --arg queue "$queue" '
-    ((.name // "") | endswith("/queues/" + $queue))
+  # A suffix match would accept an identically named queue in another project or
+  # region, so the observed queue must be the full resource identity.
+  jq -e --arg expected "projects/$project/locations/$location/queues/$queue" '
+    (.name // "") == $expected
     and (.state // "") == "PAUSED"
   ' <<<"$queue_json" >/dev/null \
     || die "initial identity roll-forward requires the exact PAUSED target queue"
@@ -1667,9 +1851,127 @@ verify_target_queue_is_paused_and_empty() {
   log "verified: target queue $queue is paused and observably empty"
 }
 
+# The reconcile replaces the roles/run.invoker binding wholesale, so the binding
+# it replaces must first be proven to be exactly the reviewed prior state: one
+# unconditioned binding holding exactly the asserted prior task caller and the
+# unchanged current maintenance caller.
+initial_identity_prior_invoker_binding_is_exact() {
+  local policy_json="$1"
+  local expected_prior_members_json
+  expected_prior_members_json="$(printf '%s\n' \
+    "serviceAccount:$old_task_sa" "serviceAccount:$maintenance" \
+    | jq -Rsc 'split("\n") | map(select(length > 0)) | sort')"
+  jq -e --argjson expected "$expected_prior_members_json" '
+    [.bindings[]? | select(.role == "roles/run.invoker")] as $invokers
+    | ($invokers | length) == 1
+    and ($invokers[0].condition? == null)
+    and ((($invokers[0].members // []) | sort) == ($expected | sort))
+  ' <<<"$policy_json" >/dev/null
+}
+
+verify_initial_identity_roll_forward_prior_iam() {
+  local prior_iam_json
+  prior_iam_json="$(gcloud run services get-iam-policy "$service" \
+    "--project=$project" "--region=$region" '--format=json')" \
+    || die "initial identity roll-forward prior invoker binding could not be observed"
+  initial_identity_prior_invoker_binding_is_exact "$prior_iam_json" \
+    || die "initial identity roll-forward requires the exact reviewed prior invoker binding: one unconditioned roles/run.invoker holding exactly the asserted prior task caller and the current maintenance caller"
+  log "verified: prior invoker binding holds exactly the asserted prior caller and the current maintenance caller"
+}
+
+# The exact prior Cloud Run state this run owns.  Applied to the snapshot that
+# was fully validated and again to the latest read at the mutation barrier.
+initial_identity_service_state_is_exact() {
+  local config="$1"
+  local expected_old_enqueuer
+  expected_old_enqueuer="$(expected_old_enqueuer_value)"
+  [[ "$(jq -r '.metadata.resourceVersion // empty' <<<"$config")" \
+     == "$initial_identity_resource_version" ]] || return 1
+  [[ "$(jq -r '.metadata.generation // empty' <<<"$config")" \
+     == "$initial_identity_generation" ]] || return 1
+  [[ "$(jq -r --arg key "$PROVENANCE_LABEL_KEY" '.metadata.labels[$key] // empty' <<<"$config")" \
+     == "$old_source_sha_assertion" ]] || return 1
+  [[ "$(jq -r --arg key "$task_sa_var" \
+       '[.spec.template.spec.containers[]?.env[]? | select(.name == $key) | .value][0] // empty' \
+       <<<"$config")" == "$old_task_sa" ]] || return 1
+  [[ "$(jq -r --arg key "$enqueuer_var" \
+       '[.spec.template.spec.containers[]?.env[]? | select(.name == $key) | .value][0] // empty' \
+       <<<"$config")" == "$expected_old_enqueuer" ]] || return 1
+  [[ "$(runtime_identity_value "$config")" == "$old_runtime" ]] || return 1
+  [[ "$(traffic_projection "$config")" == "$initial_identity_traffic_projection" ]] || return 1
+}
+
+iam_policies_match_modulo_etag() {
+  jq -e -n --argjson observed "$1" --argjson intended "$2" '
+    def normalize:
+      del(.etag)
+      | .bindings = ((.bindings // [])
+          | map(.members = ((.members // []) | sort))
+          | sort_by([.role, ((.members // []) | join(","))]));
+    ($observed | normalize) == ($intended | normalize)
+    and (($observed.etag // "") | length) > 0
+  ' >/dev/null
+}
+
+# One dedicated barrier immediately before the single set-iam-policy call.  A
+# read-then-write gap is exactly where an out-of-band change slips through, so
+# every external precondition is re-proven against the latest observable state
+# and the write is fenced by the etag from that same latest policy read.
+initial_identity_roll_forward_final_mutation_barrier() {
+  local latest_service_json
+  local latest_iam_json
+  local latest_etag
+  local intended_policy
+  local observed_policy_json
+  verify_target_queue_is_paused_and_empty
+  verify_preflight_recovery_scheduler_quiescent
+  verify_vercel_public_deployment
+  latest_service_json="$(gcloud run services describe "$service" \
+    "--project=$project" "--region=$region" '--format=json')" \
+    || die "initial identity roll-forward could not re-observe the Cloud Run service at the identity mutation barrier"
+  initial_identity_service_state_is_exact "$latest_service_json" \
+    || die "initial identity roll-forward Cloud Run service changed between verification and the identity mutation barrier"
+  latest_iam_json="$(gcloud run services get-iam-policy "$service" \
+    "--project=$project" "--region=$region" '--format=json')" \
+    || die "initial identity roll-forward could not re-observe the service IAM policy at the identity mutation barrier"
+  latest_etag="$(jq -r '.etag // empty' <<<"$latest_iam_json")"
+  [[ -n "$latest_etag" ]] \
+    || die "initial identity roll-forward requires the latest IAM policy to carry a non-empty etag for optimistic concurrency"
+  # An invoker binding that independently became the desired binding is not
+  # success: the transition would no longer be causally guarded by this run.
+  initial_identity_prior_invoker_binding_is_exact "$latest_iam_json" \
+    || die "initial identity roll-forward requires the exact reviewed prior invoker binding on the latest policy at the identity mutation barrier"
+  iam_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-capacity-run-iam.XXXXXX")"
+  jq --argjson expected "$allowed_invoker_members_json" '
+    .bindings = ((.bindings // [])
+      | map(select(.role != "roles/run.invoker"))
+      + [{"role": "roles/run.invoker", "members": $expected}])
+  ' <<<"$latest_iam_json" >"$iam_policy_file"
+  intended_policy="$(cat "$iam_policy_file")"
+  # Exactly one write, no retry: a rejected conflict must re-run the whole
+  # evidence sequence rather than race a concurrent policy update.
+  gcloud run services set-iam-policy "$service" "$iam_policy_file" \
+    "--project=$project" "--region=$region" --quiet >/dev/null \
+    || die "initial identity roll-forward invoker rotation failed; no retry is attempted"
+  rm -f -- "$iam_policy_file"
+  iam_policy_file=""
+  observed_policy_json="$(gcloud run services get-iam-policy "$service" \
+    "--project=$project" "--region=$region" '--format=json')" \
+    || die "initial identity roll-forward could not re-observe the rotated IAM policy"
+  iam_policies_match_modulo_etag "$observed_policy_json" "$intended_policy" \
+    || die "initial identity roll-forward observed IAM policy does not match the policy this run intended"
+  service_iam_json="$observed_policy_json"
+  verify_service_iam \
+    || die "initial identity roll-forward rotated invoker IAM was not exactly private after the write"
+  log "verified: rotated invoker policy written exactly once against the latest etag and read back unchanged"
+}
+
 # The complete precondition set for an initial-stage identity rotation.  It runs
 # before the contract verification that may reconcile IAM and before any deploy,
-# so no mutation can precede the prior-state, queue, and producer evidence.
+# so no service, IAM, or deploy mutation can precede the prior-state, queue,
+# scheduler, IAM, and producer evidence.  (The generation-bound GCS deploy lock
+# is acquired earlier; it is this run's mutual-exclusion token, not a change to
+# the service, its IAM, or its revisions.)
 verify_initial_identity_roll_forward_preconditions() {
   local observed_task
   local observed_enqueuer
@@ -1690,12 +1992,31 @@ verify_initial_identity_roll_forward_preconditions() {
     || die "initial identity roll-forward prior runtime identity assertion does not match the observed service"
   [[ "$observed_label_sha" == "$old_source_sha_assertion" ]] \
     || die "initial identity roll-forward prior source SHA assertion does not match the observed service"
+  # Own the exact Cloud Run revision of the prior state so the mutation barrier
+  # can prove nothing changed underneath this run.
+  initial_identity_resource_version="$(jq -r '.metadata.resourceVersion // empty' <<<"$service_json")"
+  initial_identity_generation="$(jq -r '.metadata.generation // empty' <<<"$service_json")"
+  initial_identity_traffic_projection="$(traffic_projection "$service_json")"
+  [[ -n "$initial_identity_resource_version" ]] \
+    || die "initial identity roll-forward requires an observable Cloud Run metadata.resourceVersion"
+  # A missing or non-positive generation would make the barrier comparison
+  # vacuous, so require a real positive integer rather than comparing blanks.
+  [[ "$initial_identity_generation" =~ ^[1-9][0-9]*$ ]] \
+    || die "initial identity roll-forward requires an observable positive Cloud Run metadata.generation"
   verify_target_queue_is_paused_and_empty
-  # Preflight producers live in Vercel; the desired caller/target/audience must
-  # already be the active producer contract before the worker adopts it.  Paid
-  # has no Vercel producer and keeps its own unchanged producer contract.
-  verify_preflight_runtime_fingerprint
-  log "verified: initial identity roll-forward preconditions before any IAM or deploy mutation"
+  # A PAUSED queue still accepts createTask and the serving recovery endpoint
+  # enqueues with the OLD caller, so an ENABLED recovery scheduler can refill
+  # the queue after it was observed empty.
+  verify_preflight_recovery_scheduler_quiescent
+  # The invoker binding this run is about to replace is itself reviewed prior
+  # state.  Prove it before set-iam-policy can widen or narrow anything.
+  verify_initial_identity_roll_forward_prior_iam
+  # The complete published Vercel evidence chain - selected READY production
+  # deployment SHA, exact alias/origin binding, next-deploy env metadata, and
+  # the active producer fingerprint - must already agree with the desired
+  # caller/target/audience before the worker adopts it.
+  verify_vercel_public_deployment
+  log "verified: initial identity roll-forward preconditions before any service, IAM, or deploy mutation (the generation-bound deploy lock is acquired earlier)"
 }
 
 initial_identity_roll_forward_value_is_allowed() {
@@ -1791,11 +2112,12 @@ verify_service_contract() {
     || die "invalid internal initial identity roll-forward allowance"
   if [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" ]]; then
     [[ "$allow_initial_identity_roll_forward" == "true" \
+       && "$role" == "preflight" \
        && "$mode" == "apply" && "$mode_was_explicit" == "true" \
        && "$reconcile_iam" == "true" \
        && "$require_traffic" == "true" \
        && "$stage" == "initial" && "$contract_stage" == "initial" ]] \
-      || die "initial identity roll-forward allowance is valid only for explicit initial apply predeploy verification"
+      || die "initial identity roll-forward allowance is valid only for explicit initial preflight apply predeploy verification"
   fi
   if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" ]]; then
     [[ "$mode" == "apply" && "$mode_was_explicit" == "true" \
@@ -1939,7 +2261,14 @@ verify_service_contract() {
     || die "Cloud Run capacity-stage label drifted"
   observed_source_sha="$(jq -r --arg key "$PROVENANCE_LABEL_KEY" '.metadata.labels[$key] // empty' <<<"$service_json")"
   if [[ "$observed_source_sha" != "$source_sha" ]]; then
-    if [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
+    if [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" ]]; then
+      # Under the identity allowance only the externally asserted prior SHA is
+      # acceptable, never an arbitrary syntactically valid older SHA.
+      [[ "$observed_source_sha" == "$old_source_sha_assertion" ]] \
+        || die "Cloud Run source provenance label drifted"
+      log "predeploy: allowing the exact asserted prior Cloud Run source provenance label"
+      source_roll_forward_observed="true"
+    elif [[ "$allow_existing_service_predeploy_source_roll_forward" == "true" \
        && "$observed_source_sha" =~ ^[0-9a-f]{40}$ ]]; then
       log "predeploy: allowing an older valid Cloud Run source provenance label"
       source_roll_forward_observed="true"
@@ -2032,7 +2361,11 @@ verify_service_contract() {
         ;;
     esac
   done
-  if verify_service_iam; then
+  if [[ "$allow_existing_service_predeploy_initial_identity_roll_forward" == "true" ]]; then
+    # Never take generic verify_service_iam success or the generic reconcile on
+    # the exceptional path; the dedicated barrier is the only route to the write.
+    initial_identity_roll_forward_final_mutation_barrier
+  elif verify_service_iam; then
     :
   elif [[ "$mode" == "apply" && "$reconcile_iam" == "true" ]]; then
     iam_policy_file="$(mktemp "${TMPDIR:-/tmp}/analysis-capacity-run-iam.XXXXXX")"
@@ -2198,5 +2531,14 @@ else
   verify_preflight_queue_oidc_contract
   verify_capacity_activation_readiness
 fi
-verify_preflight_maintenance
+if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
+  # The exceptional run must never resume the recovery scheduler: the paid role
+  # and the final cross-role checks are still pending, and a resumed scheduler
+  # would enqueue against a half-rotated system.  Re-prove it is still paused
+  # and hand the sole resume to the external final rollout.
+  verify_preflight_recovery_scheduler_quiescent
+  log "resume deferred: the preflight recovery scheduler remains PAUSED; the external final rollout owns the sole resume of both recovery schedulers and both queues"
+else
+  verify_preflight_maintenance
+fi
 rollback_armed="false"

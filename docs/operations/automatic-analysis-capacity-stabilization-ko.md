@@ -99,8 +99,19 @@ identity, 그리고 현재 revision에 아예 없던 role enqueuer 환경값을 
 `--allow-initial-identity-roll-forward`를 명시해야 한다. 이전 identity는 절대
 코드에 넣지 않고 실행할 때마다 외부에서 공급한다.
 
+**이 허용은 preflight 전용이다.** 활성 public runtime은 preflight producer
+contract에 대해서만 producer configuration fingerprint를 공개한다. 따라서 회전된
+caller/target/audience가 이미 라이브 producer contract임을 공개된 증거로 증명할
+수 있는 role은 preflight뿐이다. paid producer에는 이에 상응하는 공개 증거가
+없으므로 `--role=paid`에서는 관측이나 mutation 이전에 곧바로 거부한다. 이는 현재
+공개된 증거의 한계이지 paid에 producer가 없다는 뜻이 아니다. paid identity 회전은
+별도의 검토된 증거 경로가 필요하며 여기서는 범위 밖이다. 일반 paid apply 동작은
+바뀌지 않고 그대로 exact이다. paid task caller, target URL, OIDC audience drift는
+여전히 fail-closed다.
+
 다음 조건이 전부 성립할 때만 허용한다.
 
+- `--role=preflight`.
 - 명시적 `--apply`와 `--reconcile-iam`. invoker binding을 새 caller로 교체해야
   하므로 check/dry-run은 거부한다.
 - 대상 stage `initial`과 관측 stage `initial`. `--allow-bootstrap-initial-transition`과
@@ -110,28 +121,93 @@ identity, 그리고 현재 revision에 아예 없던 role enqueuer 환경값을 
   `..._OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL`(현재 revision에 enqueuer 값이 없으면
   리터럴 `absent`), `..._OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL`, `..._OLD_SOURCE_SHA`가
   관측된 서비스와 정확히 일치해야 한다. 모든 이전 identity는 task 프로젝트의
-  service account여야 하고, 양쪽 role의 모든 목표 task/enqueuer/runtime/maintenance/build
-  identity와 달라야 하며, 서로도 pairwise distinct여야 한다. 이전 source SHA는
-  검토된 source SHA와 달라야 한다.
-- 해당 role의 target queue가 관측 가능하고 `PAUSED`이며 비어 있어야 한다. 이전
-  caller identity를 그대로 들고 있는 in-flight task가 남으면 안 된다.
-- 양쪽 role의 목표 task/enqueuer/runtime identity가 pairwise distinct이고,
-  검토된 runtime manifest가 목표 role enqueuer 값을 이미 담고 있어야 한다.
-- preflight는 활성 Vercel producer fingerprint가 목표 caller/target/audience와
-  이미 일치해야 한다. paid는 Vercel producer가 없고, secondary credential slot,
-  10개 Apify ref 전체, queue contract 등 자기 producer contract를 그대로 유지한다.
+  service account여야 하고, 8개 목표 workload identity 전부 및 build identity와
+  달라야 하며, 서로도 pairwise distinct여야 한다. 이전 source SHA는 검토된 source
+  SHA와 달라야 한다. 이 단언을 flag 없이 공급하면 아무것도 관측하기 전에 거부한다.
+- target queue가 전체 resource 식별자
+  `projects/PROJECT/locations/LOCATION/queues/QUEUE`와 정확히 일치해야 한다. 다른
+  프로젝트나 리전의 동명 queue는 거부한다. 또한 `PAUSED`이고 관측상 비어 있어야
+  한다. 이전 caller identity를 그대로 들고 있는 in-flight task가 남으면 안 된다.
+- preflight recovery scheduler가 정지 상태임을 증명해야 한다. `PAUSED` Cloud Tasks
+  queue도 `createTask`는 계속 받고, 현재 서비스 중인 recovery endpoint는 *이전*
+  caller identity로 enqueue한다. 따라서 매분 도는 scheduler가 `ENABLED`로 남아
+  있으면 queue를 비어 있다고 관측한 뒤에도 이전 caller task가 들어올 수 있다.
+  그래서 정확한 job resource `projects/PROJECT/locations/LOCATION/jobs/JOB`가
+  `PAUSED`이고 검토된 attemptDeadline/retry contract를 유지해야 하며, 외부에서
+  공급한 `ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH`
+  (엄격한 10진 epoch 초, 미래 값 불가)가 최소 660초 이전이어야 한다. 660초는
+  배포된 Cloud Run 요청 timeout 600초에 여유를 더한 값이다. 이 epoch은 감사된
+  pause 시각을 다음 정수 초로 **올림**해서 쓴다. 관측된 attempt timestamp도 같은
+  방식으로 올림하므로, 소수점 이하 잔여가 최대 0.999초의 추가 경과를 벌어줄 수
+  없다. job 이름과 해석된 scheduler location(`PREFLIGHT_TASKS_MAINTENANCE_LOCATION`,
+  없으면 Cloud Run region으로 폴백하며 Cloud Tasks queue location이 아니다)은
+  `gcloud` 인자로 전달되기 전에 검증한다. **`lastAttemptTime`
+  부재는 drain을 증명하지 않는다.** 실제 시도 몇 초 뒤에도 paused job이 이 필드를
+  더 이상 보고하지 않는 사례가 관측되었으므로, 나이 든 pause 단언이 필수이고
+  `lastAttemptTime`이 있는데 window 안이면 그것도 거부한다. `userUpdateTime`은
+  문서상 생성 시각이므로 pause 시각으로 쓰지 않는다.
+- preflight와 paid의 task/enqueuer/runtime/maintenance 8개 목표 workload identity가
+  모두 pairwise distinct이고, 검토된 runtime manifest가 목표 role enqueuer 값을
+  이미 담고 있어야 한다.
+- 공개된 Vercel 증거 체인 전체가 목표 contract와 이미 일치해야 한다. 선택된 READY
+  production deployment의 Git SHA가 검토된 source SHA와 같고, public freeze origin이
+  바로 그 deployment URL 또는 반환된 alias에 묶여 있으며, next-deploy production
+  environment metadata가 필요한 producer key를 담고 hidden production 값이 없고,
+  활성 producer fingerprint가 목표 caller/target/audience와 일치해야 한다.
+- 기존 서비스 IAM에 조건 없는 `roles/run.invoker` binding이 정확히 하나 있고 그
+  member가 단언된 이전 task caller와 변경되지 않은 현재 maintenance caller뿐이어야
+  한다. member 추가, public/`allAuthenticatedUsers` member, IAM condition, member
+  누락, invoker binding 2개 이상, invoker binding 부재는 `set-iam-policy` 이전에
+  거부한다.
 
-모든 증거는 mutation 이전에 수집한다. paused/empty target queue와 producer
-fingerprint는 IAM reconcile과 `gcloud run deploy`보다 먼저 관측된다. 이 허용은
-predeploy 전용이며 위 세 identity 값만 대상으로 한다. 그 밖의 환경, maintenance,
-gate, source drift는 여전히 fail-closed다. staged revision은 검토된 manifest와
-runtime identity에 대해 exact하게 검증하고, 승격된 revision도 다시 exact하게
-검증한다. 승격 이후 caller drift는 기존 검증 rollback을 발동한다.
+모든 증거는 service/IAM/deploy mutation 이전에 수집한다. (generation 기반 GCS
+deploy lock은 그보다 먼저 획득한다. 이는 이 실행의 상호배제 토큰이며 service,
+IAM, revision을 바꾸지 않는다.) 그리고 단 한 번의 `set-iam-policy` 직전에
+**최종 mutation barrier**에서 전부 다시 증명한다. read와 write 사이의 간격이 바로
+out-of-band 변경이 끼어드는 지점이기 때문이다. barrier는 정확한 paused/empty
+target queue를 다시 describe하고, recovery scheduler와 나이 든 pause 단언을 다시
+확인하고, Vercel 증거 체인 전체를 다시 돌리고, 서비스를 다시 읽어 동일한
+`metadata.resourceVersion`과 `metadata.generation`, 단언된 이전 task/enqueuer/runtime
+identity, 이전 source SHA, 그리고 포착해 둔 serving traffic 배분이 그대로인지
+요구하고, 마지막으로 IAM policy를 다시 읽어 정확한 이전 invoker binding과 비어
+있지 않은 `etag`를 요구한다. 목표 policy는 바로 그 최신 policy JSON에서 `etag`를
+보존한 채 만들고, `set-iam-policy`를 재시도 없이 정확히 한 번 호출한 뒤 다시
+읽는다. 관측된 policy는 서버가 새로 발급한 `etag`를 제외하고 의도한 policy와
+같아야 한다. 무관한 binding 변경, binding/member 추가, condition 주입, policy
+version 변경은 `gcloud run deploy` 이전에 실패시킨다. read 사이에 invoker binding이
+이미 목표 binding으로 바뀌어 있으면 성공으로 취급하지 않고 fail-closed 한다.
 
-Rollback은 기존 경로 그대로다. 마지막 정상 revision을 재배포하고 이전 invoker
-binding을 복원한다. 회전 전에 target queue를 paused/empty로 만들었으므로 invoke
-권한이 사라진 caller identity에 묶여 남는 task는 없다. queue 재개는 승격된
-revision 검증이 끝난 뒤에만 한다.
+이 허용은 predeploy 전용이며 위 세 identity 값만 대상으로 한다. 그 밖의 환경,
+source, maintenance, target, audience, queue, stage, traffic 검사는 모두 그대로
+exact이다. flag가 켜진 경우 source provenance는 문법적으로 유효한 아무 예전 SHA가
+아니라 외부에서 단언한 이전 SHA와 정확히 같아야 한다. staged revision은 검토된
+manifest와 runtime identity에 대해 exact하게 검증하고, 승격된 revision도 다시
+exact하게 검증한다. 승격 이후 task caller, enqueuer, runtime identity drift는 각각
+독립적으로 자동 rollback을 발동한다.
+
+예외 경로 실행은 recovery scheduler를 절대 재개하지 않는다. 성공 시 job이 여전히
+`PAUSED`임을 다시 증명하고 resume을 유예했다고 보고한다. 모든 실패 경로도 paused로
+남긴다. 두 role 배포, Vercel, IAM, 로그, ledger, provider-free probe가 모두 통과한
+뒤 외부 최종 rollout이 두 recovery scheduler와 두 queue의 유일한 resume을 담당한다.
+
+### rollback이 실제로 하는 일
+
+실패를 다룰 때 이 부분을 정확히 알아야 한다. **자동 rollback은 traffic만
+복원한다.** 포착해 둔 배포 이전 revision으로 serving 배분을 되돌리고 일치를
+검증할 뿐이며, 이전 source를 재배포하지 않고 이전 IAM policy도 복원하지 않는다.
+이미 성공한 `set-iam-policy`는 그대로 적용된 채 남는다.
+
+따라서 identity roll-forward가 실패한 뒤에는
+
+- target queue와 recovery scheduler는 `PAUSED`로 남는다.
+- invoker 회전 *이후*에 실패했다면 서비스는 이미 회전된 invoker binding으로
+  동작 중이다. 이전 binding 복원은 별도의 명시적 운영 단계이며, 재시도 전에 새로
+  읽은 policy와 그 `etag`에 대해 직접 검증해야 한다.
+- 회전 전에 queue를 paused/empty로 만들었으므로 invoke 권한을 잃은 caller
+  identity에 묶여 남는 task는 없다.
+
+queue와 recovery scheduler 재개는 승격된 revision 검증과 최종 rollout 점검이 모두
+끝난 뒤에만 한다.
 
 ## 관찰 및 중단 기준
 

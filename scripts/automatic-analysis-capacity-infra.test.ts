@@ -14,6 +14,12 @@ const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config
 // roll-forward.  These are deliberately synthetic; no real production service
 // account, project, or source SHA ever appears in this suite.
 const OLD_IDENTITY_SOURCE_SHA = 'c'.repeat(40);
+// The recovery scheduler must have been PAUSED for longer than the deployed
+// Cloud Run request timeout plus grace before the queue can be trusted empty.
+const PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS = 660;
+function agedPauseEpoch(agoSeconds = PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS + 240): string {
+    return String(Math.floor(Date.now() / 1000) - agoSeconds);
+}
 const OLD_IDENTITIES = {
     preflight: {
         task: 'preflight-task-legacy@example-project.iam.gserviceaccount.com',
@@ -111,6 +117,15 @@ function baseEnvironment(role: 'preflight' | 'paid' = 'preflight') {
             : 'primary:7,tertiary:7,quaternary:7,quinary:7,septenary:7,octonary:7,nonary:7,tenth:7',
         ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT: 'analysis-build@example-project.iam.gserviceaccount.com',
         GITHUB_TOKEN: 'github-token-fixture',
+        // fakeRun spreads process.env before this fixture, so the exceptional
+        // roll-forward assertions must be blanked explicitly.  Otherwise a
+        // developer or orchestrator shell that exports them would silently
+        // change what the ordinary-path tests exercise.
+        ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL: '',
+        ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL: '',
+        ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL: '',
+        ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: '',
+        ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: '',
     };
 }
 
@@ -272,8 +287,26 @@ interface FakeRunOptions {
     vercelProjectEnvironment?: unknown;
     queueTasks?: unknown;
     targetQueue?: Record<string, unknown> | 'unobservable';
-    deployAppliesIdentities?: boolean;
-    postDeployTaskServiceAccount?: string;
+    // Each identity is switched independently so staged and post-promotion
+    // exactness is proven separately for the task caller, the enqueuer, and the
+    // runtime identity rather than through one combined toggle.
+    deploySkipsIdentity?: 'task' | 'enqueuer' | 'runtime';
+    postDeployIdentityDrift?: { field: 'task' | 'enqueuer' | 'runtime'; value: string };
+    schedulerJob?: Record<string, unknown> | 'unobservable';
+    // jq patch applied to the service fixture before it is written. deepMerge
+    // treats null/undefined overrides as "keep base", so an explicitly absent or
+    // null field can only be expressed this way.
+    serviceJsonPatch?: string;
+    // Simulates a rejected write (e.g. an etag conflict) so the no-retry
+    // contract can be observed.
+    failSetIamPolicy?: boolean;
+    // Sequence-aware races: the Nth read still returns the pre-drift fixture and
+    // the drift lands immediately afterwards, so a later read observes it.
+    serviceDriftAfterReads?: { afterReads: number; patch: string };
+    iamDriftAfterReads?: { afterReads: number; patch: string };
+    // Applied to the IAM fixture by the fake set-iam-policy, modelling a server
+    // that accepted the write but returns something other than what was sent.
+    postSetIamPatch?: string;
     publicFreeze?: Record<string, unknown>;
 }
 
@@ -385,6 +418,8 @@ function fakeRun(options: FakeRunOptions = {}) {
         },
         metadata: {
             name: service,
+            resourceVersion: 'rv-fixture-0001',
+            generation: 7,
             labels: {
                 'analysis-workload-role': role,
                 'analysis-capacity-stage': serviceStage,
@@ -478,7 +513,9 @@ function fakeRun(options: FakeRunOptions = {}) {
         Reflect.deleteProperty(serviceJson.spec.template.metadata.annotations, 'autoscaling.knative.dev/minScale');
     }
     const iamJson = options.iam ?? {
-            bindings: [
+        version: 1,
+        etag: 'BwXfixture01=',
+        bindings: [
                 { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
             { role: 'roles/run.invoker', members: [
                 `serviceAccount:${taskServiceAccount}`,
@@ -507,6 +544,12 @@ function fakeRun(options: FakeRunOptions = {}) {
     // This fake has no network access and mutates only fixture files when a
     // set-iam-policy command is explicitly exercised by --apply.
     writeFileSync(servicePath, JSON.stringify(serviceJson));
+    if (options.serviceJsonPatch) {
+        writeFileSync(servicePath, execFileSync('jq', [options.serviceJsonPatch, servicePath], {
+            encoding: 'utf8',
+            timeout: CHILD_PROCESS_TIMEOUT_MS,
+        }));
+    }
     writeFileSync(iamPath, JSON.stringify(iamJson));
     writeFileSync(legacyQueuePath, JSON.stringify({
         name: 'projects/example-project/locations/asia-northeast3/queues/analysis-pipeline',
@@ -574,7 +617,9 @@ function fakeRun(options: FakeRunOptions = {}) {
             },
         },
     }]));
-    writeFileSync(schedulerPath, JSON.stringify({
+    const schedulerJobName = `projects/${env.PREFLIGHT_TASKS_PROJECT}/locations/${env.PREFLIGHT_TASKS_LOCATION}/jobs/${env.PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB}`;
+    writeFileSync(schedulerPath, options.schedulerJob === 'unobservable' ? '' : JSON.stringify({
+        name: schedulerJobName,
         schedule: '* * * * *',
         timeZone: 'Etc/UTC',
         httpTarget: {
@@ -596,6 +641,7 @@ function fakeRun(options: FakeRunOptions = {}) {
             maxDoublings: 3,
         },
         state: serviceStage === 'bootstrap' ? 'PAUSED' : 'ENABLED',
+        ...(typeof options.schedulerJob === 'object' ? options.schedulerJob : {}),
     }));
     writeFileSync(readinessPath, JSON.stringify(options.readiness ?? {
         ready: true,
@@ -627,13 +673,20 @@ function fakeRun(options: FakeRunOptions = {}) {
     writeFileSync(manifestPath, JSON.stringify(desiredManifest));
     // The real `gcloud run deploy` writes the reviewed manifest identities and
     // the `--service-account` runtime identity into the new revision.  Mirror
-    // exactly those three fields so post-deploy verification stays authentic.
-    const deployIdentityEnv = [
-        `${prefix}_SERVICE_ACCOUNT_EMAIL`,
-        `${prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL`,
-    ]
-        .filter((key) => typeof desiredManifest[key] === 'string')
+    // exactly those three fields so post-deploy verification stays authentic,
+    // and let a test withhold exactly one of them.
+    const taskIdentityKey = `${prefix}_SERVICE_ACCOUNT_EMAIL`;
+    const enqueuerIdentityKey = `${prefix}_ENQUEUER_SERVICE_ACCOUNT_EMAIL`;
+    const skippedIdentityKey = options.deploySkipsIdentity === 'task'
+        ? taskIdentityKey
+        : options.deploySkipsIdentity === 'enqueuer' ? enqueuerIdentityKey : '';
+    const deployIdentityEnv = [taskIdentityKey, enqueuerIdentityKey]
+        .filter((key) => typeof desiredManifest[key] === 'string' && key !== skippedIdentityKey)
         .map((key) => ({ name: key, value: desiredManifest[key] as string }));
+    const postDeployDriftKey = options.postDeployIdentityDrift?.field === 'task'
+        ? taskIdentityKey
+        : options.postDeployIdentityDrift?.field === 'enqueuer' ? enqueuerIdentityKey
+            : options.postDeployIdentityDrift?.field === 'runtime' ? '__runtime__' : '';
     const buildManifestPath = join(fixtureDir, 'build.json');
     writeFileSync(buildManifestPath, JSON.stringify({
         NEXT_PUBLIC_SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
@@ -700,7 +753,16 @@ if [[ "\${1:-}" == "storage" && "\${2:-}" == "rm" ]]; then
   rm -f "$FAKE_GCLOUD_LOCK_PATH" "$FAKE_GCLOUD_LOCK_GENERATION_PATH"
   exit 0
 fi
-if [[ "\${1:-} \${2:-} \${3:-}" == "run services describe" ]]; then cat "$FAKE_GCLOUD_SERVICE_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "run services describe" ]]; then
+  cat "$FAKE_GCLOUD_SERVICE_JSON"
+  describe_count=\$(( \$(cat "$FAKE_GCLOUD_SERVICE_DESCRIBE_COUNT" 2>/dev/null || printf '0') + 1 ))
+  printf '%s' "\$describe_count" > "$FAKE_GCLOUD_SERVICE_DESCRIBE_COUNT"
+  if [[ -n "$FAKE_GCLOUD_SERVICE_DRIFT_AFTER" && "\$describe_count" == "$FAKE_GCLOUD_SERVICE_DRIFT_AFTER" ]]; then
+    jq "$FAKE_GCLOUD_SERVICE_DRIFT_PATCH" "$FAKE_GCLOUD_SERVICE_JSON" > "$FAKE_GCLOUD_SERVICE_JSON.drift"
+    mv "$FAKE_GCLOUD_SERVICE_JSON.drift" "$FAKE_GCLOUD_SERVICE_JSON"
+  fi
+  exit 0
+fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
   for argument in "\$@"; do
     [[ "\$argument" != --service=* ]] || {
@@ -714,7 +776,16 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
     "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
 fi
-if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then cat "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then
+  cat "$FAKE_GCLOUD_IAM_JSON"
+  iam_read_count=\$(( \$(cat "$FAKE_GCLOUD_IAM_READ_COUNT" 2>/dev/null || printf '0') + 1 ))
+  printf '%s' "\$iam_read_count" > "$FAKE_GCLOUD_IAM_READ_COUNT"
+  if [[ -n "$FAKE_GCLOUD_IAM_DRIFT_AFTER" && "\$iam_read_count" == "$FAKE_GCLOUD_IAM_DRIFT_AFTER" ]]; then
+    jq "$FAKE_GCLOUD_IAM_DRIFT_PATCH" "$FAKE_GCLOUD_IAM_JSON" > "$FAKE_GCLOUD_IAM_JSON.drift"
+    mv "$FAKE_GCLOUD_IAM_JSON.drift" "$FAKE_GCLOUD_IAM_JSON"
+  fi
+  exit 0
+fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
   jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" --argjson desiredIdentityEnv "$FAKE_GCLOUD_DEPLOY_IDENTITY_ENV" --arg desiredRuntimeSa "$FAKE_GCLOUD_DEPLOY_RUNTIME_SA" '
     .status.latestCreatedRevisionName = $rev
@@ -767,19 +838,44 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
   mv "$FAKE_GCLOUD_SERVICE_JSON.tmp" "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
 fi
-if [[ "\${1:-} \${2:-} \${3:-}" == "run services set-iam-policy" ]]; then cp "\${5:-}" "$FAKE_GCLOUD_IAM_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "run services set-iam-policy" ]]; then
+  cp "\${5:-}" "$FAKE_GCLOUD_LAST_SET_IAM_POLICY"
+  if [[ "$FAKE_GCLOUD_FAIL_SET_IAM" == "true" ]]; then
+    printf 'ERROR: simulated set-iam-policy conflict\\n' >&2
+    exit 1
+  fi
+  # Optimistic concurrency: when the stored policy carries an etag, a write must
+  # present that exact etag or the server rejects it.
+  current_etag="\$(jq -r '.etag // ""' "$FAKE_GCLOUD_IAM_JSON")"
+  if [[ -n "\$current_etag" ]]; then
+    sent_etag="\$(jq -r '.etag // ""' "\${5:-}")"
+    if [[ "\$sent_etag" != "\$current_etag" ]]; then
+      printf 'ERROR: etag mismatch; policy was modified concurrently\\n' >&2
+      exit 1
+    fi
+  fi
+  # A real server issues a fresh etag on every accepted write.
+  jq '.etag = "BwXfixtureNEXT="' "\${5:-}" > "$FAKE_GCLOUD_IAM_JSON"
+  if [[ -n "$FAKE_GCLOUD_POST_SET_IAM_PATCH" ]]; then
+    jq "$FAKE_GCLOUD_POST_SET_IAM_PATCH" "$FAKE_GCLOUD_IAM_JSON" > "$FAKE_GCLOUD_IAM_JSON.patched"
+    mv "$FAKE_GCLOUD_IAM_JSON.patched" "$FAKE_GCLOUD_IAM_JSON"
+  fi
+  exit 0
+fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services update-traffic" ]]; then
   revision='';
   for argument in "\$@"; do
     case "\$argument" in --to-revisions=*) revision="\${argument#--to-revisions=}"; revision="\${revision%%=*}" ;; esac
   done
   jq --arg rev "\$revision" --arg postDeploySourceSha "\$FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA" \
-    --arg postDeployTaskSa "\$FAKE_GCLOUD_POST_DEPLOY_TASK_SA" --arg taskSaKey "$FAKE_GCLOUD_TASK_SA_ENV_KEY" '
+    --arg driftKey "$FAKE_GCLOUD_POST_DEPLOY_DRIFT_KEY" --arg driftValue "$FAKE_GCLOUD_POST_DEPLOY_DRIFT_VALUE" '
     .status.traffic=[{revisionName:$rev,percent:100}]
     | .status.latestReadyRevisionName=$rev
-    | (if $postDeployTaskSa == "" then . else
+    | (if $driftKey == "" then .
+       elif $driftKey == "__runtime__" then .spec.template.spec.serviceAccountName = $driftValue
+       else
         (.spec.template.spec.containers[0].env) |= map(
-          if .name == $taskSaKey then {name: .name, value: $postDeployTaskSa} else . end)
+          if .name == $driftKey then {name: .name, value: $driftValue} else . end)
       end)
     | if $postDeploySourceSha == "" then . else
         .metadata.labels["analysis-v2-source-commit"]=$postDeploySourceSha
@@ -789,7 +885,11 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run services update-traffic" ]]; then
   mv "$FAKE_GCLOUD_SERVICE_JSON.tmp" "$FAKE_GCLOUD_SERVICE_JSON"
   exit 0
 fi
-if [[ "\${1:-} \${2:-}" == "scheduler jobs" && "\${3:-}" == "describe" ]]; then cat "$FAKE_GCLOUD_SCHEDULER_JSON"; exit 0; fi
+if [[ "\${1:-} \${2:-}" == "scheduler jobs" && "\${3:-}" == "describe" ]]; then
+  [[ -s "$FAKE_GCLOUD_SCHEDULER_JSON" ]] || exit 1
+  cat "$FAKE_GCLOUD_SCHEDULER_JSON"
+  exit 0
+fi
 if [[ "\${1:-} \${2:-}" == "scheduler jobs" && ("\${3:-}" == "create" || "\${3:-}" == "update") ]]; then
   jq -n --arg uri "$FAKE_GCLOUD_SCHEDULER_URI" --arg email "$FAKE_GCLOUD_MAINTENANCE_EMAIL" --arg audience "$FAKE_GCLOUD_MAINTENANCE_AUDIENCE" '{schedule:"* * * * *",timeZone:"Etc/UTC",httpTarget:{uri:$uri,httpMethod:"POST",oidcToken:{serviceAccountEmail:$email,audience:$audience},headers:{"Content-Type":"application/json"},body:"e30="},attemptDeadline:"300s",retryConfig:{retryCount:3,maxRetryDuration:"300s",minBackoffDuration:"10s",maxBackoffDuration:"60s",maxDoublings:3},state:"ENABLED"}' > "$FAKE_GCLOUD_SCHEDULER_JSON"
   exit 0
@@ -907,12 +1007,21 @@ fi
                 FAKE_GCLOUD_QUEUE_TASKS_JSON: queueTasksPath,
                 FAKE_GCLOUD_TARGET_QUEUE_JSON: targetQueuePath,
                 FAKE_GCLOUD_LEGACY_QUEUE_NAME: env.ANALYSIS_CAPACITY_LEGACY_QUEUE,
-                FAKE_GCLOUD_TASK_SA_ENV_KEY: `${prefix}_SERVICE_ACCOUNT_EMAIL`,
-                FAKE_GCLOUD_DEPLOY_IDENTITY_ENV: JSON.stringify(
-                    options.deployAppliesIdentities === false ? [] : deployIdentityEnv,
-                ),
-                FAKE_GCLOUD_DEPLOY_RUNTIME_SA: options.deployAppliesIdentities === false ? '' : runtime,
-                FAKE_GCLOUD_POST_DEPLOY_TASK_SA: options.postDeployTaskServiceAccount ?? '',
+                FAKE_GCLOUD_SERVICE_DESCRIBE_COUNT: join(fixtureDir, 'service-describe.count'),
+                FAKE_GCLOUD_IAM_READ_COUNT: join(fixtureDir, 'iam-read.count'),
+                FAKE_GCLOUD_SERVICE_DRIFT_AFTER: options.serviceDriftAfterReads
+                    ? String(options.serviceDriftAfterReads.afterReads) : '',
+                FAKE_GCLOUD_SERVICE_DRIFT_PATCH: options.serviceDriftAfterReads?.patch ?? '.',
+                FAKE_GCLOUD_IAM_DRIFT_AFTER: options.iamDriftAfterReads
+                    ? String(options.iamDriftAfterReads.afterReads) : '',
+                FAKE_GCLOUD_IAM_DRIFT_PATCH: options.iamDriftAfterReads?.patch ?? '.',
+                FAKE_GCLOUD_POST_SET_IAM_PATCH: options.postSetIamPatch ?? '',
+                FAKE_GCLOUD_LAST_SET_IAM_POLICY: join(fixtureDir, 'last-set-iam.json'),
+                FAKE_GCLOUD_FAIL_SET_IAM: options.failSetIamPolicy ? 'true' : 'false',
+                FAKE_GCLOUD_DEPLOY_IDENTITY_ENV: JSON.stringify(deployIdentityEnv),
+                FAKE_GCLOUD_DEPLOY_RUNTIME_SA: options.deploySkipsIdentity === 'runtime' ? '' : runtime,
+                FAKE_GCLOUD_POST_DEPLOY_DRIFT_KEY: postDeployDriftKey,
+                FAKE_GCLOUD_POST_DEPLOY_DRIFT_VALUE: options.postDeployIdentityDrift?.value ?? '',
                 FAKE_GCLOUD_NEXT_REVISION: `${service}-00002-staged`,
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
@@ -952,9 +1061,21 @@ fi
             ].join('\n'));
         }
         const finalIam = JSON.parse(readFileSync(iamPath, 'utf8')) as Record<string, unknown>;
-        const finalScheduler = JSON.parse(readFileSync(schedulerPath, 'utf8')) as Record<string, unknown>;
+        // An unobservable-scheduler fixture is intentionally empty.
+        const schedulerContent = readFileSync(schedulerPath, 'utf8');
+        const finalScheduler = (schedulerContent
+            ? JSON.parse(schedulerContent)
+            : {}) as Record<string, unknown>;
         const finalService = JSON.parse(readFileSync(servicePath, 'utf8')) as Record<string, unknown>;
-        return { ...result, calls, finalIam, finalScheduler, finalService };
+        const lastSetIamPath = join(fixtureDir, 'last-set-iam.json');
+        let sentIamPolicy: Record<string, unknown> | null = null;
+        try {
+            const sent = readFileSync(lastSetIamPath, 'utf8');
+            if (sent) sentIamPolicy = JSON.parse(sent) as Record<string, unknown>;
+        } catch {
+            sentIamPolicy = null;
+        }
+        return { ...result, calls, finalIam, finalScheduler, finalService, sentIamPolicy };
     } finally {
         rmSync(fixtureDir, { recursive: true, force: true });
     }
@@ -2240,6 +2361,8 @@ describe('automatic-analysis infrastructure contracts', () => {
             serviceEnv: { [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: old.task },
             serviceOverrides: { spec: { template: { spec: { serviceAccountName: old.runtime } } } },
             iam: {
+                version: 1,
+                etag: 'BwXfixture01=',
                 bindings: [
                     { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
                     { role: 'roles/run.invoker', members: [
@@ -2249,11 +2372,15 @@ describe('automatic-analysis infrastructure contracts', () => {
                 ],
             },
             queueTasks: [],
+            // The rollout pauses the every-minute recovery scheduler and waits
+            // out the quiescence window before invoking the guarded path.
+            schedulerJob: { state: 'PAUSED' },
             environment: {
                 ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL: old.task,
                 ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'absent',
                 ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL: old.runtime,
                 ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: OLD_IDENTITY_SOURCE_SHA,
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: agedPauseEpoch(),
             },
             args: ['--apply', '--reconcile-iam', '--allow-initial-identity-roll-forward'],
         };
@@ -2291,7 +2418,7 @@ describe('automatic-analysis infrastructure contracts', () => {
         const result = identityRollForwardRun('preflight');
         expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
         expect(result.stdout).toContain(
-            'verified: initial identity roll-forward preconditions before any IAM or deploy mutation',
+            'verified: initial identity roll-forward preconditions before any service, IAM, or deploy mutation',
         );
         expect(result.stdout).toContain('predeploy: allowing exact initial task caller identity roll-forward');
         expect(result.stdout).toContain('predeploy: allowing exact initial runtime identity roll-forward');
@@ -2321,37 +2448,69 @@ describe('automatic-analysis infrastructure contracts', () => {
         const indexOf = (predicate: (line: string) => boolean) => lines.findIndex(predicate);
         const readinessIndex = indexOf((line) => line.startsWith('curl ') && line.includes('/api/analysis/capacity/readiness'));
         const targetQueueIndex = indexOf((line) => line.startsWith('tasks queues describe analysis-preflight'));
+        const deploymentsIndex = indexOf((line) => line.startsWith('curl ') && line.includes('/v6/deployments'));
+        const aliasesIndex = indexOf((line) => line.startsWith('curl ') && line.includes('/aliases'));
+        const nextEnvIndex = indexOf((line) => line.startsWith('curl ') && line.includes('/v10/projects/'));
+        const iamPolicyReadIndex = indexOf((line) => line.startsWith('run services get-iam-policy'));
         const iamMutationIndex = indexOf((line) => line.startsWith('run services set-iam-policy'));
         const deployIndex = indexOf((line) => line.startsWith('run deploy'));
-        expect(readinessIndex).toBeGreaterThanOrEqual(0);
-        expect(targetQueueIndex).toBeGreaterThanOrEqual(0);
-        expect(iamMutationIndex).toBeGreaterThanOrEqual(0);
-        expect(deployIndex).toBeGreaterThanOrEqual(0);
-        expect(readinessIndex).toBeLessThan(iamMutationIndex);
-        expect(targetQueueIndex).toBeLessThan(iamMutationIndex);
-        expect(readinessIndex).toBeLessThan(deployIndex);
-        expect(targetQueueIndex).toBeLessThan(deployIndex);
+        for (const index of [
+            readinessIndex, targetQueueIndex, deploymentsIndex, aliasesIndex,
+            nextEnvIndex, iamPolicyReadIndex, iamMutationIndex, deployIndex,
+        ]) {
+            expect(index).toBeGreaterThanOrEqual(0);
+        }
+        // Every piece of evidence — paused/empty target queue, the complete
+        // published Vercel deployment chain, and the prior invoker binding —
+        // is observed before the IAM reconcile and before the deploy.
+        for (const evidenceIndex of [
+            readinessIndex, targetQueueIndex, deploymentsIndex, aliasesIndex,
+            nextEnvIndex, iamPolicyReadIndex,
+        ]) {
+            expect(evidenceIndex).toBeLessThan(iamMutationIndex);
+            expect(evidenceIndex).toBeLessThan(deployIndex);
+        }
+        expect(iamMutationIndex).toBeLessThan(deployIndex);
     });
 
-    it('rolls the paid worker forward while preserving its own producer contract', () => {
-        const base = baseEnvironment('paid');
+    // The active public runtime exposes a producer fingerprint only for the
+    // preflight producer contract, so there is no equivalent published evidence
+    // that a rotated paid caller is already live.  The exceptional flag is
+    // therefore refused for paid outright, before any observation or mutation.
+    it('refuses the exceptional identity roll-forward for the paid role before observing anything', () => {
         const result = identityRollForwardRun('paid');
-        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
-        expect(serviceIdentities(result.finalService, 'paid')).toEqual({
-            task: base.ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,
-            enqueuer: base.ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL,
-            runtime: base.ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL,
-        });
-        // Paid keeps its own producer contract: the secondary credential slot,
-        // the full ten-ref Apify inventory, and no preflight producer evidence.
-        const finalEnv = (result.finalService.spec as {
-            template: { spec: { containers: Array<{ env: Array<{ name: string; value?: string; valueFrom?: unknown }> }> } };
-        }).template.spec.containers[0].env;
-        expect(finalEnv.find(({ name }) => name === 'ANALYSIS_V2_APIFY_API_TOKEN_SLOT')?.value).toBe('secondary');
-        expect(finalEnv.filter(({ name, valueFrom }) => name.startsWith('APIFY_') && valueFrom)).toHaveLength(10);
-        expect(result.calls).not.toContain('/v10/projects/');
-        expect(result.calls).toContain('tasks queues describe analysis-v2-pipeline');
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`)
+            .toContain('--allow-initial-identity-roll-forward is valid only for --role=preflight');
+        expect(result.calls).toBe('');
     });
+
+    const paidExactnessCases: Array<[string, Record<string, string | null>, string]> = [
+        ['task caller', {
+            ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: OLD_IDENTITIES.paid.task,
+        }, 'Cloud Run observed task identity drifted'],
+        ['target URL', {
+            ANALYSIS_V2_TASKS_TARGET_URL: 'https://stale.example.com/api/analysis/v2/worker',
+        }, 'Cloud Run observed target URL drifted'],
+        ['OIDC audience', {
+            ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://stale.example.com',
+        }, 'Cloud Run observed OIDC audience drifted'],
+    ];
+
+    it.each(paidExactnessCases)(
+        'keeps the ordinary paid apply exact for %s drift',
+        (_name, serviceEnv, expected) => {
+            const result = fakeRun({
+                role: 'paid',
+                serviceEnv,
+                args: ['--apply', '--reconcile-iam'],
+            });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run deploy');
+            expect(result.calls).not.toContain('run services set-iam-policy');
+        },
+    );
 
     const unauthorizedIdentityRollForwardCases: Array<[string, FakeRunOptions, string]> = [
         ['check mode', { args: ['--check', '--allow-initial-identity-roll-forward'] },
@@ -2472,7 +2631,7 @@ describe('automatic-analysis infrastructure contracts', () => {
     ];
 
     it.each(failClosedIdentityRollForwardCases)(
-        'keeps the initial identity roll-forward fail-closed before any mutation: %s',
+        'keeps the initial identity roll-forward fail-closed before any service/IAM/deploy mutation: %s',
         (_name, overrides, expected) => {
             const result = identityRollForwardRun('preflight', overrides);
             expect(result.status).not.toBe(0);
@@ -2516,25 +2675,329 @@ describe('automatic-analysis infrastructure contracts', () => {
         },
     );
 
-    it('requires the staged revision to carry the exact rotated identities', () => {
-        const result = identityRollForwardRun('preflight', { deployAppliesIdentities: false });
-        expect(result.status).not.toBe(0);
-        expect(`${result.stdout}\n${result.stderr}`).toContain('Cloud Run observed task identity drifted');
-        expect(result.calls).toContain('run deploy');
-        expect(result.calls).not.toContain('run services update-traffic');
+    // Correction 2: the exceptional path must clear the complete published
+    // Vercel evidence chain - selected READY deployment SHA, exact alias/origin
+    // binding, next-deploy env metadata, and the active runtime fingerprint -
+    // before the IAM reconcile or the deploy, not the fingerprint alone.
+    const vercelEvidenceCases: Array<[string, FakeRunOptions, string]> = [
+        ['production SHA mismatch', {
+            vercelDeployments: {
+                deployments: [{
+                    uid: 'dpl_fixture',
+                    url: 'vercel-fixture.example.com',
+                    target: 'production',
+                    readyState: 'READY',
+                    meta: { githubCommitSha: 'e'.repeat(40) },
+                }],
+            },
+        }, 'Vercel production SHA does not match the deployed source SHA'],
+        ['no ready production deployment', {
+            vercelDeployments: {
+                deployments: [{
+                    uid: 'dpl_fixture',
+                    url: 'vercel-fixture.example.com',
+                    target: 'production',
+                    readyState: 'BUILDING',
+                    meta: { githubCommitSha: 'e'.repeat(40) },
+                }],
+            },
+        }, 'Vercel has no ready production deployment record'],
+        ['alias/origin does not bind the selected deployment', {
+            vercelAliases: {
+                aliases: [{ uid: 'alias_fixture', alias: 'unrelated.example.com', created: '2026-08-01T00:00:00.000Z' }],
+            },
+        }, 'public freeze origin does not match the selected READY Vercel deployment URL or exact alias'],
+        ['next-deploy env metadata is missing the producer caller key', {
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 0,
+            },
+        }, 'next-deploy Vercel preflight environment is missing required production keys'],
+        ['hidden production env values', {
+            vercelProjectEnvironment: {
+                envs: [
+                    { key: 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_TARGET_URL', target: ['production'] },
+                    { key: 'PREFLIGHT_TASKS_OIDC_AUDIENCE', target: ['production'] },
+                ],
+                hiddenProductionEnvCount: 2,
+            },
+        }, 'next-deploy Vercel preflight environment has hidden production values'],
+    ];
+
+    it.each(vercelEvidenceCases)(
+        'requires the full published Vercel evidence chain before any service/IAM/deploy mutation: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // Correction 3: the prior invoker binding itself is reviewed evidence.  The
+    // rotation may only replace exactly {asserted old caller, unchanged current
+    // maintenance caller}; anything else must be refused before set-iam-policy.
+    const PREFLIGHT_MAINTENANCE = 'preflight-maintenance@example-project.iam.gserviceaccount.com';
+    const oldInvokerBinding = (members: string[], extra: Record<string, unknown> = {}) => ({
+        version: 1,
+        etag: 'BwXfixture01=',
+        bindings: [
+            { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
+            { role: 'roles/run.invoker', members, ...extra },
+        ],
     });
 
-    it('rejects post-promotion task caller drift after the rotated revision serves all traffic', () => {
+    const oldInvokerIamCases: Array<[string, FakeRunOptions, string]> = [
+        ['an extra third member', {
+            iam: oldInvokerBinding([
+                `serviceAccount:${OLD_IDENTITIES.preflight.task}`,
+                `serviceAccount:${PREFLIGHT_MAINTENANCE}`,
+                'serviceAccount:stale@example-project.iam.gserviceaccount.com',
+            ]),
+        }, 'prior invoker binding'],
+        ['a public member', {
+            iam: oldInvokerBinding([
+                `serviceAccount:${OLD_IDENTITIES.preflight.task}`,
+                `serviceAccount:${PREFLIGHT_MAINTENANCE}`,
+                'allUsers',
+            ]),
+        }, 'prior invoker binding'],
+        ['an authenticated-user member', {
+            iam: oldInvokerBinding([
+                `serviceAccount:${OLD_IDENTITIES.preflight.task}`,
+                'allAuthenticatedUsers',
+            ]),
+        }, 'prior invoker binding'],
+        ['a conditioned binding', {
+            iam: oldInvokerBinding(
+                [
+                    `serviceAccount:${OLD_IDENTITIES.preflight.task}`,
+                    `serviceAccount:${PREFLIGHT_MAINTENANCE}`,
+                ],
+                { condition: { title: 'temporary', expression: 'true' } },
+            ),
+        }, 'prior invoker binding'],
+        ['a missing prior caller member', {
+            iam: oldInvokerBinding([`serviceAccount:${PREFLIGHT_MAINTENANCE}`]),
+        }, 'prior invoker binding'],
+        ['a missing maintenance member', {
+            iam: oldInvokerBinding([`serviceAccount:${OLD_IDENTITIES.preflight.task}`]),
+        }, 'prior invoker binding'],
+        ['a caller that is already the desired identity', {
+            iam: oldInvokerBinding([
+                'serviceAccount:preflight-task@example-project.iam.gserviceaccount.com',
+                `serviceAccount:${PREFLIGHT_MAINTENANCE}`,
+            ]),
+        }, 'prior invoker binding'],
+        ['two invoker bindings', {
+            iam: {
+                bindings: [
+                    { role: 'roles/run.invoker', members: [`serviceAccount:${OLD_IDENTITIES.preflight.task}`] },
+                    { role: 'roles/run.invoker', members: [`serviceAccount:${PREFLIGHT_MAINTENANCE}`] },
+                ],
+            },
+        }, 'prior invoker binding'],
+        ['no invoker binding at all', {
+            iam: {
+                bindings: [
+                    { role: 'roles/viewer', members: ['serviceAccount:unrelated@example-project.iam.gserviceaccount.com'] },
+                ],
+            },
+        }, 'prior invoker binding'],
+    ];
+
+    it.each(oldInvokerIamCases)(
+        'requires the exact reviewed prior invoker binding before reconciling IAM: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // Correction 4: a suffix match accepts a same-named queue in another project
+    // or region.  The observed queue must be the full resource identity.
+    const targetQueueIdentityCases: Array<[string, FakeRunOptions, string]> = [
+        ['same queue name in another project', {
+            targetQueue: {
+                name: 'projects/other-project/locations/asia-northeast3/queues/analysis-preflight',
+            },
+        }, 'requires the exact PAUSED target queue'],
+        ['same queue name in another location', {
+            targetQueue: {
+                name: 'projects/example-project/locations/us-central1/queues/analysis-preflight',
+            },
+        }, 'requires the exact PAUSED target queue'],
+        ['a queue name that merely ends with the target name', {
+            targetQueue: {
+                name: 'projects/example-project/locations/asia-northeast3/queues/shadow-analysis-preflight',
+            },
+        }, 'requires the exact PAUSED target queue'],
+    ];
+
+    it.each(targetQueueIdentityCases)(
+        'requires the full target queue resource identity: %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // Correction 5: global distinctness covers all eight desired workload
+    // identities of both roles, maintenance included.
+    const eightIdentityDistinctnessCases: Array<[string, Record<string, string>, string]> = [
+        ['paid maintenance aliases the preflight task caller', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:
+                'preflight-task@example-project.iam.gserviceaccount.com',
+        }, 'task, enqueuer, runtime, and maintenance identities must be distinct'],
+        ['paid maintenance aliases the preflight runtime', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:
+                'preflight-runtime@example-project.iam.gserviceaccount.com',
+        }, 'task, enqueuer, runtime, and maintenance identities must be distinct'],
+        ['paid maintenance aliases the preflight maintenance identity', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: PREFLIGHT_MAINTENANCE,
+        }, 'task, enqueuer, runtime, and maintenance identities must be distinct'],
+        ['paid maintenance aliases the paid enqueuer', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL:
+                'paid-enqueuer@example-project.iam.gserviceaccount.com',
+        }, 'task, enqueuer, runtime, and maintenance identities must be distinct'],
+        ['the other role maintenance identity is missing', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: '',
+        }, 'the other workload maintenance identity is required'],
+        ['the other role maintenance identity is malformed', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: 'not-a-service-account',
+        }, 'invalid other workload maintenance service account'],
+    ];
+
+    it.each(eightIdentityDistinctnessCases)(
+        'requires all eight desired workload identities to be distinct: %s',
+        (_name, environment, expected) => {
+            const result = fakeRun({ role: 'preflight', environment, args: ['--check'] });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).toBe('');
+        },
+    );
+
+    it('rejects a prior identity that aliases the other role maintenance identity', () => {
         const result = identityRollForwardRun('preflight', {
-            postDeployTaskServiceAccount: OLD_IDENTITIES.preflight.task,
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:
+                    'paid-maintenance@example-project.iam.gserviceaccount.com',
+            },
         });
         expect(result.status).not.toBe(0);
-        expect(`${result.stdout}\n${result.stderr}`).toContain('Cloud Run observed task identity drifted');
-        expect(result.calls.match(/run services update-traffic/g) ?? []).toHaveLength(2);
+        expect(`${result.stdout}\n${result.stderr}`)
+            .toContain('must differ from every desired workload identity');
+        expect(result.calls).toBe('');
     });
 
-    it('leaves the ordinary initial deploy path unchanged without the explicit allowance', () => {
+    it('rejects a prior identity that aliases the build identity', () => {
         const result = identityRollForwardRun('preflight', {
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:
+                    'analysis-build@example-project.iam.gserviceaccount.com',
+            },
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`)
+            .toContain('must differ from every desired workload identity');
+        expect(result.calls).toBe('');
+    });
+
+    // Correction 6: prior-state assertions are meaningful only under the
+    // explicit exceptional flag.  Supplying one without the flag is an operator
+    // error that must fail before anything is observed.
+    const strayPriorAssertionCases: Array<[string, Record<string, string>]> = [
+        ['prior task caller', {
+            ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_TASK_SERVICE_ACCOUNT_EMAIL:
+                OLD_IDENTITIES.preflight.task,
+        }],
+        ['prior enqueuer', {
+            ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'absent',
+        }],
+        ['prior runtime', {
+            ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_RUNTIME_SERVICE_ACCOUNT_EMAIL:
+                OLD_IDENTITIES.preflight.runtime,
+        }],
+        ['prior source SHA', {
+            ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_OLD_SOURCE_SHA: OLD_IDENTITY_SOURCE_SHA,
+        }],
+    ];
+
+    it.each(strayPriorAssertionCases)(
+        'rejects a %s assertion supplied without the explicit exceptional flag',
+        (_name, environment) => {
+            for (const args of [['--check'], ['--apply', '--reconcile-iam']]) {
+                const result = fakeRun({ role: 'preflight', environment, args });
+                expect(result.status).not.toBe(0);
+                expect(`${result.stdout}\n${result.stderr}`).toContain(
+                    'initial identity roll-forward assertions require --allow-initial-identity-roll-forward',
+                );
+                expect(result.calls).toBe('');
+            }
+        },
+    );
+
+    const stagedIdentityExactnessCases: Array<['task' | 'enqueuer' | 'runtime', string]> = [
+        ['task', 'Cloud Run observed task identity drifted'],
+        ['enqueuer', 'Cloud Run observed environment drifted for PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL'],
+        ['runtime', 'Cloud Run runtime service account drifted'],
+    ];
+
+    it.each(stagedIdentityExactnessCases)(
+        'requires the staged revision to carry the exact rotated %s identity',
+        (field, expected) => {
+            const result = identityRollForwardRun('preflight', { deploySkipsIdentity: field });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).toContain('run deploy');
+            expect(result.calls).not.toContain('run services update-traffic');
+        },
+    );
+
+    const postPromotionIdentityDriftCases: Array<[
+        'task' | 'enqueuer' | 'runtime', string, string,
+    ]> = [
+        ['task', OLD_IDENTITIES.preflight.task, 'Cloud Run observed task identity drifted'],
+        ['enqueuer', 'preflight-enqueuer-legacy@example-project.iam.gserviceaccount.com',
+            'Cloud Run observed environment drifted for PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL'],
+        ['runtime', OLD_IDENTITIES.preflight.runtime, 'Cloud Run runtime service account drifted'],
+    ];
+
+    it.each(postPromotionIdentityDriftCases)(
+        'rolls back when post-promotion %s identity drifts after the rotated revision serves all traffic',
+        (field, value, expected) => {
+            const result = identityRollForwardRun('preflight', {
+                postDeployIdentityDrift: { field, value },
+            });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls.match(/run services update-traffic/g) ?? []).toHaveLength(2);
+            expect(`${result.stderr}`).toContain('rollback verified');
+        },
+    );
+
+    // A genuine ordinary path: the serving revision really has drifted
+    // identities, but the operator supplied no exceptional assertions at all.
+    it('leaves the ordinary initial deploy path unchanged without the explicit allowance', () => {
+        const result = fakeRun({
+            role: 'preflight',
+            observedSourceSha: OLD_IDENTITY_SOURCE_SHA,
+            serviceEnv: { PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: OLD_IDENTITIES.preflight.task },
+            serviceOverrides: {
+                spec: { template: { spec: { serviceAccountName: OLD_IDENTITIES.preflight.runtime } } },
+            },
             args: ['--apply', '--reconcile-iam'],
         });
         expect(result.status).not.toBe(0);
@@ -2542,4 +3005,579 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(result.calls).not.toContain('run deploy');
         expect(result.calls).not.toContain('run services set-iam-policy');
     });
+
+    // Correction B: an every-minute recovery scheduler that is still ENABLED can
+    // enqueue an old-caller task after the queue was observed empty, so the
+    // exceptional path needs an aged, externally asserted pause epoch plus the
+    // exact PAUSED job resource.  An absent lastAttemptTime never proves drain.
+    // These fixtures are relative to "now", so they are built lazily inside the
+    // test body.  Computing them while the case table is collected would let
+    // them age past the quiescence window during a long full-suite run and
+    // silently stop testing the boundary they name.
+    const schedulerQuiescenceCases: Array<[string, () => FakeRunOptions, string]> = [
+        ['missing pause epoch assertion', () => ({
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: '' },
+        }), 'requires an exact preflight recovery scheduler pause epoch assertion'],
+        ['malformed pause epoch assertion', () => ({
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: '17e9' },
+        }), 'pause epoch must be strict decimal epoch seconds'],
+        ['zero-padded pause epoch assertion', () => ({
+            environment: { ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: '01700000000' },
+        }), 'pause epoch must be strict decimal epoch seconds'],
+        ['future pause epoch assertion', () => ({
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH:
+                    String(Math.floor(Date.now() / 1000) + 3600),
+            },
+        }), 'pause epoch must not be in the future'],
+        ['too recent pause epoch assertion', () => ({
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: agedPauseEpoch(120),
+            },
+        }), 'recovery scheduler quiescence window'],
+        ['pause epoch just inside the quiescence window', () => ({
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH:
+                    agedPauseEpoch(PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS - 60),
+            },
+        }), 'recovery scheduler quiescence window'],
+    ];
+
+    it.each(schedulerQuiescenceCases)(
+        'rejects an unproven recovery scheduler pause: %s',
+        (_name, makeOverrides, expected) => {
+            const result = identityRollForwardRun('preflight', makeOverrides());
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    const schedulerStateCases: Array<[string, () => FakeRunOptions, string]> = [
+        ['still ENABLED', () => ({ schedulerJob: { state: 'ENABLED' } }),
+            'recovery scheduler must be observably PAUSED'],
+        ['unobservable', () => ({ schedulerJob: 'unobservable' }),
+            'recovery scheduler could not be observed'],
+        ['wrong job resource', () => ({
+            schedulerJob: {
+                state: 'PAUSED',
+                name: 'projects/other-project/locations/asia-northeast3/jobs/analysis-preflight-recovery',
+            },
+        }), 'recovery scheduler must be observably PAUSED'],
+        ['drifted attempt deadline', () => ({
+            schedulerJob: { state: 'PAUSED', attemptDeadline: '900s' },
+        }), 'recovery scheduler must be observably PAUSED'],
+        ['missing job resource name', () => ({
+            schedulerJob: { state: 'PAUSED', name: null },
+        }), 'recovery scheduler must be observably PAUSED'],
+        ['wrong job location', () => ({
+            schedulerJob: {
+                state: 'PAUSED',
+                name: 'projects/example-project/locations/us-central1/jobs/analysis-preflight-recovery',
+            },
+        }), 'recovery scheduler must be observably PAUSED'],
+        ['wrong job name', () => ({
+            schedulerJob: {
+                state: 'PAUSED',
+                name: 'projects/example-project/locations/asia-northeast3/jobs/some-other-job',
+            },
+        }), 'recovery scheduler must be observably PAUSED'],
+        // Documented behaviour: a paused job can stop reporting lastAttemptTime
+        // even seconds after a real attempt, so absence must never prove drain.
+        ['absent lastAttemptTime with a too-recent asserted pause', () => ({
+            schedulerJob: { state: 'PAUSED' },
+            environment: {
+                ANALYSIS_CAPACITY_INITIAL_ROLL_FORWARD_PREFLIGHT_RECOVERY_PAUSE_EPOCH: agedPauseEpoch(90),
+            },
+        }), 'recovery scheduler quiescence window'],
+        ['recent lastAttemptTime despite an aged asserted pause', () => ({
+            schedulerJob: {
+                state: 'PAUSED',
+                lastAttemptTime: new Date(Date.now() - 30_000).toISOString().replace(/\.\d+Z$/, 'Z'),
+            },
+        }), 'recovery scheduler last attempt is inside the quiescence window'],
+        ['malformed lastAttemptTime', () => ({
+            schedulerJob: { state: 'PAUSED', lastAttemptTime: 'not-a-timestamp' },
+        }), 'recovery scheduler last attempt timestamp is malformed'],
+    ];
+
+    it.each(schedulerStateCases)(
+        'rejects a recovery scheduler that is not provably quiescent: %s',
+        (_name, makeOverrides, expected) => {
+            const result = identityRollForwardRun('preflight', makeOverrides());
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // The whole reviewed job contract is evidence, not just its state: a job
+    // that is PAUSED but reconfigured could be resumed into a different,
+    // unreviewed behaviour at any moment.
+    const schedulerConfigDriftCases: Array<[string, Record<string, unknown>]> = [
+        ['schedule', { schedule: '*/5 * * * *' }],
+        ['time zone', { timeZone: 'Asia/Seoul' }],
+        ['attempt deadline', { attemptDeadline: '600s' }],
+        ['HTTP method', { httpTarget: { httpMethod: 'GET' } }],
+        ['recover URI', { httpTarget: { uri: 'https://preflight.example.com/api/analysis/preflight/other' } }],
+        ['recover URI origin', { httpTarget: { uri: 'https://elsewhere.example.com/api/analysis/preflight/recover' } }],
+        ['Content-Type header', { httpTarget: { headers: { 'Content-Type': 'text/plain' } } }],
+        ['base64 body', { httpTarget: { body: 'eyJhIjoxfQ==' } }],
+        ['maintenance service account', {
+            httpTarget: {
+                oidcToken: {
+                    serviceAccountEmail: 'preflight-maintenance-old@example-project.iam.gserviceaccount.com',
+                    audience: 'https://preflight.example.com',
+                },
+            },
+        }],
+        ['OIDC audience', {
+            httpTarget: {
+                oidcToken: {
+                    serviceAccountEmail: 'preflight-maintenance@example-project.iam.gserviceaccount.com',
+                    audience: 'https://elsewhere.example.com',
+                },
+            },
+        }],
+        ['retry count', { retryConfig: { retryCount: 5 } }],
+        ['max retry duration', { retryConfig: { maxRetryDuration: '900s' } }],
+        ['min backoff duration', { retryConfig: { minBackoffDuration: '1s' } }],
+        ['max backoff duration', { retryConfig: { maxBackoffDuration: '600s' } }],
+        ['max doublings', { retryConfig: { maxDoublings: 9 } }],
+    ];
+
+    it.each(schedulerConfigDriftCases)(
+        'rejects recovery scheduler configuration drift in %s',
+        (_name, patch) => {
+            const base = {
+                schedule: '* * * * *',
+                timeZone: 'Etc/UTC',
+                attemptDeadline: '300s',
+                httpTarget: {
+                    uri: 'https://preflight.example.com/api/analysis/preflight/recover',
+                    httpMethod: 'POST',
+                    oidcToken: {
+                        serviceAccountEmail: 'preflight-maintenance@example-project.iam.gserviceaccount.com',
+                        audience: 'https://preflight.example.com',
+                    },
+                    headers: { 'Content-Type': 'application/json' },
+                    body: 'e30=',
+                },
+                retryConfig: {
+                    retryCount: 3,
+                    maxRetryDuration: '300s',
+                    minBackoffDuration: '10s',
+                    maxBackoffDuration: '60s',
+                    maxDoublings: 3,
+                },
+            };
+            const result = identityRollForwardRun('preflight', {
+                schedulerJob: { state: 'PAUSED', ...deepMerge(base, patch) },
+            });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`)
+                .toContain('recovery scheduler must be observably PAUSED');
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // Runs the script's own rfc3339_to_epoch against fixed timestamps, so the
+    // rounding boundary is proven deterministically instead of racing the clock.
+    function runRfc3339ToEpoch(value: string): { status: number; stdout: string } {
+        const source = readFileSync(join(root, 'scripts/deploy-analysis-capacity-workers.sh'), 'utf8');
+        const start = source.indexOf('rfc3339_to_epoch() {');
+        expect(start, 'rfc3339_to_epoch must exist in the deploy script').toBeGreaterThanOrEqual(0);
+        const end = source.indexOf('\n}\n', start);
+        expect(end, 'rfc3339_to_epoch must be a closed shell function').toBeGreaterThan(start);
+        const fn = source.slice(start, end + 3);
+        const harnessDir = mkdtempSync(join(tmpdir(), 'rfc3339-'));
+        const harnessPath = join(harnessDir, 'rfc3339.sh');
+        writeFileSync(harnessPath, `#!/usr/bin/env bash\nset -euo pipefail\n${fn}\nrfc3339_to_epoch "$1"\n`);
+        try {
+            const result = spawnSync('bash', [harnessPath, value], {
+                encoding: 'utf8',
+                timeout: CHILD_PROCESS_TIMEOUT_MS,
+            });
+            return { status: result.status ?? -1, stdout: (result.stdout ?? '').trim() };
+        } finally {
+            rmSync(harnessDir, { recursive: true, force: true });
+        }
+    }
+
+    it('rounds an attempt timestamp up so 659.999s never clears the 660s window', () => {
+        // A fixed reference instant makes this exact rather than clock-dependent.
+        const referenceEpoch = 1_800_000_000;
+        const attemptMs = referenceEpoch * 1000 - 659_999;
+        const attempt = new Date(attemptMs).toISOString();
+        const observed = Number(runRfc3339ToEpoch(attempt).stdout);
+        // Ceiling => 659s of apparent age, which is inside the window and is
+        // refused. Flooring would have reported 660s and wrongly cleared it.
+        expect(referenceEpoch - observed).toBe(659);
+        expect(referenceEpoch - observed).toBeLessThan(PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS);
+        expect(referenceEpoch - Math.floor(attemptMs / 1000))
+            .toBe(PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS);
+    });
+
+    it.each([
+        ['whole second', '2026-01-01T00:00:00.000Z', 1767225600],
+        ['one millisecond past', '2026-01-01T00:00:00.001Z', 1767225601],
+        ['999 milliseconds past', '2026-01-01T00:00:00.999Z', 1767225601],
+        ['no fractional part', '2026-01-01T00:00:00Z', 1767225600],
+        // Date.parse truncates below milliseconds, so sub-millisecond precision
+        // must be honoured from the fractional string rather than the parse.
+        ['one nanosecond past', '2026-01-01T00:00:00.000000001Z', 1767225601],
+        ['all-zero nanoseconds', '2026-01-01T00:00:00.000000000Z', 1767225600],
+        ['one microsecond past', '2026-01-01T00:00:00.000001Z', 1767225601],
+        ['trailing nonzero at high precision', '2026-01-01T00:00:00.0000000000001Z', 1767225601],
+    ])('parses a %s timestamp with ceiling semantics', (_name, value, expected) => {
+        const result = runRfc3339ToEpoch(value);
+        expect(result.status).toBe(0);
+        expect(Number(result.stdout)).toBe(expected);
+    });
+
+    it.each([
+        ['a local-time timestamp', '2026-01-01T00:00:00'],
+        ['an offset timestamp', '2026-01-01T00:00:00+09:00'],
+        ['a bare date', '2026-01-01'],
+        ['prose', 'not-a-timestamp'],
+        ['an empty value', ''],
+    ])('fails closed on %s', (_name, value) => {
+        expect(runRfc3339ToEpoch(value).status).not.toBe(0);
+    });
+
+    it('rejects a fractional lastAttemptTime that is inside the quiescence window', () => {
+        const result = identityRollForwardRun('preflight', {
+            schedulerJob: {
+                state: 'PAUSED',
+                lastAttemptTime: new Date(Date.now() - 600_500).toISOString(),
+            },
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`)
+            .toContain('recovery scheduler last attempt is inside the quiescence window');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    const capturedGenerationCases: Array<[string, FakeRunOptions, string]> = [
+        ['missing', { serviceJsonPatch: 'del(.metadata.generation)' },
+            'positive Cloud Run metadata.generation'],
+        ['null', { serviceJsonPatch: '.metadata.generation = null' },
+            'positive Cloud Run metadata.generation'],
+        ['zero', { serviceOverrides: { metadata: { generation: 0 } } },
+            'positive Cloud Run metadata.generation'],
+        ['negative', { serviceOverrides: { metadata: { generation: -3 } } },
+            'positive Cloud Run metadata.generation'],
+        ['malformed', { serviceOverrides: { metadata: { generation: 'seven' } } },
+            'positive Cloud Run metadata.generation'],
+        ['fractional', { serviceOverrides: { metadata: { generation: 1.5 } } },
+            'positive Cloud Run metadata.generation'],
+    ];
+
+    it.each(capturedGenerationCases)(
+        'refuses to own a prior service whose metadata.generation is %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    const capturedResourceVersionCases: Array<[string, FakeRunOptions]> = [
+        ['missing', { serviceJsonPatch: 'del(.metadata.resourceVersion)' }],
+        ['null', { serviceJsonPatch: '.metadata.resourceVersion = null' }],
+        ['empty', { serviceOverrides: { metadata: { resourceVersion: '' } } }],
+    ];
+
+    it.each(capturedResourceVersionCases)(
+        'refuses to own a prior service whose metadata.resourceVersion is %s',
+        (_name, overrides) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`)
+                .toContain('observable Cloud Run metadata.resourceVersion');
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // The job name and the resolved location both reach gcloud as positional /
+    // flag input, so they are validated before any scheduler command runs.
+    const schedulerInputCases: Array<[string, Record<string, string>, string]> = [
+        ['a job name with a shell metacharacter', {
+            PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB: 'analysis-preflight-recovery; rm -rf /',
+        }, 'recovery scheduler job name is invalid'],
+        ['a job name with a flag prefix', {
+            PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB: '--project=attacker-project',
+        }, 'recovery scheduler job name is invalid'],
+        ['a job name with a path separator', {
+            PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB: 'projects/other/jobs/x',
+        }, 'recovery scheduler job name is invalid'],
+        ['an empty job name', {
+            PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB: ' ',
+        }, 'recovery scheduler job name is invalid'],
+        ['a malformed maintenance location', {
+            PREFLIGHT_TASKS_MAINTENANCE_LOCATION: 'not a region',
+        }, 'recovery scheduler location is invalid'],
+        ['a maintenance location with a flag prefix', {
+            PREFLIGHT_TASKS_MAINTENANCE_LOCATION: '--format=json',
+        }, 'recovery scheduler location is invalid'],
+    ];
+
+    it.each(schedulerInputCases)(
+        'validates scheduler input before any gcloud call: %s',
+        (_name, environment, expected) => {
+            const result = identityRollForwardRun('preflight', { environment });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('scheduler jobs');
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    // The maintenance contract may place the recovery job in its own location,
+    // so the expected resource name must follow that resolved location.
+    it('resolves the recovery scheduler location from the maintenance contract', () => {
+        const result = identityRollForwardRun('preflight', {
+            environment: { PREFLIGHT_TASKS_MAINTENANCE_LOCATION: 'us-central1' },
+        });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`)
+            .toContain('recovery scheduler must be observably PAUSED');
+        expect(result.calls).toContain('scheduler jobs describe analysis-preflight-recovery');
+        expect(result.calls).toContain('--location=us-central1');
+        expect(result.calls).not.toContain('run services set-iam-policy');
+        expect(result.calls).not.toContain('run deploy');
+    });
+
+    it('accepts an aged pause assertion with an aged lastAttemptTime', () => {
+        const result = identityRollForwardRun('preflight', {
+            schedulerJob: {
+                state: 'PAUSED',
+                lastAttemptTime: new Date(Date.now() - 3_600_000).toISOString().replace(/\.\d+Z$/, 'Z'),
+            },
+        });
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.stdout).toContain('recovery scheduler is the exact PAUSED job');
+    });
+
+    // Correction C: the exceptional run must never resume the recovery
+    // scheduler; the external final rollout owns the sole resume.
+    it('never resumes the recovery scheduler on a successful exceptional run', () => {
+        const result = identityRollForwardRun('preflight');
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls).not.toContain('scheduler jobs resume');
+        expect(result.calls).not.toContain('scheduler jobs update');
+        expect(result.calls).not.toContain('scheduler jobs create');
+        expect(result.calls).not.toContain('scheduler jobs pause');
+        expect(result.finalScheduler.state).toBe('PAUSED');
+        expect(result.stdout).toContain('resume deferred');
+    });
+
+    it.each([
+        ['a failed queue precondition', { targetQueue: { state: 'RUNNING' } }],
+        ['a failed staged revision', { deploySkipsIdentity: 'task' as const }],
+        ['a failed post-promotion check', {
+            postDeployIdentityDrift: { field: 'task' as const, value: OLD_IDENTITIES.preflight.task },
+        }],
+    ] as Array<[string, FakeRunOptions]>)(
+        'leaves the recovery scheduler PAUSED after %s',
+        (_name, overrides) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(result.calls).not.toContain('scheduler jobs resume');
+            expect(result.finalScheduler.state).toBe('PAUSED');
+        },
+    );
+
+    // Correction D/E: one dedicated final barrier immediately before the single
+    // set-iam-policy re-proves every piece of evidence against the latest state.
+    const finalBarrierCases: Array<[string, FakeRunOptions, string]> = [
+        ['the service resourceVersion changed after validation', {
+            serviceDriftAfterReads: { afterReads: 3, patch: '.metadata.resourceVersion = "rv-fixture-0002"' },
+        }, 'service changed between verification and the identity mutation barrier'],
+        ['the service generation changed after validation', {
+            serviceDriftAfterReads: { afterReads: 3, patch: '.metadata.generation = 8' },
+        }, 'service changed between verification and the identity mutation barrier'],
+        ['the serving task identity became the desired identity after validation', {
+            serviceDriftAfterReads: {
+                afterReads: 3,
+                patch: '(.spec.template.spec.containers[0].env) |= map(if .name == "PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL" then {name: .name, value: "preflight-task@example-project.iam.gserviceaccount.com"} else . end)',
+            },
+        }, 'service changed between verification and the identity mutation barrier'],
+        ['the serving runtime identity changed after validation', {
+            serviceDriftAfterReads: {
+                afterReads: 3,
+                patch: '.spec.template.spec.serviceAccountName = "preflight-runtime@example-project.iam.gserviceaccount.com"',
+            },
+        }, 'service changed between verification and the identity mutation barrier'],
+        ['the source provenance moved to another valid old SHA after validation', {
+            serviceDriftAfterReads: {
+                afterReads: 3,
+                patch: '.metadata.labels["analysis-v2-source-commit"] = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"',
+            },
+        }, 'service changed between verification and the identity mutation barrier'],
+        ['the invoker binding became the desired binding between reads', {
+            iamDriftAfterReads: {
+                afterReads: 2,
+                patch: '(.bindings) |= map(if .role == "roles/run.invoker" then {role: .role, members: ["serviceAccount:preflight-task@example-project.iam.gserviceaccount.com", "serviceAccount:preflight-maintenance@example-project.iam.gserviceaccount.com"]} else . end)',
+            },
+        }, 'prior invoker binding'],
+        ['an extra invoker member appeared between reads', {
+            iamDriftAfterReads: {
+                afterReads: 2,
+                patch: '(.bindings) |= map(if .role == "roles/run.invoker" then (.members += ["serviceAccount:intruder@example-project.iam.gserviceaccount.com"]) else . end)',
+            },
+        }, 'prior invoker binding'],
+        ['a condition appeared on the invoker binding between reads', {
+            iamDriftAfterReads: {
+                afterReads: 2,
+                patch: '(.bindings) |= map(if .role == "roles/run.invoker" then (.condition = {title: "t", expression: "true"}) else . end)',
+            },
+        }, 'prior invoker binding'],
+        ['the latest policy has no etag', {
+            iamDriftAfterReads: { afterReads: 2, patch: 'del(.etag)' },
+        }, 'non-empty etag'],
+        ['the latest policy has an empty etag', {
+            iamDriftAfterReads: { afterReads: 2, patch: '.etag = ""' },
+        }, 'non-empty etag'],
+    ];
+
+    it.each(finalBarrierCases)(
+        'fails closed at the final mutation barrier when %s',
+        (_name, overrides, expected) => {
+            const result = identityRollForwardRun('preflight', overrides);
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run services set-iam-policy');
+            expect(result.calls).not.toContain('run deploy');
+        },
+    );
+
+    const iamPostconditionCases: Array<[string, string, string]> = [
+        ['an unrelated binding was altered',
+            '(.bindings) |= map(if .role == "roles/viewer" then {role: .role, members: ["serviceAccount:someone-else@example-project.iam.gserviceaccount.com"]} else . end)',
+            'observed IAM policy does not match the policy this run intended'],
+        ['an unexpected binding was added',
+            '.bindings += [{role: "roles/run.admin", members: ["serviceAccount:intruder@example-project.iam.gserviceaccount.com"]}]',
+            'observed IAM policy does not match the policy this run intended'],
+        ['an unexpected member was added to the invoker binding',
+            '(.bindings) |= map(if .role == "roles/run.invoker" then (.members += ["allUsers"]) else . end)',
+            'observed IAM policy does not match the policy this run intended'],
+        ['a condition was introduced on the invoker binding',
+            '(.bindings) |= map(if .role == "roles/run.invoker" then (.condition = {title: "t", expression: "true"}) else . end)',
+            'observed IAM policy does not match the policy this run intended'],
+        ['the policy version was changed',
+            '.version = 3',
+            'observed IAM policy does not match the policy this run intended'],
+    ];
+
+    it.each(iamPostconditionCases)(
+        'rejects a post-write IAM policy where %s',
+        (_name, patch, expected) => {
+            const result = identityRollForwardRun('preflight', { postSetIamPatch: patch });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).not.toContain('run deploy');
+            expect(result.calls.match(/run services set-iam-policy/g) ?? []).toHaveLength(1);
+        },
+    );
+
+    it('writes the rotated invoker policy exactly once, preserving the latest etag', () => {
+        const result = identityRollForwardRun('preflight');
+        expect(result.status, `${result.stderr?.toString() ?? ''}\n${result.calls}`).toBe(0);
+        expect(result.calls.match(/run services set-iam-policy/g) ?? []).toHaveLength(1);
+        // The policy actually handed to set-iam-policy must carry the etag from
+        // the latest pre-mutation read, which is what fences a concurrent edit.
+        expect(result.sentIamPolicy).not.toBeNull();
+        expect(result.sentIamPolicy?.etag).toBe('BwXfixture01=');
+        expect((result.sentIamPolicy?.bindings as Array<{ role: string; members: string[] }>)
+            .find((binding) => binding.role === 'roles/run.invoker')?.members).toEqual([
+            'serviceAccount:preflight-maintenance@example-project.iam.gserviceaccount.com',
+            'serviceAccount:preflight-task@example-project.iam.gserviceaccount.com',
+        ]);
+        const bindings = result.finalIam.bindings as Array<{ role: string; members: string[] }>;
+        expect(bindings.find((binding) => binding.role === 'roles/run.invoker')?.members).toEqual([
+            'serviceAccount:preflight-maintenance@example-project.iam.gserviceaccount.com',
+            'serviceAccount:preflight-task@example-project.iam.gserviceaccount.com',
+        ]);
+        // Unrelated bindings and the policy version survive the rotation.
+        expect(bindings.find((binding) => binding.role === 'roles/viewer')?.members).toEqual([
+            'serviceAccount:unrelated@example-project.iam.gserviceaccount.com',
+        ]);
+        expect(result.finalIam.version).toBe(1);
+    });
+
+    // A rejected write must not be retried: racing a concurrent policy update is
+    // exactly what the etag fence exists to prevent.
+    it('never retries a rejected invoker write and leaves the queue and scheduler paused', () => {
+        const result = identityRollForwardRun('preflight', { failSetIamPolicy: true });
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}\n${result.stderr}`).toContain('no retry is attempted');
+        expect(result.calls.match(/run services set-iam-policy/g) ?? []).toHaveLength(1);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.calls).not.toContain('run services update-traffic');
+        expect(result.calls).not.toContain('scheduler jobs resume');
+        expect(result.finalScheduler.state).toBe('PAUSED');
+    });
+
+    it('is rejected by the server when the presented etag is not the latest', () => {
+        // The policy is built from the read that happens before the barrier's
+        // own re-read; drifting the etag in between must fail the write.
+        const result = identityRollForwardRun('preflight', {
+            iamDriftAfterReads: { afterReads: 3, patch: '.etag = "BwXsomeoneElse="' },
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.calls.match(/run services set-iam-policy/g) ?? []).toHaveLength(1);
+        expect(result.calls).not.toContain('run deploy');
+        expect(result.finalScheduler.state).toBe('PAUSED');
+    });
+
+    // Correction G: the other-role tuple is trusted by global distinctness, so
+    // it must be validated with the same rules as the active role.
+    const otherRoleIdentityCases: Array<[string, Record<string, string>, string]> = [
+        ['malformed other task identity', {
+            ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'not-a-service-account',
+        }, 'invalid other workload task service account'],
+        ['malformed other enqueuer identity', {
+            ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'nope@example.com',
+        }, 'invalid other workload enqueuer service account'],
+        ['malformed other runtime identity', {
+            ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL: 'bad',
+        }, 'invalid other workload runtime service account'],
+        ['cross-project other task identity', {
+            ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'paid-task@other-project.iam.gserviceaccount.com',
+        }, 'other workload task service account must belong to the other workload project'],
+        ['cross-project other runtime identity', {
+            ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL: 'paid-runtime@other-project.iam.gserviceaccount.com',
+        }, 'other workload runtime service account must belong to the other workload project'],
+        ['cross-project other maintenance identity', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: 'paid-maintenance@other-project.iam.gserviceaccount.com',
+        }, 'other workload maintenance service account must belong to the other workload project'],
+        ['other maintenance aliases the build identity', {
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: 'analysis-build@example-project.iam.gserviceaccount.com',
+        }, 'build service account must be distinct from every desired workload identity'],
+        ['build identity aliases the active task caller', {
+            ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT: 'preflight-task@example-project.iam.gserviceaccount.com',
+        }, 'build service account must be distinct from every desired workload identity'],
+        ['build identity aliases the other role runtime', {
+            ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT: 'paid-runtime@example-project.iam.gserviceaccount.com',
+        }, 'build service account must be distinct from every desired workload identity'],
+    ];
+
+    it.each(otherRoleIdentityCases)(
+        'validates the other-role identities before trusting global distinctness: %s',
+        (_name, environment, expected) => {
+            const result = fakeRun({ role: 'preflight', environment, args: ['--check'] });
+            expect(result.status).not.toBe(0);
+            expect(`${result.stdout}\n${result.stderr}`).toContain(expected);
+            expect(result.calls).toBe('');
+        },
+    );
 });
