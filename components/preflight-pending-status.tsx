@@ -35,6 +35,51 @@ interface PreflightPendingStatusProps {
     now?: () => number;
 }
 
+export type PrecheckoutDelayedState = 'parent_pending' | 'pending';
+
+interface PrecheckoutDelayedStatusProps {
+    targetInstagramId: string | null;
+    state?: PrecheckoutDelayedState;
+    parentState?: 'pending' | 'processing' | 'ready';
+}
+
+/**
+ * The immersive graph has already finished its one pass. This surface deliberately has no
+ * timer, indeterminate progress bar, or action: a status read may still replace it later.
+ */
+export function PrecheckoutDelayedStatus({
+    targetInstagramId,
+    state = 'parent_pending',
+    parentState = 'pending',
+}: PrecheckoutDelayedStatusProps) {
+    const supportingCopy = parentState === 'ready'
+        ? '추가 신호를 확인하고 있습니다. 결과가 준비되면 이 화면이 업데이트됩니다.'
+        : '요청 상태를 확인하고 있습니다. 결과가 준비되면 이 화면이 업데이트됩니다.';
+
+    return (
+        <div
+            className="mt-7 py-4 text-center"
+            data-precheckout-delayed-state={state}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+        >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
+                <BrandMark size={26} className="text-blood" />
+            </div>
+            <h2 data-amp-block className="mt-5 text-[18px] font-extrabold text-fg">
+                @{targetInstagramId ?? '대상 계정'} 확인 중
+            </h2>
+            <p className="mt-2 text-[13px] font-medium text-fg-dim">
+                확인이 조금 더 필요해요
+            </p>
+            <p className="mt-5 text-[12px] leading-relaxed text-fg-mute">
+                {supportingCopy}
+            </p>
+        </div>
+    );
+}
+
 export function PreflightPendingStatus({
     targetInstagramId,
     startedAt,
