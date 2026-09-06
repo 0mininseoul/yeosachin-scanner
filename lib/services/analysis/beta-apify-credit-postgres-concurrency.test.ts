@@ -5,6 +5,10 @@ import { Client } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAnalysisPlan, PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budget';
+import {
+    createPostgresTestContainerLifecycle,
+    initializePostgresTestContainer,
+} from './postgres-test-container';
 
 // This is intentionally a real PostgreSQL test.  It starts a uniquely named
 // postgres:16 container unless a caller supplies the same URL-style opt-in
@@ -12,10 +16,22 @@ import { getBetaApifyOperationBudgetCatalog } from './beta-apify-operation-budge
 const suppliedUrl = process.env.BETA_APIFY_POSTGRES_TEST_URL;
 const containerName = `beta-apify-credit-${randomUUID().replaceAll('-', '')}`;
 let databaseUrl = suppliedUrl;
-let containerStarted = false;
 let first: Client;
 let second: Client;
 let observer: Client;
+
+async function closePostgresClients(): Promise<void> {
+    const clients = [first, second, observer]
+        .filter((client): client is Client => Boolean(client));
+    await Promise.allSettled(clients.map(client => client.end()));
+}
+
+const postgresContainer = createPostgresTestContainerLifecycle({
+    suppliedUrl,
+    containerName,
+    password: 'postgres',
+    database: 'beta_credit_test',
+});
 let retryExhaustionBeforeUpgrade: {
     channel: string;
     status: string;
@@ -51,7 +67,9 @@ function hasDockerDaemon(): boolean {
     }
 }
 
-const describePostgres = hasDockerDaemon() ? describe : describe.skip;
+// Do not probe Docker when a caller supplies a URL: that path must execute zero Docker
+// commands, including the daemon-info probe.
+const describePostgres = suppliedUrl ? describe : hasDockerDaemon() ? describe : describe.skip;
 
 const migrationFiles = [
     '20260802010000_add_betatest_apify_credit_pool.sql',
@@ -580,40 +598,34 @@ async function seedActivatedBetaRequest(client: Client, snapshotLimit = 10): Pro
 
 describePostgres('beta Apify credit PostgreSQL 16 concurrency', () => {
     beforeAll(async () => {
-        if (!databaseUrl) {
-            const id = execFileSync('docker', [
-                'run', '-d', '--rm', '--name', containerName,
-                '-e', 'POSTGRES_PASSWORD=postgres', '-e', 'POSTGRES_DB=beta_credit_test',
-                '-p', '127.0.0.1::5432', 'postgres:16-alpine',
-            ], { encoding: 'utf8' }).trim();
-            if (!id) throw new Error('BETA_APIFY_POSTGRES_DOCKER_START_FAILED');
-            containerStarted = true;
-            const port = execFileSync('docker', ['port', containerName, '5432/tcp'], { encoding: 'utf8' })
-                .trim().split(':').at(-1);
-            databaseUrl = `postgres://postgres:postgres@127.0.0.1:${port}/beta_credit_test`;
-        }
-        await waitForDatabase(databaseUrl!);
-        first = new Client({ connectionString: databaseUrl });
-        second = new Client({ connectionString: databaseUrl });
-        observer = new Client({ connectionString: databaseUrl });
-        await Promise.all([first.connect(), second.connect(), observer.connect()]);
-        await first.query(faithfulBootstrap());
-        for (const migration of migrationFiles) await first.query(migration);
+        // This catch boundary covers the whole Docker-owned lifecycle, including port
+        // discovery, readiness, client connections, and schema setup.  The helper closes
+        // any clients that connected before attempting rm -f -v, then rethrows the cause.
+        databaseUrl = await initializePostgresTestContainer({
+            lifecycle: postgresContainer,
+            suppliedUrl,
+            waitForDatabase,
+            connectClients: async url => {
+                first = new Client({ connectionString: url });
+                second = new Client({ connectionString: url });
+                observer = new Client({ connectionString: url });
+                await Promise.all([first.connect(), second.connect(), observer.connect()]);
+            },
+            setupDatabase: async () => {
+                await first.query(faithfulBootstrap());
+                for (const migration of migrationFiles) await first.query(migration);
+            },
+            closeClients: closePostgresClients,
+        });
     }, 90_000);
 
     afterAll(async () => {
         try {
-            const clients = [first, second, observer]
-                .filter((client): client is Client => Boolean(client));
-            await Promise.allSettled(clients.map(client => client.end()));
+            await closePostgresClients();
         } finally {
-            if (containerStarted) {
-                try {
-                    execFileSync('docker', ['rm', '-f', containerName], { stdio: 'ignore' });
-                } catch {
-                    // `--rm` may already have removed a container that exited unexpectedly.
-                }
-            }
+            // A transient removal failure remains retryable because the lifecycle only
+            // marks the container reaped after a successful rm -f -v command.
+            postgresContainer.cleanup();
         }
     }, 30_000);
 
