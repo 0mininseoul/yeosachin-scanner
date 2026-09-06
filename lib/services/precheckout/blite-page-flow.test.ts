@@ -342,8 +342,9 @@ describe('bounded precheckout browser states', () => {
     it.each([
         ['parent_pending', 'delayed'],
         ['pending', 'delayed'],
+        ['transient', 'delayed'],
         ['unavailable', 'plans'],
-        ['failed', 'retry'],
+        ['failed', 'plans'],
         ['terminal', 'retry'],
         ['expired', 'retry'],
     ] as const)('maps %s to the bounded %s action', (status, expected) => {
@@ -351,7 +352,7 @@ describe('bounded precheckout browser states', () => {
     });
 
     it('allows a new preflight only after an explicit terminal or expiry retry action', () => {
-        expect(canRetryPrecheckout('failed')).toBe(true);
+        expect(canRetryPrecheckout('failed')).toBe(false);
         expect(canRetryPrecheckout('terminal')).toBe(true);
         expect(canRetryPrecheckout('expired')).toBe(true);
         expect(canRetryPrecheckout('parent_pending')).toBe(false);

@@ -123,6 +123,33 @@ describe('POST /api/analysis/precheckout-blite', () => {
         expect(mocks.readStatus).not.toHaveBeenCalled();
     });
 
+    it('returns expired before parent-pending when a pending row has passed its expiry', async () => {
+        mocks.findForOwner.mockResolvedValue({
+            ...ready(),
+            status: 'pending',
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(410);
+        expect(await response.json()).toEqual({ state: 'expired' });
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('fails open for a malformed expiry before parent-pending classification', async () => {
+        mocks.findForOwner.mockResolvedValue({
+            ...ready(),
+            status: 'pending',
+            expiresAt: 'not-a-timestamp',
+        });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(204);
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
     it('returns explicit unavailable when a ready parent has no B-lite row', async () => {
         mocks.readStatus.mockResolvedValue(null);
 

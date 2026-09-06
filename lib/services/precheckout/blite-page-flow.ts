@@ -39,15 +39,15 @@ export type PrecheckoutFallbackAction = 'delayed' | 'plans' | 'retry';
 export function resolvePrecheckoutFallbackAction(
     status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
 ): PrecheckoutFallbackAction {
-    if (status === 'unavailable') return 'plans';
-    if (status === 'failed' || status === 'terminal' || status === 'expired') return 'retry';
+    if (status === 'unavailable' || status === 'failed') return 'plans';
+    if (status === 'terminal' || status === 'expired') return 'retry';
     return 'delayed';
 }
 
 export function canRetryPrecheckout(
     status: Exclude<PrecheckoutBrowserStatus, 'complete'>,
 ): boolean {
-    return status === 'failed' || status === 'terminal' || status === 'expired';
+    return status === 'terminal' || status === 'expired';
 }
 
 export type BlitePageState = Readonly<{
