@@ -146,6 +146,7 @@ describe('Amplitude analytics adapter', () => {
             BLITE_AVAILABLE: 'precheckout_blite_available',
             BLITE_RESULT_VIEWED: 'precheckout_blite_result_viewed',
             BLITE_FALLBACK_SELECTED: 'precheckout_blite_fallback_selected',
+            BLITE_FALLBACK_CTA_CLICKED: 'precheckout_blite_fallback_cta_clicked',
             BLITE_GENDER_CONFIRMATION_COMPLETED: 'precheckout_blite_gender_confirmation_completed',
             BLITE_PREVIEW_CTA_CLICKED: 'precheckout_blite_preview_cta_clicked',
             DEMO_STARTED: 'precheckout_demo_started',
@@ -155,6 +156,36 @@ describe('Amplitude analytics adapter', () => {
         });
         expect(Object.isFrozen(PRECHECKOUT_EVENTS)).toBe(true);
         expect((PRECHECKOUT_EVENTS as Record<string, string>).BLITE_VIEWED).toBeUndefined();
+    });
+
+    it('keeps waiting demo mode and the bounded fallback CTA event', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.PRECHECKOUT_EVENTS.DEMO_STARTED, {
+            demo_mode: 'waiting',
+        });
+        expect(analytics.trackPrecheckoutEvent(
+            analytics.PRECHECKOUT_EVENTS.BLITE_FALLBACK_CTA_CLICKED,
+            VALID_USER_ID,
+            {
+                parent_state: 'pending',
+                fallback_reason: 'preflight_expired',
+                username: 'raw-target',
+            } as never,
+        )).toBe(true);
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['precheckout_demo_started', { demo_mode: 'waiting' }],
+            ['precheckout_blite_fallback_cta_clicked', {
+                parent_state: 'pending',
+                fallback_reason: 'preflight_expired',
+                preflight_id: VALID_USER_ID,
+            }],
+        ]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain('raw-target');
     });
 
     it('validates B-lite properties and strips raw identity, text, and error values', async () => {
