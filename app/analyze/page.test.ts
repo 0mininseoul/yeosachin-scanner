@@ -92,16 +92,17 @@ describe('/analyze precheckout plan gate', () => {
 
     it('owns terminal retry in the page and starts a new preflight only from the retry callback', () => {
         const page = readFileSync(join(process.cwd(), 'app/analyze/page.tsx'), 'utf8');
-        const retry = page.slice(page.indexOf('const handleRetryPreflight = useCallback(() => {'));
+        const retry = page.slice(page.indexOf('const handleRetryPreflight = useCallback(async () => {'));
         const retryBody = retry.slice(0, retry.indexOf('}, ['));
 
         expect(retryBody).toContain('const retryTarget = targetInstagramId;');
         expect(retryBody).toContain('if (!retryTarget) return;');
+        expect(retryBody).toContain('clearAutoCheckoutContinuation();');
         expect(retryBody).toContain('reset();');
         expect(retryBody).toContain("setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });");
-        expect(retryBody).toContain('void startPreflight(retryTarget);');
+        expect(retryBody).toContain('const accepted = await startPreflight(retryTarget);');
         expect(retryBody.indexOf('reset();')).toBeLessThan(
-            retryBody.indexOf('void startPreflight(retryTarget);'),
+            retryBody.indexOf('const accepted = await startPreflight(retryTarget);'),
         );
         expect(page).toContain('onRetry={handleRetryPreflight}');
     });
