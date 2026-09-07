@@ -14,8 +14,11 @@ import {
     type CapacityManifest,
     type EpochErrorCode,
     type ProtectedBuildInput,
+    type ProtectedIamBinding,
     type ProtectedIamInput,
+    type ProtectedIamPolicySnapshot,
     type ProtectedIdentity,
+    type ProtectedIamInputs,
     type ProtectedObservationTargets,
     type ProtectedOldObservations,
     type ProtectedPlatformInputs,
@@ -25,6 +28,7 @@ import {
     type ProtectedSchedulerInput,
     type Role,
     type Slot,
+    type RuntimeSettings,
 } from './contracts';
 import { EpochError } from './contracts';
 
@@ -34,13 +38,25 @@ const SERVICE_ACCOUNT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4
 const RESOURCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,255}$/;
 const HEX_DIGEST = /^[0-9a-f]{64}$/;
 const REVISION_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
-
+const SCOPED_IAM_ROLES = new Set([
+    'roles/run.invoker', 'roles/cloudtasks.enqueuer', 'roles/cloudtasks.viewer',
+    'roles/iam.serviceAccountUser', 'roles/iam.serviceAccountTokenCreator',
+]);
+const IAM_ROLES_BY_KIND: Record<'run' | 'queue' | 'taskCaller' | 'maintenance', ReadonlySet<string>> = {
+    run: new Set(['roles/run.invoker']),
+    queue: new Set(['roles/cloudtasks.enqueuer', 'roles/cloudtasks.viewer']),
+    taskCaller: new Set(['roles/iam.serviceAccountUser']),
+    // The maintenance identity is a second private Run invoker.  It does not
+    // receive a self-granted token-creator role.
+    maintenance: new Set(['roles/run.invoker']),
+};
 const SOURCE_KEYS = [
-    'oldSha', 'oldRevision', 'desiredSha', 'desiredBuildDigest', 'desiredRuntimeDigest', 'revisionPlan', 'desiredRevisionId',
+    'oldSha', 'oldRevision', 'desiredSha', 'desiredBuildDigest', 'desiredRuntimeDigest',
+    'desiredRuntimeEnvironment', 'desiredRuntimeSettings', 'revisionPlan', 'desiredRevisionId',
 ] as const;
 const PRODUCER_KEYS = ['sourceSha', 'fingerprintVersion', 'fingerprint', 'admissionEnabled'] as const;
-const QUEUE_KEYS = ['resource', 'project', 'location', 'configDigest', 'state', 'empty', 'tasksDigest'] as const;
-const SCHEDULER_KEYS = ['resource', 'project', 'location', 'configDigest', 'state', 'pauseEpochMs', 'lastAttemptMs'] as const;
+const QUEUE_KEYS = ['resource', 'project', 'location', 'targetDigest', 'configDigest', 'state', 'empty', 'tasksDigest'] as const;
+const SCHEDULER_KEYS = ['resource', 'project', 'location', 'targetDigest', 'configDigest', 'state', 'pauseEpochMs', 'lastAttemptMs'] as const;
 const RETENTION_KEYS = ['resource', 'project', 'location', 'enabled', 'configDigest'] as const;
 const IAM_KEYS = ['policyDigest', 'desiredBindings', 'retiredBindings'] as const;
 const READINESS_KEYS = [
@@ -59,9 +75,24 @@ const QUEUE_INPUT_KEYS = ['resource', 'project', 'location', 'target', 'configur
 const QUEUE_TARGET_KEYS = ['url', 'audience', 'callerIdentity'] as const;
 const SCHEDULER_INPUT_KEYS = ['resource', 'project', 'location', 'target', 'configuration', 'state', 'pauseEpochMs', 'lastAttemptMs'] as const;
 const SCHEDULER_TARGET_KEYS = ['uri', 'audience', 'identity'] as const;
-const IAM_INPUT_KEYS = ['resource', 'project', 'etag', 'bindings'] as const;
+const IAM_INPUT_KEYS = ['kind', 'resource', 'project', 'etag', 'bindings', 'previous'] as const;
+const IAM_SNAPSHOT_KEYS = ['resource', 'project', 'etag', 'bindings'] as const;
+const IAM_INPUT_MAP_KEYS = ['run', 'queue', 'taskCaller', 'maintenance'] as const;
 const IAM_BINDING_KEYS = ['role', 'member', 'condition'] as const;
 const RETENTION_INPUT_KEYS = ['resource', 'project', 'location', 'enabled', 'configuration'] as const;
+
+const INITIAL_FIXED_RUNTIME_ENVIRONMENT: Readonly<Record<string, string>> = {
+    ANALYSIS_CAPACITY_STAGE: 'initial',
+    ANALYSIS_CAPACITY_EXPANSION_CANARY: 'false',
+    ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: 'true',
+    ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'drain-and-block',
+    ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: 'true',
+    ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED: 'true',
+    ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED: 'true',
+    ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED: 'true',
+    ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+    ANALYSIS_BETA_PREPARE_ENABLED: 'false',
+};
 const OLD_OBSERVATION_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness'] as const;
 const OBSERVATION_TARGET_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness', 'zeroWorkSources'] as const;
 const SOURCE_OBSERVATION_KEYS = ['sourceSha', 'revision', 'metadataDigest'] as const;
@@ -117,6 +148,24 @@ function validateProtectedIdentity(value: unknown): asserts value is ProtectedId
     if (!match || match[1] !== value.project) epochFail('IDENTITY_INVALID');
 }
 
+function validateRuntimeSettings(value: unknown): asserts value is RuntimeSettings {
+    if (!isObject(value) || !hasExactKeys(value, RUNTIME_SETTINGS_KEYS)
+        || !safeString(value.cpu, 16) || !safeString(value.memory, 32)
+        || !Number.isSafeInteger(value.concurrency) || (value.concurrency as number) <= 0
+        || !Number.isSafeInteger(value.timeoutSeconds) || (value.timeoutSeconds as number) <= 0
+        || !Number.isSafeInteger(value.maxInstances) || (value.maxInstances as number) <= 0) {
+        epochFail('SOURCE_INVALID');
+    }
+}
+
+function validateRuntimeEnvironment(value: unknown): asserts value is Record<string, string> {
+    if (!isObject(value) || Object.keys(value).length === 0
+        || Object.keys(value).some(key => !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(key))
+        || !Object.values(value).every(item => safeString(item, 2048))) {
+        epochFail('SOURCE_INVALID');
+    }
+}
+
 function validateRevision(value: unknown): void {
     if (!isObject(value)
         || (!hasExactKeys(value, SOURCE_KEYS.slice(0, -1)) && !hasExactKeys(value, SOURCE_KEYS))) {
@@ -125,6 +174,8 @@ function validateRevision(value: unknown): void {
     if (!isSha(value.oldSha) || !safeString(value.oldRevision, 128) || !isSha(value.desiredSha)
         || !validDigest(value.desiredBuildDigest) || !validDigest(value.desiredRuntimeDigest)
         || !isObject(value.revisionPlan)) epochFail('SOURCE_INVALID');
+    validateRuntimeEnvironment(value.desiredRuntimeEnvironment);
+    validateRuntimeSettings(value.desiredRuntimeSettings);
     assertKeys(value.revisionPlan, ['prefix', 'suffix'], 'SOURCE_INVALID');
     if (!safeString(value.revisionPlan.prefix, 64)
         || !safeString(value.revisionPlan.suffix, 64)
@@ -148,7 +199,7 @@ function validateProducer(value: unknown, role: Role): void {
 function validateQueue(value: unknown): void {
     assertKeys(value, QUEUE_KEYS);
     if (!safeString(value.resource) || !safeString(value.project) || !safeString(value.location)
-        || !validDigest(value.configDigest) || typeof value.state !== 'string'
+        || !validDigest(value.targetDigest) || !validDigest(value.configDigest) || typeof value.state !== 'string'
         || !['PAUSED', 'RUNNING'].includes(value.state)
         || typeof value.empty !== 'boolean' || !validDigest(value.tasksDigest)) {
         epochFail('RESOURCE_INVALID');
@@ -160,7 +211,7 @@ function validateScheduler(value: unknown): void {
     const pauseEpochMs = value.pauseEpochMs as unknown;
     const lastAttemptMs = value.lastAttemptMs as unknown;
     if (!safeString(value.resource) || !safeString(value.project) || !safeString(value.location)
-        || !validDigest(value.configDigest) || typeof value.state !== 'string'
+        || !validDigest(value.targetDigest) || !validDigest(value.configDigest) || typeof value.state !== 'string'
         || !['PAUSED', 'ENABLED'].includes(value.state)
         || !Number.isSafeInteger(pauseEpochMs) || (pauseEpochMs as number) < 0
         || (lastAttemptMs !== null
@@ -254,20 +305,69 @@ function validateRuntimeInput(value: unknown, role: Role): asserts value is Prot
     if (value.role !== role || !safeString(value.service, 128) || !safeString(value.project, 128)
         || !safeString(value.location, 128) || !isSha(value.sourceSha)) epochFail('SOURCE_INVALID');
     validateProtectedIdentity(value.identity);
-    const settings = value.settings as Record<string, unknown>;
     const environment = value.environment as Record<string, unknown>;
     if (!isObject(value.environment) || !Object.values(environment).every(item => typeof item === 'string')
-        || !isObject(value.secretReferences) || !Object.values(value.secretReferences).every(item => safeString(item, 256))
-        || !isObject(value.settings) || !hasExactKeys(settings, RUNTIME_SETTINGS_KEYS)
-        || !safeString(settings.cpu, 16) || !safeString(settings.memory, 32)
-        || !Number.isSafeInteger(settings.concurrency) || (settings.concurrency as number) <= 0
-        || !Number.isSafeInteger(settings.timeoutSeconds) || (settings.timeoutSeconds as number) <= 0
-        || !Number.isSafeInteger(settings.maxInstances) || (settings.maxInstances as number) <= 0
+        || environment.ANALYSIS_WORKLOAD_ROLE !== role
+        || !isObject(value.secretReferences) || !Object.values(value.secretReferences).every(item => typeof item === 'string' && /^.{1,240}:[1-9][0-9]*$/.test(item))
         || !isObject(value.target) || !hasExactKeys(value.target, TARGET_KEYS)) epochFail('SOURCE_INVALID');
+    validateRuntimeSettings(value.settings);
     validateUrl(value.target.url);
     validateUrl(value.target.audience);
     if (typeof value.noTraffic !== 'boolean' || typeof value.providerAdmissionEnabled !== 'boolean'
         || environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED !== String(value.providerAdmissionEnabled)) epochFail('SOURCE_INVALID');
+}
+
+function validateDesiredInitialRuntimeContract(
+    role: Role,
+    runtime: ProtectedRuntimeInput,
+    queue: ProtectedQueueInput,
+    scheduler: ProtectedSchedulerInput,
+    expectedEnvironment: Readonly<Record<string, string>>,
+    expectedSettings: RuntimeSettings,
+): void {
+    // Stage, freeze, and gate semantics are fixed by the approved INITIAL
+    // epoch.  CPU/memory remain reviewed manifest values and are checked
+    // against the protected settings below rather than a process default.
+    for (const [key, expected] of Object.entries(INITIAL_FIXED_RUNTIME_ENVIRONMENT)) {
+        if (expectedEnvironment[key] !== expected || runtime.environment[key] !== expected) epochFail('SOURCE_INVALID');
+    }
+    const expectedGates: Readonly<Record<string, string>> = {
+        PREFLIGHT_TASKS_ENABLED: role === 'preflight' ? 'true' : 'false',
+        ANALYSIS_V2_TASKS_ENABLED: role === 'paid' ? 'true' : 'false',
+        ANALYSIS_V2_WORKER_ENABLED: role === 'paid' ? 'true' : 'false',
+        PREFLIGHT_TASKS_RECOVERY_ENABLED: role === 'preflight' ? 'true' : 'false',
+        ANALYSIS_V2_RECOVERY_ENABLED: role === 'paid' ? 'true' : 'false',
+    };
+    for (const [key, expected] of Object.entries(expectedGates)) {
+        if (expectedEnvironment[key] !== expected || runtime.environment[key] !== expected) epochFail('SOURCE_INVALID');
+    }
+    if (expectedEnvironment.ANALYSIS_WORKLOAD_ROLE !== role
+        || runtime.environment.ANALYSIS_WORKLOAD_ROLE !== role
+        || expectedEnvironment.ANALYSIS_CAPACITY_WORKER_CPU !== expectedSettings.cpu
+        || expectedEnvironment.ANALYSIS_CAPACITY_WORKER_MEMORY !== expectedSettings.memory
+        || runtime.environment.ANALYSIS_CAPACITY_WORKER_CPU !== runtime.settings.cpu
+        || runtime.environment.ANALYSIS_CAPACITY_WORKER_MEMORY !== runtime.settings.memory
+        || canonicalDigest(runtime.settings) !== canonicalDigest(expectedSettings)) epochFail('SOURCE_INVALID');
+
+    const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+    const maintenancePrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2';
+    const queueName = queue.resource.slice(queue.resource.lastIndexOf('/') + 1);
+    const expectedResourceEnvironment: Readonly<Record<string, string>> = {
+        [`${prefix}_PROJECT`]: runtime.project,
+        [`${prefix}_LOCATION`]: runtime.location,
+        [`${prefix}_QUEUE`]: queueName,
+        [`${prefix}_TARGET_URL`]: runtime.target.url,
+        [`${prefix}_OIDC_AUDIENCE`]: runtime.target.audience,
+        [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: queue.target.callerIdentity.identity,
+        [`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`]: scheduler.target.identity.identity,
+        [`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE`]: scheduler.target.audience,
+    };
+    for (const [key, expected] of Object.entries(expectedResourceEnvironment)) {
+        if (expectedEnvironment[key] !== expected || runtime.environment[key] !== expected) epochFail('SOURCE_INVALID');
+    }
+    if (expectedSettings.concurrency !== 1
+        || expectedSettings.timeoutSeconds !== 600
+        || expectedSettings.maxInstances !== (role === 'preflight' ? 32 : 8)) epochFail('SOURCE_INVALID');
 }
 
 function validateQueueInput(value: unknown): asserts value is ProtectedQueueInput {
@@ -298,21 +398,54 @@ function validateSchedulerInput(value: unknown): asserts value is ProtectedSched
             && (!Number.isSafeInteger(lastAttemptMs) || (lastAttemptMs as number) < 0))) epochFail('RESOURCE_INVALID');
 }
 
-function validateIamInput(value: unknown, expectedProject?: string): asserts value is ProtectedIamInput {
-    assertKeys(value, IAM_INPUT_KEYS, 'RESOURCE_INVALID');
+const CLOUD_TASKS_SERVICE_AGENT = /^serviceAccount:service-([0-9]{6,20})@gcp-sa-cloudtasks\.iam\.gserviceaccount\.com$/;
+const PRINCIPAL_MEMBER = /^(?:user|group|domain|principal|principalSet):[^\u0000-\u001f\u007f]{1,511}$/;
+
+function validateIamBinding(value: unknown, expectedProject?: string): asserts value is ProtectedIamBinding {
+    assertKeys(value, IAM_BINDING_KEYS, 'RESOURCE_INVALID');
+    if (!safeString(value.role, 256) || !/^roles\/[A-Za-z0-9.]{1,240}$/.test(value.role)
+        || !safeString(value.member, 1024)
+        || (value.condition !== null && typeof value.condition !== 'string' && !isObject(value.condition))) {
+        epochFail('RESOURCE_INVALID');
+    }
+    if (typeof value.condition === 'string' && !safeString(value.condition, 4096)) epochFail('RESOURCE_INVALID');
+    if (isObject(value.condition)) {
+        if (!Object.keys(value.condition).every(key => ['title', 'description', 'expression'].includes(key))
+            || !Object.values(value.condition).every(item => typeof item === 'string' && safeString(item, 4096))) epochFail('RESOURCE_INVALID');
+    }
+    if (value.member.startsWith('serviceAccount:')) {
+        const member = value.member.slice('serviceAccount:'.length);
+        const serviceAgent = value.member.match(CLOUD_TASKS_SERVICE_AGENT);
+        const match = member.match(SERVICE_ACCOUNT_PATTERN);
+        if (serviceAgent) return;
+        if (!match || (expectedProject !== undefined && match[1] !== expectedProject)) epochFail('IDENTITY_INVALID');
+        return;
+    }
+    if (!PRINCIPAL_MEMBER.test(value.member) && value.member !== 'allUsers' && value.member !== 'allAuthenticatedUsers') {
+        epochFail('RESOURCE_INVALID');
+    }
+}
+
+function validateIamSnapshot(value: unknown, expectedProject?: string): asserts value is ProtectedIamPolicySnapshot {
+    assertKeys(value, IAM_SNAPSHOT_KEYS, 'RESOURCE_INVALID');
     if (!safeString(value.resource) || !RESOURCE_PATTERN.test(value.resource)
         || !safeString(value.project, 128) || !safeString(value.etag, 512)
         || !Array.isArray(value.bindings)) epochFail('RESOURCE_INVALID');
     if (expectedProject !== undefined && value.project !== expectedProject) epochFail('PROJECT_MISMATCH');
-    for (const binding of value.bindings) {
-        assertKeys(binding, IAM_BINDING_KEYS, 'RESOURCE_INVALID');
-        if (!safeString(binding.role, 128) || !safeString(binding.member, 512)
-            || (binding.condition !== null && !safeString(binding.condition, 2048))) epochFail('RESOURCE_INVALID');
-        if (!binding.member.startsWith('serviceAccount:')) epochFail('RESOURCE_INVALID');
-        const member = binding.member.slice('serviceAccount:'.length);
-        const match = member.match(SERVICE_ACCOUNT_PATTERN);
-        if (!match || (expectedProject !== undefined && match[1] !== expectedProject)) epochFail('IDENTITY_INVALID');
-    }
+    for (const binding of value.bindings) validateIamBinding(binding, expectedProject);
+}
+
+function validateIamInput(value: unknown, expectedProject?: string, expectedKind?: ProtectedIamInput['kind']): asserts value is ProtectedIamInput {
+    assertKeys(value, IAM_INPUT_KEYS, 'RESOURCE_INVALID');
+    if ((value.kind !== 'run' && value.kind !== 'queue' && value.kind !== 'taskCaller' && value.kind !== 'maintenance')
+        || (expectedKind !== undefined && value.kind !== expectedKind)
+        || !safeString(value.resource) || !RESOURCE_PATTERN.test(value.resource)
+        || !safeString(value.project, 128) || !safeString(value.etag, 512)
+        || !Array.isArray(value.bindings)
+        || (value.previous !== null && !isObject(value.previous))) epochFail('RESOURCE_INVALID');
+    if (expectedProject !== undefined && value.project !== expectedProject) epochFail('PROJECT_MISMATCH');
+    for (const binding of value.bindings) validateIamBinding(binding, expectedProject);
+    if (value.previous !== null) validateIamSnapshot(value.previous, expectedProject);
 }
 
 function validateRetentionInput(value: unknown): asserts value is ProtectedRetentionInput {
@@ -328,7 +461,7 @@ function validateQualifiedResource(resource: string, project: string): void {
     if (!match || match[1] !== project) epochFail('PROJECT_MISMATCH');
 }
 
-function validatePlatformInputs(value: unknown, manifest: CapacityManifest): asserts value is ProtectedPlatformInputs {
+function validatePlatformInputs(value: unknown, manifest: CapacityManifest, phase: 'old' | 'desired' = 'old'): asserts value is ProtectedPlatformInputs {
     assertKeys(value, PLATFORM_KEYS, 'INVALID_PACKET');
     validateBuildInput(value.build);
     validateProtectedIdentity(manifest.build);
@@ -336,31 +469,181 @@ function validatePlatformInputs(value: unknown, manifest: CapacityManifest): ass
         || value.build.identity.project !== manifest.build.project) epochFail('SOURCE_INVALID');
     const expectedProject = manifest.build.project;
     if (value.build.identity.project !== expectedProject) epochFail('PROJECT_MISMATCH');
+    if (phase === 'desired') {
+        const expectedBuildSource = manifest.source[ROLES[0]].desiredSha;
+        if (value.build.sourceSha !== expectedBuildSource
+            || !ROLES.every(role => manifest.source[role].desiredSha === expectedBuildSource)) epochFail('SOURCE_INVALID');
+    }
     if (!isObject(value.runtime) || !hasExactKeys(value.runtime, ROLES)
         || !isObject(value.queues) || !hasExactKeys(value.queues, ROLES)
         || !isObject(value.schedulers) || !hasExactKeys(value.schedulers, ROLES)
         || !isObject(value.iam) || !hasExactKeys(value.iam, ROLES)) epochFail('INVALID_PACKET');
+    const runtimeInputs = value.runtime as ProtectedPlatformInputs['runtime'];
+    const queueInputs = value.queues as ProtectedPlatformInputs['queues'];
+    const schedulerInputs = value.schedulers as ProtectedPlatformInputs['schedulers'];
+    const iamInputs = value.iam as ProtectedPlatformInputs['iam'];
     for (const role of ROLES) {
-        validateRuntimeInput(value.runtime[role], role);
-        validateQueueInput(value.queues[role]);
-        validateSchedulerInput(value.schedulers[role]);
-        validateIamInput(value.iam[role], expectedProject);
-        if (value.runtime[role].project !== expectedProject
-            || value.runtime[role].identity.project !== expectedProject
-            || value.queues[role].project !== expectedProject
-            || value.queues[role].target.callerIdentity.project !== expectedProject
-            || value.schedulers[role].project !== expectedProject
-            || value.schedulers[role].target.identity.project !== expectedProject) epochFail('PROJECT_MISMATCH');
-        validateQualifiedResource(value.queues[role].resource, expectedProject);
-        validateQualifiedResource(value.schedulers[role].resource, expectedProject);
-        validateQualifiedResource(value.iam[role].resource, expectedProject);
-        if (value.runtime[role].identity.identity !== manifest.roleSlots[`${role}.runtime` as Slot].identity
-            || value.queues[role].target.callerIdentity.identity !== manifest.roleSlots[`${role}.task-caller` as Slot].identity
-            || value.schedulers[role].target.identity.identity !== manifest.roleSlots[`${role}.maintenance` as Slot].identity) epochFail('IDENTITY_CONFLICT');
+        validateRuntimeInput(runtimeInputs[role], role);
+        const expectedSourceSha = phase === 'desired' ? manifest.source[role].desiredSha : manifest.source[role].oldSha;
+        if (runtimeInputs[role].sourceSha !== expectedSourceSha) epochFail('SOURCE_INVALID');
+        if (phase === 'desired' && runtimeInputs[role].providerAdmissionEnabled !== true) epochFail('SOURCE_INVALID');
+        if (phase === 'desired'
+            && (canonicalDigest(value.build) !== manifest.source[role].desiredBuildDigest
+                || canonicalDigest(runtimeInputs[role]) !== manifest.source[role].desiredRuntimeDigest)) epochFail('SOURCE_INVALID');
+        validateQueueInput(queueInputs[role]);
+        validateSchedulerInput(schedulerInputs[role]);
+        if (queueInputs[role].resource !== manifest.queues[role].resource
+            || schedulerInputs[role].resource !== manifest.recoverySchedulers[role].resource
+            || canonicalDigest(queueInputs[role].target) !== manifest.queues[role].targetDigest
+            || canonicalDigest(schedulerInputs[role].target) !== manifest.recoverySchedulers[role].targetDigest) epochFail('RESOURCE_INVALID');
+        if (phase === 'desired' && runtimeInputs[role].noTraffic !== true) epochFail('SOURCE_INVALID');
+        if (phase === 'desired') {
+            if (canonicalDigest(runtimeInputs[role].environment)
+                !== canonicalDigest(manifest.source[role].desiredRuntimeEnvironment)
+                || canonicalDigest(runtimeInputs[role].settings)
+                !== canonicalDigest(manifest.source[role].desiredRuntimeSettings)) epochFail('SOURCE_INVALID');
+            validateDesiredInitialRuntimeContract(
+                role,
+                runtimeInputs[role],
+                queueInputs[role],
+                schedulerInputs[role],
+                manifest.source[role].desiredRuntimeEnvironment,
+                manifest.source[role].desiredRuntimeSettings,
+            );
+        }
+        if (!isObject(iamInputs[role]) || !hasExactKeys(iamInputs[role], IAM_INPUT_MAP_KEYS)) epochFail('RESOURCE_INVALID');
+        for (const kind of IAM_INPUT_MAP_KEYS) validateIamInput(iamInputs[role][kind], expectedProject, kind);
+        if (iamInputs[role].run.resource !== iamInputs[role].maintenance.resource
+            || iamInputs[role].run.project !== iamInputs[role].maintenance.project
+            || iamInputs[role].run.etag !== iamInputs[role].maintenance.etag
+            || canonicalDigest(iamInputs[role].run.bindings) !== canonicalDigest(iamInputs[role].maintenance.bindings)) epochFail('RESOURCE_INVALID');
+        if (runtimeInputs[role].project !== expectedProject
+            || runtimeInputs[role].identity.project !== expectedProject
+            || queueInputs[role].project !== expectedProject
+            || queueInputs[role].target.callerIdentity.project !== expectedProject
+            || schedulerInputs[role].project !== expectedProject
+            || schedulerInputs[role].target.identity.project !== expectedProject) epochFail('PROJECT_MISMATCH');
+        validateQualifiedResource(queueInputs[role].resource, expectedProject);
+        validateQualifiedResource(schedulerInputs[role].resource, expectedProject);
+        for (const kind of IAM_INPUT_MAP_KEYS) validateQualifiedResource(iamInputs[role][kind].resource, expectedProject);
+        if (runtimeInputs[role].identity.identity !== manifest.roleSlots[`${role}.runtime` as Slot].identity
+            || queueInputs[role].target.callerIdentity.identity !== manifest.roleSlots[`${role}.task-caller` as Slot].identity
+            || schedulerInputs[role].target.identity.identity !== manifest.roleSlots[`${role}.maintenance` as Slot].identity) epochFail('IDENTITY_CONFLICT');
     }
     validateRetentionInput(value.retention);
     if (value.retention.project !== expectedProject) epochFail('PROJECT_MISMATCH');
     validateQualifiedResource(value.retention.resource, expectedProject);
+    validateScopedIamGraph(value as ProtectedPlatformInputs, manifest);
+}
+
+function bindingKey(binding: ProtectedIamBinding): string {
+    return canonicalDigest(binding);
+}
+
+function bindingSet(bindings: readonly ProtectedIamBinding[]): Set<string> {
+    return new Set(bindings.map(bindingKey));
+}
+
+function validateScopedIamGraph(value: ProtectedPlatformInputs, manifest: CapacityManifest): void {
+    for (const role of ROLES) {
+        const resources = value.iam[role];
+        const runtimeIdentity = manifest.roleSlots[`${role}.runtime` as Slot].identity;
+        const taskCallerIdentity = manifest.roleSlots[`${role}.task-caller` as Slot].identity;
+        const enqueuerIdentity = manifest.roleSlots[`${role}.enqueuer` as Slot].identity;
+        const maintenanceIdentity = manifest.roleSlots[`${role}.maintenance` as Slot].identity;
+        const has = (kind: keyof typeof resources, requiredRole: string, member: string): boolean =>
+            resources[kind].bindings.some(binding => binding.role === requiredRole
+                && binding.member === `serviceAccount:${member}` && binding.condition === null);
+        if (!has('run', 'roles/run.invoker', taskCallerIdentity)
+            || !has('run', 'roles/run.invoker', maintenanceIdentity)
+            || !has('queue', 'roles/cloudtasks.enqueuer', enqueuerIdentity)
+            || !has('queue', 'roles/cloudtasks.enqueuer', runtimeIdentity)
+            || !has('queue', 'roles/cloudtasks.viewer', runtimeIdentity)
+            || !has('taskCaller', 'roles/iam.serviceAccountUser', enqueuerIdentity)
+            || !has('taskCaller', 'roles/iam.serviceAccountUser', runtimeIdentity)
+            || !resources.taskCaller.bindings.some(binding => binding.role === 'roles/iam.serviceAccountUser'
+                && binding.condition === null && CLOUD_TASKS_SERVICE_AGENT.test(binding.member))) epochFail('RESOURCE_INVALID');
+        if (!resources.run.resource.endsWith(`/services/${value.runtime[role].service}`)
+            || resources.maintenance.resource !== resources.run.resource
+            || resources.queue.resource !== value.queues[role].resource
+            || resources.taskCaller.resource !== `projects/${value.runtime[role].project}/serviceAccounts/${taskCallerIdentity}`) epochFail('RESOURCE_INVALID');
+    }
+}
+
+function validateIamPreservesOld(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs): void {
+    for (const role of ROLES) {
+        for (const kind of IAM_INPUT_MAP_KEYS) {
+            const oldResource = oldInputs.iam[role][kind];
+            const desiredResource = desiredInputs.iam[role][kind];
+            if (oldResource.resource === desiredResource.resource) {
+                const desiredBindings = new Set(desiredResource.bindings.map(bindingKey));
+                for (const binding of oldResource.bindings) {
+                    if (!desiredBindings.has(bindingKey(binding))) epochFail('RESOURCE_INVALID');
+                }
+                if (desiredResource.previous !== null
+                    && (desiredResource.previous.resource !== oldResource.resource
+                        || desiredResource.previous.bindings.length !== oldResource.bindings.length
+                        || ![...bindingSet(desiredResource.previous.bindings)].every(binding => bindingSet(oldResource.bindings).has(binding)))) epochFail('RESOURCE_INVALID');
+                continue;
+            }
+            // A roll-forward may move the task-caller policy to a new service
+            // account.  The exact old policy remains a separate protected
+            // snapshot; it is never silently replaced by the new policy.
+            if (desiredResource.previous === null
+                || desiredResource.previous.resource !== oldResource.resource
+                || desiredResource.previous.project !== oldResource.project
+                || desiredResource.previous.bindings.length !== oldResource.bindings.length
+                || ![...bindingSet(desiredResource.previous.bindings)].every(binding => bindingSet(oldResource.bindings).has(binding))) epochFail('RESOURCE_INVALID');
+        }
+    }
+}
+
+function validateIamAdditions(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs, desiredManifest: CapacityManifest): void {
+    for (const role of ROLES) {
+        for (const kind of IAM_INPUT_MAP_KEYS) {
+            const oldResource = oldInputs.iam[role][kind];
+            const desiredResource = desiredInputs.iam[role][kind];
+            const baseline = desiredResource.resource === oldResource.resource
+                ? oldResource.bindings
+                : desiredResource.previous?.bindings;
+            if (baseline === undefined) epochFail('RESOURCE_INVALID');
+            const baselineKeys = bindingSet(baseline);
+            const allowedMembers: Record<typeof kind, readonly string[]> = {
+                run: [
+                    desiredManifest.roleSlots[`${role}.task-caller` as Slot].identity,
+                    desiredManifest.roleSlots[`${role}.maintenance` as Slot].identity,
+                ],
+                queue: [
+                    desiredManifest.roleSlots[`${role}.enqueuer` as Slot].identity,
+                    desiredManifest.roleSlots[`${role}.runtime` as Slot].identity,
+                ],
+                taskCaller: [
+                    desiredManifest.roleSlots[`${role}.enqueuer` as Slot].identity,
+                    desiredManifest.roleSlots[`${role}.runtime` as Slot].identity,
+                ],
+                maintenance: [
+                    desiredManifest.roleSlots[`${role}.task-caller` as Slot].identity,
+                    desiredManifest.roleSlots[`${role}.maintenance` as Slot].identity,
+                ],
+            };
+            const oldTaskCallerAgents = oldResource.kind === 'taskCaller'
+                ? oldResource.bindings.filter(binding => binding.role === 'roles/iam.serviceAccountUser' && CLOUD_TASKS_SERVICE_AGENT.test(binding.member)).map(binding => binding.member)
+                : [];
+            for (const binding of desiredResource.bindings) {
+                if (baselineKeys.has(bindingKey(binding))) continue;
+                const member = binding.member.slice('serviceAccount:'.length);
+                const taskCallerMemberAllowed = kind !== 'taskCaller'
+                    || (CLOUD_TASKS_SERVICE_AGENT.test(binding.member)
+                        ? oldTaskCallerAgents.includes(binding.member)
+                        : /^serviceAccount:[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(binding.member));
+                if (!IAM_ROLES_BY_KIND[kind].has(binding.role)
+                    || binding.condition !== null
+                    || !binding.member.startsWith('serviceAccount:')
+                    || !taskCallerMemberAllowed
+                    || !allowedMembers[kind].includes(member)) epochFail('RESOURCE_INVALID');
+            }
+        }
+    }
 }
 
 function validateOldObservations(
@@ -443,10 +726,12 @@ function validateOldObservations(
             || canonicalDigest(schedulers[role].configuration) !== canonicalDigest(expectedScheduler.configuration)) epochFail('RESOURCE_INVALID');
     }
 
-    const iam = value.iam as Record<Role, unknown>;
+    const iam = value.iam as ProtectedIamInputs;
     for (const role of ROLES) {
-        validateIamInput(iam[role], manifest.build.project);
-        if (canonicalDigest(iam[role]) !== canonicalDigest(platform.iam[role])) epochFail('RESOURCE_INVALID');
+        for (const kind of IAM_INPUT_MAP_KEYS) {
+            validateIamInput(iam[role][kind], manifest.build.project, kind);
+            if (canonicalDigest(iam[role][kind]) !== canonicalDigest(platform.iam[role][kind])) epochFail('RESOURCE_INVALID');
+        }
     }
     validateRetentionInput(value.retention);
     if (canonicalDigest(value.retention) !== canonicalDigest(platform.retention)) epochFail('RESOURCE_INVALID');
@@ -494,7 +779,7 @@ function validateObservationTargets(
         iam: value.iam as ProtectedPlatformInputs['iam'],
         retention: value.retention as ProtectedPlatformInputs['retention'],
     };
-    validatePlatformInputs(targetPlatform, manifest);
+    validatePlatformInputs(targetPlatform, manifest, 'desired');
     if (canonicalDigest(targetPlatform.runtime) !== canonicalDigest(platform.runtime)
         || canonicalDigest(targetPlatform.queues) !== canonicalDigest(platform.queues)
         || canonicalDigest(targetPlatform.schedulers) !== canonicalDigest(platform.schedulers)
@@ -637,8 +922,10 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
     validateManifest(value.oldManifest);
     validateManifest(value.desiredManifest);
     validateManifestComparison(value.oldManifest, value.desiredManifest);
-    validatePlatformInputs(protectedInputs.old, value.oldManifest);
-    validatePlatformInputs(protectedInputs.desired, value.desiredManifest);
+    validatePlatformInputs(protectedInputs.old, value.oldManifest, 'old');
+    validatePlatformInputs(protectedInputs.desired, value.desiredManifest, 'desired');
+    validateIamPreservesOld(protectedInputs.old, protectedInputs.desired);
+    validateIamAdditions(protectedInputs.old, protectedInputs.desired, value.desiredManifest);
     validateOldObservations(protectedObservations.old, value.oldManifest, protectedInputs.old);
     validateObservationTargets(protectedObservations.desired, value.desiredManifest, protectedInputs.desired);
     if (!isDigest(value.oldManifestDigest) || !isDigest(value.desiredManifestDigest)
@@ -651,8 +938,10 @@ export function createProtectedPacket(input: ProtectedPacketInput): CapacityEpoc
     validateManifest(input.oldManifest);
     validateManifest(input.desiredManifest);
     validateManifestComparison(input.oldManifest, input.desiredManifest);
-    validatePlatformInputs(input.protectedInputs.old, input.oldManifest);
-    validatePlatformInputs(input.protectedInputs.desired, input.desiredManifest);
+    validatePlatformInputs(input.protectedInputs.old, input.oldManifest, 'old');
+    validatePlatformInputs(input.protectedInputs.desired, input.desiredManifest, 'desired');
+    validateIamPreservesOld(input.protectedInputs.old, input.protectedInputs.desired);
+    validateIamAdditions(input.protectedInputs.old, input.protectedInputs.desired, input.desiredManifest);
     const oldManifestDigest = canonicalDigest(input.oldManifest);
     const desiredManifestDigest = canonicalDigest(input.desiredManifest);
     const roleSetDigest = canonicalDigest([...input.roleSet].sort());

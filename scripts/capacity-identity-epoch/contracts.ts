@@ -73,12 +73,28 @@ export type ProtectedIdentity = Readonly<{
     project: string;
 }>;
 
+export type RuntimeSettings = Readonly<{
+    cpu: string;
+    memory: string;
+    concurrency: number;
+    timeoutSeconds: number;
+    maxInstances: number;
+}>;
+
 export type RevisionContract = Readonly<{
     oldSha: string;
     oldRevision: string;
     desiredSha: string;
     desiredBuildDigest: string;
     desiredRuntimeDigest: string;
+    /**
+     * The reviewed target runtime contract is carried in the protected
+     * manifest instead of being re-created from process defaults.  This is
+     * deliberately an exact map: a staged candidate must match the complete
+     * role/project/queue/gate contract selected by the operator.
+     */
+    desiredRuntimeEnvironment: Readonly<Record<string, string>>;
+    desiredRuntimeSettings: RuntimeSettings;
     revisionPlan: Readonly<{ prefix: string; suffix: string }>;
     desiredRevisionId?: string;
 }>;
@@ -94,6 +110,7 @@ export type QueueContract = Readonly<{
     resource: string;
     project: string;
     location: string;
+    targetDigest: string;
     configDigest: string;
     state: 'PAUSED' | 'RUNNING';
     empty: boolean;
@@ -104,6 +121,7 @@ export type SchedulerContract = Readonly<{
     resource: string;
     project: string;
     location: string;
+    targetDigest: string;
     configDigest: string;
     state: 'PAUSED' | 'ENABLED';
     pauseEpochMs: number;
@@ -156,13 +174,7 @@ export type ProtectedRuntimeInput = Readonly<{
     sourceSha: string;
     environment: Readonly<Record<string, string>>;
     secretReferences: Readonly<Record<string, string>>;
-    settings: Readonly<{
-        cpu: string;
-        memory: string;
-        concurrency: number;
-        timeoutSeconds: number;
-        maxInstances: number;
-    }>;
+    settings: RuntimeSettings;
     target: Readonly<{ url: string; audience: string }>;
     noTraffic: boolean;
     providerAdmissionEnabled: boolean;
@@ -187,16 +199,40 @@ export type ProtectedSchedulerInput = Readonly<{
     lastAttemptMs: number | null;
 }>;
 
-export type ProtectedIamInput = Readonly<{
+export type ProtectedIamBinding = Readonly<{
+    role: string;
+    member: string;
+    condition: string | null | Readonly<Record<string, string>>;
+}>;
+
+export type ProtectedIamPolicySnapshot = Readonly<{
     resource: string;
     project: string;
     etag: string;
-    bindings: readonly Readonly<{
-        role: string;
-        member: string;
-        condition: string | null;
-    }>[];
+    bindings: readonly ProtectedIamBinding[];
 }>;
+
+export type ProtectedIamInput = Readonly<{
+    kind: 'run' | 'queue' | 'taskCaller' | 'maintenance';
+    resource: string;
+    project: string;
+    etag: string;
+    bindings: readonly ProtectedIamBinding[];
+    /**
+     * The exact prior policy is required when a desired identity moves to a
+     * new service-account resource.  It keeps old policy evidence separate
+     * from the new target policy while still allowing unrelated grants to be
+     * preserved and reviewed.
+     */
+    previous: ProtectedIamPolicySnapshot | null;
+}>;
+
+export type ProtectedIamInputs = Readonly<Record<Role, Readonly<{
+    run: ProtectedIamInput;
+    queue: ProtectedIamInput;
+    taskCaller: ProtectedIamInput;
+    maintenance: ProtectedIamInput;
+}>>>;
 
 export type ProtectedRetentionInput = Readonly<{
     resource: string;
@@ -211,7 +247,7 @@ export type ProtectedPlatformInputs = Readonly<{
     runtime: Readonly<Record<Role, ProtectedRuntimeInput>>;
     queues: Readonly<Record<Role, ProtectedQueueInput>>;
     schedulers: Readonly<Record<Role, ProtectedSchedulerInput>>;
-    iam: Readonly<Record<Role, ProtectedIamInput>>;
+    iam: ProtectedIamInputs;
     retention: ProtectedRetentionInput;
 }>;
 
@@ -263,7 +299,7 @@ export type ProtectedOldObservations = Readonly<{
         lastAttemptMs: number | null;
         configuration: Readonly<Record<string, unknown>>;
     }>>>;
-    iam: Readonly<Record<Role, ProtectedIamInput>>;
+    iam: ProtectedIamInputs;
     retention: ProtectedRetentionInput;
     readiness: Readonly<ReadinessContract & { ready: boolean }>;
 }>;
@@ -283,7 +319,7 @@ export type ProtectedObservationTargets = Readonly<{
     runtime: Readonly<Record<Role, ProtectedRuntimeInput>>;
     queues: Readonly<Record<Role, ProtectedQueueInput>>;
     schedulers: Readonly<Record<Role, ProtectedSchedulerInput>>;
-    iam: Readonly<Record<Role, ProtectedIamInput>>;
+    iam: ProtectedIamInputs;
     retention: ProtectedRetentionInput;
     readiness: ReadinessContract;
     zeroWorkSources: Readonly<Record<'providerLedger' | 'billingLedger' | 'taskAudit' | 'receiverLog', Readonly<{

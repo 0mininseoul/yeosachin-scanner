@@ -11,7 +11,7 @@ import {
     validateEpochPacket,
     validateManifestComparison,
 } from './packet';
-import { EpochError } from './contracts';
+import { EpochError, canonicalDigest } from './contracts';
 import type { CapacityManifest, ProtectedOldObservations, ProtectedObservationTargets, ProtectedPlatformInputs } from './contracts';
 
 const PROJECT = 'example-project';
@@ -22,17 +22,86 @@ function identity(value: string) {
     return { identity: value, project: PROJECT };
 }
 
+function runtimeSettings(role: 'preflight' | 'paid') {
+    return { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: role === 'preflight' ? 32 : 8 };
+}
+
+function runtimeEnvironment(role: 'preflight' | 'paid', suffix: 'old' | 'desired') {
+    const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+    const maintenancePrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2';
+    const targetOrigin = `https://${role}.example.com`;
+    const taskCallerIdentity = `${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`;
+    const maintenanceIdentity = `${role}-maintenance-${suffix}@example-project.iam.gserviceaccount.com`;
+    return {
+        [`${prefix}_PROJECT`]: PROJECT,
+        [`${prefix}_LOCATION`]: 'asia-northeast3',
+        [`${prefix}_QUEUE`]: role,
+        [`${prefix}_TARGET_URL`]: `${targetOrigin}/api/analysis/${role}/worker`,
+        [`${prefix}_OIDC_AUDIENCE`]: targetOrigin,
+        [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: taskCallerIdentity,
+        [`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`]: maintenanceIdentity,
+        [`${maintenancePrefix}_MAINTENANCE_OIDC_AUDIENCE`]: targetOrigin,
+        [`${role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS'}_RECOVERY_ENABLED`]: 'true',
+        ANALYSIS_WORKLOAD_ROLE: role,
+        ANALYSIS_CAPACITY_STAGE: 'initial',
+        ANALYSIS_CAPACITY_EXPANSION_CANARY: 'false',
+        ANALYSIS_CAPACITY_WORKER_CPU: '2',
+        ANALYSIS_CAPACITY_WORKER_MEMORY: '2Gi',
+        ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: 'true',
+        ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'drain-and-block',
+        ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: 'true',
+        ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED: 'true',
+        ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED: 'true',
+        ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED: 'true',
+        ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+        ANALYSIS_BETA_PREPARE_ENABLED: 'false',
+        PREFLIGHT_TASKS_ENABLED: role === 'preflight' ? 'true' : 'false',
+        ANALYSIS_V2_TASKS_ENABLED: role === 'paid' ? 'true' : 'false',
+        ANALYSIS_V2_WORKER_ENABLED: role === 'paid' ? 'true' : 'false',
+        PREFLIGHT_TASKS_RECOVERY_ENABLED: role === 'preflight' ? 'true' : 'false',
+        ANALYSIS_V2_RECOVERY_ENABLED: role === 'paid' ? 'true' : 'false',
+        ANALYSIS_V2_APIFY_API_TOKEN_SLOT: role === 'preflight' ? 'senary' : 'secondary',
+        ...(role === 'preflight' ? { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' } : {}),
+    };
+}
+
 function manifest(kind: 'old' | 'desired'): CapacityManifest {
+    const suffix = kind === 'old' ? 'old' : 'desired';
     const roleSlots = Object.fromEntries(SLOTS.map(slot => [
         slot,
         identity(kind === 'old' ? oldIdentity(slot) : desiredIdentity(slot)),
     ]));
+    const buildInput = {
+        identity: identity('new-build@example-project.iam.gserviceaccount.com'),
+        sourceSha: 'b'.repeat(40), sourceContext: 'fixture-source-context', buildArguments: { NODE_ENV: 'production' },
+    };
+    const runtimeTarget = (role: 'preflight' | 'paid') => ({
+        role,
+        service: `${role}-worker`, project: PROJECT, location: 'asia-northeast3',
+        identity: identity(`${role}.runtime-desired`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
+        sourceSha: 'b'.repeat(40),
+        environment: runtimeEnvironment(role, 'desired'),
+        secretReferences: { ANALYSIS_SECRET: 'secret:7' },
+        settings: runtimeSettings(role),
+        target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
+        noTraffic: true, providerAdmissionEnabled: true,
+    });
+    const queueTarget = (role: 'preflight' | 'paid') => ({
+        url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com`,
+        callerIdentity: identity(`${role}.task-caller-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
+    });
+    const schedulerTarget = (role: 'preflight' | 'paid') => ({
+        uri: `https://${role}.example.com/api/analysis/${role}/recover`, audience: `https://${role}.example.com`,
+        identity: identity(`${role}.maintenance-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
+    });
     const revision = (role: 'preflight' | 'paid') => ({
         oldSha: 'a'.repeat(40),
         oldRevision: `${role}-old-revision`,
         desiredSha: 'b'.repeat(40),
-        desiredBuildDigest: 'c'.repeat(64),
-        desiredRuntimeDigest: 'd'.repeat(64),
+        desiredBuildDigest: canonicalDigest(buildInput),
+        desiredRuntimeDigest: canonicalDigest(runtimeTarget(role)),
+        desiredRuntimeEnvironment: runtimeEnvironment(role, 'desired'),
+        desiredRuntimeSettings: runtimeSettings(role),
         revisionPlan: { prefix: `${role}-epoch`, suffix: 'fixture' },
     });
     const producer = (role: 'preflight' | 'paid') => ({
@@ -42,11 +111,13 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         admissionEnabled: false,
     });
     const queue = (role: 'preflight' | 'paid') => ({
-        resource: `${role}-queue`, project: PROJECT, location: 'asia-northeast3',
+        resource: `projects/${PROJECT}/locations/asia-northeast3/queues/${role}`, project: PROJECT, location: 'asia-northeast3',
+        targetDigest: canonicalDigest(queueTarget(role)),
         configDigest: '1'.repeat(64), state: 'PAUSED', empty: true, tasksDigest: '2'.repeat(64),
     });
     const scheduler = (role: 'preflight' | 'paid') => ({
-        resource: `${role}-scheduler`, project: PROJECT, location: 'asia-northeast3',
+        resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: PROJECT, location: 'asia-northeast3',
+        targetDigest: canonicalDigest(schedulerTarget(role)),
         configDigest: '3'.repeat(64), state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
     });
     const iam = (role: 'preflight' | 'paid') => ({
@@ -59,7 +130,7 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         producer: { preflight: producer('preflight'), paid: producer('paid') },
         queues: { preflight: queue('preflight'), paid: queue('paid') },
         recoverySchedulers: { preflight: scheduler('preflight'), paid: scheduler('paid') },
-        retention: { resource: 'retention-scheduler', project: PROJECT, location: 'asia-northeast3', enabled: true, configDigest: '5'.repeat(64) },
+        retention: { resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/retention`, project: PROJECT, location: 'asia-northeast3', enabled: true, configDigest: '5'.repeat(64) },
         iam: { preflight: iam('preflight'), paid: iam('paid') },
         readiness: {
             schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40),
@@ -71,15 +142,15 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
 
 function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
     const suffix = kind === 'old' ? 'old' : 'desired';
-    const sourceSha = 'a'.repeat(40);
+    const sourceSha = kind === 'old' ? 'a'.repeat(40) : 'b'.repeat(40);
     const roleInput = (role: 'preflight' | 'paid') => ({
         role,
         service: `${role}-worker`, project: PROJECT, location: 'asia-northeast3',
         identity: identity(`${role}.runtime-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         sourceSha,
-        environment: { ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', ANALYSIS_WORKLOAD_ROLE: role },
+        environment: runtimeEnvironment(role, suffix),
         secretReferences: { ANALYSIS_SECRET: 'secret:7' },
-        settings: { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: role === 'preflight' ? 32 : 8 },
+        settings: runtimeSettings(role),
         target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
         noTraffic: true,
         providerAdmissionEnabled: true,
@@ -107,12 +178,49 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
         configuration: { schedule: '* * * * *', method: 'POST' },
         state: 'PAUSED' as const, pauseEpochMs: 1, lastAttemptMs: null,
     });
-    const iamInput = (role: 'preflight' | 'paid') => ({
-        resource: `projects/${PROJECT}/locations/asia-northeast3/services/${role}-worker`,
-        project: PROJECT,
-        etag: 'Bwfixture',
-        bindings: [{ role: 'roles/run.invoker', member: `serviceAccount:${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`, condition: null }],
-    });
+    const iamInput = (role: 'preflight' | 'paid') => {
+        const oldTaskCaller = `${role}-task-caller-old@example-project.iam.gserviceaccount.com`;
+        const desiredTaskCaller = `${role}-task-caller-desired@example-project.iam.gserviceaccount.com`;
+        const oldMaintenance = `${role}-maintenance-old@example-project.iam.gserviceaccount.com`;
+        const desiredMaintenance = `${role}-maintenance-desired@example-project.iam.gserviceaccount.com`;
+        const oldEnqueuer = `${role}-enqueuer-old@example-project.iam.gserviceaccount.com`;
+        const desiredEnqueuer = `${role}-enqueuer-desired@example-project.iam.gserviceaccount.com`;
+        const oldRuntime = `${role}-runtime-old@example-project.iam.gserviceaccount.com`;
+        const desiredRuntime = `${role}-runtime-desired@example-project.iam.gserviceaccount.com`;
+        const includeOld = kind === 'desired';
+        const members = (oldValue: string, desiredValue: string) => includeOld ? [oldValue, desiredValue] : [oldValue];
+        const agent = 'serviceAccount:service-123456789012@gcp-sa-cloudtasks.iam.gserviceaccount.com';
+        const runResource = `projects/${PROJECT}/locations/asia-northeast3/services/${role}-worker`;
+        const queueResource = `projects/${PROJECT}/locations/asia-northeast3/queues/${role}`;
+        const taskCallerResource = `projects/${PROJECT}/serviceAccounts/${kind === 'old' ? oldTaskCaller : desiredTaskCaller}`;
+        const runBindings = [
+            ...members(oldTaskCaller, desiredTaskCaller).map(member => ({ role: 'roles/run.invoker', member: `serviceAccount:${member}`, condition: null })),
+            ...members(oldMaintenance, desiredMaintenance).map(member => ({ role: 'roles/run.invoker', member: `serviceAccount:${member}`, condition: null })),
+        ];
+        const queueBindings = [
+            ...members(oldEnqueuer, desiredEnqueuer).map(member => ({ role: 'roles/cloudtasks.enqueuer', member: `serviceAccount:${member}`, condition: null })),
+            ...members(oldRuntime, desiredRuntime).map(member => ({ role: 'roles/cloudtasks.enqueuer', member: `serviceAccount:${member}`, condition: null })),
+            ...members(oldRuntime, desiredRuntime).map(member => ({ role: 'roles/cloudtasks.viewer', member: `serviceAccount:${member}`, condition: null })),
+        ];
+        const oldTaskCallerBindings = [
+            { role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${oldEnqueuer}`, condition: null },
+            { role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${oldRuntime}`, condition: null },
+            { role: 'roles/iam.serviceAccountUser', member: agent, condition: null },
+        ];
+        const taskCallerBindings = [
+            ...members(oldEnqueuer, desiredEnqueuer).map(member => ({ role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${member}`, condition: null })),
+            ...members(oldRuntime, desiredRuntime).map(member => ({ role: 'roles/iam.serviceAccountUser', member: `serviceAccount:${member}`, condition: null })),
+            { role: 'roles/iam.serviceAccountUser', member: agent, condition: null },
+        ];
+        const previous = (resource: string, bindings: readonly { role: string; member: string; condition: null }[]) =>
+            kind === 'old' ? null : { resource, project: PROJECT, etag: 'Bwfixture', bindings };
+        return {
+            run: { kind: 'run' as const, resource: runResource, project: PROJECT, etag: 'Bwfixture', bindings: runBindings, previous: previous(runResource, runBindings.filter(binding => binding.member.includes('-old@'))) },
+            queue: { kind: 'queue' as const, resource: queueResource, project: PROJECT, etag: 'Bwfixture', bindings: queueBindings, previous: previous(queueResource, queueBindings.filter(binding => binding.member.includes('-old@'))) },
+            taskCaller: { kind: 'taskCaller' as const, resource: taskCallerResource, project: PROJECT, etag: 'Bwfixture', bindings: taskCallerBindings, previous: previous(`projects/${PROJECT}/serviceAccounts/${oldTaskCaller}`, oldTaskCallerBindings) },
+            maintenance: { kind: 'maintenance' as const, resource: runResource, project: PROJECT, etag: 'Bwfixture', bindings: [...runBindings], previous: previous(runResource, runBindings.filter(binding => binding.member.includes('-old@'))) },
+        };
+    };
     return {
         build: {
             identity: identity(`${kind === 'old' ? 'old' : 'new'}-build@example-project.iam.gserviceaccount.com`),
@@ -280,6 +388,16 @@ describe('coordinated epoch protected packet', () => {
         expect(() => validateManifestComparison(shared.oldManifest, shared.desiredManifest)).toThrow('IDENTITY_CONFLICT');
     });
 
+    it('allows heterogeneous old source provenance when each role is bound independently', () => {
+        const value = packet() as any;
+        const paidOldSha = 'c'.repeat(40);
+        value.oldManifest.source.paid.oldSha = paidOldSha;
+        value.protectedInputs.old.runtime.paid.sourceSha = paidOldSha;
+        value.protectedObservations.old.source.paid.sourceSha = paidOldSha;
+        value.protectedObservations.old.runtime.paid.sourceSha = paidOldSha;
+        expect(() => createProtectedPacket(value)).not.toThrow();
+    });
+
     it('rejects every old workload/build alias reused by the desired build or workload set', () => {
         for (const slot of SLOTS) {
             const value = packet() as any;
@@ -309,10 +427,115 @@ describe('coordinated epoch protected packet', () => {
         expect(() => validateEpochPacket(codeMutation)).toThrow('PROBE_FAILED');
 
         const iamMutation = packet() as any;
-        iamMutation.protectedInputs.desired.iam.paid.bindings.push({
+        iamMutation.protectedInputs.desired.iam.paid.run.bindings.push({
             role: 'roles/run.invoker', member: 'allUsers', condition: null,
         });
         expect(() => validateEpochPacket(iamMutation)).toThrow('RESOURCE_INVALID');
+    });
+
+    it('rejects semantically invalid candidates even when their fresh digests are rebuilt', () => {
+        const badRole = packet() as any;
+        badRole.protectedInputs.desired.iam.paid.run.bindings[0].role = 'roles/owner';
+        badRole.protectedObservations.desired.iam.paid.run.bindings[0].role = 'roles/owner';
+        expect(() => createProtectedPacket(badRole)).toThrow(EpochError);
+
+        const badSource = packet() as any;
+        badSource.protectedInputs.desired.runtime.preflight.sourceSha = 'c'.repeat(40);
+        badSource.protectedObservations.desired.runtime.preflight.sourceSha = 'c'.repeat(40);
+        expect(() => createProtectedPacket(badSource)).toThrow(EpochError);
+
+        const badGate = packet() as any;
+        badGate.protectedInputs.desired.runtime.preflight.providerAdmissionEnabled = false;
+        badGate.protectedInputs.desired.runtime.preflight.environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED = 'false';
+        badGate.protectedObservations.desired.runtime.preflight.providerAdmissionEnabled = false;
+        expect(() => createProtectedPacket(badGate)).toThrow(EpochError);
+
+        const badResource = packet() as any;
+        badResource.desiredManifest.queues.preflight.resource = 'projects/example-project/locations/asia-northeast3/queues/unrelated';
+        expect(() => createProtectedPacket(badResource)).toThrow(EpochError);
+    });
+
+    it('rejects auth-graph, build, runtime, secret, and capacity setting drift with copied targets', () => {
+        const wrongInvoker = packet() as any;
+        const wrongInvokerGrant = {
+            role: 'roles/run.invoker',
+            member: `serviceAccount:${desiredIdentity('paid.runtime')}`,
+            condition: null,
+        };
+        wrongInvoker.protectedInputs.desired.iam.preflight.run.bindings.push(wrongInvokerGrant);
+        wrongInvoker.protectedObservations.desired.iam.preflight.run.bindings.push(wrongInvokerGrant);
+        expect(() => createProtectedPacket(wrongInvoker)).toThrow('RESOURCE_INVALID');
+
+        const arbitraryAgent = packet() as any;
+        const agentGrant = {
+            role: 'roles/iam.serviceAccountUser',
+            member: 'serviceAccount:service-999999999999@gcp-sa-cloudtasks.iam.gserviceaccount.com',
+            condition: null,
+        };
+        arbitraryAgent.protectedInputs.desired.iam.preflight.taskCaller.bindings.push(agentGrant);
+        arbitraryAgent.protectedObservations.desired.iam.preflight.taskCaller.bindings.push(agentGrant);
+        expect(() => createProtectedPacket(arbitraryAgent)).toThrow('RESOURCE_INVALID');
+
+        const wrongBuildSource = packet() as any;
+        wrongBuildSource.protectedInputs.desired.build.sourceSha = 'c'.repeat(40);
+        wrongBuildSource.protectedObservations.desired.source.preflight.sourceSha = 'c'.repeat(40);
+        expect(() => createProtectedPacket(wrongBuildSource)).toThrow('SOURCE_INVALID');
+
+        const trafficEnabled = packet() as any;
+        trafficEnabled.protectedInputs.desired.runtime.preflight.noTraffic = false;
+        trafficEnabled.protectedObservations.desired.runtime.preflight.noTraffic = false;
+        expect(() => createProtectedPacket(trafficEnabled)).toThrow('SOURCE_INVALID');
+
+        const mutableSecret = packet() as any;
+        mutableSecret.protectedInputs.desired.runtime.preflight.secretReferences.ANALYSIS_SECRET = 'secret:latest';
+        mutableSecret.protectedObservations.desired.runtime.preflight.secretReferences.ANALYSIS_SECRET = 'secret:latest';
+        expect(() => createProtectedPacket(mutableSecret)).toThrow('SOURCE_INVALID');
+
+        const wrongCapacity = packet() as any;
+        wrongCapacity.protectedInputs.desired.runtime.preflight.settings.maxInstances = 99;
+        wrongCapacity.protectedObservations.desired.runtime.preflight.settings.maxInstances = 99;
+        expect(() => createProtectedPacket(wrongCapacity)).toThrow('SOURCE_INVALID');
+    });
+
+    it('rejects a coherently copied expanded desired contract and disabled required task gate', () => {
+        const value = packet() as any;
+        const desiredRuntime = value.protectedInputs.desired.runtime.preflight;
+        desiredRuntime.environment.ANALYSIS_CAPACITY_STAGE = 'expanded';
+        desiredRuntime.environment.ANALYSIS_CAPACITY_EXPANSION_CANARY = 'true';
+        desiredRuntime.environment.PREFLIGHT_TASKS_ENABLED = 'false';
+        desiredRuntime.settings.maxInstances = 64;
+        value.protectedObservations.desired.runtime.preflight = JSON.parse(JSON.stringify(desiredRuntime));
+        value.desiredManifest.source.preflight.desiredRuntimeEnvironment = JSON.parse(JSON.stringify(desiredRuntime.environment));
+        value.desiredManifest.source.preflight.desiredRuntimeSettings = { ...desiredRuntime.settings };
+        value.desiredManifest.source.preflight.desiredRuntimeDigest = canonicalDigest(desiredRuntime);
+        value.protectedObservations.desired.source.preflight.desiredRuntimeDigest = value.desiredManifest.source.preflight.desiredRuntimeDigest;
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+    });
+
+    it('preserves unrelated old IAM policy bindings and rejects unapproved additions', () => {
+        const preserved = packet() as any;
+        const unrelated = { role: 'roles/logging.viewer', member: 'user:operator@example.test', condition: null };
+        preserved.protectedInputs.old.iam.preflight.run.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.run.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.run.previous.bindings.push(unrelated);
+        preserved.protectedInputs.old.iam.preflight.maintenance.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.maintenance.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.maintenance.previous.bindings.push(unrelated);
+        preserved.protectedObservations.old.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.old.iam));
+        preserved.protectedObservations.desired.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.desired.iam));
+        expect(() => createProtectedPacket(preserved)).not.toThrow();
+
+        const dropped = packet() as any;
+        dropped.protectedInputs.old.iam.preflight.run.bindings.push(unrelated);
+        expect(() => createProtectedPacket(dropped)).toThrow('RESOURCE_INVALID');
+
+        const inventedMaintenanceGrant = packet() as any;
+        inventedMaintenanceGrant.protectedInputs.desired.iam.preflight.maintenance.bindings.push({
+            role: 'roles/iam.serviceAccountTokenCreator',
+            member: `serviceAccount:${oldIdentity('preflight.maintenance')}`,
+            condition: null,
+        });
+        expect(() => createProtectedPacket(inventedMaintenanceGrant)).toThrow('RESOURCE_INVALID');
     });
 
     it('rejects malformed, cross-project, wildcard, and user-managed-key identities', () => {
