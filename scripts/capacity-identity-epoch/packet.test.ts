@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
     ROLES,
     SLOTS,
+    assertCoordinatorCapability,
     createProtectedPacket,
     issueCoordinatorCapability,
     loadProtectedPacket,
@@ -600,6 +601,14 @@ describe('coordinated epoch protected packet', () => {
         const altered = { ...value, desiredManifestDigest: 'f'.repeat(64) };
         expect(() => validateEpochPacket(altered, capability)).toThrow('CAPABILITY_BINDING_MISMATCH');
         expect(() => issueCoordinatorCapability(value, 'owner-digest', 'other-lock')).toThrow('LOCK_NAMESPACE_MISMATCH');
+    });
+
+    it('rejects a capability issued for another owner', () => {
+        const value = packet() as any;
+        const capability = issueCoordinatorCapability(value, 'owner-a');
+        expect(() => validateEpochPacket(value, capability)).not.toThrow();
+        expect(() => assertCoordinatorCapability(value, capability, 'owner-b')).toThrow('CAPABILITY_BINDING_MISMATCH');
+        expect(() => assertCoordinatorCapability(value, capability, 'owner-a')).not.toThrow();
     });
 
     it('loads only from an inherited descriptor and rejects an ordinary path descriptor', () => {

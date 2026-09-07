@@ -1028,14 +1028,15 @@ export function issueCoordinatorCapability(
     return token;
 }
 
-export function assertCoordinatorCapability(packet: CapacityEpochPacket, capability: CoordinatorCapability): void {
+export function assertCoordinatorCapability(packet: CapacityEpochPacket, capability: CoordinatorCapability, ownerDigest?: string): void {
     if ((typeof capability !== 'object' && typeof capability !== 'function') || capability === null) epochFail('CAPABILITY_INVALID');
     const binding = capabilityRegistry.get(capability);
     if (!binding) epochFail('CAPABILITY_INVALID');
     if (binding.epochId !== packet.epochId
         || binding.packetDigest !== canonicalDigest(packet)
         || binding.roleSetDigest !== packet.roleSetDigest
-        || binding.lockNamespace !== packet.lockNamespace) epochFail('CAPABILITY_BINDING_MISMATCH');
+        || binding.lockNamespace !== packet.lockNamespace
+        || (ownerDigest !== undefined && binding.ownerDigest !== ownerDigest)) epochFail('CAPABILITY_BINDING_MISMATCH');
 }
 
 export type ProtectedPacketDescriptor = Readonly<{ fd: number; maxBytes?: number }>;

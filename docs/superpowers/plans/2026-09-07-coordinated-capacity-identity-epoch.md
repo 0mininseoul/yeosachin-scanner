@@ -35,6 +35,8 @@
 | `scripts/deploy-analysis-capacity-workers.sh` | v3 consumer and epoch exclusion around ordinary mutation; existing exceptions preserved. |
 | `scripts/configure-analysis-capacity-queues.sh` | Epoch exclusion around delegated capacity queue mutations. |
 | `scripts/configure-analysis-tasks-queue.sh` | Guard direct capacity-owned queue mutation entry when necessary to close the same bypass. |
+| `scripts/configure-analysis-preflight-maintenance.sh` | Include standalone epoch-owned Run IAM/recovery scheduler mutations in shared exclusion; retain read-only and ordinary guards. |
+| `scripts/configure-analysis-v2-maintenance.sh` | Include standalone paid recovery mutations in shared exclusion without disabling or altering unrelated retention work. |
 | `scripts/test-analysis-v2-release-readiness.sh` | Existing shell release harness v3 fixtures and negative tests. |
 | `scripts/automatic-analysis-capacity-infra.test.ts` | Ordinary/bootstrap/expanded/preflight-exception regression and epoch exclusion tests. |
 | `scripts/capacity-identity-epoch/contracts.ts` | Fixed slot/state schemas, typed protected packet, safe codes, canonical hashing. |
@@ -195,6 +197,7 @@ await storage.put(lockKey, nextLock, { ifGenerationMatch: observedGeneration });
 
 - [ ] Close cross-epoch and ordinary-script races. The epoch lock remains the only state writer; a generation-protected resource reservation in the same bucket excludes a second epoch over the same two planes, and generation-fenced reservations at existing ordinary service-lock keys prevent pre-upgrade role deploy overlap. Ordinary capacity queue/deploy mutations acquire/check the corresponding common reservation for their whole mutation interval, not just an existence check before a race. No per-role lock substitutes for the epoch journal. Reservations contain only digests/expiry/fence and are not a second state machine.
 - [ ] Test two epochs racing, an ordinary deploy winning first, coordinator winning first, concurrent role queue apply, stale owner cleanup, crash after header creation, duplicate append, missing sequence, failed generation precondition and aborted capability reuse. Read-only ordinary checks remain permitted; no paid exceptional bypass.
+- [ ] Cover standalone preflight/paid maintenance entry points as well as their nested invocation from a deployer: the same exact owned IAM/scheduler resources must not mutate concurrently with an epoch. Test each winner ordering and nested delegation without deadlock or a forgeable environment bypass; preserve unrelated retention behavior. This closes the existing resource-wide exclusion requirement discovered during implementation review, not a new exceptional path.
 - [ ] Run journal and infra tests. Commit `feat: fence coordinated epochs and preserve append-only state`.
 
 ## Task 6: Observation proofs and zero-work provenance
@@ -343,4 +346,4 @@ Self-review found and resolved five implementation hazards: gate-parser disagree
 
 Primary API references checked during planning: [GCS request preconditions](https://docs.cloud.google.com/storage/docs/request-preconditions), [Cloud Tasks paginated task listing](https://docs.cloud.google.com/tasks/docs/reference/rest/v2/projects.locations.queues.tasks/list), [Cloud Run services](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services), and [Vercel deployments](https://vercel.com/docs/deployments/overview). Re-check the exact endpoint contract while implementing each live adapter.
 
-Plan status: coordinator review complete; implementation not yet started. The user already selected supervised visible Orca execution, so no execution-choice confirmation is required.
+Plan status: coordinator review complete; supervised implementation and independent negative-case review are in progress. The 2026-09-07 maintenance-entry clarification above records a bounded file-map omission under the approved shared-exclusion invariant. Milestone acceptance and test outcomes are tracked separately; a commit or smoke-test pass does not imply review acceptance. The user already selected supervised visible Orca execution, so no execution-choice confirmation is required.

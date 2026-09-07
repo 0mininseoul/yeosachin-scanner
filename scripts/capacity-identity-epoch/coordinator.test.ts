@@ -3,6 +3,7 @@ import { EpochError, canonicalDigest, type EpochHeader, type State } from './con
 import { EpochJournal, type JournalStorage, type StoredObject } from './journal';
 import { EpochCoordinator, type EpochControlPlane, type OperationEvidence } from './coordinator';
 import { createFixturePacket } from './fixtures';
+import { issueCoordinatorCapability } from './packet';
 
 class MemoryStorage implements JournalStorage {
     private readonly values = new Map<string, StoredObject>();
@@ -86,7 +87,7 @@ describe('ordered coordinator', () => {
         await first.coordinator.runThroughVerified();
         const resumed = await first.coordinator.runThroughVerified();
         expect(resumed.state).toBe('VERIFIED');
-        expect(first.controlPlane.calls).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED']);
+        expect(first.controlPlane.calls).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED', 'VERIFIED']);
     });
 
     it('requires opaque fresh authorization for offline activation and rejects copied tokens', async () => {
@@ -118,5 +119,27 @@ describe('ordered coordinator', () => {
         const state = await journal.readValidatedState(lease);
         expect(state.state).toBe('PRODUCERS_CLOSED_ALIGNED');
         expect(state.transitions).toHaveLength(3);
+    });
+
+    it('rejects a capability bound to a different owner before journal work', () => {
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const journal = new EpochJournal(new MemoryStorage(), { header, now: () => 1_000, leaseMs: 10_000 });
+        const capability = issueCoordinatorCapability(packet, canonicalDigest('owner-a'));
+        expect(() => new EpochCoordinator({ packet, journal, controlPlane: new FixtureControlPlane(), ownerDigest: canonicalDigest('owner-b'), capability })).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
+    it('freezes nested protected packet input after bootstrap', () => {
+        const { packet } = setup();
+        expect(Object.isFrozen(packet)).toBe(true);
+        expect(Object.isFrozen(packet.protectedInputs.desired.runtime.preflight.environment)).toBe(true);
+        expect(() => {
+            (packet.protectedInputs.desired.runtime.preflight.environment as Record<string, string>).MUTATED = 'true';
+        }).toThrow();
     });
 });
