@@ -60,6 +60,11 @@ function validateHeader(value: unknown): asserts value is EpochHeader {
         || !safeTimestamp(header.createdAt)) epochFail('JOURNAL_INVALID');
 }
 
+/** Validate a retained header before it is adopted for a resumed bootstrap. */
+export function validateEpochHeader(value: unknown): asserts value is EpochHeader {
+    validateHeader(value);
+}
+
 function validateLock(value: unknown, headerDigest: string): asserts value is EpochLock {
     if (typeof value !== 'object' || value === null || Array.isArray(value) || !hasExactKeys(value, LOCK_KEYS)) epochFail('JOURNAL_INVALID');
     const lock = value as Record<string, unknown>;

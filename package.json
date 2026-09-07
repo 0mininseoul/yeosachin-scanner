@@ -36,7 +36,7 @@
     "load:analysis-capacity": "tsx --conditions=react-server scripts/capacity-extension-load-harness.ts",
     "bootstrap:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/bootstrap-demo-editable-fixture.ts",
     "publish:demo-fixture": "tsx --conditions=react-server --env-file=.env.local scripts/publish-demo-editable-fixture.ts",
-    "capacity:identity-epoch": "tsx scripts/run-capacity-identity-epoch.ts",
+    "capacity:identity-epoch": "node --import tsx scripts/run-capacity-identity-epoch.ts",
     "test:identity-epoch": "vitest run scripts/capacity-identity-epoch scripts/capacity-identity-epoch.integration.test.ts lib/services/analysis/legacy-analysis-public-readiness.test.ts lib/services/analysis/public-readiness-contract.test.ts"
   },
   "dependencies": {

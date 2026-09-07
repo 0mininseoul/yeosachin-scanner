@@ -1,4 +1,5 @@
-import { constants as fsConstants, createReadStream, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants as fsConstants, createReadStream, fstatSync, openSync, readSync } from 'node:fs';
+import { Socket } from 'node:net';
 import {
     MANIFEST_KEYS,
     ROLES,
@@ -26,6 +27,7 @@ import {
     type ProtectedObservationTargets,
     type ProtectedOldObservations,
     type ProtectedPlatformInputs,
+    type ProtectedProviderScope,
     type ProtectedQueueInput,
     type ProtectedRetentionInput,
     type ProtectedRuntimeInput,
@@ -84,6 +86,14 @@ const IAM_SNAPSHOT_KEYS = ['resource', 'project', 'etag', 'bindings'] as const;
 const IAM_INPUT_MAP_KEYS = ['run', 'queue', 'taskCaller', 'maintenance'] as const;
 const IAM_BINDING_KEYS = ['role', 'member', 'condition'] as const;
 const RETENTION_INPUT_KEYS = ['resource', 'project', 'location', 'enabled', 'configuration'] as const;
+const PROVIDER_SCOPE_KEYS = [
+    'bucket', 'publicReadinessUrl', 'googleProjectId', 'vercelProjectId', 'vercelTeamId',
+    'vercelDeploymentId', 'vercelExpectedOldDeploymentId', 'vercelProducerAlias',
+] as const;
+const PROVIDER_PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const PROVIDER_RESOURCE_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const PROVIDER_BUCKET_PATTERN = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
+const PROVIDER_ALIAS_PATTERN = /^[A-Za-z0-9.-]{1,253}$/;
 
 const INITIAL_FIXED_RUNTIME_ENVIRONMENT: Readonly<Record<string, string>> = {
     ANALYSIS_CAPACITY_STAGE: 'initial',
@@ -124,7 +134,7 @@ const SOURCE_TARGET_KEYS = ['sourceSha', 'revisionPlan', 'desiredBuildDigest', '
 const EVIDENCE_SOURCE_KEYS = ['source', 'lookbackMs'] as const;
 const PACKET_INPUT_KEYS = [
     'epochId', 'lockNamespace', 'roleSet', 'oldManifest', 'desiredManifest', 'protectedInputs', 'oldManifestDigest',
-    'desiredManifestDigest', 'capabilityDigest', 'roleSetDigest', 'sourcePlanDigest', 'activation',
+    'providerScope', 'desiredManifestDigest', 'capabilityDigest', 'roleSetDigest', 'sourcePlanDigest', 'activation',
     'quiescence', 'observationInputs', 'protectedObservations', 'probe',
 ] as const;
 
@@ -151,6 +161,29 @@ function safeString(value: unknown, max = 512): value is string {
 
 function validDigest(value: unknown): value is string {
     return isDigest(value) && HEX_DIGEST.test(value);
+}
+
+function validateProviderScope(value: unknown): asserts value is ProtectedProviderScope {
+    assertKeys(value, PROVIDER_SCOPE_KEYS, 'RESOURCE_INVALID');
+    if (!PROVIDER_BUCKET_PATTERN.test(value.bucket as string)
+        || !PROVIDER_PROJECT_PATTERN.test(value.googleProjectId as string)
+        || !PROVIDER_RESOURCE_PATTERN.test(value.vercelProjectId as string)
+        || !PROVIDER_RESOURCE_PATTERN.test(value.vercelTeamId as string)
+        || !PROVIDER_RESOURCE_PATTERN.test(value.vercelDeploymentId as string)
+        || !PROVIDER_RESOURCE_PATTERN.test(value.vercelExpectedOldDeploymentId as string)
+        || !PROVIDER_ALIAS_PATTERN.test(value.vercelProducerAlias as string)
+        || typeof value.bucket !== 'string'
+        || typeof value.publicReadinessUrl !== 'string'
+        || typeof value.googleProjectId !== 'string'
+        || typeof value.vercelProjectId !== 'string'
+        || typeof value.vercelTeamId !== 'string'
+        || typeof value.vercelDeploymentId !== 'string'
+        || typeof value.vercelExpectedOldDeploymentId !== 'string'
+        || typeof value.vercelProducerAlias !== 'string') epochFail('RESOURCE_INVALID');
+    let parsed: URL;
+    try { parsed = new URL(value.publicReadinessUrl); } catch { epochFail('RESOURCE_INVALID'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
+        || parsed.pathname !== '/api/analysis/capacity/readiness') epochFail('RESOURCE_INVALID');
 }
 
 function assertKeys(value: unknown, keys: readonly string[], code: EpochErrorCode = 'INVALID_SCHEMA'): asserts value is Record<string, unknown> {
@@ -1077,6 +1110,7 @@ function deriveCapabilityDigest(packet: CapacityEpochPacket): string {
         oldManifestDigest: packet.oldManifestDigest,
         desiredManifestDigest: packet.desiredManifestDigest,
         sourcePlanDigest: packet.sourcePlanDigest,
+        providerScope: packet.providerScope,
         activation: packet.activation,
         quiescence: packet.quiescence,
         observationInputs: packet.observationInputs,
@@ -1088,6 +1122,7 @@ function deriveCapabilityDigest(packet: CapacityEpochPacket): string {
 function validatePacketShape(value: unknown): asserts value is CapacityEpochPacket {
     assertKeys(value, PACKET_INPUT_KEYS, 'INVALID_PACKET');
     const protectedInputs = value.protectedInputs as Record<string, unknown>;
+    const providerScope = value.providerScope;
     const protectedObservations = value.protectedObservations as Record<string, unknown>;
     const activation = value.activation as Record<string, unknown>;
     const quiescence = value.quiescence as Record<string, unknown>;
@@ -1097,6 +1132,7 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
         || !Array.isArray(value.roleSet) || value.roleSet.length !== ROLES.length
         || !value.roleSet.every(isRole) || new Set(value.roleSet).size !== ROLES.length
         || !isObject(protectedInputs) || !hasExactKeys(protectedInputs, ['old', 'desired'])
+        || !isObject(providerScope)
         || !isObject(protectedObservations) || !hasExactKeys(protectedObservations, ['old', 'desired'])
         || !isObject(activation) || !isObject(quiescence)
         || !isObject(observationInputs) || !isObject(probe)) epochFail('INVALID_PACKET');
@@ -1112,11 +1148,14 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
     if (!hasExactKeys(observationInputs, digestKeys)
         || !digestKeys.every(key => validDigest(observationInputs[key]))) epochFail('INVALID_PACKET');
     validateProbe(probe);
+    validateProviderScope(providerScope);
     validateManifest(value.oldManifest);
     validateManifest(value.desiredManifest);
     validateManifestComparison(value.oldManifest, value.desiredManifest);
     validatePlatformInputs(protectedInputs.old, value.oldManifest, 'old');
     validatePlatformInputs(protectedInputs.desired, value.desiredManifest, 'desired');
+    if (providerScope.googleProjectId !== value.oldManifest.build.project
+        || providerScope.googleProjectId !== value.desiredManifest.build.project) epochFail('PROJECT_MISMATCH');
     validateSecretReferencePreservation(protectedInputs.old, protectedInputs.desired);
     validateIamPreservesOld(protectedInputs.old, protectedInputs.desired);
     validateIamAdditions(protectedInputs.old, protectedInputs.desired, value.desiredManifest);
@@ -1135,6 +1174,9 @@ export function createProtectedPacket(input: ProtectedPacketInput): CapacityEpoc
     validateManifest(input.oldManifest);
     validateManifest(input.desiredManifest);
     validateManifestComparison(input.oldManifest, input.desiredManifest);
+    validateProviderScope(input.providerScope);
+    if (input.providerScope.googleProjectId !== input.oldManifest.build.project
+        || input.providerScope.googleProjectId !== input.desiredManifest.build.project) epochFail('PROJECT_MISMATCH');
     validatePlatformInputs(input.protectedInputs.old, input.oldManifest, 'old');
     validatePlatformInputs(input.protectedInputs.desired, input.desiredManifest, 'desired');
     validateSecretReferencePreservation(input.protectedInputs.old, input.protectedInputs.desired);
@@ -1209,7 +1251,7 @@ export type ProtectedPacketDescriptor = Readonly<{ fd: number; maxBytes?: number
 
 const PROTECTED_DESCRIPTOR_TIMEOUT_MS = 5_000;
 
-function validateProtectedDescriptor(fd: number, maxBytes: number): void {
+function validateProtectedDescriptor(fd: number, maxBytes: number): ReturnType<typeof fstatSync> {
     if (!Number.isInteger(fd) || fd < 0
         || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 4_194_304) {
         epochFail('PROTECTED_INPUT_UNAVAILABLE');
@@ -1222,9 +1264,15 @@ function validateProtectedDescriptor(fd: number, maxBytes: number): void {
     }
     // A live invocation receives the packet through an inherited regular file
     // or FIFO. Never resolve a path, and never accept a public descriptor.
-    if ((!stat.isFile() && !stat.isFIFO())
+    const inheritedPipe = stat.isFIFO() || stat.isSocket();
+    if ((!stat.isFile() && !inheritedPipe)
         || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
-        || (stat.mode & 0o077) !== 0) epochFail('PROTECTED_INPUT_UNAVAILABLE');
+        // Permission bits on an inherited anonymous pipe are implementation
+        // metadata rather than a path-access boundary. Regular files still
+        // require owner-only mode; FIFO/socket descriptors are already scoped
+        // by the inherited handle and owner check above.
+        || (stat.isFile() && (stat.mode & 0o077) !== 0)) epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    return stat;
 }
 
 /**
@@ -1233,13 +1281,67 @@ function validateProtectedDescriptor(fd: number, maxBytes: number): void {
  * stalled writer both produce a bounded result.
  */
 export async function readProtectedDescriptor(fd: number, maxBytes = 1_048_576): Promise<string> {
-    validateProtectedDescriptor(fd, maxBytes);
-    let stream: ReturnType<typeof createReadStream>;
-    let streamFd: number;
+    const stat = validateProtectedDescriptor(fd, maxBytes);
+    if (stat.isFIFO() || stat.isSocket()) return readProtectedIpcDescriptor(fd, maxBytes);
+    return readProtectedRegularFile(fd, maxBytes);
+}
+
+async function readProtectedIpcDescriptor(fd: number, maxBytes: number): Promise<string> {
+    let socket: Socket;
+    try {
+        // The inherited IPC descriptor is consumed by this socket. It is
+        // never connected to a host; destroy() is the cancellation/ownership
+        // boundary that closes the descriptor and unblocks the event loop.
+        socket = new Socket({ fd, readable: true, writable: false });
+    } catch {
+        try { closeSync(fd); } catch { /* best-effort ownership cleanup */ }
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    try {
+        await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const settle = (error?: unknown): void => {
+                if (settled) return;
+                settled = true;
+                if (error === undefined) resolve();
+                else reject(error);
+            };
+            const timer = setTimeout(() => {
+                socket.destroy();
+                settle(new EpochError('PROTECTED_INPUT_UNAVAILABLE'));
+            }, PROTECTED_DESCRIPTOR_TIMEOUT_MS);
+            const clear = (): void => clearTimeout(timer);
+            socket.on('data', chunk => {
+                totalBytes += chunk.byteLength;
+                if (totalBytes > maxBytes) {
+                    clear();
+                    socket.destroy();
+                    settle(new EpochError('PROTECTED_INPUT_UNAVAILABLE'));
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            socket.once('end', () => { clear(); socket.destroy(); settle(); });
+            socket.once('error', error => { clear(); settle(error); });
+        });
+    } catch (error) {
+        if (error instanceof EpochError) throw error;
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    } finally {
+        socket.destroy();
+    }
+    return Buffer.concat(chunks).toString('utf8');
+}
+
+async function readProtectedRegularFile(fd: number, maxBytes: number): Promise<string> {
+    let stream: ReturnType<typeof createReadStream> | undefined;
+    let streamFd: number | undefined;
     try {
         // Duplicate only the already validated inherited descriptor. The
-        // stream owns the duplicate, so timeout/oversize cleanup cannot close
-        // the caller's packet/bootstrap descriptor.
+        // stream owns the duplicate, so timeout/oversize cleanup is distinct
+        // from consuming the inherited descriptor exactly once below.
         streamFd = openSync(`/dev/fd/${fd}`, fsConstants.O_RDONLY);
         stream = createReadStream(null as unknown as string, { fd: streamFd, autoClose: true });
     } catch {
@@ -1279,7 +1381,8 @@ export async function readProtectedDescriptor(fd: number, maxBytes = 1_048_576):
         if (error instanceof EpochError) throw error;
         epochFail('PROTECTED_INPUT_UNAVAILABLE');
     } finally {
-        stream.destroy();
+        stream?.destroy();
+        try { closeSync(fd); } catch { /* inherited descriptor may already be closed by the caller */ }
     }
     return Buffer.concat(chunks).toString('utf8');
 }

@@ -13,7 +13,7 @@ import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-ident
 
 type Command = 'check' | 'apply';
 
-function fail(code: 'ADAPTER_REQUEST_INVALID' | 'PROTECTED_INPUT_UNAVAILABLE' | 'ACTIVATION_AUTH_REQUIRED' | 'CAPABILITY_BINDING_MISMATCH'): never {
+function fail(code: 'ADAPTER_REQUEST_INVALID' | 'PROTECTED_INPUT_UNAVAILABLE' | 'ACTIVATION_AUTH_REQUIRED' | 'CAPABILITY_BINDING_MISMATCH' | 'EVIDENCE_UNAVAILABLE'): never {
     epochFail(code);
 }
 
@@ -67,21 +67,21 @@ async function run(): Promise<void> {
         return;
     }
     if (options.packetFd === undefined || options.bootstrapFd === undefined) fail('PROTECTED_INPUT_UNAVAILABLE');
+    if (options.command === 'check' && options.through !== undefined && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
+    if (options.command === 'apply' && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
     const packet = await loadProtectedPacketAsync({ fd: options.packetFd });
     const bootstrapDescriptor = await loadProtectedLiveBootstrap(options.bootstrapFd);
-    const live = buildLiveBootstrap(packet, bootstrapDescriptor);
+    const live = await buildLiveBootstrap(packet, bootstrapDescriptor, { resolveRetainedHeader: options.command !== 'check' });
     if (options.command === 'check') {
-        if (options.through !== undefined && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
         // Adapter construction and packet/resource binding are part of the
         // read-only preflight. No journal header/lock or provider request is
         // written by this command. Missing independent source/ledger/probe
         // channels are a fixed, non-success outcome.
-        if (live.missingEvidence.length > 0) fail('PROTECTED_INPUT_UNAVAILABLE');
+        if (live.missingEvidence.length > 0) fail('EVIDENCE_UNAVAILABLE');
         process.stdout.write(`CHECK_OK packetDigest=${canonicalDigest(packet)}\n`);
         return;
     }
-    if (options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
-    if (live.missingEvidence.length > 0) fail('PROTECTED_INPUT_UNAVAILABLE');
+    if (live.missingEvidence.length > 0) fail('EVIDENCE_UNAVAILABLE');
     // This path is deliberately closed until the reviewed evidence channels
     // are supplied to the bootstrap descriptor. When supplied, the concrete
     // coordinator runs through VERIFIED; it never calls activation.

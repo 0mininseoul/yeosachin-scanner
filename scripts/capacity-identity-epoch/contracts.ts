@@ -394,6 +394,22 @@ export type ActivationContract = Readonly<{
     earlybirdWebhookAutoAdmissionEnabled: boolean;
 }>;
 
+/**
+ * Reviewed provider selectors used to construct the live adapter graph.
+ * These are execution expectations, not observations of a future successful
+ * state; the live adapters still fetch every mutable resource fact.
+ */
+export type ProtectedProviderScope = Readonly<{
+    bucket: string;
+    publicReadinessUrl: string;
+    googleProjectId: string;
+    vercelProjectId: string;
+    vercelTeamId: string;
+    vercelDeploymentId: string;
+    vercelExpectedOldDeploymentId: string;
+    vercelProducerAlias: string;
+}>;
+
 export type CapacityEpochPacket = {
     epochId: string;
     lockNamespace: string;
@@ -404,6 +420,7 @@ export type CapacityEpochPacket = {
         old: ProtectedPlatformInputs;
         desired: ProtectedPlatformInputs;
     }>;
+    providerScope: ProtectedProviderScope;
     oldManifestDigest: string;
     desiredManifestDigest: string;
     capabilityDigest: string;

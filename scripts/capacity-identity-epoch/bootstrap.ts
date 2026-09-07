@@ -1,5 +1,5 @@
 import { createAuthenticatedGcsJournalStorage } from './gcs';
-import { EpochJournal } from './journal';
+import { EpochJournal, type JournalStorage, validateEpochHeader } from './journal';
 import { CloudRunAdapter } from './cloud-run';
 import { IamAdapter } from './iam';
 import { WorkPlaneClient } from './work-planes';
@@ -55,7 +55,7 @@ const BOOTSTRAP_KEYS = [
     'vercelExpectedOldDeploymentId', 'vercelProducerAlias', 'vercelToken', 'serviceBodies', 'scopeDigest',
 ] as const;
 
-function fail(code: 'PROTECTED_INPUT_UNAVAILABLE' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH' | 'EVIDENCE_UNAVAILABLE'): never {
+function fail(code: 'PROTECTED_INPUT_UNAVAILABLE' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH' | 'EVIDENCE_UNAVAILABLE' | 'JOURNAL_INVALID'): never {
     epochFail(code);
 }
 
@@ -116,6 +116,11 @@ export async function loadProtectedLiveBootstrap(fd: number): Promise<ProtectedL
 function validateBinding(packet: CapacityEpochPacket, descriptor: ProtectedLiveBootstrapDescriptor): void {
     if (descriptor.packetDigest !== canonicalDigest(packet)
         || descriptor.lockNamespace !== packet.lockNamespace) fail('CAPABILITY_BINDING_MISMATCH');
+    // The descriptor's self-attested scope digest is not sufficient: a caller
+    // must not be able to retarget a valid packet by changing selectors and
+    // recomputing that digest. The reviewed packet carries the canonical
+    // provider selector contract independently of live observations.
+    if (canonicalDigest(packet.providerScope) !== descriptor.scopeDigest) fail('CAPABILITY_BINDING_MISMATCH');
     const project = packet.protectedInputs.old.build.identity.project;
     if (descriptor.googleProjectId !== project) fail('CAPABILITY_BINDING_MISMATCH');
     for (const role of ['preflight', 'paid'] as const) {
@@ -132,7 +137,47 @@ function validateBinding(packet: CapacityEpochPacket, descriptor: ProtectedLiveB
  * graph exposes a fixed missing-evidence list and the coordinator remains
  * unable to claim PREPARED or VERIFIED.
  */
-export function buildLiveBootstrap(packet: CapacityEpochPacket, descriptor: ProtectedLiveBootstrapDescriptor): LiveBootstrap {
+export type LiveBootstrapOptions = Readonly<{
+    /** Provider-free tests inject storage; production defaults to authenticated GCS. */
+    storage?: JournalStorage;
+    now?: () => number;
+    /** `check` deliberately avoids a GCS read; apply/resume adopts a retained header. */
+    resolveRetainedHeader?: boolean;
+}>;
+
+function candidateHeader(packet: CapacityEpochPacket, now: () => number): EpochHeader {
+    return {
+        epochIdDigest: canonicalDigest(packet.epochId),
+        capabilityDigest: packet.capabilityDigest,
+        oldManifestDigest: packet.oldManifestDigest,
+        desiredManifestDigest: packet.desiredManifestDigest,
+        roleSetDigest: packet.roleSetDigest,
+        sourcePlanDigest: packet.sourcePlanDigest,
+        createdAt: new Date(now()).toISOString(),
+    };
+}
+
+async function resolveHeader(storage: JournalStorage, candidate: EpochHeader, now: () => number): Promise<EpochHeader> {
+    const candidateJournal = new EpochJournal(storage, { header: candidate, now });
+    const existing = await storage.get(candidateJournal.headerKey);
+    if (!existing) return candidate;
+    if (!/^[1-9][0-9]*$/.test(existing.generation)) fail('JOURNAL_INVALID');
+    validateEpochHeader(existing.value);
+    const retained = existing.value as EpochHeader;
+    if (retained.epochIdDigest !== candidate.epochIdDigest
+        || retained.capabilityDigest !== candidate.capabilityDigest
+        || retained.oldManifestDigest !== candidate.oldManifestDigest
+        || retained.desiredManifestDigest !== candidate.desiredManifestDigest
+        || retained.roleSetDigest !== candidate.roleSetDigest
+        || retained.sourcePlanDigest !== candidate.sourcePlanDigest) fail('JOURNAL_INVALID');
+    return retained;
+}
+
+export async function buildLiveBootstrap(
+    packet: CapacityEpochPacket,
+    descriptor: ProtectedLiveBootstrapDescriptor,
+    bootstrapOptions: LiveBootstrapOptions = {},
+): Promise<LiveBootstrap> {
     validateBinding(packet, descriptor);
     validateProviderScope(descriptor);
     const google = createGoogleProtectedTransport();
@@ -144,17 +189,12 @@ export function buildLiveBootstrap(packet: CapacityEpochPacket, descriptor: Prot
         transport: vercelTransport,
         publicReadinessOrigin: new URL(descriptor.publicReadinessUrl).origin,
     });
-    const now = () => Date.now();
-    const header: EpochHeader = {
-        epochIdDigest: canonicalDigest(packet.epochId),
-        capabilityDigest: packet.capabilityDigest,
-        oldManifestDigest: packet.oldManifestDigest,
-        desiredManifestDigest: packet.desiredManifestDigest,
-        roleSetDigest: packet.roleSetDigest,
-        sourcePlanDigest: packet.sourcePlanDigest,
-        createdAt: new Date(now()).toISOString(),
-    };
-    const storage = createAuthenticatedGcsJournalStorage({ bucket: descriptor.bucket });
+    const now = bootstrapOptions.now ?? (() => Date.now());
+    const candidate = candidateHeader(packet, now);
+    const storage = bootstrapOptions.storage ?? createAuthenticatedGcsJournalStorage({ bucket: descriptor.bucket });
+    const header = bootstrapOptions.resolveRetainedHeader === false
+        ? candidate
+        : await resolveHeader(storage, candidate, now);
     const journal = new EpochJournal(storage, { header, now });
     const options: LiveEpochControlPlaneOptions = {
         cloudRun,

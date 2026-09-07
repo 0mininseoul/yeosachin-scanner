@@ -4,6 +4,17 @@ import { ROLES, SLOTS, createProtectedPacket, deriveObservationInputDigests, der
 /** Provider-free, synthetic packet fixture shared by coordinator/integration tests. */
 export const FIXTURE_PROJECT = 'example-project';
 
+export const FIXTURE_PROVIDER_SCOPE = {
+    bucket: 'fixture-epoch-bucket',
+    publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
+    googleProjectId: FIXTURE_PROJECT,
+    vercelProjectId: 'vercel-fixture-project',
+    vercelTeamId: 'fixture-team',
+    vercelDeploymentId: 'dpl-desired',
+    vercelExpectedOldDeploymentId: 'dpl-old',
+    vercelProducerAlias: 'desired.example.invalid',
+} as const;
+
 function identity(value: string) {
     return { identity: value, project: FIXTURE_PROJECT };
 }
@@ -182,6 +193,7 @@ function observationTargets(): ProtectedObservationTargets {
 export function createFixturePacket(): ReturnType<typeof createProtectedPacket> {
     const input = {
         epochId: 'epoch-fixture', lockNamespace: 'fixture-lock', roleSet: [...ROLES], oldManifest: manifest('old'), desiredManifest: manifest('desired'), protectedInputs: { old: platformInputs('old'), desired: platformInputs('desired') },
+        providerScope: FIXTURE_PROVIDER_SCOPE,
         activation: { analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: true }, quiescence: { timeoutMs: 60_000, graceMs: 5_000 },
         protectedObservations: { old: oldObservations(), desired: observationTargets() }, probe: { bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 } as const, expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' } as const },
     };

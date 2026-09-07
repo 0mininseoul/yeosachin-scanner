@@ -2848,7 +2848,7 @@ describe('automatic-analysis infrastructure contracts', () => {
         }, 'producer fingerprint does not match the reviewed contract'],
         ['unready preflight producer configuration', {
             publicFreeze: { preflightProducerConfigReady: false },
-        }, 'producer fingerprint does not match the reviewed contract'],
+        }, 'public freeze readiness failed strict v3 wire validation'],
     ];
 
     it.each(failClosedIdentityRollForwardCases)(

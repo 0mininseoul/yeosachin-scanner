@@ -7,7 +7,7 @@ import { EpochCoordinator, type EpochControlPlane, type OperationEvidence } from
 import { EpochJournal, type JournalStorage, type StoredObject } from './capacity-identity-epoch/journal';
 import { canonicalDigest, EpochError, type EpochHeader, type State } from './capacity-identity-epoch/contracts';
 import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
-import { chmodSync, closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -97,9 +97,8 @@ describe('provider-free coordinated identity epoch integration', () => {
     });
 
     it('refuses live CLI construction without an inherited protected packet descriptor', () => {
-        const tsx = join(root, 'node_modules/.bin/tsx');
         const script = join(root, 'scripts/run-capacity-identity-epoch.ts');
-        const result = spawnSync(tsx, [script, 'check'], {
+        const result = spawnSync(process.execPath, ['--import', 'tsx', script, 'check'], {
             cwd: root,
             env: { ...process.env, NODE_ENV: 'test' },
             encoding: 'utf8',
@@ -114,16 +113,7 @@ describe('provider-free coordinated identity epoch integration', () => {
 
     it('constructs the real adapter graph only after packet-bound bootstrap validation', async () => {
         const packet = createFixturePacket();
-        const scope = {
-            bucket: 'fixture-epoch-bucket',
-            publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
-            googleProjectId: 'example-project',
-            vercelProjectId: 'vercel-fixture-project',
-            vercelTeamId: 'fixture-team',
-            vercelDeploymentId: 'dpl-desired',
-            vercelExpectedOldDeploymentId: 'dpl-old',
-            vercelProducerAlias: 'desired.example.invalid',
-        } as const;
+        const scope = packet.providerScope;
         const descriptor = {
             packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('provider-free-bootstrap-owner'), lockNamespace: packet.lockNamespace,
             ...scope, scopeDigest: canonicalDigest(scope), vercelToken: 'fixture-vercel-token',
@@ -136,16 +126,60 @@ describe('provider-free coordinated identity epoch integration', () => {
         try {
             chmodSync(descriptorPath, 0o600);
             const loaded = await loadProtectedLiveBootstrap(fd);
-            const live = buildLiveBootstrap(packet, loaded);
+            const storage = new MemoryStorage();
+            const live = await buildLiveBootstrap(packet, loaded, { storage, now: () => 1_000 });
+            await live.journal.ensureHeader();
+            const resumed = await buildLiveBootstrap(packet, loaded, { storage, now: () => 2_000 });
             expect(live.missingEvidence).toEqual([
                 'sourceObservation', 'buildObservation', 'pauseProvenance',
                 'zeroWorkBaseline', 'zeroWorkObservation', 'probe',
             ]);
             expect(live.journal.headerKey).toContain('epoch-header');
+            expect(resumed.journal.headerKey).toBe(live.journal.headerKey);
+            expect(resumed.journal.epochHeaderDigest).toBe(live.journal.epochHeaderDigest);
+            expect(resumed.journal.lockKey).toBe(live.journal.lockKey);
         } finally {
-            closeSync(fd);
             rmSync(directory, { recursive: true, force: true });
         }
-        expect(() => buildLiveBootstrap(packet, { ...descriptor, packetDigest: 'f'.repeat(64) })).toThrow('CAPABILITY_BINDING_MISMATCH');
+        await expect(buildLiveBootstrap(packet, { ...descriptor, packetDigest: 'f'.repeat(64) }, { resolveRetainedHeader: false })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        const replacements: { [K in keyof typeof packet.providerScope]: string } = {
+            bucket: 'other-epoch-bucket',
+            publicReadinessUrl: 'https://other.example.invalid/api/analysis/capacity/readiness',
+            googleProjectId: 'other-project',
+            vercelProjectId: 'other-vercel-project',
+            vercelTeamId: 'other-team',
+            vercelDeploymentId: 'dpl-other',
+            vercelExpectedOldDeploymentId: 'dpl-previous',
+            vercelProducerAlias: 'other.example.invalid',
+        };
+        for (const key of Object.keys(replacements) as Array<keyof typeof packet.providerScope>) {
+            const retargetedScope = { ...packet.providerScope, [key]: replacements[key] };
+            await expect(buildLiveBootstrap(packet, {
+                ...descriptor,
+                ...retargetedScope,
+                scopeDigest: canonicalDigest(retargetedScope),
+            }, { resolveRetainedHeader: false })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        }
+
+        const headerKey = `${'epoch'}/epoch-header/${canonicalDigest(packet.epochId)}/${packet.desiredManifestDigest}.json`;
+        const retainedHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: new Date(1_000).toISOString(),
+        } as const;
+        const malformedStorage = new MemoryStorage();
+        await malformedStorage.put(headerKey, { ...retainedHeader, unexpected: true }, { ifGenerationMatch: '0' });
+        await expect(buildLiveBootstrap(packet, descriptor, {
+            storage: malformedStorage,
+            now: () => 2_000,
+        })).rejects.toThrow('JOURNAL_INVALID');
+
+        const mismatchedStorage = new MemoryStorage();
+        await mismatchedStorage.put(headerKey, { ...retainedHeader, sourcePlanDigest: '0'.repeat(64) }, { ifGenerationMatch: '0' });
+        await expect(buildLiveBootstrap(packet, descriptor, {
+            storage: mismatchedStorage,
+            now: () => 2_000,
+        })).rejects.toThrow('JOURNAL_INVALID');
     });
 });
