@@ -8,7 +8,7 @@
  * VERIFIED and is separate from the coordinator's proof-bound activation API.
  */
 import { canonicalDigest, EpochError, epochFail } from './capacity-identity-epoch/contracts';
-import { loadProtectedPacket } from './capacity-identity-epoch/packet';
+import { loadProtectedPacketAsync } from './capacity-identity-epoch/packet';
 import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
 
 type Command = 'check' | 'apply';
@@ -67,8 +67,8 @@ async function run(): Promise<void> {
         return;
     }
     if (options.packetFd === undefined || options.bootstrapFd === undefined) fail('PROTECTED_INPUT_UNAVAILABLE');
-    const packet = loadProtectedPacket({ fd: options.packetFd });
-    const bootstrapDescriptor = loadProtectedLiveBootstrap(options.bootstrapFd);
+    const packet = await loadProtectedPacketAsync({ fd: options.packetFd });
+    const bootstrapDescriptor = await loadProtectedLiveBootstrap(options.bootstrapFd);
     const live = buildLiveBootstrap(packet, bootstrapDescriptor);
     if (options.command === 'check') {
         if (options.through !== undefined && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');

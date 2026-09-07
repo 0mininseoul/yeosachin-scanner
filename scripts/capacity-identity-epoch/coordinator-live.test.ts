@@ -4,7 +4,7 @@ import { LiveEpochControlPlane } from './coordinator';
 import { VercelAdapter } from './vercel';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from './platform';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
-import { canonicalDigest, canonicalRuntimeInputDigest, type EpochLock, type Role } from './contracts';
+import { canonicalDigest, canonicalQueueConfiguration, canonicalRuntimeInputDigest, type EpochLock, type Role } from './contracts';
 
 class FakeTransport implements ProtectedTransport {
     constructor(private readonly responder: (request: ProtectedHttpRequest) => ProtectedHttpResponse) {}
@@ -166,5 +166,32 @@ describe('live coordinator producer wire ordering', () => {
         expect((prepared.postcondition as any).observedDigests.source).toMatch(/^[0-9a-f]{64}$/);
         driftQueue = true;
         await expect(control.prepare({ packet, lease: { generation: '1', lock } })).rejects.toThrow('OBSERVATION_INVALID');
+    });
+
+    it('reconciles QUEUES_ALIGNED against old paused auth contracts before rotation', async () => {
+        const packet = createFixturePacket();
+        const lock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
+        const workPlanes = {
+            observeQueue: async (input: any) => {
+                expect(canonicalDigest(input.target)).toBe(canonicalDigest(packet.protectedInputs.old.queues[input.resource.endsWith('/preflight') ? 'preflight' : 'paid'].target));
+                return {
+                    resource: input.resource, project: input.project, location: input.location, state: 'PAUSED',
+                    target: { url: input.target.url, audience: input.target.audience, callerIdentity: input.target.callerIdentity, uriOverride: null, wireConfigurationDigest: canonicalDigest('wire') },
+                    httpTargetPresent: true, configuration: input.configuration, configurationDigest: canonicalDigest(canonicalQueueConfiguration(input.configuration)), tasks: [], complete: true,
+                };
+            },
+            observeScheduler: async (input: any) => {
+                expect(canonicalDigest(input.target)).toBe(canonicalDigest(packet.protectedInputs.old.schedulers[input.resource.endsWith('/preflight-recovery') ? 'preflight' : 'paid'].target));
+                return { resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: input.target, configuration: input.configuration, configurationDigest: canonicalDigest(input.configuration) };
+            },
+        };
+        const control = new LiveEpochControlPlane({
+            cloudRun: {} as never, iam: {} as never, workPlanes: workPlanes as never, vercel: {} as never,
+            publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
+            deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
+            serviceBodies: { preflight: {}, paid: {} }, now: () => 100_000,
+        });
+        const result = await control.reconcile({ packet, lease: { generation: '1', lock }, state: 'QUEUES_ALIGNED' });
+        expect(result.proof).toMatchObject({ action: 'RECONCILE_QUEUES_ALIGNED' });
     });
 });

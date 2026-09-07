@@ -545,7 +545,15 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
                 buildDigest: input.packet.desiredManifest.source[role].desiredBuildDigest,
             });
-            staged.push({ role, revision, generation: after.generation, digest: after.rawDigest });
+            staged.push({
+                role,
+                revision,
+                generation: after.generation,
+                digest: after.rawDigest,
+                sourceSha: runtimeObservation.sourceSha,
+                runtimeDigest: runtimeObservation.runtimeDigest,
+                buildDigest: runtimeObservation.buildDigest,
+            });
         }
         return this.evidence('STAGED', staged, input.lease.lock.lockFence);
     }
@@ -790,7 +798,13 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
                 buildDigest: input.packet.desiredManifest.source[role].desiredBuildDigest,
             });
-            runtimes.push({ role, digest: canonicalDigest(observation) });
+            runtimes.push({
+                role,
+                digest: canonicalDigest(observation),
+                sourceSha: observation.sourceSha,
+                runtimeDigest: observation.runtimeDigest,
+                buildDigest: observation.buildDigest,
+            });
         }
         return this.evidence('RECONCILE_STAGED', runtimes, input.lease.lock.lockFence);
     }
@@ -821,10 +835,15 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         const schedulers: unknown[] = [];
         const nowMs = this.now();
         for (const role of ['preflight', 'paid'] as const) {
-            const queueInput = input.packet.protectedInputs.desired.queues[role];
-            const schedulerInput = input.packet.protectedInputs.desired.schedulers[role];
+            // QUEUES_ALIGNED is recorded immediately after the old auth chain
+            // is paused and quiescent. Desired OIDC targets are not changed
+            // until INVOKERS_ROTATED, so a resumed owner must reconcile the
+            // exact OLD contracts rather than treating the desired packet as
+            // a current provider state assertion.
+            const queueInput = input.packet.protectedInputs.old.queues[role];
+            const schedulerInput = input.packet.protectedInputs.old.schedulers[role];
             const queue = await this.options.workPlanes.observeQueue(queueInput);
-            validateQueueObservation({ role, ...queue }, queueInput, input.packet.desiredManifest.queues[role].configDigest, role);
+            validateQueueObservation({ role, ...queue }, queueInput, input.packet.oldManifest.queues[role].configDigest, role);
             const scheduler = await this.options.workPlanes.observeScheduler(schedulerInput);
             validateSchedulerObservation({ role, ...scheduler, nowMs }, schedulerInput, nowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             queues.push({ role, digest: canonicalDigest(queue) });

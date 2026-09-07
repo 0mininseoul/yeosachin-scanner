@@ -1,4 +1,4 @@
-import { fstatSync, readSync } from 'node:fs';
+import { constants as fsConstants, createReadStream, fstatSync, openSync, readSync } from 'node:fs';
 import {
     MANIFEST_KEYS,
     ROLES,
@@ -1207,8 +1207,85 @@ export function assertCoordinatorCapability(packet: CapacityEpochPacket, capabil
 
 export type ProtectedPacketDescriptor = Readonly<{ fd: number; maxBytes?: number }>;
 
+const PROTECTED_DESCRIPTOR_TIMEOUT_MS = 5_000;
+
+function validateProtectedDescriptor(fd: number, maxBytes: number): void {
+    if (!Number.isInteger(fd) || fd < 0
+        || !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 4_194_304) {
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    }
+    let stat;
+    try {
+        stat = fstatSync(fd);
+    } catch {
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    }
+    // A live invocation receives the packet through an inherited regular file
+    // or FIFO. Never resolve a path, and never accept a public descriptor.
+    if ((!stat.isFile() && !stat.isFIFO())
+        || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+        || (stat.mode & 0o077) !== 0) epochFail('PROTECTED_INPUT_UNAVAILABLE');
+}
+
+/**
+ * Read a bounded inherited protected descriptor without persisting its
+ * contents. The async path is required for FIFOs so a closed writer and a
+ * stalled writer both produce a bounded result.
+ */
+export async function readProtectedDescriptor(fd: number, maxBytes = 1_048_576): Promise<string> {
+    validateProtectedDescriptor(fd, maxBytes);
+    let stream: ReturnType<typeof createReadStream>;
+    let streamFd: number;
+    try {
+        // Duplicate only the already validated inherited descriptor. The
+        // stream owns the duplicate, so timeout/oversize cleanup cannot close
+        // the caller's packet/bootstrap descriptor.
+        streamFd = openSync(`/dev/fd/${fd}`, fsConstants.O_RDONLY);
+        stream = createReadStream(null as unknown as string, { fd: streamFd, autoClose: true });
+    } catch {
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    }
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    try {
+        await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const settle = (error?: unknown): void => {
+                if (settled) return;
+                settled = true;
+                if (error === undefined) resolve();
+                else reject(error);
+            };
+            const timer = setTimeout(() => {
+                stream.destroy();
+                settle(new EpochError('PROTECTED_INPUT_UNAVAILABLE'));
+            }, PROTECTED_DESCRIPTOR_TIMEOUT_MS);
+            const clear = (): void => clearTimeout(timer);
+            stream.on('data', chunk => {
+                const data = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+                totalBytes += data.byteLength;
+                if (totalBytes > maxBytes) {
+                    clear();
+                    stream.destroy();
+                    settle(new EpochError('PROTECTED_INPUT_UNAVAILABLE'));
+                    return;
+                }
+                chunks.push(data);
+            });
+            stream.once('end', () => { clear(); settle(); });
+            stream.once('error', error => { clear(); settle(error); });
+        });
+    } catch (error) {
+        if (error instanceof EpochError) throw error;
+        epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    } finally {
+        stream.destroy();
+    }
+    return Buffer.concat(chunks).toString('utf8');
+}
+
 /** Parse JSON structure only to reject duplicate decoded object keys. */
-function rejectDuplicateJsonKeys(raw: string): void {
+export function rejectDuplicateJsonKeys(raw: string): void {
     let index = 0;
     const maxDepth = 16;
 
@@ -1363,6 +1440,22 @@ export function loadProtectedPacket(descriptor: ProtectedPacketDescriptor): Capa
         epochFail('PROTECTED_INPUT_UNAVAILABLE');
     }
     const raw = Buffer.concat(chunks).toString('utf8');
+    rejectDuplicateJsonKeys(raw);
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        epochFail('INVALID_PACKET');
+    }
+    validateEpochPacket(parsed);
+    return parsed as CapacityEpochPacket;
+}
+
+/** Load the same protected packet contract from an inherited file or FIFO. */
+export async function loadProtectedPacketAsync(descriptor: ProtectedPacketDescriptor): Promise<CapacityEpochPacket> {
+    if (!descriptor || !Number.isInteger(descriptor.fd) || descriptor.fd < 0) epochFail('PROTECTED_INPUT_UNAVAILABLE');
+    const maxBytes = descriptor.maxBytes ?? 1_048_576;
+    const raw = await readProtectedDescriptor(descriptor.fd, maxBytes);
     rejectDuplicateJsonKeys(raw);
     let parsed: unknown;
     try {

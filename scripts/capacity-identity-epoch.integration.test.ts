@@ -112,13 +112,21 @@ describe('provider-free coordinated identity epoch integration', () => {
         expect(result.stderr).not.toMatch(/example-project|https?:\/\//);
     });
 
-    it('constructs the real adapter graph only after packet-bound bootstrap validation', () => {
+    it('constructs the real adapter graph only after packet-bound bootstrap validation', async () => {
         const packet = createFixturePacket();
+        const scope = {
+            bucket: 'fixture-epoch-bucket',
+            publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
+            googleProjectId: 'example-project',
+            vercelProjectId: 'vercel-fixture-project',
+            vercelTeamId: 'fixture-team',
+            vercelDeploymentId: 'dpl-desired',
+            vercelExpectedOldDeploymentId: 'dpl-old',
+            vercelProducerAlias: 'desired.example.invalid',
+        } as const;
         const descriptor = {
             packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('provider-free-bootstrap-owner'), lockNamespace: packet.lockNamespace,
-            bucket: 'fixture-epoch-bucket', publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
-            projectId: 'example-project', teamId: 'fixture-team', deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old',
-            producerAlias: 'desired.example.invalid', vercelToken: 'fixture-vercel-token',
+            ...scope, scopeDigest: canonicalDigest(scope), vercelToken: 'fixture-vercel-token',
             serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } },
         } as const;
         const directory = mkdtempSync(join(tmpdir(), 'identity-epoch-bootstrap-'));
@@ -127,7 +135,7 @@ describe('provider-free coordinated identity epoch integration', () => {
         const fd = openSync(descriptorPath, 'r');
         try {
             chmodSync(descriptorPath, 0o600);
-            const loaded = loadProtectedLiveBootstrap(fd);
+            const loaded = await loadProtectedLiveBootstrap(fd);
             const live = buildLiveBootstrap(packet, loaded);
             expect(live.missingEvidence).toEqual([
                 'sourceObservation', 'buildObservation', 'pauseProvenance',

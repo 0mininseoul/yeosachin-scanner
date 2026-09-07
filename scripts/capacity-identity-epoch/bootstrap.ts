@@ -1,4 +1,3 @@
-import { fstatSync, readSync } from 'node:fs';
 import { createAuthenticatedGcsJournalStorage } from './gcs';
 import { EpochJournal } from './journal';
 import { CloudRunAdapter } from './cloud-run';
@@ -7,8 +6,8 @@ import { WorkPlaneClient } from './work-planes';
 import { createGoogleProtectedTransport } from './platform';
 import { createVercelProtectedTransport, VercelAdapter } from './vercel';
 import { EpochCoordinator, LiveEpochControlPlane, type LiveEpochControlPlaneOptions } from './coordinator';
-import { issueCoordinatorCapability } from './packet';
-import { canonicalDigest, EpochError, epochFail, hasExactKeys, isObject, type CapacityEpochPacket, type EpochHeader, type Role } from './contracts';
+import { issueCoordinatorCapability, readProtectedDescriptor, rejectDuplicateJsonKeys } from './packet';
+import { canonicalDigest, epochFail, hasExactKeys, isObject, type CapacityEpochPacket, type EpochHeader, type Role } from './contracts';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -29,13 +28,18 @@ export type ProtectedLiveBootstrapDescriptor = Readonly<{
     lockNamespace: string;
     bucket: string;
     publicReadinessUrl: string;
-    projectId: string;
-    teamId: string;
-    deploymentId: string;
-    expectedOldDeploymentId: string;
-    producerAlias: string;
+    /** Google project/resource namespace; must match the protected packet. */
+    googleProjectId: string;
+    /** Vercel project namespace; intentionally independent from Google. */
+    vercelProjectId: string;
+    vercelTeamId: string;
+    vercelDeploymentId: string;
+    vercelExpectedOldDeploymentId: string;
+    vercelProducerAlias: string;
     vercelToken: string;
     serviceBodies: Readonly<Record<Role, Readonly<Record<string, unknown>>>>;
+    /** Digest of the independently reviewed provider selector contract. */
+    scopeDigest: string;
 }>;
 
 export type LiveBootstrap = Readonly<{
@@ -47,57 +51,55 @@ export type LiveBootstrap = Readonly<{
 
 const BOOTSTRAP_KEYS = [
     'packetDigest', 'ownerDigest', 'lockNamespace', 'bucket', 'publicReadinessUrl',
-    'projectId', 'teamId', 'deploymentId', 'expectedOldDeploymentId', 'producerAlias',
-    'vercelToken', 'serviceBodies',
+    'googleProjectId', 'vercelProjectId', 'vercelTeamId', 'vercelDeploymentId',
+    'vercelExpectedOldDeploymentId', 'vercelProducerAlias', 'vercelToken', 'serviceBodies', 'scopeDigest',
 ] as const;
 
 function fail(code: 'PROTECTED_INPUT_UNAVAILABLE' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH' | 'EVIDENCE_UNAVAILABLE'): never {
     epochFail(code);
 }
 
-function readPrivateJson(fd: number): unknown {
-    if (!Number.isInteger(fd) || fd < 0) fail('PROTECTED_INPUT_UNAVAILABLE');
-    let stat;
-    try { stat = fstatSync(fd); } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
-    // Synchronous regular-file reads are deliberately used only for a bounded
-    // inherited descriptor; FIFOs could block indefinitely and are rejected.
-    if (!stat.isFile()
-        || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
-        || (stat.mode & 0o077) !== 0) fail('PROTECTED_INPUT_UNAVAILABLE');
-    const chunks: Buffer[] = [];
-    let total = 0;
-    try {
-        while (true) {
-            const remaining = MAX_BYTES + 1 - total;
-            if (remaining <= 0) fail('PROTECTED_INPUT_UNAVAILABLE');
-            const chunk = Buffer.allocUnsafe(Math.min(65_536, remaining));
-            const count = readSync(fd, chunk, 0, chunk.length, null);
-            if (count === 0) break;
-            total += count;
-            if (total > MAX_BYTES) fail('PROTECTED_INPUT_UNAVAILABLE');
-            chunks.push(chunk.subarray(0, count));
-        }
-    } catch (error) {
-        if (error instanceof EpochError) throw error;
-        fail('PROTECTED_INPUT_UNAVAILABLE');
-    }
-    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
+function providerScope(descriptor: Pick<ProtectedLiveBootstrapDescriptor,
+    'bucket' | 'publicReadinessUrl' | 'googleProjectId' | 'vercelProjectId' | 'vercelTeamId'
+    | 'vercelDeploymentId' | 'vercelExpectedOldDeploymentId' | 'vercelProducerAlias'>): Readonly<Record<string, string>> {
+    return {
+        bucket: descriptor.bucket,
+        publicReadinessUrl: descriptor.publicReadinessUrl,
+        googleProjectId: descriptor.googleProjectId,
+        vercelProjectId: descriptor.vercelProjectId,
+        vercelTeamId: descriptor.vercelTeamId,
+        vercelDeploymentId: descriptor.vercelDeploymentId,
+        vercelExpectedOldDeploymentId: descriptor.vercelExpectedOldDeploymentId,
+        vercelProducerAlias: descriptor.vercelProducerAlias,
+    };
 }
 
-export function loadProtectedLiveBootstrap(fd: number): ProtectedLiveBootstrapDescriptor {
-    const value = readPrivateJson(fd);
+function validateProviderScope(descriptor: ProtectedLiveBootstrapDescriptor): void {
+    if (canonicalDigest(providerScope(descriptor)) !== descriptor.scopeDigest) fail('CAPABILITY_BINDING_MISMATCH');
+}
+
+async function readPrivateJson(fd: number): Promise<unknown> {
+    const raw = await readProtectedDescriptor(fd, MAX_BYTES);
+    rejectDuplicateJsonKeys(raw);
+    try { return JSON.parse(raw) as unknown; } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
+}
+
+export async function loadProtectedLiveBootstrap(fd: number): Promise<ProtectedLiveBootstrapDescriptor> {
+    const value = await readPrivateJson(fd);
     if (!isObject(value) || !hasExactKeys(value, BOOTSTRAP_KEYS)
         || typeof value.packetDigest !== 'string' || !DIGEST.test(value.packetDigest)
         || typeof value.ownerDigest !== 'string' || !DIGEST.test(value.ownerDigest)
         || typeof value.lockNamespace !== 'string' || value.lockNamespace.length === 0 || value.lockNamespace.length > 128
         || typeof value.bucket !== 'string' || !BUCKET.test(value.bucket)
         || typeof value.publicReadinessUrl !== 'string'
-        || typeof value.projectId !== 'string' || !PROJECT.test(value.projectId)
-        || typeof value.teamId !== 'string' || !RESOURCE_ID.test(value.teamId)
-        || typeof value.deploymentId !== 'string' || !RESOURCE_ID.test(value.deploymentId)
-        || typeof value.expectedOldDeploymentId !== 'string' || !RESOURCE_ID.test(value.expectedOldDeploymentId)
-        || typeof value.producerAlias !== 'string' || !ALIAS.test(value.producerAlias)
+        || typeof value.googleProjectId !== 'string' || !PROJECT.test(value.googleProjectId)
+        || typeof value.vercelProjectId !== 'string' || !RESOURCE_ID.test(value.vercelProjectId)
+        || typeof value.vercelTeamId !== 'string' || !RESOURCE_ID.test(value.vercelTeamId)
+        || typeof value.vercelDeploymentId !== 'string' || !RESOURCE_ID.test(value.vercelDeploymentId)
+        || typeof value.vercelExpectedOldDeploymentId !== 'string' || !RESOURCE_ID.test(value.vercelExpectedOldDeploymentId)
+        || typeof value.vercelProducerAlias !== 'string' || !ALIAS.test(value.vercelProducerAlias)
         || typeof value.vercelToken !== 'string' || value.vercelToken.length === 0 || value.vercelToken.length > 8192
+        || typeof value.scopeDigest !== 'string' || !DIGEST.test(value.scopeDigest)
         || !isObject(value.serviceBodies) || !hasExactKeys(value.serviceBodies, ['preflight', 'paid'])) fail('PROTECTED_INPUT_UNAVAILABLE');
     for (const role of ['preflight', 'paid'] as const) {
         if (!isObject(value.serviceBodies[role]) || Object.keys(value.serviceBodies[role]).length === 0) fail('PROTECTED_INPUT_UNAVAILABLE');
@@ -106,14 +108,16 @@ export function loadProtectedLiveBootstrap(fd: number): ProtectedLiveBootstrapDe
     try { parsed = new URL(value.publicReadinessUrl); } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
         || parsed.pathname !== '/api/analysis/capacity/readiness') fail('PROTECTED_INPUT_UNAVAILABLE');
-    return value as ProtectedLiveBootstrapDescriptor;
+    const descriptor = value as ProtectedLiveBootstrapDescriptor;
+    validateProviderScope(descriptor);
+    return descriptor;
 }
 
 function validateBinding(packet: CapacityEpochPacket, descriptor: ProtectedLiveBootstrapDescriptor): void {
     if (descriptor.packetDigest !== canonicalDigest(packet)
         || descriptor.lockNamespace !== packet.lockNamespace) fail('CAPABILITY_BINDING_MISMATCH');
     const project = packet.protectedInputs.old.build.identity.project;
-    if (descriptor.projectId !== project) fail('CAPABILITY_BINDING_MISMATCH');
+    if (descriptor.googleProjectId !== project) fail('CAPABILITY_BINDING_MISMATCH');
     for (const role of ['preflight', 'paid'] as const) {
         const runtime = packet.protectedInputs.desired.runtime[role];
         if (runtime.project !== project || packet.protectedInputs.desired.queues[role].project !== project
@@ -130,6 +134,7 @@ function validateBinding(packet: CapacityEpochPacket, descriptor: ProtectedLiveB
  */
 export function buildLiveBootstrap(packet: CapacityEpochPacket, descriptor: ProtectedLiveBootstrapDescriptor): LiveBootstrap {
     validateBinding(packet, descriptor);
+    validateProviderScope(descriptor);
     const google = createGoogleProtectedTransport();
     const vercelTransport = createVercelProtectedTransport({ tokenProvider: async () => descriptor.vercelToken });
     const cloudRun = new CloudRunAdapter({ transport: google });
@@ -157,11 +162,11 @@ export function buildLiveBootstrap(packet: CapacityEpochPacket, descriptor: Prot
         workPlanes,
         vercel,
         publicReadinessUrl: descriptor.publicReadinessUrl,
-        projectId: descriptor.projectId,
-        teamId: descriptor.teamId,
-        deploymentId: descriptor.deploymentId,
-        expectedOldDeploymentId: descriptor.expectedOldDeploymentId,
-        producerAlias: descriptor.producerAlias,
+        projectId: descriptor.vercelProjectId,
+        teamId: descriptor.vercelTeamId,
+        deploymentId: descriptor.vercelDeploymentId,
+        expectedOldDeploymentId: descriptor.vercelExpectedOldDeploymentId,
+        producerAlias: descriptor.vercelProducerAlias,
         serviceBodies: descriptor.serviceBodies,
         journal,
         now,
@@ -176,4 +181,3 @@ export function buildLiveBootstrap(packet: CapacityEpochPacket, descriptor: Prot
         missingEvidence: ['sourceObservation', 'buildObservation', 'pauseProvenance', 'zeroWorkBaseline', 'zeroWorkObservation', 'probe'],
     };
 }
-
