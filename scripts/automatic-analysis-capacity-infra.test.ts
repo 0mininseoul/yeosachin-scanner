@@ -577,7 +577,7 @@ function fakeRun(options: FakeRunOptions = {}) {
         }),
     );
     writeFileSync(publicFreezePath, JSON.stringify({
-        schemaVersion: 'analysis-public-freeze-readiness-v2',
+        schemaVersion: 'analysis-public-freeze-readiness-v3',
         ready: active,
         stage,
         freezeMode: active ? 'drain-and-block' : 'unknown',
@@ -590,6 +590,8 @@ function fakeRun(options: FakeRunOptions = {}) {
         paidProducerConfigFingerprintVersion: PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION,
         paidProducerConfigFingerprint: active ? producerConfigFingerprint(env, 'paid') : null,
         paidProducerConfigReady: active,
+        analysisV2AdmissionEnabled: active,
+        earlybirdWebhookAutoAdmissionEnabled: active,
         routes: Object.fromEntries([
             '/api/analysis/start', '/api/analysis/step', '/api/analysis/run',
         ].map((route) => [route, {

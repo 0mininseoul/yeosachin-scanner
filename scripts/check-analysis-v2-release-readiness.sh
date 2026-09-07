@@ -47,6 +47,8 @@ required_env ANALYSIS_V2_IMAGE_PROXY_PROBE_BASE_URL
 required_env ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL
 required_env ANALYSIS_CAPACITY_LEGACY_TARGET_URL
 required_env ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE
+required_env ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED
+required_env ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED
 
 expected_sha="$ANALYSIS_V2_EXPECTED_GIT_SHA"
 cloud_project="$ANALYSIS_V2_TASKS_PROJECT"
@@ -55,6 +57,12 @@ cloud_region="$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
 vercel_project_id="$VERCEL_PROJECT_ID"
 vercel_token="$VERCEL_TOKEN"
 validate_sha ANALYSIS_V2_EXPECTED_GIT_SHA "$expected_sha"
+[[ "$ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED" == 'true' \
+   || "$ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED" == 'false' ]] \
+  || die 'ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED must be true or false'
+[[ "$ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED" == 'true' \
+   || "$ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED" == 'false' ]] \
+  || die 'ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED must be true or false'
 validate_identifier VERCEL_PROJECT_ID "$vercel_project_id"
 [[ "$vercel_token" != *[[:space:]]* ]] \
   && ((${#vercel_token} >= 8 && ${#vercel_token} <= 512)) \
@@ -284,7 +292,9 @@ if ! readiness_contract_result="$(printf '%s' "$public_freeze_json" \
   die 'public freeze readiness failed strict v3 wire validation'
 fi
 jq -e --arg expected_sha "$expected_sha" \
-  --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" '
+  --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" \
+  --argjson expected_analysis_gate "$ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED" \
+  --argjson expected_paid_gate "$ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED" '
   (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
   and .schemaVersion == "analysis-public-freeze-readiness-v3"
   and .ready == true
@@ -299,8 +309,8 @@ jq -e --arg expected_sha "$expected_sha" \
   and .paidProducerConfigFingerprintVersion == "paid-producer-config-v1"
   and .paidProducerConfigReady == true
   and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
-  and .analysisV2AdmissionEnabled == false
-  and .earlybirdWebhookAutoAdmissionEnabled == false
+  and .analysisV2AdmissionEnabled == $expected_analysis_gate
+  and .earlybirdWebhookAutoAdmissionEnabled == $expected_paid_gate
   and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
   and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
 ' <<<"$public_freeze_json" >/dev/null 2>&1 \

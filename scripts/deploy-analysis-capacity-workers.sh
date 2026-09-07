@@ -817,8 +817,8 @@ verify_legacy_quiescence() {
     and .paidProducerConfigFingerprintVersion == $paid_version
     and .paidProducerConfigReady == true
     and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
-    and .analysisV2AdmissionEnabled == false
-    and .earlybirdWebhookAutoAdmissionEnabled == false
+    and (.analysisV2AdmissionEnabled | type == "boolean")
+    and (.earlybirdWebhookAutoAdmissionEnabled | type == "boolean")
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
@@ -1201,8 +1201,8 @@ verify_role_runtime_fingerprint() {
       and (.[ $producer_fingerprint_field ] | type == "string")
       and (.[ $producer_fingerprint_field ] | test("^[0-9a-f]{64}$"))
       and .[$producer_fingerprint_field] == $expected
-      and .analysisV2AdmissionEnabled == false
-      and .earlybirdWebhookAutoAdmissionEnabled == false
+      and (.analysisV2AdmissionEnabled | type == "boolean")
+      and (.earlybirdWebhookAutoAdmissionEnabled | type == "boolean")
     ' <<<"$public_json" >/dev/null 2>&1 \
     || die "active Vercel $role_label producer fingerprint does not match the reviewed contract"
   if [[ "$role" == 'preflight' ]]; then

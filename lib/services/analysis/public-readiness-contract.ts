@@ -221,11 +221,16 @@ export function parsePublicReadinessJson(raw: string): LegacyPublicReadiness {
 }
 
 function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPublicReadiness {
-    if (!hasExactOrderedKeys(value, READINESS_KEYS)) fail('READINESS_CONTRACT_INVALID');
+    // JSON object order is not part of the consumer wire contract. The
+    // runtime emitter keeps the documented order, while consumers accept any
+    // permutation of the exact duplicate-free key set.
+    if (!hasExactKeys(value, READINESS_KEYS)) fail('READINESS_CONTRACT_INVALID');
     if (value.schemaVersion !== 'analysis-public-freeze-readiness-v3'
         || !isBoolean(value.ready)
-        || !['initial', 'expanded', 'unknown'].includes(String(value.stage))
-        || !['drain-and-block', 'unknown'].includes(String(value.freezeMode))
+        || !isString(value.stage)
+        || !['initial', 'expanded', 'unknown'].includes(value.stage)
+        || !isString(value.freezeMode)
+        || !['drain-and-block', 'unknown'].includes(value.freezeMode)
         || !isBoolean(value.publicFreezeEnabled)
         || (value.sourceSha !== null && (!isString(value.sourceSha) || !SHA_PATTERN.test(value.sourceSha)))
         || (value.legacyTargetResource !== null && !isString(value.legacyTargetResource))
@@ -245,12 +250,13 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
         fail('READINESS_CONTRACT_INVALID');
     }
     const routes = value.routes;
-    if (!hasExactOrderedKeys(routes, LEGACY_PUBLIC_READINESS_ROUTES)) fail('READINESS_CONTRACT_INVALID');
+    if (!hasExactKeys(routes, LEGACY_PUBLIC_READINESS_ROUTES)) fail('READINESS_CONTRACT_INVALID');
     for (const route of LEGACY_PUBLIC_READINESS_ROUTES) {
-        const entry = routes[route];
+        const entry = routes[route] as Record<string, unknown>;
         if (!isObject(entry)
-            || !hasExactOrderedKeys(entry, ROUTE_KEYS)
-            || !['frozen', 'not_ready'].includes(String(entry.gateState))
+            || !hasExactKeys(entry, ROUTE_KEYS)
+            || !isString(entry.gateState)
+            || !['frozen', 'not_ready'].includes(entry.gateState)
             || ![410, 503].includes(entry.expectedStatus as number)
             || entry.gateBeforeRuntime !== true) {
             fail('READINESS_CONTRACT_INVALID');
@@ -264,9 +270,9 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
         || value.paidProducerConfigReady !== paidReady) {
         fail('READINESS_CONTRACT_INVALID');
     }
-    const frozen = routes[LEGACY_PUBLIC_READINESS_ROUTES[0]].gateState === 'frozen';
-    if (routes[LEGACY_PUBLIC_READINESS_ROUTES[1]].gateState !== (frozen ? 'frozen' : 'not_ready')
-        || routes[LEGACY_PUBLIC_READINESS_ROUTES[2]].gateState !== (frozen ? 'frozen' : 'not_ready')
+    const frozen = (routes[LEGACY_PUBLIC_READINESS_ROUTES[0]] as Record<string, unknown>).gateState === 'frozen';
+    if ((routes[LEGACY_PUBLIC_READINESS_ROUTES[1]] as Record<string, unknown>).gateState !== (frozen ? 'frozen' : 'not_ready')
+        || (routes[LEGACY_PUBLIC_READINESS_ROUTES[2]] as Record<string, unknown>).gateState !== (frozen ? 'frozen' : 'not_ready')
         || value.ready !== (value.stage !== 'unknown'
             && value.freezeMode === 'drain-and-block'
             && value.publicFreezeEnabled
