@@ -1,6 +1,6 @@
 # Coordinated capacity identity epoch roll-forward design
 
-Status: approved implementation baseline
+Status: proposed for user review
 
 Date: 2026-09-07
 
@@ -39,21 +39,44 @@ per-role apply path less strict.
 
 The scope is the coordinated transition of the two workload roles, their
 authentication contracts, their queues and recovery schedulers, their staged
-revisions, producer fingerprints, and the public readiness admission signal.
+revisions, producer fingerprints, and the additive public readiness admission
+facts.
 It does not redesign workload processing, provider budgets, payment state,
 retention policy, or application business logic.
+
+### Admission vocabulary
+
+The migration keeps three independent gates distinct. They are observed and
+mutated through different boundaries, and no one gate is inferred from
+another:
+
+| Boundary | Existing configuration | Public/readiness fact | Role in this migration |
+| --- | --- | --- | --- |
+| Vercel public preflight/intake | `ANALYSIS_V2_ADMISSION_ENABLED` | `analysisV2AdmissionEnabled` | Controls public preflight/intake admission. False through `VERIFIED`; activation sets only the separately reviewed desired value, normally true for the activated epoch. |
+| Vercel paid webhook auto-admission | `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED` | `earlybirdWebhookAutoAdmissionEnabled` | Controls whether paid webhook events can automatically enqueue paid work. False through `VERIFIED`; activation restores only its separately reviewed desired value. It is never inferred from the public preflight gate. |
+| Cloud Run worker provider admission | `ANALYSIS_PROVIDER_ADMISSION_ENABLED` | Not exposed by the Vercel public DTO | Private worker gate checked by the worker before provider work. The exact `INITIAL` target manifests require it to be true. A staged no-traffic revision may therefore have it true while both Vercel gates, queues, and recovery schedulers are closed. |
+
+The readiness endpoint runs in the Vercel/public runtime and cannot prove the
+private Cloud Run worker gate. `ANALYSIS_PROVIDER_ADMISSION_ENABLED` is
+therefore never represented by a public field named `providerAdmissionEnabled`
+or any other field that suggests public observability. Signed/manual test paths
+are not exercised by this migration. Zero-work protection before activation
+comes from both Vercel work-producing gates being false, no-traffic revisions,
+paused/empty queues, paused recovery schedulers, and provider-free malformed
+body validation after authentication.
 
 ## 2. Options and decision
 
 ### Option A: coordinated dual-role epoch transition (chosen)
 
 Create one generation-bound epoch for both roles. Capture exact old and
-desired manifests, close producer and provider admission, pause both work
-planes, stage both revisions without traffic, align producer fingerprints,
-align desired OIDC and IAM with compare-and-swap etags, promote the captured
-revisions, remove retired grants only after both planes are exact, verify a
-provider-free system, and activate only after the public readiness contract
-proves admission enabled.
+desired manifests, close both Vercel work-producing gates, pause both work
+planes, stage both revisions without traffic while retaining the exact desired
+private worker provider-admission setting, align producer fingerprints, align
+desired OIDC and IAM with compare-and-swap etags, promote the captured
+revisions, remove retired grants only after both planes are exact, verify the
+closed public system, and activate only after the additive public readiness
+contract proves the two Vercel admission facts.
 
 Advantages:
 
@@ -142,18 +165,25 @@ The following invariants are hard gates for every transition and postcondition:
 6. Every identity belongs to the exact intended project. Malformed,
    cross-project, wildcard, user-managed-key, or otherwise unparseable
    identity input fails closed.
-7. Provider admission and producer admission are false for all preparation and
-   migration states. Aggregate readiness is never used as a substitute for
-   the explicit provider-admission signal.
+7. From `PREPARED` through `VERIFIED`, the public readiness proof has
+   `ready: true`, `analysisV2AdmissionEnabled: false`, and
+   `earlybirdWebhookAutoAdmissionEnabled: false`, while preserving all v2
+   freeze, SHA, route, and fingerprint evidence. The exact `INITIAL` desired
+   worker manifests have `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true`; that
+   private gate is not a public readiness fact and may be true on staged
+   no-traffic revisions.
 8. Both queues and both recovery schedulers remain paused and empty while
    identity and revision mutations are in progress. Retention remains
    enabled.
-9. No provider, billable, or user work occurs before the pre-activation
-   verification completes. A malformed authenticated probe is allowed only
-   when it returns a reviewed 4xx before provider admission.
-10. Each mutation is preceded by a fresh generation and etag proof and is
-    followed by a read-back postcondition. A stale owner or stale observation
-    cannot mutate the next epoch.
+9. No provider, billable, or user work occurs before the public activation
+   boundary. Before that boundary, zero-work protection is the combination of
+   both Vercel gates false, no-traffic revisions, paused/empty queues, paused
+   recovery schedulers, and provider-free authenticated malformed-body probes
+   that return reviewed 4xx responses before any provider call.
+10. Each mutation is preceded by the applicable native concurrency token or
+    exact resource observation digest and is followed by a read-back
+    postcondition. A stale owner or stale observation cannot mutate the next
+    epoch.
 
 ## 4. Exact manifests and protected release packet
 
@@ -171,10 +201,10 @@ documentation, the journal, or logs:
 | --- | --- |
 | `roleSlots` | Exactly the eight role-slot keys above, each mapped to one exact identity and its owning project. |
 | `build` | One exact build identity and its owning project. |
-| `source` | Exact old and desired source SHAs and immutable platform revision identifiers for each role. |
-| `producer` | Exact producer configuration fingerprint version and digest for each role, plus the exact Git-backed Vercel source SHA selected as producer evidence. |
-| `queues` | The exact protected resource identity for each role, its project/location binding, observed generation, etag, and PAUSED/empty proof. |
-| `recoverySchedulers` | The exact protected resource identity for each role, paused state, pause epoch, location, and last-attempt evidence. |
+| `source` | Exact old observed source SHA/revision for each role; desired source SHA, build/runtime inputs, and deterministic revision naming plan or suffix. The desired immutable revision ID is intentionally absent until `STAGED` creates it. |
+| `producer` | Exact producer configuration fingerprint version and digest for each role, the exact Git-backed Vercel source SHA selected as producer evidence, and the two Vercel admission facts. |
+| `queues` | The exact protected resource identity for each role, its project/location binding, the complete observed configuration digest, and the PAUSED/empty proof. Cloud Tasks has no invented etag/generation token. |
+| `recoverySchedulers` | The exact protected resource identity for each role, complete observed configuration digest, paused state, pause epoch, location, and last-attempt evidence. Cloud Scheduler has no invented etag/generation token. |
 | `retention` | The retention scheduler/resource proof and enabled state. |
 | `iam` | The expected role-scoped OIDC, invoker, enqueuer, runtime, maintenance, and actAs bindings for both planes, represented by protected values and their canonical digest. |
 | `readiness` | Readiness schema version 3, public origin binding, both producer fingerprints, and the admission state proof. |
@@ -185,11 +215,14 @@ slot: `preflight.task-caller`, `preflight.enqueuer`,
 `preflight.runtime`, `preflight.maintenance`, `paid.task-caller`,
 `paid.enqueuer`, `paid.runtime`, and `paid.maintenance`. Each entry has one
 exact identity, one owning-project assertion, and one canonical slot digest.
-The old manifest additionally carries the observed live generation/etag and
-serving revision for each resource; the desired manifest carries the reviewed
-target generation-independent contract and the captured immutable revision
-plan. Both carry a single build record and the complete source, producer,
-queue, scheduler, retention, IAM, and readiness records above. A manifest
+The old manifest additionally carries the observed live serving source SHA and
+immutable revision for each role, plus the current resource-specific
+concurrency observations. The desired manifest carries exact source,
+build/runtime inputs, a deterministic revision naming plan or suffix, and the
+target resource/configuration contracts; it does not claim an immutable
+revision ID before `STAGED`. Both carry a single build record and the complete
+source, producer, queue, scheduler, retention, IAM, and readiness records
+above. A manifest
 with a missing slot, duplicate slot, additional slot, unresolved identity,
 or unresolved project is rejected before `PREPARED`.
 
@@ -216,8 +249,10 @@ proves:
 - each old shared identity and each retired identity is absent from the whole
   desired set;
 - all old and desired identities are in the intended project;
-- old observed source/revision and desired source/revision are exact captured
-  values, never a mutable `latest` selector; and
+- old observed source/revision is exact, while desired source/build/runtime
+  inputs and the deterministic revision naming plan are exact; the desired
+  immutable revision ID is created and captured only by `STAGED`, never
+  selected through a mutable `latest` alias; and
 - both old and desired producer fingerprints are bound to the corresponding
   Git-backed source SHA and role.
 
@@ -228,8 +263,9 @@ non-secret digest. The actual values remain protected.
 
 The coordinator cannot enter `PREPARED` until every proof below succeeds in
 one bounded read-only admission pass. A later mutation boundary revalidates
-the relevant generation and etag immediately before mutation; the initial
-proof is not a lease over cloud state.
+the relevant native concurrency token or exact resource observation digest
+immediately before mutation; the initial proof is not a lease over cloud
+state.
 
 ### 5.1 Capability and source proof
 
@@ -244,8 +280,9 @@ proof is not a lease over cloud state.
   accepted only through this exact coordinated capability.
 - The old source SHA and immutable serving revision for each role are read
   from the platform and compared to the old protected manifest. The desired
-  source SHA and captured immutable staged revision are compared to the
-  desired protected manifest. Any mismatch fails closed.
+  source SHA, build/runtime inputs, and deterministic revision naming plan are
+  compared to the desired protected manifest; no desired immutable revision
+  is required until `STAGED` creates it. Any mismatch fails closed.
 - The producer proof includes the exact Git-backed Vercel SHA selected for the
   serving producer and the exact producer configuration fingerprint for each
   role. A project environment listing, a mutable alias, or a next-deploy
@@ -271,8 +308,8 @@ or replaying a task:
 
 - queue state is `PAUSED`;
 - the complete queue listing is empty, not merely a zero approximate count;
-- the queue's project, location, generation, and etag match the protected
-  resource proof; and
+- the queue's project, location, and complete configuration observation digest
+  match the protected resource proof; and
 - the queue target, audience, and caller contract match the old manifest.
 
 Observe the exact recovery scheduler for each role and prove:
@@ -281,7 +318,8 @@ Observe the exact recovery scheduler for each role and prove:
 - the pause epoch is a strict, non-future epoch older than the configured
   request-timeout-plus-grace quiescence window;
 - no attempt occurred inside that window; and
-- the job target, location, and OIDC contract match the old manifest.
+- the job target, location, pause epoch, and OIDC contract match the old
+  manifest and its complete observation digest.
 
 Retention is independently observed and must remain enabled. A retention
 proof does not authorize a recovery scheduler to resume and does not replace
@@ -292,53 +330,151 @@ quiescent, or retention is disabled, the coordinator remains closed. It may
 wait for an operator-managed safe drain, but it must not purge, replay, or
 silently discard work to manufacture an empty proof.
 
-### 5.4 Readiness v3 and producer admission proof
+### 5.4 Additive readiness v3 and producer admission proof
 
-The public readiness DTO is upgraded to a strict, PII-free schema version 3
-before this epoch is attempted. The exact consumer contract is:
+The public readiness DTO is an additive strict evolution of the current v2
+contract. It is not a replacement or a shortened DTO. The current v2 literal
+is `analysis-public-freeze-readiness-v2`; v3 uses the string literal
+`analysis-public-freeze-readiness-v3` and preserves every v2 key, type, and
+meaning while adding two PII-free Vercel admission facts.
 
 ```text
-schemaVersion: 3
-ready: boolean
-providerAdmissionEnabled: boolean
-preflightProducerConfigFingerprintVersion: string | null
-preflightProducerConfigFingerprint: lower-case SHA-256 hex digest | null
-preflightProducerConfigReady: boolean
-paidProducerConfigFingerprintVersion: string | null
-paidProducerConfigFingerprint: lower-case SHA-256 hex digest | null
-paidProducerConfigReady: boolean
+schemaVersion
+ready
+stage
+freezeMode
+publicFreezeEnabled
+sourceSha
+legacyTargetResource
+preflightProducerConfigFingerprintVersion
+preflightProducerConfigFingerprint
+preflightProducerConfigReady
+paidProducerConfigFingerprintVersion
+paidProducerConfigFingerprint
+paidProducerConfigReady
+routes
 ```
 
-The field names above are the complete public readiness key set for this
-contract. The DTO contains no identity strings, project identifiers, queue or
-scheduler names, URLs, task bodies, user IDs, provider IDs, run IDs, raw error
-messages, or log fragments. Fingerprints are computed by the serving runtime
-from its own canonical role configuration; callers cannot submit a tuple or
-identity to make the proof pass.
+Their current semantics remain unchanged in v3:
 
-`ready` is the aggregate readiness result used by existing consumers. It may
-be false for any aggregate reason and must never be interpreted as proof that
-provider admission is enabled. `providerAdmissionEnabled` is an independent
-boolean admission fact consumed explicitly by the coordinator and release
-checker. During `PREPARED` through `VERIFIED` it must be false. At activation,
-the coordinator must publicly observe it as true before resuming recovery
-schedulers or queues.
+- `schemaVersion` is the exact string literal
+  `analysis-public-freeze-readiness-v2` in v2 and the exact v3 literal above
+  in v3; it is not a number.
+- `stage` is `initial` or `expanded` when configured, otherwise `unknown`.
+- `freezeMode` is `drain-and-block` when configured, otherwise `unknown`.
+- `publicFreezeEnabled` is the boolean public-freeze setting owned by the
+  Vercel runtime.
+- `sourceSha` is the Vercel Git commit SHA only when it is a valid lower-case
+  40-character hexadecimal SHA and agrees with any configured source SHA;
+  otherwise it is `null`.
+- `legacyTargetResource` is the trimmed legacy target resource string or
+  `null`. It is preserved as evidence but is not independently treated as
+  active runtime provenance.
+- Each producer fingerprint version remains its exact current literal:
+  `preflight-producer-config-v1` for preflight and
+  `paid-producer-config-v1` for paid. Each fingerprint is either `null` or a
+  lower-case 64-character
+  SHA-256 hexadecimal digest computed by the serving runtime from its own
+  canonical role tuple (normalized task identity, target, and audience). The
+  corresponding `*Ready` boolean is true exactly when that role's tuple is
+  valid and its digest is non-null, and false otherwise. The DTO never emits
+  the tuple values.
+- `ready` preserves the v2 aggregate formula exactly: known `stage`,
+  `freezeMode == drain-and-block`, `publicFreezeEnabled == true`, the legacy
+  producer gate is frozen, non-null `sourceSha`, and both producer `*Ready`
+  booleans true. It does not include either new Vercel admission boolean and
+  it does not claim the private worker gate.
+- The readiness endpoint's HTTP status remains 200 exactly when `ready` is
+  true and 503 otherwise. The two additive admission booleans do not change
+  that aggregate status semantics.
 
-The preflight and paid fingerprint versions and digests must each match the
-desired protected producer manifest and the exact Git-backed Vercel source
-SHA. Missing, malformed, duplicate, or mismatched fields fail closed. The
-readiness client, release checker, and tests must reject unknown keys and must
-test `ready` and `providerAdmissionEnabled` independently.
+The v2 `routes` object remains exactly this three-route object and shape:
+
+```text
+routes: {
+  "/api/analysis/start": {
+    gateState: "frozen" | "not_ready",
+    expectedStatus: 410 | 503,
+    gateBeforeRuntime: true
+  },
+  "/api/analysis/step": {
+    gateState: "frozen" | "not_ready",
+    expectedStatus: 410 | 503,
+    gateBeforeRuntime: true
+  },
+  "/api/analysis/run": {
+    gateState: "frozen" | "not_ready",
+    expectedStatus: 410 | 503,
+    gateBeforeRuntime: true
+  }
+}
+```
+
+`gateState` is `frozen` exactly when the legacy producer gate is frozen and
+`not_ready` otherwise. Every route's `expectedStatus` is 410 when frozen and
+503 otherwise; every route has `gateBeforeRuntime: true`. The route keys,
+inner keys, allowed values, and gate-before-runtime semantics are not changed
+by v3. Unknown, missing, duplicate, or extra keys fail strict validation.
+
+The exact v3 key set is the complete v2 set above plus exactly these two
+top-level boolean keys, added without removing or renaming any v2 key:
+
+```text
+analysisV2AdmissionEnabled: boolean
+earlybirdWebhookAutoAdmissionEnabled: boolean
+```
+
+Serialization retains the current v2 key order and appends
+`analysisV2AdmissionEnabled` followed by
+`earlybirdWebhookAutoAdmissionEnabled`; strict consumers validate the exact
+key set as well as the values.
+
+`analysisV2AdmissionEnabled` is the PII-free public fact for
+`ANALYSIS_V2_ADMISSION_ENABLED`, the Vercel public preflight/intake gate.
+`earlybirdWebhookAutoAdmissionEnabled` is the independent PII-free fact for
+`EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED`, the Vercel paid webhook
+auto-admission gate. Neither field contains an identity, URL, project, user,
+task, provider, payment, or raw error value. The public DTO must not expose
+`ANALYSIS_PROVIDER_ADMISSION_ENABLED`; in particular it must not invent a
+public field named `providerAdmissionEnabled`.
+
+`ready` retains the v2 formula and remains independent of both new booleans.
+Therefore `ready: true` is aggregate freeze/fingerprint evidence, not proof
+that either Vercel work-producing gate is open. The v3 readiness consumer and
+coordinator must read all three facts separately:
+
+- Through `VERIFIED`, `ready: true`,
+  `analysisV2AdmissionEnabled: false`, and
+  `earlybirdWebhookAutoAdmissionEnabled: false` are required, together with
+  the exact v2 SHA, fingerprint, freeze, and route evidence.
+- The desired `INITIAL` private worker manifests require
+  `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true`. A staged desired revision may
+  carry that value while no-traffic, both queues and recovery schedulers are
+  paused, and both Vercel gates are false. This private fact is proved from
+  the exact Cloud Run revision/runtime manifest, never from the public DTO.
+- At activation, the public proof must show `ready: true` and
+  `analysisV2AdmissionEnabled: true`. The public proof must also show
+  `earlybirdWebhookAutoAdmissionEnabled` equal to its separately reviewed
+  desired value before any resource resumes. The coordinator must not infer
+  the paid webhook value from the public preflight value.
+
+The readiness implementation, release checker, and coordinator tests must
+reject unknown keys, preserve the entire v2 object, validate both new booleans
+as strict booleans, and test aggregate `ready` independently from both
+admission facts. Missing, malformed, duplicate, or mismatched fingerprints,
+SHA, freeze evidence, route object, or admission facts fail closed.
 
 ### 5.5 Provider-free probe proof
 
 After authentication succeeds, send only reviewed malformed-body probes to the
 private role receivers. Each receiver must return its documented 4xx response
-before task creation, provider admission, billing, or user-work creation.
-The probe contract is provider-free, bounded, and non-retrying. A 2xx, 5xx,
-unexpected 4xx, provider ledger row, billable operation, task, or user-work
-row fails verification. The probe does not contain a real target, account,
-provider run, or user identifier.
+before task creation, provider admission, billing, or user-work creation. The
+worker provider-admission gate may be true in the staged `INITIAL` revision,
+but validation must reject the malformed body before that gate can admit a
+provider operation. The probe contract is provider-free, bounded, and
+non-retrying. A 2xx, 5xx, unexpected 4xx, provider ledger row, billable
+operation, task, or user-work row fails verification. The probe does not
+contain a real target, account, provider run, or user identifier.
 
 ## 6. Architecture
 
@@ -357,34 +493,50 @@ The coordinator has four boundaries:
    release packet metadata; computes non-secret canonical digests; never emits
    protected values.
 2. **Observation boundary**: reads platform, queue, scheduler, IAM, revision,
-   Vercel, readiness, and ledger facts; returns typed facts plus generation and
-   etag tokens.
+   Vercel, readiness, and ledger facts; returns typed facts plus each
+   resource's native concurrency token or exact observation digest.
 3. **Mutation boundary**: acquires or renews the single lock, revalidates the
-   expected generation/etag immediately before a mutation, performs one
-   idempotent mutation, and reads the postcondition before advancing.
-4. **Activation boundary**: proves the public admission bit, resumes both
-   recovery schedulers and both queues, and records activation only after all
-   four resources are in the expected state.
+   applicable native token or observation digest immediately before a
+   mutation, performs one bounded idempotent mutation, and reads the
+   postcondition before advancing.
+4. **Activation boundary**: proves the public readiness aggregate and both
+   independent Vercel admission facts, retains the private worker gate proven
+   from the exact revision, resumes both recovery schedulers before either
+   queue, and records activation only after all four resources are in the
+   expected state.
 
 No boundary accepts a caller-supplied identity, URL, task body, provider run,
 or user identifier as proof. Every external value is compared to the
 protected manifest or to an independently observed public/runtime fingerprint.
 
-### 6.2 Single generation-bound deploy lock
+### 6.2 Single generation-bound deploy lock and journal storage
 
-The coordinator acquires one private deploy lock bound to:
+The concrete durable storage boundary is the existing private
+`ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET` GCS bucket. The bucket name and object
+contents are protected and never appear in this document or ordinary logs.
+The coordinator uses two digest-derived object families inside that bucket:
 
-- the epoch identifier and desired-manifest digest;
-- both role keys;
-- the current resource-generation digest;
-- an owner token digest;
-- a monotonically increasing fencing token; and
-- a bounded expiry and renewal deadline.
+- one coordinated epoch lock object keyed by the epoch and desired-manifest
+  digests. Its logical key components are `epoch-lock/`, the epoch digest,
+  the desired-manifest digest, and the `.lock` suffix; and
+- append-only journal objects under a prefix derived from the epoch digest,
+  with logical key components `epoch-journal/`, the epoch digest, a bounded
+  sequence marker, the transition digest, and the `.json` suffix.
 
-All epoch mutations carry the fencing token and expected generation/etag. A
-stale owner, expired lease, mismatched capability, or different manifest
-digest is rejected. A per-role lock cannot substitute for this lock because it
-would permit the two roles to observe different epochs.
+The lock object contains only non-secret hashes, the state marker, owner
+digest, fencing counter, and bounded expiry. Lock acquisition/replacement and
+renewal use GCS object-generation preconditions; creation uses
+`ifGenerationMatch=0` and takeover uses the exact observed object generation.
+A stale owner, expired lease without a new fence, mismatched
+capability, or different manifest digest is rejected. Journal objects are
+created with an object-generation precondition and read back before the state
+marker advances. The journal is append-only: an owner cannot rewrite an
+earlier transition.
+
+The lock binds the epoch identifier, desired-manifest digest, both role keys,
+owner token digest, monotonic fencing token, and bounded expiry/renewal
+deadline. A per-role lock cannot substitute for this lock because it would
+permit the two roles to observe different epochs.
 
 ### 6.3 Durable private epoch journal
 
@@ -398,12 +550,33 @@ The journal is not the source of truth for cloud state. It is a resume ledger.
 Every resume reads the current resource and readiness state again, then
 decides whether the recorded transition remains valid.
 
+### 6.4 Resource concurrency controls
+
+The coordinator never invents an etag or generation for a platform that does
+not expose one. It uses the following resource-specific protocol:
+
+| Resource | Native concurrency token | Before mutation | Mutation and postcondition |
+| --- | --- | --- | --- |
+| IAM policy | Provider policy `etag` | Fresh policy read and exact etag comparison | CAS policy update with etag; exact policy read-back. Any CAS mismatch fails closed. |
+| Cloud Run service/revision and traffic | Metadata `generation`/`resourceVersion` | Fresh service metadata read plus exact desired revision/traffic proof | Mutate or promote with the observed resource version; read exact serving traffic, revision, source SHA, and runtime gate back. |
+| GCS epoch lock/journal | Object `generation` | Fresh object generation read | Create/rewrite with `ifGenerationMatch`; read object generation and content digest back. |
+| Cloud Tasks queue | No native CAS token used by this design | Immediate complete configuration/task-list read and canonical observation digest under the epoch lock | One bounded pause/resume operation; immediate exact config/state/task-list read-back. Any digest drift fails closed. |
+| Cloud Scheduler recovery job | No native CAS token used by this design | Immediate complete job/config/status read and canonical observation digest under the epoch lock | One bounded pause/resume operation; immediate exact status/config/pause-epoch read-back. Any digest drift fails closed. |
+| Vercel producer deployment/gates | No cross-resource CAS token used by this design | Exact selected Git SHA, readiness v3 facts, and immutable deployment evidence read immediately before the operation | Deploy/select only the reviewed immutable source; read public readiness and source/fingerprint facts back. Any source or fact drift fails closed. |
+
+For Cloud Tasks and Cloud Scheduler, a changed observation digest between the
+pre-mutation read and post-read is a race even though no native etag exists.
+The epoch lock fences cooperating actors, while the immediate exact read
+detects external drift. No unconditional overwrite, guessed generation, or
+invented etag is allowed.
+
 ## 7. State machine
 
 The coordinator may advance only in the order shown below. A state is entered
 after its entry evidence is durable. A state may be retried idempotently when
-the same epoch, lock fence, manifest digest, resource generations, and etags
-still hold. Any unrecognized evidence or external drift fails closed.
+the same epoch, lock fence, manifest digest, native concurrency tokens, and
+resource observation digests still hold. Any unrecognized evidence or external
+drift fails closed.
 
 ### `PREPARED`
 
@@ -412,16 +585,21 @@ still hold. Any unrecognized evidence or external drift fails closed.
 - The coordinator capability is valid and binds both roles and the desired
   manifest digest.
 - The old and desired manifests are complete and exact, with all eight slots,
-  build identity, source/revision records, producer fingerprints, queue and
-  scheduler records, retention proof, IAM expectations, and readiness v3
+  build identity, old observed revision records, desired source/build/runtime
+  inputs and deterministic revision naming plan, producer fingerprints, queue
+  and scheduler records, retention proof, IAM expectations, and readiness v3
   contract.
 - Identity/project, pairwise-disjoint, build-distinct, unchanged-slot, and
   retired/shared-identity proofs pass.
-- Exact old source SHAs/revisions, Vercel Git-backed SHA, both producer
+- Exact old source SHAs/revisions, desired source/build/runtime inputs and
+  deterministic revision naming plan, Vercel Git-backed SHA, both producer
   fingerprints, queue PAUSED/empty proofs, both aged scheduler pause proofs,
-  retention enabled, and readiness v3 admission false are observed.
-- The single lock is acquired and the initial generation/etag digest is
-  recorded.
+  retention enabled, readiness `ready: true`, and both Vercel admission facts
+  false are observed. The private worker provider-admission value is proven
+  from the exact desired `INITIAL` manifest as true; it is not read from the
+  public endpoint.
+- The single GCS lock is acquired and the initial resource-specific
+  concurrency-token/observation digests are recorded.
 
 **Allowed mutations**
 
@@ -432,7 +610,9 @@ deployment, IAM, queue, scheduler, provider, or readiness mutation is allowed.
 
 The journal records the canonical old/desired manifest digests, source and
 resource proof digests, lock fence, and `PREPARED` marker. The public
-readiness proof still shows `providerAdmissionEnabled: false`.
+readiness proof shows `ready: true`, `analysisV2AdmissionEnabled: false`, and
+`earlybirdWebhookAutoAdmissionEnabled: false`; the private target worker
+gate remains the exact desired `INITIAL` value true.
 
 **Retry and idempotency**
 
@@ -451,66 +631,83 @@ readiness schema mismatch, or lock race stops before `STAGED`.
 
 **Entry evidence**
 
-`PREPARED` is complete, provider and producer admission remain false, and the
-two role deployment inputs resolve to the desired source SHAs and immutable
-revision plan. The readiness v3 deployment, if required by the release, is
-already serving with admission false and its exact public schema is observed.
+`PREPARED` is complete, both Vercel work-producing gates remain false, and the
+two role deployment inputs resolve to the desired source/build/runtime inputs
+and deterministic revision naming plan. The desired private worker
+provider-admission value is true in both target `INITIAL` manifests. The
+readiness v3 deployment is already serving with `ready: true`, both Vercel
+admission facts false, and its exact additive public schema observed.
 
 **Allowed mutations**
 
 - Build or deploy one exact no-traffic revision for each role using the
   desired runtime/build manifests and pinned inputs.
-- Bind the desired role, gate, and non-secret fingerprint configuration to
-  those revisions.
+- Bind the desired role, private worker provider-admission value, and
+  non-secret fingerprint configuration to those revisions; the Vercel gates
+  remain false outside those revisions.
 - Perform no traffic promotion, queue resume, scheduler resume, IAM grant
   removal, provider call, or user-work mutation.
 
-Each deployment mutation is preceded by a fresh service generation/etag proof
-and exact source/build proof. The revision selector is the captured immutable
-revision, never a mutable latest selector.
+Each deployment mutation is preceded by a fresh Cloud Run metadata
+generation/resourceVersion proof and exact source/build/runtime proof. The
+desired deterministic naming plan is used to create or look up the exact
+revision; its immutable observed revision ID/digest is captured in the
+journal only after the platform confirms it.
 
 **Completion evidence**
 
 - Both exact desired revisions exist and receive no traffic.
-- Each revision reports the desired role and admission gates false.
+- Each revision reports the desired role and
+  `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true`; no traffic can reach it.
+- The Vercel public/intake and paid webhook admission facts remain false.
 - Each staged revision's source SHA, runtime manifest digest, build manifest
-  digest, and non-secret fingerprint digest match the protected packet.
-- The public readiness v3 endpoint remains PII-free and reports admission
-  false.
+  digest, private worker-gate value, and non-secret fingerprint digest match
+  the protected packet.
+- The public readiness v3 endpoint remains PII-free, reports `ready: true`,
+  and reports both Vercel admission facts false.
 
 **Retry and idempotency**
 
-If the captured revision already exists with the exact digest and no traffic,
-the coordinator reuses it. A same-name or same-source revision with any
-different manifest, role, or gate is not adopted. A failed build can be
-retried only with the same protected inputs; an ambiguous platform result is
-resolved by read-back, not by submitting a second uncontrolled deployment.
+If the deterministic naming plan already resolves to an immutable revision
+with the exact source/build/runtime/fingerprint digest and no traffic, the
+coordinator reuses it and journals its observed immutable ID/digest. A
+same-name or same-source revision with any different manifest, role, gate, or
+metadata is not adopted. A failed build can be retried only with the same
+protected inputs; an ambiguous platform result is resolved by read-back, not
+by submitting a second uncontrolled deployment.
 
 **Fail-closed behavior**
 
-Any traffic, latest selector, source drift, gate-on revision, producer
-admission, or generation race leaves both roles closed. The coordinator does
-not promote a partial pair.
+Any traffic, mutable latest selector, source drift, unexpected private worker
+gate, Vercel gate-on state, producer drift, or Cloud Run generation race
+leaves both Vercel gates closed. The coordinator does not promote a partial
+pair.
 
 ### `PRODUCERS_CLOSED_ALIGNED`
 
 **Entry evidence**
 
 Both staged revisions are exact and no-traffic. Public readiness v3 reports
-`providerAdmissionEnabled: false`. Both producer planes are bound to the
-desired Git-backed source SHA and desired role fingerprints, but no producer
-may create work.
+`ready: true`, `analysisV2AdmissionEnabled: false`, and
+`earlybirdWebhookAutoAdmissionEnabled: false`. Both producer planes are bound
+to the desired Git-backed source SHA and desired role fingerprints, but no
+Vercel producer may create work. The private worker provider-admission value
+is true in each exact staged `INITIAL` revision and is not a public readiness
+fact.
 
 **Allowed mutations**
 
-- Close or reassert the Vercel producer/provider admission gate.
+- Close or reassert both Vercel work-producing gates: the public preflight
+  gate and the paid webhook auto-admission gate.
 - Deploy or select the reviewed producer revision that emits both desired
-  producer fingerprints while keeping admission false.
+  producer fingerprints while keeping both Vercel gates false.
 - Update only the protected, reviewed non-secret producer fingerprint
   configuration required to match the desired manifests.
 
-Do not create a task, send a probe task, enable provider admission, rotate IAM,
-promote a worker, resume a scheduler, or run a paid provider.
+Do not create a task, send a probe task, enable either Vercel gate, rotate IAM,
+promote a worker, resume a scheduler, exercise a signed/manual test path, or
+run a paid provider. Do not change the private worker provider-admission gate
+away from its exact desired `INITIAL` value.
 
 **Completion evidence**
 
@@ -518,8 +715,8 @@ promote a worker, resume a scheduler, or run a paid provider.
   SHA required by the packet.
 - Preflight and paid fingerprint version/digest pairs match their desired
   manifests exactly.
-- Public readiness v3 is the same strict key set, remains PII-free, and
-  reports admission false.
+- Public readiness v3 is the same additive strict key set, remains PII-free,
+  has `ready: true`, and reports both Vercel admission facts false.
 - A read-only producer and queue check sees no newly created task.
 
 **Retry and idempotency**
@@ -527,14 +724,16 @@ promote a worker, resume a scheduler, or run a paid provider.
 Re-reading an already aligned producer is a no-op. A failed producer deploy
 is recovered by selecting the exact captured deployment or retrying the same
 reviewed source, never by following a mutable alias. If the public source SHA,
-fingerprint, or schema changes, return to the last safe closed state and
-require a fresh proof.
+fingerprint, schema, or either Vercel admission fact changes, return to the
+last safe closed state and require a fresh proof.
 
 **Fail-closed behavior**
 
 Any missing fingerprint, aggregate/admission ambiguity, public schema drift,
-unexpected producer source, or task creation leaves admission false and blocks
-the next state.
+unexpected producer source, either Vercel gate enabled, or task creation
+leaves both Vercel gates false and blocks the next state. The private worker
+provider-admission gate may remain true only as specified by the exact staged
+`INITIAL` manifest.
 
 ### `QUEUES_ALIGNED`
 
@@ -543,12 +742,15 @@ the next state.
 `PRODUCERS_CLOSED_ALIGNED` is complete. Both exact queue resources are
 observed PAUSED and empty; both exact recovery schedulers are PAUSED with
 aged pause epochs; retention is enabled; and no recovery attempt occurred in
-the quiescence window.
+the quiescence window. Their complete configuration observation digests were
+read immediately before this state; neither resource is assigned an invented
+etag or generation.
 
 **Allowed mutations**
 
-- Reassert PAUSED on either queue or recovery scheduler when the observed
-  resource is still the expected generation and etag.
+- Reassert PAUSED on either queue or recovery scheduler only after an
+  immediate complete resource/configuration re-read still matches the
+  expected observation digest under the epoch lock.
 - Refresh a bounded read-only empty and quiescence proof.
 
 Do not purge tasks, acknowledge tasks, enqueue synthetic tasks, resume a
@@ -559,15 +761,15 @@ queue is non-empty, wait only for an operator-managed safe drain or abort.
 
 The complete queue listings are empty and both queues remain PAUSED. Both
 recovery schedulers remain PAUSED with pause epochs older than the configured
-window. Retention remains enabled. The postcondition records fresh generation
-and etag digests.
+window. Retention remains enabled. The postcondition records fresh queue and
+scheduler observation digests.
 
 **Retry and idempotency**
 
 Repeated pause operations are no-ops when the resource is already PAUSED.
 Empty and scheduler-age proofs are re-read on every retry. A changed
-generation, recent scheduler attempt, or new task invalidates the proof and
-requires revalidation from `PRODUCERS_CLOSED_ALIGNED`.
+configuration digest, recent scheduler attempt, or new task invalidates the
+proof and requires revalidation from `PRODUCERS_CLOSED_ALIGNED`.
 
 **Fail-closed behavior**
 
@@ -580,8 +782,11 @@ emptiness by deletion.
 **Entry evidence**
 
 Both producers are closed and aligned, both queues/schedulers are paused and
-empty/quiescent, retention is enabled, and both staged revisions are exact.
-The current IAM etags and policy generations are freshly observed.
+empty/quiescent, retention is enabled, both staged revisions are exact, and
+the public readiness proof is `ready: true` with both Vercel admission facts
+false. The private worker provider-admission value is true in both exact
+staged `INITIAL` revisions. The current IAM etags and Cloud Run
+generation/resourceVersion values are freshly observed.
 
 **Allowed mutations**
 
@@ -595,7 +800,8 @@ Using compare-and-swap etags and one lock fence:
 
 Every IAM mutation is one bounded CAS operation with an immediate read-back.
 Unrelated bindings are not replaced. No traffic, queue, scheduler, provider,
-or admission mutation is allowed in this state.
+or Vercel admission mutation is allowed in this state. The private worker
+provider-admission value remains the exact staged `INITIAL` setting.
 
 **Completion evidence**
 
@@ -605,7 +811,9 @@ or admission mutation is allowed in this state.
 - Desired task caller, enqueuer, runtime, and maintenance identities are
   bound only to their exact role/slot resources.
 - IAM etag/policy-generation postconditions match the expected new state.
-- Public admission remains false and both work planes remain paused.
+- Both Vercel admission facts remain false and both work planes remain
+  paused; the private worker gate remains true only in the exact staged
+  `INITIAL` revisions.
 
 **Retry and idempotency**
 
@@ -618,8 +826,9 @@ either prove the desired additions or stop.
 **Fail-closed behavior**
 
 There is no automatic IAM rollback. A partial policy is not treated as safe
-for activation. Keep admission false, queues/schedulers paused, and the
-staged revisions no-traffic; record the bounded failure and require a resumed
+for activation. Keep both Vercel gates false, queues/schedulers paused, and
+the staged revisions no-traffic; leave the private worker gate at the exact
+desired `INITIAL` value and record the bounded failure. Require a resumed
 epoch or a new reviewed epoch after operator inspection. Restoring the old
 policy blindly could reintroduce the identity collision or grant an ambiguous
 role.
@@ -629,8 +838,10 @@ role.
 **Entry evidence**
 
 `INVOKERS_ROTATED` is complete, both desired IAM policies are exact, the
-queues and schedulers are still paused, provider admission is false, and each
-staged revision is bound to an immutable desired source SHA and revision ID.
+queues and schedulers are still paused, both Vercel admission facts are false,
+and each staged revision is bound to the immutable revision ID/digest captured
+by `STAGED`. The private worker provider-admission value is true in the exact
+desired `INITIAL` revisions.
 Retired old invoker/enqueuer grants may still exist at entry; retaining them
 until both role revisions are exact prevents an invocation gap during the
 promotion boundary.
@@ -659,7 +870,9 @@ revision, queue resume, scheduler resume, or provider call is allowed.
 - Retired old invoker/enqueuer grants are absent only after both exact
   promotion postconditions and the removal CAS postconditions succeed.
 - No old revision receives traffic unexpectedly.
-- Public readiness remains schema v3 and admission false.
+- Public readiness remains additive schema v3 with `ready: true` and both
+  Vercel admission facts false; the private worker gate remains the exact
+  desired `INITIAL` value true.
 
 **Retry and idempotency**
 
@@ -673,134 +886,177 @@ the latest revision to compensate.
 
 **Fail-closed behavior**
 
-Any revision, traffic, source, runtime identity, or fingerprint mismatch or
+Any revision, traffic, source, runtime identity, fingerprint mismatch, or
 failed post-promotion grant removal blocks verification and activation. Keep
-all work closed; do not switch back to a guessed old revision or guessed old
-IAM policy.
+both Vercel gates false and all work planes paused; do not switch back to a
+guessed old revision or guessed old IAM policy.
 
 ### `VERIFIED`
 
 **Entry evidence**
 
 Both exact revisions are serving, desired IAM is exact, old grants retired as
-specified, producer fingerprints match, and admission is still false. The
-queues are PAUSED and empty, recovery schedulers are PAUSED and aged, and
+specified, producer fingerprints match, and the public readiness proof has
+`ready: true`, `analysisV2AdmissionEnabled: false`, and
+`earlybirdWebhookAutoAdmissionEnabled: false`. The private worker
+provider-admission value is true in both exact desired `INITIAL` revisions.
+The queues are PAUSED and empty, recovery schedulers are PAUSED and aged, and
 retention is enabled.
 
 **Allowed mutations**
 
 None except read-only checks and the bounded provider-free authenticated
 malformed-body probes described in section 5.5. The probes must run after
-auth, return the reviewed 4xx, and create no task, provider-run, billable,
+auth, return the reviewed 4xx before the private worker provider-admission
+gate can admit an operation, and create no task, provider-run, billable,
 user-work, or ledger side effect.
 
 **Completion evidence**
 
-- Repeated public readiness reads show schema v3, both exact fingerprints,
-  and `providerAdmissionEnabled: false`.
+- Repeated public readiness reads show additive schema v3, `ready: true`,
+  both exact fingerprints, `analysisV2AdmissionEnabled: false`, and
+  `earlybirdWebhookAutoAdmissionEnabled: false`.
 - Exact serving revisions, source SHAs, runtime identities, receiver IAM,
-  queue IAM, enqueuer IAM, maintenance IAM, and build separation all match.
+  queue IAM, enqueuer IAM, maintenance IAM, build separation, and private
+  `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true` all match.
 - Queue and scheduler proofs remain paused/empty/quiescent and retention is
   enabled.
 - Logs and ledgers show zero provider calls, billable operations, user-work
-  creations, and task creations during preparation and migration.
+  creations, and task creations through the pre-activation verification
+  boundary. The worker provider gate being true in a no-traffic revision is
+  not itself provider activity.
 - The journal contains a verification digest covering every invariant.
 
 **Retry and idempotency**
 
 Verification is fully repeatable. A probe or read that has any ambiguous
 result is not retried against a provider; repeat the same read-only proof or
-abort. A resource generation or etag change invalidates verification and
-returns the epoch to closed revalidation.
+abort. A changed IAM etag, Cloud Run metadata generation/resourceVersion, GCS
+object generation, queue observation digest, scheduler observation digest, or
+Vercel proof invalidates verification and returns the epoch to closed
+revalidation.
 
 **Fail-closed behavior**
 
 No activation occurs on a partial, stale, aggregate-only, or ambiguous proof.
-The public admission bit remains false and all queues/schedulers remain
-paused.
+Both Vercel admission facts remain false and all queues/schedulers remain
+paused; the private worker gate remains the exact desired `INITIAL` value.
 
 ### `ACTIVATED`
 
 **Entry evidence**
 
 `VERIFIED` is complete, the lock is current, the activation fence is fresh,
-and both queues/schedulers are still paused. Retention is still enabled.
+and both queues/schedulers are still paused. The private worker gate is already
+the exact desired `INITIAL` value true. Retention is still enabled.
 
-**Allowed mutations, in exact order**
+**Allowed mutations** (in exact order)
 
-1. Publish or select the reviewed producer state that enables admission.
-2. Read the public readiness endpoint and prove the exact schema v3 with
-   `providerAdmissionEnabled: true`, both desired fingerprints, and the exact
-   Git-backed source SHA evidence.
-3. Revalidate both queue and scheduler generations immediately before each
-   resume.
-4. Resume both recovery schedulers and both queues. Resume all four resources
-   under the epoch lock; no single role is activated in isolation.
+1. Publish or select the reviewed producer state that sets
+   `analysisV2AdmissionEnabled` to its exact desired activation value.
+2. Independently set or select the reviewed paid webhook state and read the
+   public readiness endpoint. Prove additive schema v3, `ready: true`,
+   `analysisV2AdmissionEnabled: true`, the exact desired value of
+   `earlybirdWebhookAutoAdmissionEnabled`, both desired fingerprints, and the
+   exact Git-backed source SHA evidence. Never infer the paid value from the
+   public preflight value. The private worker gate is not read from this
+   endpoint; it remains proven from the exact serving revision.
+3. Revalidate each queue and scheduler's complete observation digest
+   immediately before its bounded resume operation.
+4. Resume resources in this deterministic order under the epoch lock:
+   preflight recovery scheduler, paid recovery scheduler, preflight queue,
+   then paid queue. This is scheduler-before-queue for both roles; the order
+   is fixed and not a transaction.
 5. Read back all four resource states and record activation only after both
    roles are active, retention remains enabled, and desired IAM/revisions are
    still exact.
 
 **Completion evidence**
 
-The public proof is admission true, both recovery schedulers are enabled, both
-queues are enabled, retention is enabled, and both roles serve the exact
-desired revisions with exact IAM. The journal records activation only after
-the complete postcondition, not when the first resume call returns.
+The public proof is `ready: true`,
+`analysisV2AdmissionEnabled: true`, and
+`earlybirdWebhookAutoAdmissionEnabled` equal to its separately reviewed
+desired value. Both recovery schedulers are enabled, both queues are enabled,
+retention is enabled, the private worker gate is true in both exact serving
+revisions, and both roles serve the exact desired revisions with exact IAM.
+The journal records activation only after the complete postcondition, not when
+the first resume call returns.
 
 **Retry and idempotency**
 
-If admission is already true and every resource is already active with the
-same epoch proof, activation is a no-op. If admission becomes true but any
-resume fails or the postcondition is incomplete, immediately close admission,
-pause any resource that was resumed, and verify both queues/schedulers are
-paused before retrying. Do not treat a partially active epoch as complete.
+If both Vercel admission facts already equal their reviewed activation values
+and every resource is already active with the same epoch proof, activation is
+a no-op. Once the public admission proof is true, legitimate external work
+may be admitted into queues that are still paused during the short ordered
+resume window; that is post-activation-boundary work, not a violation of the
+pre-activation zero-work proof. If any resume fails, immediately set both
+Vercel admission gates false, pause any resumed scheduler or queue, never
+purge or discard newly admitted tasks, and require operator review and safe
+drain before retry when a queue is non-empty. Do not treat a partially active
+epoch as complete.
 
 **Fail-closed behavior**
 
 Activation never resumes a single role on a stale or unverified proof. A
-partial activation is converted back to closed admission and paused work; IAM
-and revisions remain at the exact desired state rather than being restored by
-an unsafe automatic rollback.
+partial activation is compensated by closing both Vercel gates and pausing any
+resumed scheduler or queue; IAM and revisions remain at the exact desired
+state rather than being restored by an unsafe automatic rollback. Cross-plane
+atomicity is provided by the ordered state machine and this fail-closed
+compensation, not by a transaction spanning Vercel, Cloud Scheduler, and
+Cloud Tasks.
 
 ## 8. Safe ordering and partial-failure rules
 
 The ordering is a safety property, not an operator preference:
 
-1. Deploy readiness schema v3 with admission false and verify the strict
-   PII-free DTO.
+1. Deploy additive readiness schema v3 with both Vercel work-producing gates
+   false and verify the entire strict v2-plus-v3 PII-free DTO. The private
+   worker provider-admission gate is not changed by this public deployment.
 2. Acquire the single epoch lock and complete all `PREPARED` proofs.
-3. Stage both role revisions with no traffic and gates false.
-4. Keep Vercel/provider admission false while aligning both producer
-   fingerprints to the desired Git-backed source SHA.
+3. Stage both role revisions with no traffic, exact desired
+   `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true`, and both Vercel gates false.
+4. Keep both Vercel gates false while aligning both producer fingerprints to
+   the desired Git-backed source SHA. Signed/manual test paths are not
+   exercised.
 5. Pause and prove both recovery schedulers and both queues are empty. Keep
    retention enabled.
-6. Align desired OIDC and IAM with generation/etag compare-and-swap. Add
+6. Align desired OIDC and IAM with IAM-etag compare-and-swap. Add
    desired bindings first and read them back; retain old invoker/enqueuer
    grants until both revisions are exact. Never delete old service accounts.
 7. Promote only the captured exact revisions, then remove retired old
    invoker/enqueuer grants using fresh CAS etags after both planes are exact
    and before activation.
 8. Run the complete verification, including authenticated malformed-body
-   probes that return reviewed 4xx and zero-work ledger/log proofs.
-9. Prove public readiness `providerAdmissionEnabled: true`.
-10. Resume both recovery schedulers and both queues, rechecking their
-    generations immediately before each mutation; retain the retention
-    scheduler enabled.
+   probes that return reviewed 4xx before provider admission and zero-work
+   ledger/log proofs through this pre-activation boundary.
+9. Prove public readiness `ready: true`,
+   `analysisV2AdmissionEnabled: true`, and
+   `earlybirdWebhookAutoAdmissionEnabled` equal to its separately reviewed
+   desired value. The private worker provider-admission gate remains the exact
+   desired `INITIAL` value true and is not inferred from this public proof.
+10. Resume resources in the fixed order: preflight recovery scheduler, paid
+    recovery scheduler, preflight queue, then paid queue. Recheck each
+    resource's complete observation digest immediately before its mutation;
+    retain the retention scheduler enabled.
 
-Before activation, a failure leaves admission false, both queues paused, both
-recovery schedulers paused, and no provider/user/billable work. A failure after
-desired grants are added does not trigger an automatic IAM rollback. The
-desired policy may be left in place while the system remains closed so an
-operator can complete the same epoch after revalidation. This avoids restoring
-an old policy whose identity aliases are precisely the reason the migration is
+Before the public activation boundary, a failure leaves both Vercel gates
+false, both queues paused, both recovery schedulers paused, and no
+provider/user/billable work. The private worker gate may be true in an exact
+no-traffic revision without violating that proof. A failure after desired
+grants are added does not trigger an automatic IAM rollback. The desired
+policy may be left in place while the system remains closed so an operator can
+complete the same epoch after revalidation. This avoids restoring an old
+policy whose identity aliases are precisely the reason the migration is
 needed.
 
-If a queue or scheduler resumes during a partial activation, immediately
-close admission, pause every resumed resource, re-prove emptiness/quiescence,
-and inspect the provider/billable/user-work ledgers. Any observed work stops
-automatic recovery and requires operator review. The coordinator never cancels
-an ambiguous provider run, changes payment status, deletes a task to hide a
-side effect, or resumes the other role to compensate.
+Once the public activation proof is true, legitimate external work may be
+admitted into a still-paused queue during the fixed scheduler-then-queue
+resume window. If any resume fails, immediately close both Vercel gates, pause
+any resumed scheduler or queue, never purge or discard newly admitted tasks,
+and require operator review and safe drain before retry if a queue is
+non-empty. Inspect provider/billable/user-work ledgers; any observed work
+requires review. The coordinator never cancels an ambiguous provider run,
+changes payment status, or resumes the other role to compensate.
 
 ## 9. Crash recovery, fencing, and operator abort
 
@@ -823,12 +1079,20 @@ epoch:
   lockExpiresAt
   activationFenceDigest
   sourceProofDigest
+  preflightStagedRevisionDigest
+  paidStagedRevisionDigest
   producerProofDigest
   queueProofDigest
   schedulerProofDigest
   retentionProofDigest
   iamProofDigest
   readinessProofDigest
+  gcsObjectGenerationDigest
+  iamEtagDigest
+  cloudRunGenerationResourceVersionDigest
+  queueObservationDigest
+  schedulerObservationDigest
+  vercelProofDigest
   lastReasonCode
   createdAt
   updatedAt
@@ -842,8 +1106,8 @@ transition:
   preconditionDigest
   mutationDigest
   postconditionDigest
-  observedGenerationDigest
-  observedEtagDigest
+  nativeConcurrencyTokenDigest
+  resourceObservationDigest
   resultCode
   recordedAt
 ```
@@ -853,16 +1117,19 @@ bounded timestamps. The journal does not store identities, credentials,
 URLs, project names, queue/scheduler names, task bodies, deployment names,
 raw logs, user IDs, provider IDs, run IDs, or manifest values. A digest must
 be computed from a canonical protected value without making the value
-recoverable in ordinary logs.
+recoverable in ordinary logs. The two staged-revision fields are digests of the
+immutable observed revision IDs plus their exact manifest/source proof; the
+protected revision IDs themselves remain outside the journal.
 
 ### 9.2 Lock ownership and expiry
 
 The lock owner is the coordinator process bound to the capability and epoch;
 the journal stores only its digest. Acquisition is compare-and-set on an
-unowned or expired lock and returns a monotonic fencing token. Renewal is
-bounded and must precede expiry. Every mutation verifies the live fence and
-the expected resource generation/etag. An expired owner cannot renew or
-mutate, even if its process later resumes.
+unowned or expired GCS lock object and returns a monotonic fencing token.
+Renewal uses the observed lock-object generation and is bounded to precede
+expiry. Every mutation verifies the live fence and the applicable native token
+or resource observation digest. An expired owner cannot renew or mutate, even
+if its process later resumes.
 
 An operator may not force-unlock a live owner by changing a marker in the
 journal. After expiry, a new owner must re-read all cloud state and either
@@ -873,59 +1140,75 @@ new reviewed epoch.
 
 - **`PREPARED`**: reacquire the lock, re-read every precondition, and resume
   only if the old/desired packet digests and resource proofs still match.
-- **`STAGED`**: verify each captured no-traffic revision. Restage only the
-  missing exact revision with identical inputs; never adopt a different
-  revision or latest alias.
-- **`PRODUCERS_CLOSED_ALIGNED`**: re-read the public schema, admission bit,
-  Git-backed SHA, and both fingerprints. Re-close admission if needed; stop
-  on any producer drift.
+- **`STAGED`**: verify each captured no-traffic revision ID/digest. Create or
+  reuse only the deterministic-plan revision with identical inputs; never
+  adopt a different revision or latest alias.
+- **`PRODUCERS_CLOSED_ALIGNED`**: re-read the public schema, both named Vercel
+  admission facts, Git-backed SHA, and both fingerprints. Re-close both
+  Vercel gates if needed; stop on any producer drift. Do not infer the private
+  worker gate from this public read.
 - **`QUEUES_ALIGNED`**: re-read complete queue listings and aged scheduler
-  pauses. Reassert pause only with current generation/etag; do not purge or
-  replay work.
+  pauses. Reassert pause only when the complete configuration observation
+  digest still matches under the epoch lock; do not purge or replay work.
 - **`INVOKERS_ROTATED`**: read both IAM policies. If desired additions are
   already exact, continue. If additions are partial, complete only the
   reviewed additions using a new etag. Retain old invoker/enqueuer grants
   until both revisions are exact; never restore the old policy automatically.
 - **`SERVICES_PROMOTED`**: observe both serving revisions and promote only a
-  missing captured revision. Once both are exact, remove retired
-  invoker/enqueuer grants with fresh etags. If traffic or removal is
-  ambiguous, keep admission closed and require an operator decision.
+  missing captured revision using fresh Cloud Run metadata
+  generation/resourceVersion evidence. Once both are exact, remove retired
+  invoker/enqueuer grants with fresh IAM etags. If traffic or removal is
+  ambiguous, keep both Vercel gates false and require an operator decision.
 - **`VERIFIED`**: rerun all read-only proofs and provider-free probes; the
   journal marker alone cannot authorize activation.
-- **`ACTIVATED`**: prove public admission and all four resumed resources. If
-  activation is partial, close admission and pause all four, then record a
-  bounded recovery result; no automatic IAM rollback.
+- **`ACTIVATED`**: prove public readiness and both Vercel admission facts plus
+  all four resumed resources. If activation is partial, close both Vercel
+  gates and pause every resumed resource, preserve any newly admitted tasks,
+  and record a bounded recovery result; no automatic IAM rollback or automatic
+  empty-queue reproof is required after the public boundary has opened.
 
-### 9.4 Generation and etag races
+### 9.4 Resource concurrency and race handling
 
-Every mutation follows this sequence:
+Every mutation follows the resource-specific protocol in section 6.4:
 
-1. Read the exact resource and its current generation/etag.
-2. Compare both to the last proof and the protected expected resource key.
-3. Acquire or confirm the epoch lock fence immediately before the mutation.
-4. Submit one CAS mutation with the fresh generation/etag and fence.
-5. Read the resource back and verify the exact postcondition.
-6. Append the transition record only after the postcondition succeeds.
+1. Read the exact resource and its native token, or its complete observation
+   digest when the platform has no native CAS token.
+2. Compare that token/digest to the last proof and the protected expected
+   resource key.
+3. Acquire or confirm the GCS epoch-lock fence immediately before mutation.
+4. For IAM, submit one etag CAS; for Cloud Run, submit one mutation bound to
+   metadata generation/resourceVersion; for GCS, use object-generation
+   preconditions; for Cloud Tasks, Cloud Scheduler, and Vercel, perform one
+   bounded operation under the lock after the immediate observation re-read.
+5. Read the resource back and verify its exact postcondition, including the
+   complete observation digest for resources without native CAS.
+6. Append the transition object with the applicable token/digest only after
+   the postcondition succeeds.
 
-A changed generation or etag returns a race result, not a retryable success.
-The coordinator re-observes from the current state, bounded to a reviewed
-number of attempts, and then stops closed. It never retries with stale tokens,
-uses an unconditional overwrite, or assumes the caller's earlier snapshot is
-still current.
+A changed native token or observation digest returns a race result, not a
+retryable success. The coordinator re-observes from current state, bounded to
+a reviewed number of attempts, and then stops closed. It never retries with a
+stale IAM etag, Cloud Run resourceVersion, or GCS object generation; it never
+uses an unconditional overwrite; and it never assumes a queue/scheduler
+observation remains current without the immediate post-read.
 
 ### 9.5 Operator abort semantics
 
-An operator abort is a durable marker bound to the epoch and lock fence. The
-coordinator finishes only the minimum safe closure: set producer/provider
-admission false, pause any resumed queue or scheduler, verify both queues are
-paused and empty when possible, and keep retention enabled. It does not purge
-tasks, delete service accounts, restore ambiguous IAM, mutate payment state,
-or run a canary.
+An operator abort is a durable marker bound to the epoch and lock fence. Before
+the public activation boundary, the coordinator finishes the minimum safe
+closure: set both Vercel gates false, pause any resumed queue or scheduler,
+verify the pre-activation queues are paused/empty when safe, and keep
+retention enabled. After the public boundary has opened, it still sets both
+Vercel gates false and pauses any resumed resource, but it never purges or
+discards newly admitted tasks; a non-empty queue requires operator
+review/safe drain before retry. The private worker gate remains the exact
+desired `INITIAL` setting. The coordinator does not delete service accounts,
+restore ambiguous IAM, mutate payment state, or run a canary.
 
 An abort before activation leaves staged revisions no-traffic and may leave
 the exact desired IAM policy in place. A later attempt uses a new reviewed
-epoch after fresh old-state and generation/etag proofs; it must not reuse an
-aborted epoch's capability. An abort after partial activation follows the
+epoch after fresh old-state and resource-token/observation-digest proofs; it
+must not reuse an aborted epoch's capability. An abort after partial activation follows the
 same closure and additionally requires provider/billable/user-work ledger
 review before any future activation.
 
@@ -953,55 +1236,77 @@ that protected values are absent from output and journal fixtures.
 | Identity | Malformed identity, wrong resource kind, wildcard, or invalid project | Rejected before observation-dependent mutation. |
 | Identity | Cross-project old, desired, build, task, runtime, enqueuer, or maintenance identity | Rejected. |
 | Source | Old serving SHA/revision differs from the exact old manifest | Rejected. |
-| Source | Desired staged revision differs from desired source SHA or is mutable latest | Rejected; captured immutable revision is required. |
+| Source | Desired manifest omits exact source/build/runtime inputs or deterministic revision naming plan | Rejected before staging. |
+| Source | `STAGED` revision differs from desired inputs, is mutable latest, or its immutable ID/digest is not captured after creation | Rejected; later states cannot proceed. |
 | Producer | Missing or mismatched preflight fingerprint | Rejected. |
 | Producer | Missing or mismatched paid fingerprint | Rejected. |
 | Producer | Project environment metadata is present but active Git-backed SHA/fingerprint is absent | Rejected; metadata is not active evidence. |
-| Readiness | Strict readiness v3 exact-key DTO with PII-free fields | Accepted only with the exact schema and no extra identity/URL/task/user fields. |
-| Readiness | `ready=true`, `providerAdmissionEnabled=false` | Aggregate readiness does not activate; coordinator remains closed. |
-| Readiness | `ready=false`, `providerAdmissionEnabled=true` | Rejected as an inconsistent activation proof. |
-| Readiness | Admission false through `PREPARED` to `VERIFIED` | Required. |
-| Readiness | Public admission true at activation with both fingerprints exact | Required before resume. |
-| Queue | Wrong exact resource, generation, location, or etag | Rejected. |
+| Readiness | Strict v3 exact-key DTO preserves every v2 key and exact three-route object, adds only the two Vercel booleans, and contains no PII/protected values | Accepted only with string schema literal `analysis-public-freeze-readiness-v3`; unknown or removed keys fail. |
+| Readiness | `ready=true`, `analysisV2AdmissionEnabled=false`, `earlybirdWebhookAutoAdmissionEnabled=false`, private worker gate true only in exact staged `INITIAL` revision | Valid through `VERIFIED`; aggregate ready is independent of both Vercel gates. |
+| Readiness | `ready=false` with any Vercel admission combination | Rejected for state completion and activation; v2 aggregate semantics remain fail-closed. |
+| Readiness | `ready=true`, public gate true, paid webhook false when desired is false | Valid activation fact only if that exact paid desired value was separately reviewed. |
+| Readiness | `ready=true`, public gate true, paid webhook differs from its separately reviewed desired value | Rejected; the paid value is never inferred from the public gate. |
+| Readiness | Public DTO contains `ANALYSIS_PROVIDER_ADMISSION_ENABLED` or a provider-admission boolean | Rejected; private worker gate is not publicly readable. |
+| Readiness | Public v2 route object changes path, status, inner key, or gate-before-runtime semantics | Rejected. |
+| Queue | Wrong exact resource, location, or complete configuration observation digest | Rejected; no invented queue etag/generation is accepted. |
 | Queue | Either queue not PAUSED | Rejected and remains closed. |
 | Queue | Either queue non-empty | Rejected; no purge, replay, or synthetic drain. |
 | Scheduler | Either recovery scheduler not PAUSED | Rejected. |
 | Scheduler | Pause epoch future, malformed, or younger than quiescence window | Rejected. |
+| Scheduler | Wrong exact resource, location, or complete configuration observation digest | Rejected; no invented scheduler etag/generation is accepted. |
 | Retention | Retention disabled or target drifted | Rejected; retention is never disabled to complete migration. |
 | IAM | Desired add grant CAS succeeds and read-back is exact | Continue. |
 | IAM | IAM etag changes between proof and mutation | Re-observe and fail/retry with fresh etag; stale CAS is never reused. |
 | IAM | Old grant removal occurs before both role planes are exact | Reject the coordinator implementation and fixture. |
 | IAM | Old grant removal is ambiguous | Remain closed; no automatic IAM rollback. |
-| Generation | Service/queue/scheduler generation changes before mutation | Fence the mutation, re-observe, and stop after bounded attempts. |
-| State failure | Failure before `PREPARED` completion | No mutation and no admission. |
+| Cloud Run | Service metadata generation/resourceVersion changes before mutation or traffic read-back differs | Fence the mutation, re-observe, and stop after bounded attempts. |
+| GCS | Lock/journal object generation precondition fails | Reject stale owner; acquire a new fence or stop closed. |
+| Observation race | Queue or scheduler complete configuration digest changes before or after mutation | Re-observe under the epoch lock; stop closed after bounded attempts. |
+| State failure | Failure before `PREPARED` completion | No mutation; both Vercel gates remain false and private worker gate is not changed. |
 | State failure | Failure before/after each `STAGED` revision | Existing exact revision is reused only when no-traffic and digest-exact. |
-| State failure | Failure before/after producer alignment | Admission remains false; no task is created. |
+| State failure | Failure before/after producer alignment | Both Vercel gates remain false; private worker gate may be true only in exact no-traffic `INITIAL` revisions; no task is created. |
 | State failure | Failure before/after queue alignment | Both queues/schedulers remain paused; no purge or replay. |
 | State failure | Failure after each IAM add/remove mutation | Desired exactness is re-read; no guessed old-policy restore. |
 | State failure | Failure after one service promotion | The promoted exact revision remains closed; missing role is promoted only from the captured revision. |
-| State failure | Failure during verification/probe | Admission remains false; no provider or billable side effect. |
-| State failure | Failure after admission true but before all resumes | Admission closes immediately, resumed resources pause, and activation is incomplete. |
+| State failure | Failure during verification/probe | Both Vercel gates remain false; private worker gate true does not create work without traffic; no provider or billable side effect. |
+| State failure | Failure after public admission is true but before all resumes | Both Vercel gates close immediately, resumed resources pause, newly admitted tasks are preserved, and a non-empty queue requires operator review/drain before retry. |
 | Resume | Crash at every state boundary | Journal resume revalidates current state and performs no duplicate unsafe mutation. |
 | Resume | Same epoch and exact postcondition replay | No-op/idempotent completion. |
 | Resume | Expired owner resumes | Old fence rejected; new owner must re-observe. |
 | Probe | Authenticated malformed body for each role | Reviewed 4xx before provider/task/billing/user work. |
-| Zero work | Full migration harness | Zero provider calls, billable operations, user-work rows, task creations, and real canary calls before activation. |
+| Zero work | Full migration harness through `VERIFIED` | Zero provider calls, billable operations, user-work rows, task creations, and real canary calls before the public activation boundary. |
 | Security | Journal and logs inspected for protected values | Only non-secret digests, slot names, markers, timestamps, and allowlisted codes are present. |
 
 ### 10.1 Readiness v3 consumer and test updates
 
 The readiness v3 implementation and every consumer must be updated together:
 
-- the public DTO schema test asserts the exact key set and rejects unknown
-  keys;
+- the public DTO schema test asserts the entire v2 key set and exact route
+  object, then the additive v3 key set with string schema literal
+  `analysis-public-freeze-readiness-v3`; it rejects unknown, removed,
+  duplicate, or renamed keys;
+- v2 `ready` semantics remain exact: known stage, drain-and-block mode,
+  public freeze enabled, frozen legacy producer gate, non-null source SHA,
+  and both producer fingerprint ready booleans; neither new Vercel boolean is
+  folded into `ready`;
 - the runtime computes both role fingerprints from its own canonical config
   and emits null/false evidence on missing or malformed config;
-- the release checker consumes `providerAdmissionEnabled` explicitly and
+- the runtime emits `analysisV2AdmissionEnabled` and
+  `earlybirdWebhookAutoAdmissionEnabled` as strict, independent, PII-free
+  booleans and never emits the private worker gate;
+- the release checker consumes the two named Vercel facts explicitly and
   never promotes based only on aggregate `ready`;
-- coordinator tests require admission false for every pre-activation state
-  and require a fresh public true proof before activation;
-- false/false, true/false, false/true, and true/true combinations are tested
-  with the documented aggregate semantics;
+- coordinator tests require `ready: true`, both Vercel booleans false, and
+  exact freeze/SHA/fingerprint/route evidence through `VERIFIED`; the private
+  worker gate is checked from the exact revision manifest and is true for the
+  desired `INITIAL` target;
+- readiness tests cover `ready=true` with both Vercel booleans false,
+  `ready=true` with public true and the separately reviewed paid value,
+  `ready=true` with a paid-value mismatch, and `ready=false` under every
+  boolean combination; no combination treats `ready` as admission proof;
+- activation tests require public true plus the exact separately reviewed
+  paid webhook value before scheduler/queue resume, without inferring one
+  gate from the other;
 - no readiness fixture contains a raw identity, URL, task body, user ID,
   provider ID, or raw error; and
 - the selected Git-backed source SHA and both fingerprint digests are matched
@@ -1016,20 +1321,29 @@ The readiness v3 implementation and every consumer must be updated together:
    state-machine, journal, IAM-CAS, generation-race, readiness-v3, and
    fake-provider tests in CI; no production credentials or paid-provider
    network access is permitted in those checks.
-2. Deploy readiness v3 with provider/producer admission false. Verify the
-   public exact-key DTO, aggregate/admission separation, both fingerprints,
-   and the selected Git-backed source SHA without exposing protected values.
+2. Deploy additive readiness v3 with both Vercel work-producing gates false.
+   Verify the full v2 key set and exact route object plus the two new
+   PII-free Vercel admission facts, aggregate/readiness separation, both
+   fingerprints, and the selected Git-backed source SHA without exposing
+   protected values. The private worker provider-admission gate is checked
+   only from staged Cloud Run revision/runtime evidence.
 3. Prepare the protected release packet containing exact old and desired
-   role-slot manifests, exact source SHAs/revisions, exact queue/scheduler
-   resources and generations/etags, aged pause proofs, retention proof,
-   desired IAM, Vercel SHA, and both producer fingerprints.
+   role-slot manifests, exact old source SHAs/revisions, desired
+   source/build/runtime inputs and deterministic revision naming plan, exact
+   queue/scheduler resources and observation digests, aged pause proofs,
+   retention proof, desired IAM, Vercel SHA, and both producer fingerprints.
 4. Start the guarded coordinator. It must complete `PREPARED`, then move
-   through the states in order while admission remains false.
+   through the states in order while both Vercel gates remain false. The
+   desired private worker gate is true in the staged no-traffic `INITIAL`
+   revisions.
 5. At `VERIFIED`, review exact revisions, IAM, queue/scheduler state,
    readiness, fingerprints, source SHAs, and zero-work ledgers/logs.
-6. Activate by proving public admission true, then resuming both recovery
-   schedulers and both queues in the required order. Verify the complete
-   postcondition and retention.
+6. Activate by proving public readiness true, public preflight/intake
+   admission true, and the paid webhook boolean equal to its separately
+   reviewed desired value. Then resume both recovery schedulers before either
+   queue in the fixed role order. Legitimate work admitted after that public
+   boundary may wait in a still-paused queue during the short resume window;
+   verify the complete postcondition and retention.
 7. Keep the final real Instagram/provider canary unrun. A user/operator may
    perform it later under the separate canary procedure after reviewing this
    evidence.
@@ -1038,9 +1352,11 @@ The readiness v3 implementation and every consumer must be updated together:
 
 Rollback means restoring safe closure, not restoring an ambiguous IAM graph:
 
-- set producer/provider admission false;
+- set both Vercel admission gates false;
 - pause any resumed recovery scheduler and queue;
-- re-prove both queues paused/empty where safe and keep retention enabled;
+- before public activation, re-prove both queues paused/empty where safe; after
+  public activation, preserve any newly admitted task and require operator
+  review/safe drain if a queue is non-empty; keep retention enabled;
 - preserve exact desired IAM and no-traffic/serving revision state unless a
   new reviewed epoch explicitly changes it;
 - do not delete old service accounts or restore cross-role aliases;
@@ -1066,24 +1382,35 @@ or ordinary output.
 
 Non-secret evidence may include abstract role/slot names, schema versions,
 boolean proof outcomes, lower-case cryptographic digests, source SHA digests,
-resource generation/etag digests, bounded timestamps, lock fences, state
+native-token/observation digests, bounded timestamps, lock fences, state
 markers, and allowlisted reason codes. Even a non-secret digest must not be
 accompanied by the value it represents.
 
 ### 12.2 Observability
 
 Emit structured, PII-free events for epoch creation, lock acquire/renew/lose,
-state transitions, proof success/failure, generation/etag races, CAS outcomes,
-activation closure, and operator abort. Fields are limited to epoch/manifest
-digests, abstract role/slot, state, fence, result code, duration, and
-non-secret proof digests.
+state transitions, proof success/failure, native-token/observation races, CAS
+outcomes, activation closure, and operator abort. Fields are limited to
+epoch/manifest digests, abstract role/slot, state, fence, result code,
+duration, and non-secret proof digests.
 
 Alert on any of the following:
 
-- provider admission true before `VERIFIED` or without both fingerprints;
+- either Vercel admission fact true before `ACTIVATED` or without the exact
+  readiness/SHA/fingerprint proof;
+- paid webhook auto-admission differing from its separately reviewed desired
+  value at activation;
+- private `ANALYSIS_PROVIDER_ADMISSION_ENABLED` absent or false in an exact
+  desired `INITIAL` worker revision, or a provider call before the public
+  activation boundary;
 - a queue or recovery scheduler enabled while the epoch is not activated;
-- provider, billable, user-work, or task activity while admission is false;
+- provider, billable, user-work, or task activity before the public activation
+  boundary while both Vercel gates are false;
 - IAM mutation without the active epoch fence or a fresh CAS etag;
+- Cloud Run traffic/revision mutation without the active epoch fence or fresh
+  metadata generation/resourceVersion;
+- queue or scheduler mutation without the active epoch fence and immediate
+  complete observation digest read-back;
 - an old service account deletion request;
 - journal state advancing without a postcondition digest; or
 - readiness v3 emitting an unknown key or a protected value.
@@ -1097,20 +1424,29 @@ Before starting:
   slots plus build identity.
 - Confirm pairwise desired distinctness, build distinctness, same-slot-only
   unchanged identities, and retirement of all shared/retired identities.
-- Confirm exact old/desired source SHAs and immutable revisions.
+- Confirm exact old observed source SHAs/revisions and desired
+  source/build/runtime inputs plus deterministic revision naming plan. After
+  `STAGED`, confirm the two captured immutable revision IDs/digests.
 - Confirm exact queue resources are PAUSED and empty, both recovery schedulers
   are PAUSED with aged pause epochs, and retention is enabled.
-- Confirm the Vercel Git-backed SHA, both producer fingerprints, and readiness
-  v3 admission false.
+- Confirm the Vercel Git-backed SHA, both producer fingerprints, additive v3
+  readiness `ready: true`, `analysisV2AdmissionEnabled: false`, and
+  `earlybirdWebhookAutoAdmissionEnabled: false`. Confirm the private worker
+  provider-admission value is true in the desired `INITIAL` manifest, not via
+  the public DTO.
 - Confirm the coordinator capability and single lock namespace are valid.
 
 During migration:
 
-- Keep admission false and do not send real or paid provider work.
-- Recheck generation/etag immediately before every mutation.
+- Keep both Vercel admission gates false, do not exercise signed/manual paths,
+  and do not send real or paid provider work.
+- Recheck the applicable native concurrency token or complete observation
+  digest immediately before every mutation.
 - Confirm no traffic on staged revisions and no mutable latest selector.
 - Confirm desired IAM is exact before removing old invoker/enqueuer grants.
 - Confirm both queues/schedulers remain paused and empty/quiescent.
+- Confirm staged private worker provider-admission is true only in the exact
+  no-traffic desired `INITIAL` revisions.
 - Record only non-secret digests and allowlisted markers.
 
 Before activation:
@@ -1119,17 +1455,22 @@ Before activation:
   scheduler, retention, readiness, and zero-work proofs.
 - Run only provider-free authenticated malformed-body probes and verify the
   reviewed 4xx responses.
-- Confirm public readiness v3 proves `providerAdmissionEnabled: true` only
-  at the activation boundary.
-- Resume both recovery schedulers and both queues, checking generations first.
+- Confirm public readiness v3 proves `ready: true`,
+  `analysisV2AdmissionEnabled: true`, and the exact separately reviewed
+  `earlybirdWebhookAutoAdmissionEnabled` value only at the activation
+  boundary; do not infer the private worker gate from this proof.
+- Resume preflight scheduler, paid scheduler, preflight queue, then paid
+  queue, checking each native token/observation digest first.
 - Confirm the full activation postcondition and leave the real canary to the
   user/operator.
 
 After failure or abort:
 
-- Close admission and pause every resumed work resource.
+- Close both Vercel admission gates and pause every resumed work resource.
 - Preserve retention and inspect protected ledgers through the authorized
   operator path.
+- Preserve newly admitted tasks if the public activation boundary had opened;
+  require operator review/safe drain before retrying a non-empty queue.
 - Do not restore ambiguous IAM, delete service accounts, purge tasks, change
   payments, or run the real canary.
 - Mark the epoch aborted or resumable with a bounded reason code and require
@@ -1150,12 +1491,13 @@ After failure or abort:
 ## Self-review result
 
 The document contains no implementation placeholders or unresolved markers.
-State entry and
-activation ordering are consistent: admission is false through `VERIFIED`,
-desired IAM is exact before old grant removal, exact revisions are promoted
-before verification, public admission is proven true before both work planes
-resume, and retention remains enabled. Every mutation has a preceding proof
-and a postcondition, generation/etag races are bounded and fail closed, and
+State entry and activation ordering are consistent: both Vercel gates are
+false through `VERIFIED`, the private worker gate is true only in exact
+desired `INITIAL` revisions, desired IAM is exact before old grant removal,
+exact revisions are promoted before verification, public Vercel admission is
+proven true before both work planes resume, and retention remains enabled.
+Every mutation has a preceding proof and a postcondition, native-token and
+observation-digest races are bounded and fail closed, and
 the document supplies the manifests, capability, state machine, recovery,
 testing, rollout, and closure contracts needed by a separate implementation
 plan writer without exposing protected values.
