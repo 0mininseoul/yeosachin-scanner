@@ -11,6 +11,7 @@ import {
     type ProtectedRetentionInput,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
+import type { LeaseCheck } from './cloud-run';
 
 const TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
 const SCHEDULER_HOSTS = new Set(['cloudscheduler.googleapis.com']);
@@ -20,8 +21,13 @@ const QUEUE_RESOURCE = /^[A-Za-z0-9_-]{1,100}$/;
 const SCHEDULER_RESOURCE = /^[A-Za-z0-9_-]{1,500}$/;
 const SERVICE_ACCOUNT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
 
-function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_TIMEOUT' | 'PAGINATION_INCOMPLETE' | 'QUEUE_NOT_EMPTY' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE'): never {
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_TIMEOUT' | 'PAGINATION_INCOMPLETE' | 'QUEUE_NOT_EMPTY' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'LOCK_LOST'): never {
     epochFail(code);
+}
+
+function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
+    if (typeof value !== 'function') fail('LOCK_LOST');
+    return value;
 }
 
 function parseQueueResource(resource: string, project: string): { location: string; name: string } {
@@ -125,8 +131,8 @@ export class WorkPlaneClient {
         return { resource: input.resource, project: input.project, location: input.location, state: config.state, target: config.target, httpTargetPresent: config.httpTarget !== null, configuration: config.configuration, configurationDigest: canonicalDigest(config.configuration), tasks, complete: true };
     }
 
-    async pauseQueue(input: ProtectedQueueInput): Promise<QueueObservation> { return this.changeQueueState(input, 'pause'); }
-    async resumeQueue(input: ProtectedQueueInput): Promise<QueueObservation> { return this.changeQueueState(input, 'resume'); }
+    async pauseQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'pause', leaseCheck); }
+    async resumeQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'resume', leaseCheck); }
 
     async observeScheduler(input: ProtectedSchedulerInput): Promise<SchedulerObservation> {
         const { location } = parseSchedulerResource(input.resource, input.project);
@@ -135,8 +141,8 @@ export class WorkPlaneClient {
         return this.schedulerObservation(input, job);
     }
 
-    async pauseScheduler(input: ProtectedSchedulerInput): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause'); }
-    async resumeScheduler(input: ProtectedSchedulerInput): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'resume'); }
+    async pauseScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause', leaseCheck); }
+    async resumeScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'resume', leaseCheck); }
 
     /**
      * Align a paused Scheduler OIDC target. Internal packet targets are not
@@ -147,19 +153,27 @@ export class WorkPlaneClient {
         input: ProtectedSchedulerInput;
         expectedOldTarget: SchedulerTargetObservation;
         desiredTarget: SchedulerTargetObservation;
+        leaseCheck?: LeaseCheck;
     }>): Promise<SchedulerObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        await leaseCheck();
         const before = await this.getScheduler(options.input);
-        const beforeObservation = await this.schedulerObservation(options.input, before);
-        if (beforeObservation.state !== 'PAUSED' || canonicalDigest(beforeObservation.target) !== canonicalDigest(options.expectedOldTarget)) fail('OBSERVATION_RACE');
+        const beforeObservation = await this.schedulerObservation(options.input, before, leaseCheck);
+        if (beforeObservation.state !== 'PAUSED'
+            || beforeObservation.configurationDigest !== canonicalDigest(options.input.configuration)) fail('OBSERVATION_RACE');
+        if (canonicalDigest(beforeObservation.target) === canonicalDigest(options.desiredTarget)) return beforeObservation;
+        if (canonicalDigest(beforeObservation.target) !== canonicalDigest(options.expectedOldTarget)) fail('OBSERVATION_RACE');
         const path = `/v1/${options.input.resource}`;
         const currentHttpTarget = object(before.httpTarget);
         const wireTarget = { ...currentHttpTarget, uri: options.desiredTarget.uri, oidcToken: { serviceAccountEmail: options.desiredTarget.identity.identity, audience: options.desiredTarget.audience } };
+        await leaseCheck();
         await this.transport.json({
             method: 'PATCH', url: `https://cloudscheduler.googleapis.com${path}?updateMask=${encodeURIComponent('httpTarget')}`,
             allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['PATCH'], allowedQueryKeys: ['updateMask'],
             body: { httpTarget: wireTarget }, acceptedStatuses: [200],
         });
-        const after = await this.schedulerObservation(options.input, await this.getScheduler(options.input));
+        await leaseCheck();
+        const after = await this.schedulerObservation(options.input, await this.getScheduler(options.input), leaseCheck);
         if (after.state !== 'PAUSED' || canonicalDigest(after.target) !== canonicalDigest(options.desiredTarget)) fail('OBSERVATION_RACE');
         return after;
     }
@@ -168,19 +182,27 @@ export class WorkPlaneClient {
         input: ProtectedQueueInput;
         expectedOldTarget: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
         desiredTarget: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
+        leaseCheck?: LeaseCheck;
     }>): Promise<QueueObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        await leaseCheck();
         const beforeRecord = await this.getQueue({ ...options.input, target: options.expectedOldTarget });
-        const before = { resource: options.input.resource, project: options.input.project, location: options.input.location, state: beforeRecord.state, target: beforeRecord.target, httpTargetPresent: beforeRecord.httpTarget !== null, configuration: beforeRecord.configuration, configurationDigest: canonicalDigest(beforeRecord.configuration), tasks: await this.listTasks(options.input), complete: true as const };
-        if (before.state !== 'PAUSED' || !queueTargetMatches(before.target, options.expectedOldTarget)) fail('OBSERVATION_RACE');
+        await leaseCheck();
+        const before = { resource: options.input.resource, project: options.input.project, location: options.input.location, state: beforeRecord.state, target: beforeRecord.target, httpTargetPresent: beforeRecord.httpTarget !== null, configuration: beforeRecord.configuration, configurationDigest: canonicalDigest(beforeRecord.configuration), tasks: await this.listTasks(options.input, leaseCheck), complete: true as const };
+        if (before.state !== 'PAUSED' || !queueConfigurationMatches(before.configuration, options.input.configuration)) fail('OBSERVATION_RACE');
         if (beforeRecord.httpTarget === null) fail('OBSERVATION_RACE');
+        if (queueTargetMatches(before.target, options.desiredTarget)) return before;
+        if (!queueTargetMatches(before.target, options.expectedOldTarget)) fail('OBSERVATION_RACE');
         const path = `/v2/${options.input.resource}`;
         const wireTarget = { ...beforeRecord.httpTarget, oidcToken: { serviceAccountEmail: options.desiredTarget.callerIdentity.identity, audience: options.desiredTarget.audience } };
+        await leaseCheck();
         await this.transport.json({
             method: 'PATCH', url: `https://cloudtasks.googleapis.com${path}?updateMask=${encodeURIComponent('httpTarget')}`,
             allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['PATCH'], allowedQueryKeys: ['updateMask'],
             body: { httpTarget: wireTarget }, acceptedStatuses: [200],
         });
-        const after = await this.observeQueue(options.input);
+        await leaseCheck();
+        const after = await this.observeQueueWithLease(options.input, leaseCheck);
         if (after.state !== 'PAUSED' || !queueTargetMatches(after.target, options.desiredTarget)
             || after.target?.wireConfigurationDigest !== before.target?.wireConfigurationDigest) fail('OBSERVATION_RACE');
         return after;
@@ -196,6 +218,16 @@ export class WorkPlaneClient {
         return { role: 'retention' as const, resource: input.resource, project: input.project, location: input.location, enabled: state === 'ENABLED', configuration, configurationDigest: canonicalDigest(configuration) };
     }
 
+    private async observeQueueWithLease(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> {
+        const { location } = parseQueueResource(input.resource, input.project);
+        if (location !== input.location) fail('RESOURCE_INVALID');
+        if (leaseCheck) await leaseCheck();
+        const config = await this.getQueue(input);
+        if (leaseCheck) await leaseCheck();
+        const tasks = await this.listTasks(input, leaseCheck);
+        return { resource: input.resource, project: input.project, location: input.location, state: config.state, target: config.target, httpTargetPresent: config.httpTarget !== null, configuration: config.configuration, configurationDigest: canonicalDigest(config.configuration), tasks, complete: true };
+    }
+
     private async getQueue(input: ProtectedQueueInput): Promise<{ state: 'PAUSED' | 'RUNNING'; target: QueueTargetObservation | null; configuration: Record<string, unknown>; httpTarget: Record<string, unknown> | null }> {
         const path = `/v2/${input.resource}`;
         const { value } = await this.transport.json({
@@ -208,13 +240,14 @@ export class WorkPlaneClient {
         return { state, target: this.queueTarget(queue, input), configuration: this.queueConfiguration(queue), httpTarget };
     }
 
-    private async listTasks(input: ProtectedQueueInput): Promise<readonly WorkTaskObservation[]> {
+    private async listTasks(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<readonly WorkTaskObservation[]> {
         const path = `/v2/${input.resource}/tasks`;
         const results: WorkTaskObservation[] = [];
         const seenTokens = new Set<string>();
         const seenTasks = new Set<string>();
         let pageToken: string | undefined;
         for (let page = 0; page < 100; page += 1) {
+            if (leaseCheck) await leaseCheck();
             const params = new URLSearchParams({ pageSize: '1000', responseView: 'FULL' });
             if (pageToken) params.set('pageToken', pageToken);
             const { value } = await this.transport.json({
@@ -244,19 +277,23 @@ export class WorkPlaneClient {
         fail('PAGINATION_INCOMPLETE');
     }
 
-    private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume'): Promise<QueueObservation> {
+    private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume', leaseCheckInput?: LeaseCheck): Promise<QueueObservation> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput);
         const parsed = parseQueueResource(input.resource, input.project);
         if (parsed.location !== input.location) fail('RESOURCE_INVALID');
-        const before = await this.observeQueue(input);
+        const before = await this.observeQueueWithLease(input, leaseCheck);
         const targetMatches = before.target === null
             ? !isObject(input.configuration.httpTarget)
             : queueTargetMatches(before.target, input.target);
         if (!targetMatches || !queueConfigurationMatches(before.configuration, input.configuration)) fail('OBSERVATION_RACE');
+        if ((action === 'pause' && before.state === 'PAUSED') || (action === 'resume' && before.state === 'RUNNING')) return before;
         const path = `/v2/${input.resource}:${action}`;
+        await leaseCheck();
         await this.transport.json({
             method: 'POST', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
         });
-        const after = await this.observeQueue(input);
+        await leaseCheck();
+        const after = await this.observeQueueWithLease(input, leaseCheck);
         if ((action === 'pause' && after.state !== 'PAUSED') || (action === 'resume' && after.state !== 'RUNNING')) fail('OBSERVATION_RACE');
         return after;
     }
@@ -274,22 +311,27 @@ export class WorkPlaneClient {
         return object(value);
     }
 
-    private async changeSchedulerState(input: ProtectedSchedulerInput, action: 'pause' | 'resume'): Promise<SchedulerObservation> {
+    private async changeSchedulerState(input: ProtectedSchedulerInput, action: 'pause' | 'resume', leaseCheckInput?: LeaseCheck): Promise<SchedulerObservation> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput);
         const parsed = parseSchedulerResource(input.resource, input.project);
         if (parsed.location !== input.location) fail('RESOURCE_INVALID');
-        const before = await this.observeScheduler(input);
+        await leaseCheck();
+        const before = await this.schedulerObservation(input, await this.getScheduler(input), leaseCheck);
         if (canonicalDigest(before.target) !== canonicalDigest(input.target)
             || canonicalDigest(before.configuration) !== canonicalDigest(input.configuration)) fail('OBSERVATION_RACE');
+        if ((action === 'pause' && before.state === 'PAUSED') || (action === 'resume' && before.state === 'ENABLED')) return before;
         const path = `/v1/${input.resource}:${action}`;
+        await leaseCheck();
         await this.transport.json({
             method: 'POST', url: `https://cloudscheduler.googleapis.com${path}`, allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
         });
-        const after = await this.observeScheduler(input);
+        await leaseCheck();
+        const after = await this.schedulerObservation(input, await this.getScheduler(input), leaseCheck);
         if ((action === 'pause' && after.state !== 'PAUSED') || (action === 'resume' && after.state !== 'ENABLED')) fail('OBSERVATION_RACE');
         return after;
     }
 
-    private async schedulerObservation(input: ProtectedSchedulerInput, job: Record<string, unknown>): Promise<SchedulerObservation> {
+    private async schedulerObservation(input: ProtectedSchedulerInput, job: Record<string, unknown>, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> {
         const state = job.state;
         if (state !== 'PAUSED' && state !== 'ENABLED') fail('ADAPTER_RESPONSE_INVALID');
         const target = this.schedulerTarget(job, input.project);
@@ -301,6 +343,7 @@ export class WorkPlaneClient {
             let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
             let provenance: PauseProvenance;
             try {
+                if (leaseCheck) await leaseCheck();
                 provenance = await Promise.race([
                     this.pauseProvenance({ resource: input.resource, project: input.project, location: input.location, signal: controller.signal }),
                     new Promise<PauseProvenance>((_, reject) => {
@@ -314,6 +357,7 @@ export class WorkPlaneClient {
                 if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
                 controller.abort();
             }
+            if (leaseCheck) await leaseCheck();
             if (!isObject(provenance)
                 || !hasExactKeys(provenance, ['resource', 'pauseEpochMs', 'observedAtMs', 'source', 'evidence', 'evidenceDigest', 'complete'])
                 || provenance.resource !== input.resource

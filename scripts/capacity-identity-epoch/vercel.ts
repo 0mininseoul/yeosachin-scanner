@@ -19,6 +19,7 @@ import {
     type PublicReadinessExpected,
 } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
+import type { LeaseCheck } from './cloud-run';
 
 const HOSTS = new Set(['api.vercel.com']);
 const DEPLOYMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -27,8 +28,13 @@ const TEAM_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const ALIAS = /^[A-Za-z0-9.-]{1,253}$/;
 
-function fail(code: 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_NOT_ALLOWED' | 'ADAPTER_TIMEOUT' | 'ADAPTER_REDIRECT' | 'READINESS_INVALID' | 'SOURCE_INVALID' | 'OBSERVATION_RACE'): never {
+function fail(code: 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_NOT_ALLOWED' | 'ADAPTER_TIMEOUT' | 'ADAPTER_REDIRECT' | 'READINESS_INVALID' | 'SOURCE_INVALID' | 'OBSERVATION_RACE' | 'LOCK_LOST'): never {
     epochFail(code);
+}
+
+function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
+    if (typeof value !== 'function') fail('LOCK_LOST');
+    return value;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -179,7 +185,9 @@ export class VercelAdapter {
         });
     }
 
-    async assignAlias(options: Readonly<{ projectId: string; teamId: string; deploymentId: string; expectedOldDeploymentId: string; expectedSourceSha: string; alias: string }>): Promise<readonly string[]> {
+    async assignAlias(options: Readonly<{ projectId: string; teamId: string; deploymentId: string; expectedOldDeploymentId: string; expectedSourceSha: string; alias: string; leaseCheck?: LeaseCheck }>): Promise<readonly string[]> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        await leaseCheck();
         if (!PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId) || !DEPLOYMENT_ID.test(options.deploymentId) || !DEPLOYMENT_ID.test(options.expectedOldDeploymentId) || !SHA.test(options.expectedSourceSha) || !ALIAS.test(options.alias)) fail('ADAPTER_REQUEST_INVALID');
         const deployment = await this.getDeployment({ projectId: options.projectId, teamId: options.teamId, deploymentId: options.deploymentId });
         if (deployment.readyState !== 'READY' || deployment.sourceSha !== options.expectedSourceSha) fail('ADAPTER_RESPONSE_INVALID');
@@ -188,9 +196,13 @@ export class VercelAdapter {
         // deployment.  A missing alias is not equivalent to that owner and
         // must fail closed before POST; there is no invented Vercel CAS field.
         if (!prior) fail('OBSERVATION_RACE');
-        if (prior && prior.deploymentId === options.deploymentId) return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
+        if (prior && prior.deploymentId === options.deploymentId) {
+            await leaseCheck();
+            return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
+        }
         if (prior && prior.deploymentId !== options.expectedOldDeploymentId) fail('OBSERVATION_RACE');
         const path = `/v2/deployments/${encodeURIComponent(options.deploymentId)}/aliases`;
+        await leaseCheck();
         const response = await this.transport.json({
             method: 'POST',
             url: `https://api.vercel.com${path}?teamId=${encodeURIComponent(options.teamId)}`,
@@ -207,8 +219,10 @@ export class VercelAdapter {
         // The pre-read is an ownership barrier, not a provider-side atomic
         // CAS.  The independent post-read below detects a race after POST and
         // prevents this adapter from claiming success if another owner won.
+        await leaseCheck();
         const assigned = await this.getAlias({ alias: options.alias, projectId: options.projectId, teamId: options.teamId, expectedDeploymentId: options.deploymentId });
         if (!assigned || assigned.alias !== options.alias) fail('ADAPTER_RESPONSE_INVALID');
+        await leaseCheck();
         return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
     }
 

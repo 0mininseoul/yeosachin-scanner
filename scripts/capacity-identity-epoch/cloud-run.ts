@@ -18,7 +18,7 @@ const DECIMAL = /^[1-9][0-9]*$/;
 const IMAGE_REFERENCE = /^[^\s\u0000-\u001f\u007f]{1,2048}$/;
 const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/;
 
-function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_TIMEOUT' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'RUNTIME_MISMATCH'): never {
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_TIMEOUT' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'RUNTIME_MISMATCH' | 'LOCK_LOST'): never {
     epochFail(code);
 }
 
@@ -258,6 +258,18 @@ export type CloudRunAdapterOptions = Readonly<{
     pollIntervalMs?: number;
 }>;
 
+/**
+ * Immutable operation-local owner/fence capability.  Adapters never retain
+ * this callback: a renewal must remain bound to the operation that supplied
+ * it, so a later owner cannot accidentally authorize an older request.
+ */
+export type LeaseCheck = () => Promise<void>;
+
+function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
+    if (typeof value !== 'function') fail('LOCK_LOST');
+    return value;
+}
+
 /** Cloud Run v1 regional adapter: GET/PUT Service and independent GET read-back. */
 export class CloudRunAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
@@ -311,9 +323,13 @@ export class CloudRunAdapter {
         resource: string;
         expectedGeneration: string;
         body: Readonly<Record<string, unknown>>;
+        /** Required operation-local owner/fence capability. */
+        leaseCheck?: LeaseCheck;
         /** Retained for source compatibility; v1 uses PUT, not updateMask. */
         updateMask?: 'template' | 'template,traffic' | 'traffic';
     }>): Promise<CloudRunServiceObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        await leaseCheck();
         const before = await this.getService(options.resource);
         if (!DECIMAL.test(options.expectedGeneration)) fail('ADAPTER_REQUEST_INVALID');
         if (before.generation !== options.expectedGeneration) fail('OBSERVATION_RACE');
@@ -322,20 +338,26 @@ export class CloudRunAdapter {
         const body = object(options.body);
         const metadata = object(body.metadata ?? {});
         const requestBody = { ...body, metadata: { ...metadata, resourceVersion: before.resourceVersion } };
+        // Fence immediately before the actual mutation.  The check above
+        // protects the read; this one closes the read/modify/write gap.
+        await leaseCheck();
         await this.transport.json({
             method: 'PUT', url: `https://${parsed.location}-run.googleapis.com${path}`,
             allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['PUT'],
             allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200],
         });
         const requestedSpec = object(body.spec);
-        return this.waitForServicePostcondition(options.resource, requestedSpec);
+        return this.waitForServicePostcondition(options.resource, requestedSpec, leaseCheck);
     }
 
-    private async waitForServicePostcondition(resource: string, requestedSpec: Record<string, unknown>): Promise<CloudRunServiceObservation> {
+    private async waitForServicePostcondition(resource: string, requestedSpec: Record<string, unknown>, leaseCheck: LeaseCheck): Promise<CloudRunServiceObservation> {
         const startedAt = this.now();
         if (!Number.isSafeInteger(startedAt) || startedAt < 0) fail('ADAPTER_REQUEST_INVALID');
         const deadline = startedAt + this.pollTimeoutMs;
         for (;;) {
+            // Capture the initiating operation's closure for every poll and
+            // read-back; no mutable adapter-level callback is consulted.
+            await leaseCheck();
             const after = await this.getService(resource);
             const observedSpec = object(after.raw.spec);
             const exactPostcondition = canonicalDigest(observedSpec) === canonicalDigest(requestedSpec);
@@ -344,6 +366,7 @@ export class CloudRunAdapter {
             if (Array.isArray(status.conditions) && status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'False')) fail('OBSERVATION_RACE');
             const now = this.now();
             if (!Number.isSafeInteger(now) || now < startedAt || now >= deadline) fail('ADAPTER_TIMEOUT');
+            await leaseCheck();
             await this.sleep(Math.min(this.pollIntervalMs, deadline - now));
         }
     }
@@ -353,7 +376,10 @@ export class CloudRunAdapter {
         revision: string;
         expectedGeneration: string;
         serviceBody: Readonly<Record<string, unknown>>;
+        leaseCheck?: LeaseCheck;
     }>): Promise<CloudRunServiceObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        await leaseCheck();
         if (options.runtime.project !== options.runtime.identity.project) fail('PROJECT_MISMATCH');
         if (!REVISION.test(options.revision) || options.revision === 'latest') fail('RESOURCE_INVALID');
         const body = object(options.serviceBody);
@@ -362,14 +388,16 @@ export class CloudRunAdapter {
         const metadata = object(template.metadata);
         if (metadata.name !== options.revision) fail('RESOURCE_INVALID');
         const resource = `projects/${options.runtime.project}/locations/${options.runtime.location}/services/${options.runtime.service}`;
+        await leaseCheck();
         const before = await this.getService(resource);
-        const after = await this.applyService({ resource, expectedGeneration: options.expectedGeneration, body });
+        const after = await this.applyService({ resource, expectedGeneration: options.expectedGeneration, body, leaseCheck });
         const beforeTraffic = new Map(before.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
         const afterTraffic = new Map(after.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
         for (const [key, percent] of beforeTraffic) if (afterTraffic.get(key) !== percent) fail('OBSERVATION_RACE');
         for (const [key, percent] of afterTraffic) if (!beforeTraffic.has(key) && percent !== 0) fail('OBSERVATION_RACE');
         const stagedTraffic = after.traffic.find(entry => entry.revisionName === options.revision);
         if (stagedTraffic && stagedTraffic.percent !== 0) fail('OBSERVATION_RACE');
+        await leaseCheck();
         const revisionObject = await this.getRevision(options.runtime.project, options.runtime.location, options.revision);
         this.assertRevisionMatches(revisionObject, options.runtime, options.revision);
         if (after.latestCreatedRevision !== options.revision && after.latestReadyRevision !== options.revision) fail('OBSERVATION_RACE');
@@ -382,15 +410,19 @@ export class CloudRunAdapter {
         traffic: readonly Readonly<Record<string, unknown>>[];
         expectedRevision: string;
         expectedPercent: number;
+        leaseCheck?: LeaseCheck;
     }>): Promise<CloudRunServiceObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck);
         if (!REVISION.test(options.expectedRevision) || options.expectedRevision === 'latest'
             || !Number.isSafeInteger(options.expectedPercent) || options.expectedPercent < 0 || options.expectedPercent > 100) fail('RESOURCE_INVALID');
+        await leaseCheck();
         const before = await this.getService(options.resource);
         const body = object(before.raw);
         const spec = object(body.spec);
         const after = await this.applyService({
             resource: options.resource, expectedGeneration: options.expectedGeneration,
             body: { ...body, spec: { ...spec, traffic: options.traffic.map(entry => ({ ...entry })) } },
+            leaseCheck,
         });
         const match = after.traffic.find(item => item.revisionName === options.expectedRevision);
         if (!match || match.percent !== options.expectedPercent) fail('OBSERVATION_RACE');

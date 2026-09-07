@@ -209,6 +209,7 @@ export async function buildLiveBootstrap(
         producerAlias: descriptor.vercelProducerAlias,
         serviceBodies: descriptor.serviceBodies,
         journal,
+        renewLease: (lease) => journal.renew(lease),
         now,
     };
     const controlPlane = new LiveEpochControlPlane(options);

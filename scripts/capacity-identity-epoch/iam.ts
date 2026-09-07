@@ -8,6 +8,7 @@ import {
     type ProtectedIamPolicySnapshot,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
+import type { LeaseCheck } from './cloud-run';
 
 const HOSTS = new Set(['iam.googleapis.com', 'run.googleapis.com', 'cloudtasks.googleapis.com']);
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -27,8 +28,13 @@ type WirePolicy = Readonly<{
     auditConfigs?: readonly unknown[];
 }>;
 
-function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'IAM_ETAG_REQUIRED' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'OBSERVATION_RACE'): never {
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'IAM_ETAG_REQUIRED' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'OBSERVATION_RACE' | 'LOCK_LOST'): never {
     epochFail(code);
+}
+
+function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
+    if (typeof value !== 'function') fail('LOCK_LOST');
+    return value;
 }
 
 function assertProject(value: string): void {
@@ -148,25 +154,31 @@ export class IamAdapter {
         return (await this.getWirePolicy(input)).snapshot;
     }
 
-    async setPolicy(input: Pick<ProtectedIamInput, 'kind' | 'resource' | 'project'>, policy: ProtectedIamPolicySnapshot): Promise<ProtectedIamPolicySnapshot> {
+    async setPolicy(input: Pick<ProtectedIamInput, 'kind' | 'resource' | 'project'>, policy: ProtectedIamPolicySnapshot, leaseCheckInput?: LeaseCheck): Promise<ProtectedIamPolicySnapshot> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput);
+        await leaseCheck();
         const current = await this.getWirePolicy(input);
         if (policy.resource !== input.resource || policy.project !== input.project || typeof policy.etag !== 'string' || !ETAG.test(policy.etag)) fail('IAM_ETAG_REQUIRED');
         if (current.snapshot.etag !== policy.etag) fail('OBSERVATION_RACE');
         const wire = encodeWirePolicy(policy, current.wire);
         const endpoint = parseResource(input.resource, input.kind, input.project);
         const path = `${endpoint.path}:setIamPolicy`;
+        await leaseCheck();
         await this.transport.json({
             method: 'POST', url: `https://${endpoint.host}${path}`, allowedHosts: new Set([...HOSTS, endpoint.host]), allowedPath: candidate => candidate === path, allowedMethods: ['POST'],
             allowedQueryKeys: [],
             acceptedStatuses: [200], body: { policy: wire },
         });
+        await leaseCheck();
         const readback = await this.getWirePolicy(input);
         if (canonicalDigest(readback.snapshot.bindings) !== canonicalDigest(normalizeBindings(policy.bindings))) fail('OBSERVATION_RACE');
         if (canonicalDigest(readback.wire.auditConfigs ?? null) !== canonicalDigest(current.wire.auditConfigs ?? null)) fail('OBSERVATION_RACE');
         return readback.snapshot;
     }
 
-    async addBindings(input: ProtectedIamInput, additions: readonly ProtectedIamBinding[]): Promise<ProtectedIamPolicySnapshot> {
+    async addBindings(input: ProtectedIamInput, additions: readonly ProtectedIamBinding[], leaseCheckInput?: LeaseCheck): Promise<ProtectedIamPolicySnapshot> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput);
+        await leaseCheck();
         const observed = await this.getPolicy(input);
         if (observed.etag !== input.etag) fail('OBSERVATION_RACE');
         const byKey = new Map(observed.bindings.map(binding => [bindingKey(binding), binding]));
@@ -174,13 +186,15 @@ export class IamAdapter {
             const normalized = normalizeBinding(addition);
             byKey.set(bindingKey(normalized), normalized);
         }
-        return this.setPolicy(input, { resource: input.resource, project: input.project, etag: observed.etag, bindings: [...byKey.values()] });
+        return this.setPolicy(input, { resource: input.resource, project: input.project, etag: observed.etag, bindings: [...byKey.values()] }, leaseCheck);
     }
 
-    async replaceBindings(input: ProtectedIamInput, bindings: readonly ProtectedIamBinding[]): Promise<ProtectedIamPolicySnapshot> {
+    async replaceBindings(input: ProtectedIamInput, bindings: readonly ProtectedIamBinding[], leaseCheckInput?: LeaseCheck): Promise<ProtectedIamPolicySnapshot> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput);
+        await leaseCheck();
         const observed = await this.getPolicy(input);
         if (observed.etag !== input.etag) fail('OBSERVATION_RACE');
-        return this.setPolicy(input, { resource: input.resource, project: input.project, etag: observed.etag, bindings });
+        return this.setPolicy(input, { resource: input.resource, project: input.project, etag: observed.etag, bindings }, leaseCheck);
     }
 
     private async getWirePolicy(input: Pick<ProtectedIamInput, 'kind' | 'resource' | 'project'>): Promise<{ snapshot: ProtectedIamPolicySnapshot; wire: WirePolicy }> {

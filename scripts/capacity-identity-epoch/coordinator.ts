@@ -19,7 +19,7 @@ import {
     type CoordinatorCapability,
 } from './packet';
 import { EpochJournal, type JournalLease } from './journal';
-import { CloudRunAdapter } from './cloud-run';
+import { CloudRunAdapter, type LeaseCheck } from './cloud-run';
 import { IamAdapter } from './iam';
 import { WorkPlaneClient } from './work-planes';
 import { VercelAdapter } from './vercel';
@@ -40,6 +40,7 @@ import type { ProtectedRuntimeInput, ProtectedQueueInput, ProtectedSchedulerInpu
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
 type EvidenceValue = unknown;
+type BoundLeaseCheck = LeaseCheck & { currentLease: () => JournalLease };
 
 /**
  * Control-plane operations return observed values, never caller-supplied
@@ -66,6 +67,8 @@ export interface EpochControlPlane {
     reconcile(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease; state: State }>): Promise<OperationEvidence>;
     compensateActivation(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence>;
     activate?(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence>;
+    /** Live implementations notify the coordinator when a lease is renewed mid-operation. */
+    bindLeaseUpdated?(callback: (lease: JournalLease) => void): void;
 }
 
 type StateOperation = Exclude<State, 'ACTIVATED'>;
@@ -167,6 +170,9 @@ export class EpochCoordinator {
         this.capability = options.capability ?? issueCoordinatorCapability(this.packet, options.ownerDigest);
         assertCoordinatorCapability(this.packet, this.capability, options.ownerDigest);
         this.now = options.now ?? (() => Date.now());
+        this.controlPlane.bindLeaseUpdated?.((lease) => {
+            this.lease = lease;
+        });
     }
 
     /** Runs the closed rollout through VERIFIED. It never invokes activation. */
@@ -401,6 +407,8 @@ export type LiveEpochControlPlaneOptions = Readonly<{
     serviceBodies: Readonly<Record<Role, Readonly<Record<string, unknown>>>>;
     /** Journal fencing is checked immediately before every provider mutation. */
     journal?: EpochJournal;
+    /** Renew the active GCS lease before each concrete submutation/poll. */
+    renewLease?: (lease: JournalLease) => Promise<JournalLease>;
     /** Source/revision evidence is an independent Git/provider observation. */
     sourceObservation?: (input: Readonly<{ role: Role; phase: 'old' | 'desired'; revision: string; runtime: ProtectedRuntimeInput }>) => Promise<unknown>;
     /** Build/source provenance binds the deployed image to the reviewed build input. */
@@ -421,10 +429,38 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     private readonly capturedRevisions = new Map<Role, string>();
     private readonly now: () => number;
     private zeroWorkBaseline: Readonly<{ capturedAtMs: number; digest: string }> | undefined;
+    private leaseUpdated?: (lease: JournalLease) => void;
 
     constructor(options: LiveEpochControlPlaneOptions) {
         this.options = options;
         this.now = options.now ?? (() => Date.now());
+    }
+
+    bindLeaseUpdated(callback: (lease: JournalLease) => void): void {
+        this.leaseUpdated = callback;
+    }
+
+    /**
+     * Create an immutable operation-local fence capability.  Renewal state is
+     * captured by this closure, so concurrent operations cannot replace one
+     * another's lease or let an older request borrow a newer owner.
+     */
+    private leaseCheckFor(lease: JournalLease): BoundLeaseCheck {
+        let current = lease;
+        const check = (async () => {
+            if (this.options.renewLease) {
+                current = await this.options.renewLease(current);
+                this.leaseUpdated?.(current);
+                return;
+            }
+            if (this.options.journal) {
+                await this.options.journal.assertLive(current);
+                return;
+            }
+            fail('LOCK_LOST');
+        }) as BoundLeaseCheck;
+        check.currentLease = () => current;
+        return check;
     }
 
     async prepare(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
@@ -516,14 +552,15 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     }
 
     async stage(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const staged: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
+            await leaseCheck();
             const runtime = input.packet.protectedInputs.desired.runtime[role];
             const serviceResource = `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
             const before = await this.options.cloudRun.getService(serviceResource);
             const revision = this.desiredRevisionCandidate(input.packet, role);
-            const after = await this.options.cloudRun.stageRevision({ runtime, revision, expectedGeneration: before.generation, serviceBody: this.options.serviceBodies[role] });
+            const after = await this.options.cloudRun.stageRevision({ runtime, revision, expectedGeneration: before.generation, serviceBody: this.options.serviceBodies[role], leaseCheck });
             const captured = after.latestReadyRevision === revision || after.latestCreatedRevision === revision ? revision : null;
             if (!captured) fail('SOURCE_INVALID');
             this.capturedRevisions.set(role, captured);
@@ -555,11 +592,12 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 buildDigest: runtimeObservation.buildDigest,
             });
         }
-        return this.evidence('STAGED', staged, input.lease.lock.lockFence);
+        return this.evidence('STAGED', staged, leaseCheck.currentLease().lock.lockFence);
     }
 
     async closeAndAlignProducers(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
-        await this.assertLive(input.lease);
+        const leaseCheck = this.leaseCheckFor(input.lease);
+        await leaseCheck();
         // The mutable public alias still serves OLD at this boundary. Prove
         // its closed facts first, then independently prove the immutable
         // desired deployment before any alias mutation.
@@ -583,17 +621,18 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 ready: true,
             },
         });
-        await this.assertLive(input.lease);
-        const aliases = await this.options.vercel.assignAlias({ projectId: this.options.projectId, teamId: this.options.teamId, deploymentId: this.options.deploymentId, expectedOldDeploymentId: this.options.expectedOldDeploymentId, expectedSourceSha: input.packet.desiredManifest.readiness.sourceSha, alias: this.options.producerAlias });
+        await leaseCheck();
+        const aliases = await this.options.vercel.assignAlias({ projectId: this.options.projectId, teamId: this.options.teamId, deploymentId: this.options.deploymentId, expectedOldDeploymentId: this.options.expectedOldDeploymentId, expectedSourceSha: input.packet.desiredManifest.readiness.sourceSha, alias: this.options.producerAlias, leaseCheck });
         const readiness = await this.readReadiness(input.packet, 'desired');
-        return this.evidence('PRODUCERS_CLOSED_ALIGNED', { oldReadiness, aliases, deployment, deploymentReadiness: { sourceSha: deploymentReadiness.sourceSha, ready: deploymentReadiness.ready, analysisV2AdmissionEnabled: deploymentReadiness.analysisV2AdmissionEnabled, earlybirdWebhookAutoAdmissionEnabled: deploymentReadiness.earlybirdWebhookAutoAdmissionEnabled }, readiness }, input.lease.lock.lockFence);
+        return this.evidence('PRODUCERS_CLOSED_ALIGNED', { oldReadiness, aliases, deployment, deploymentReadiness: { sourceSha: deploymentReadiness.sourceSha, ready: deploymentReadiness.ready, analysisV2AdmissionEnabled: deploymentReadiness.analysisV2AdmissionEnabled, earlybirdWebhookAutoAdmissionEnabled: deploymentReadiness.earlybirdWebhookAutoAdmissionEnabled }, readiness }, leaseCheck.currentLease().lock.lockFence);
     }
 
     async alignQueues(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const queues: unknown[] = [];
         const schedulers: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
+            await leaseCheck();
             const schedulerInput = input.packet.protectedInputs.desired.schedulers[role];
             const queueInput = input.packet.protectedInputs.desired.queues[role];
             const oldSchedulerInput = input.packet.protectedInputs.old.schedulers[role];
@@ -601,12 +640,12 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             let scheduler = await this.options.workPlanes.observeScheduler(schedulerInput);
             let queue = await this.options.workPlanes.observeQueue(queueInput);
             if (scheduler.state !== 'PAUSED') {
-                await this.assertLive(input.lease);
-                scheduler = await this.options.workPlanes.pauseScheduler(schedulerInput);
+                await leaseCheck();
+                scheduler = await this.options.workPlanes.pauseScheduler(schedulerInput, leaseCheck);
             }
             if (queue.state !== 'PAUSED') {
-                await this.assertLive(input.lease);
-                queue = await this.options.workPlanes.pauseQueue(queueInput);
+                await leaseCheck();
+                queue = await this.options.workPlanes.pauseQueue(queueInput, leaseCheck);
             }
             // QUEUES_ALIGNED proves pause, quiescence, and the phase-correct
             // OLD auth chain only. Desired OIDC identities are aligned later,
@@ -619,17 +658,18 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             schedulers.push({ role, digest: canonicalDigest(scheduler) });
             queues.push({ role, digest: canonicalDigest(queue) });
         }
-        return this.evidence('QUEUES_ALIGNED', { queues, schedulers }, input.lease.lock.lockFence);
+        return this.evidence('QUEUES_ALIGNED', { queues, schedulers }, leaseCheck.currentLease().lock.lockFence);
     }
 
     async rotateInvokers(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const policies: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
             const iam = input.packet.protectedInputs.desired.iam[role];
             for (const kind of ['run', 'queue', 'taskCaller', 'maintenance'] as const) {
-                await this.assertLive(input.lease);
+                await leaseCheck();
                 const target = iam[kind];
-                const observed = await this.ensureIamBindings(target, role, target.bindings, input.lease);
+                const observed = await this.ensureIamBindings(target, role, target.bindings, leaseCheck);
                 policies.push({ role, kind, digest: canonicalDigest(observed) });
             }
         }
@@ -638,39 +678,40 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         // paused Scheduler/Tasks OIDC target. This ordering closes the auth
         // chain before the first serving promotion.
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
+            await leaseCheck();
             const desiredScheduler = input.packet.protectedInputs.desired.schedulers[role];
             const oldScheduler = input.packet.protectedInputs.old.schedulers[role];
             let scheduler = await this.options.workPlanes.observeScheduler(desiredScheduler);
             if (scheduler.state !== 'PAUSED') fail('SCHEDULER_NOT_QUIESCENT');
             if (canonicalDigest(scheduler.target) === canonicalDigest(oldScheduler.target)) {
-                await this.assertLive(input.lease);
-                scheduler = await this.options.workPlanes.updateSchedulerTarget({ input: desiredScheduler, expectedOldTarget: oldScheduler.target, desiredTarget: desiredScheduler.target });
+                await leaseCheck();
+                scheduler = await this.options.workPlanes.updateSchedulerTarget({ input: desiredScheduler, expectedOldTarget: oldScheduler.target, desiredTarget: desiredScheduler.target, leaseCheck });
             } else if (canonicalDigest(scheduler.target) !== canonicalDigest(desiredScheduler.target)) fail('OBSERVATION_RACE');
             const desiredQueue = input.packet.protectedInputs.desired.queues[role];
             const oldQueue = input.packet.protectedInputs.old.queues[role];
             let queue = await this.options.workPlanes.observeQueue(desiredQueue);
             if (queue.state !== 'PAUSED') fail('QUEUE_NOT_EMPTY');
             if (queueTargetMatches(queue.target, oldQueue.target)) {
-                await this.assertLive(input.lease);
-                queue = await this.options.workPlanes.updateQueueTarget({ input: desiredQueue, expectedOldTarget: oldQueue.target, desiredTarget: desiredQueue.target });
+                await leaseCheck();
+                queue = await this.options.workPlanes.updateQueueTarget({ input: desiredQueue, expectedOldTarget: oldQueue.target, desiredTarget: desiredQueue.target, leaseCheck });
             } else if (!queueTargetMatches(queue.target, desiredQueue.target)) fail('OBSERVATION_RACE');
             validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, desiredScheduler, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             validateQueueObservation({ role, ...queue }, desiredQueue, input.packet.desiredManifest.queues[role].configDigest, role);
             alignments.push({ role, scheduler: canonicalDigest(scheduler), queue: canonicalDigest(queue) });
         }
-        return this.evidence('INVOKERS_ROTATED', { policies, alignments }, input.lease.lock.lockFence);
+        return this.evidence('INVOKERS_ROTATED', { policies, alignments }, leaseCheck.currentLease().lock.lockFence);
     }
 
     async promote(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const promoted: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
+            await leaseCheck();
             const runtime = input.packet.protectedInputs.desired.runtime[role];
             const resource = this.serviceResource(runtime);
             const before = await this.options.cloudRun.getService(resource);
             const revision = this.desiredRevisionCandidate(input.packet, role);
-            const after = await this.options.cloudRun.setTraffic({ resource, expectedGeneration: before.generation, expectedRevision: revision, expectedPercent: 100, traffic: [{ revisionName: revision, percent: 100 }] });
+            const after = await this.options.cloudRun.setTraffic({ resource, expectedGeneration: before.generation, expectedRevision: revision, expectedPercent: 100, traffic: [{ revisionName: revision, percent: 100 }], leaseCheck });
             this.capturedRevisions.set(role, revision);
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: after.image });
@@ -686,7 +727,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         // Retirement is a fresh etag-CAS operation and never restores a stale policy.
         for (const role of ['preflight', 'paid'] as const) {
             for (const kind of ['run', 'queue', 'taskCaller', 'maintenance'] as const) {
-                await this.assertLive(input.lease);
+                await leaseCheck();
                 const target = input.packet.protectedInputs.desired.iam[role][kind];
                 const old = input.packet.protectedInputs.old.iam[role][kind];
                 const resourceInput = target.resource === old.resource ? target : old;
@@ -694,13 +735,13 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 const retired = this.retiredBindings(input.packet, role, kind, observed.bindings);
                 const remaining = observed.bindings.filter(binding => !retired.some(item => canonicalDigest(item) === canonicalDigest(binding)));
                 if (remaining.length !== observed.bindings.length) {
-                    await this.assertLive(input.lease);
-                    const result = await this.options.iam.replaceBindings({ ...resourceInput, etag: observed.etag }, remaining);
+                    await leaseCheck();
+                    const result = await this.options.iam.replaceBindings({ ...resourceInput, etag: observed.etag }, remaining, leaseCheck);
                     promoted.push({ role, kind, retired: retired.length, digest: canonicalDigest(result) });
                 }
             }
         }
-        return this.evidence('SERVICES_PROMOTED', promoted, input.lease.lock.lockFence);
+        return this.evidence('SERVICES_PROMOTED', promoted, leaseCheck.currentLease().lock.lockFence);
     }
 
     async verify(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
@@ -711,7 +752,6 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         const schedulers: unknown[] = [];
         const policies: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
             const runtime = packet.protectedInputs.desired.runtime[role];
             const revision = this.desiredRevisionCandidate(packet, role);
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
@@ -777,7 +817,6 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     private async reconcileStaged(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
         const runtimes: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
-            await this.assertLive(input.lease);
             const runtime = input.packet.protectedInputs.desired.runtime[role];
             const revision = this.desiredRevisionCandidate(input.packet, role);
             const service = await this.options.cloudRun.getService(this.serviceResource(runtime));
@@ -843,16 +882,36 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const queueInput = input.packet.protectedInputs.old.queues[role];
             const schedulerInput = input.packet.protectedInputs.old.schedulers[role];
             const queue = await this.options.workPlanes.observeQueue(queueInput);
-            validateQueueObservation({ role, ...queue }, queueInput, input.packet.oldManifest.queues[role].configDigest, role);
+            const desiredQueueInput = input.packet.protectedInputs.desired.queues[role];
+            const queueTargetIsOld = queueTargetMatches(queue.target, queueInput.target);
+            const queueTargetIsDesired = queueTargetMatches(queue.target, desiredQueueInput.target);
+            if (!queueTargetIsOld && !queueTargetIsDesired) fail('OBSERVATION_RACE');
+            // A target can be the exact desired postcondition when a writer
+            // crashed after its PATCH but before INVOKERS_ROTATED append. The
+            // queue remains otherwise governed by the durable OLD phase:
+            // config, pause, emptiness, pagination and target identity are all
+            // revalidated before the next phase re-proves IAM.
+            const queueExpectation = queueTargetIsDesired
+                ? { ...queueInput, target: desiredQueueInput.target }
+                : queueInput;
+            validateQueueObservation({ role, ...queue }, queueExpectation, input.packet.oldManifest.queues[role].configDigest, role);
             const scheduler = await this.options.workPlanes.observeScheduler(schedulerInput);
-            validateSchedulerObservation({ role, ...scheduler, nowMs }, schedulerInput, nowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
-            queues.push({ role, digest: canonicalDigest(queue) });
-            schedulers.push({ role, digest: canonicalDigest(scheduler) });
+            const schedulerTargetIsOld = canonicalDigest(scheduler.target) === canonicalDigest(schedulerInput.target);
+            const desiredSchedulerInput = input.packet.protectedInputs.desired.schedulers[role];
+            const schedulerTargetIsDesired = canonicalDigest(scheduler.target) === canonicalDigest(desiredSchedulerInput.target);
+            if (!schedulerTargetIsOld && !schedulerTargetIsDesired) fail('OBSERVATION_RACE');
+            const schedulerExpectation = schedulerTargetIsDesired
+                ? { ...schedulerInput, target: desiredSchedulerInput.target }
+                : schedulerInput;
+            validateSchedulerObservation({ role, ...scheduler, nowMs }, schedulerExpectation, nowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            queues.push({ role, target: queueTargetIsDesired ? 'DESIRED' : 'OLD', digest: canonicalDigest(queue) });
+            schedulers.push({ role, target: schedulerTargetIsDesired ? 'DESIRED' : 'OLD', digest: canonicalDigest(scheduler) });
         }
         return this.evidence('RECONCILE_QUEUES_ALIGNED', { queues, schedulers }, input.lease.lock.lockFence);
     }
 
     private async reconcileInvokers(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const policies: unknown[] = [];
         for (const role of ['preflight', 'paid'] as const) {
             for (const kind of ['run', 'queue', 'taskCaller', 'maintenance'] as const) {
@@ -862,7 +921,51 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 policies.push({ role, kind, digest: canonicalDigest(observed) });
             }
         }
-        return this.evidence('RECONCILE_INVOKERS_ROTATED', policies, input.lease.lock.lockFence);
+        const alignments: unknown[] = [];
+        // A crash can occur after IAM read-back or after either paused OIDC
+        // target update but before the phase append. Reconciliation therefore
+        // repeats the exact desired-target proof and adopts only the
+        // idempotent postcondition; it never treats desired packet data as a
+        // current provider observation.
+        for (const role of ['preflight', 'paid'] as const) {
+            await leaseCheck();
+            const desiredScheduler = input.packet.protectedInputs.desired.schedulers[role];
+            const oldScheduler = input.packet.protectedInputs.old.schedulers[role];
+            let scheduler = await this.options.workPlanes.observeScheduler(desiredScheduler);
+            if (scheduler.state !== 'PAUSED') fail('SCHEDULER_NOT_QUIESCENT');
+            if (canonicalDigest(scheduler.target) === canonicalDigest(oldScheduler.target)) {
+                await leaseCheck();
+                scheduler = await this.options.workPlanes.updateSchedulerTarget({
+                    input: desiredScheduler,
+                    expectedOldTarget: oldScheduler.target,
+                    desiredTarget: desiredScheduler.target,
+                    leaseCheck,
+                });
+            } else if (canonicalDigest(scheduler.target) !== canonicalDigest(desiredScheduler.target)) {
+                fail('OBSERVATION_RACE');
+            }
+
+            await leaseCheck();
+            const desiredQueue = input.packet.protectedInputs.desired.queues[role];
+            const oldQueue = input.packet.protectedInputs.old.queues[role];
+            let queue = await this.options.workPlanes.observeQueue(desiredQueue);
+            if (queue.state !== 'PAUSED') fail('QUEUE_NOT_EMPTY');
+            if (queueTargetMatches(queue.target, oldQueue.target)) {
+                await leaseCheck();
+                queue = await this.options.workPlanes.updateQueueTarget({
+                    input: desiredQueue,
+                    expectedOldTarget: oldQueue.target,
+                    desiredTarget: desiredQueue.target,
+                    leaseCheck,
+                });
+            } else if (!queueTargetMatches(queue.target, desiredQueue.target)) {
+                fail('OBSERVATION_RACE');
+            }
+            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, desiredScheduler, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            validateQueueObservation({ role, ...queue }, desiredQueue, input.packet.desiredManifest.queues[role].configDigest, role);
+            alignments.push({ role, scheduler: canonicalDigest(scheduler), queue: canonicalDigest(queue) });
+        }
+        return this.evidence('RECONCILE_INVOKERS_ROTATED', { policies, alignments }, leaseCheck.currentLease().lock.lockFence);
     }
 
     private async reconcilePromoted(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
@@ -906,9 +1009,11 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     }
 
     async compensateActivation(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
+        const leaseCheck = this.leaseCheckFor(input.lease);
         const resources: unknown[] = [];
         if (this.options.closeAdmissionGates) {
             try {
+                await leaseCheck();
                 await this.options.closeAdmissionGates(input);
                 resources.push({ action: 'CLOSE_ADMISSION_GATES', result: 'OBSERVED' });
             } catch (error) {
@@ -919,19 +1024,21 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         }
         for (const role of ['preflight', 'paid'] as const) {
             try {
-                await this.options.workPlanes.pauseScheduler(input.packet.protectedInputs.desired.schedulers[role]);
+                await leaseCheck();
+                await this.options.workPlanes.pauseScheduler(input.packet.protectedInputs.desired.schedulers[role], leaseCheck);
                 resources.push({ role, plane: 'scheduler', result: 'OBSERVED' });
             } catch (error) {
                 resources.push({ role, plane: 'scheduler', result: error instanceof EpochError ? error.code : 'PROBE_FAILED' });
             }
             try {
-                await this.options.workPlanes.pauseQueue(input.packet.protectedInputs.desired.queues[role]);
+                await leaseCheck();
+                await this.options.workPlanes.pauseQueue(input.packet.protectedInputs.desired.queues[role], leaseCheck);
                 resources.push({ role, plane: 'queue', result: 'OBSERVED' });
             } catch (error) {
                 resources.push({ role, plane: 'queue', result: error instanceof EpochError ? error.code : 'PROBE_FAILED' });
             }
         }
-        return this.evidence('COMPENSATED', resources, input.lease.lock.lockFence);
+        return this.evidence('COMPENSATED', resources, leaseCheck.currentLease().lock.lockFence);
     }
 
     async activate(): Promise<OperationEvidence> {
@@ -939,10 +1046,6 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         // channel not carried by this packet; refusing here prevents a live
         // coordinator from claiming ACTIVATED with an unreviewed endpoint.
         fail('ACTIVATION_AUTH_REQUIRED');
-    }
-
-    private async assertLive(lease: JournalLease): Promise<void> {
-        if (this.options.journal) await this.options.journal.assertLive(lease);
     }
 
     private async captureZeroWorkBaseline(): Promise<void> {
@@ -980,13 +1083,14 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         return value;
     }
 
-    private async ensureIamBindings(input: ProtectedIamInput, role: Role, expectedBindings: readonly ProtectedIamBinding[], lease: JournalLease): Promise<Readonly<{ resource: string; project: string; etag: string; bindings: readonly ProtectedIamBinding[] }>> {
+    private async ensureIamBindings(input: ProtectedIamInput, role: Role, expectedBindings: readonly ProtectedIamBinding[], leaseCheck: LeaseCheck): Promise<Readonly<{ resource: string; project: string; etag: string; bindings: readonly ProtectedIamBinding[] }>> {
+        await leaseCheck();
         const observed = await this.options.iam.getPolicy(input);
         const missing = expectedBindings.filter(expected => !observed.bindings.some(actual => canonicalDigest(actual) === canonicalDigest(expected)));
         if (missing.length === 0) return observed;
         if (observed.etag !== input.etag) fail('OBSERVATION_RACE');
-        await this.assertLive(lease);
-        return this.options.iam.addBindings({ ...input, etag: observed.etag }, missing);
+        await leaseCheck();
+        return this.options.iam.addBindings({ ...input, etag: observed.etag }, missing, leaseCheck);
     }
 
     private retiredIdentitySet(packet: CapacityEpochPacket): ReadonlySet<string> {
