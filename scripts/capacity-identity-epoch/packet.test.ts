@@ -26,6 +26,19 @@ function runtimeSettings(role: 'preflight' | 'paid') {
     return { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: role === 'preflight' ? 32 : 8 };
 }
 
+function runtimeSecretReferences(role: 'preflight' | 'paid') {
+    const slots = role === 'preflight'
+        ? ['primary', 'tertiary', 'quinary', 'quaternary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth']
+        : ['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth'];
+    return Object.fromEntries([
+        ...slots.map(slot => [`APIFY_${slot.toUpperCase()}_API_TOKEN`, 'fixture-secret:7']),
+        ['SUPABASE_SERVICE_ROLE_KEY', 'fixture-secret:7'],
+        ['IMAGE_PROXY_SIGNING_SECRET', 'fixture-secret:7'],
+        ['ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET', 'fixture-secret:7'],
+        ['ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET', 'fixture-secret:7'],
+    ]);
+}
+
 function runtimeEnvironment(role: 'preflight' | 'paid', suffix: 'old' | 'desired') {
     const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
     const maintenancePrefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2';
@@ -61,7 +74,7 @@ function runtimeEnvironment(role: 'preflight' | 'paid', suffix: 'old' | 'desired
         PREFLIGHT_TASKS_RECOVERY_ENABLED: role === 'preflight' ? 'true' : 'false',
         ANALYSIS_V2_RECOVERY_ENABLED: role === 'paid' ? 'true' : 'false',
         ANALYSIS_V2_APIFY_API_TOKEN_SLOT: role === 'preflight' ? 'senary' : 'secondary',
-        ...(role === 'preflight' ? { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,quinary,senary' } : {}),
+        ...(role === 'preflight' ? { PREFLIGHT_APIFY_API_TOKEN_SLOTS: 'primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth' } : {}),
     };
 }
 
@@ -81,7 +94,7 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         identity: identity(`${role}.runtime-desired`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         sourceSha: 'b'.repeat(40),
         environment: runtimeEnvironment(role, 'desired'),
-        secretReferences: { ANALYSIS_SECRET: 'secret:7' },
+        secretReferences: runtimeSecretReferences(role),
         settings: runtimeSettings(role),
         target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
         noTraffic: true, providerAdmissionEnabled: true,
@@ -149,7 +162,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
         identity: identity(`${role}.runtime-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         sourceSha,
         environment: runtimeEnvironment(role, suffix),
-        secretReferences: { ANALYSIS_SECRET: 'secret:7' },
+        secretReferences: runtimeSecretReferences(role),
         settings: runtimeSettings(role),
         target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
         noTraffic: true,
@@ -339,6 +352,15 @@ function packet() {
     });
 }
 
+function synchronizeDesiredRuntimeProof(value: any, role: 'preflight' | 'paid') {
+    const runtime = value.protectedInputs.desired.runtime[role];
+    value.protectedObservations.desired.runtime[role] = JSON.parse(JSON.stringify(runtime));
+    value.desiredManifest.source[role].desiredRuntimeEnvironment = JSON.parse(JSON.stringify(runtime.environment));
+    value.desiredManifest.source[role].desiredRuntimeSettings = { ...runtime.settings };
+    value.desiredManifest.source[role].desiredRuntimeDigest = canonicalDigest(runtime);
+    value.protectedObservations.desired.source[role].desiredRuntimeDigest = value.desiredManifest.source[role].desiredRuntimeDigest;
+}
+
 describe('coordinated epoch protected packet', () => {
     it('accepts complete old and desired manifests and binds non-secret digests', () => {
         const value = packet() as any;
@@ -504,12 +526,25 @@ describe('coordinated epoch protected packet', () => {
         desiredRuntime.environment.ANALYSIS_CAPACITY_EXPANSION_CANARY = 'true';
         desiredRuntime.environment.PREFLIGHT_TASKS_ENABLED = 'false';
         desiredRuntime.settings.maxInstances = 64;
-        value.protectedObservations.desired.runtime.preflight = JSON.parse(JSON.stringify(desiredRuntime));
-        value.desiredManifest.source.preflight.desiredRuntimeEnvironment = JSON.parse(JSON.stringify(desiredRuntime.environment));
-        value.desiredManifest.source.preflight.desiredRuntimeSettings = { ...desiredRuntime.settings };
-        value.desiredManifest.source.preflight.desiredRuntimeDigest = canonicalDigest(desiredRuntime);
-        value.protectedObservations.desired.source.preflight.desiredRuntimeDigest = value.desiredManifest.source.preflight.desiredRuntimeDigest;
+        synchronizeDesiredRuntimeProof(value, 'preflight');
         expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+    });
+
+    it('rejects synchronized incomplete or wrong provider secret contracts', () => {
+        const missingSecrets = packet() as any;
+        missingSecrets.protectedInputs.desired.runtime.preflight.secretReferences = {};
+        synchronizeDesiredRuntimeProof(missingSecrets, 'preflight');
+        expect(() => createProtectedPacket(missingSecrets)).toThrow('SOURCE_INVALID');
+
+        const paidWrongSlot = packet() as any;
+        paidWrongSlot.protectedInputs.desired.runtime.paid.environment.ANALYSIS_V2_APIFY_API_TOKEN_SLOT = 'primary';
+        synchronizeDesiredRuntimeProof(paidWrongSlot, 'paid');
+        expect(() => createProtectedPacket(paidWrongSlot)).toThrow('SOURCE_INVALID');
+
+        const preflightWrongPool = packet() as any;
+        preflightWrongPool.protectedInputs.desired.runtime.preflight.environment.PREFLIGHT_APIFY_API_TOKEN_SLOTS = 'primary';
+        synchronizeDesiredRuntimeProof(preflightWrongPool, 'preflight');
+        expect(() => createProtectedPacket(preflightWrongPool)).toThrow('SOURCE_INVALID');
     });
 
     it('preserves unrelated old IAM policy bindings and rejects unapproved additions', () => {

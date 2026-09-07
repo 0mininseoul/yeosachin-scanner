@@ -93,6 +93,18 @@ const INITIAL_FIXED_RUNTIME_ENVIRONMENT: Readonly<Record<string, string>> = {
     ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
     ANALYSIS_BETA_PREPARE_ENABLED: 'false',
 };
+const PREFLIGHT_APIFY_SLOTS = [
+    'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth',
+] as const;
+const APIFY_SLOTS = [
+    'primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth',
+] as const;
+const FIXED_SECRET_REFERENCE_NAMES = [
+    'SUPABASE_SERVICE_ROLE_KEY',
+    'IMAGE_PROXY_SIGNING_SECRET',
+    'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET',
+    'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET',
+] as const;
 const OLD_OBSERVATION_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness'] as const;
 const OBSERVATION_TARGET_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness', 'zeroWorkSources'] as const;
 const SOURCE_OBSERVATION_KEYS = ['sourceSha', 'revision', 'metadataDigest'] as const;
@@ -368,6 +380,22 @@ function validateDesiredInitialRuntimeContract(
     if (expectedSettings.concurrency !== 1
         || expectedSettings.timeoutSeconds !== 600
         || expectedSettings.maxInstances !== (role === 'preflight' ? 32 : 8)) epochFail('SOURCE_INVALID');
+
+    const selectedSlot = expectedEnvironment.ANALYSIS_V2_APIFY_API_TOKEN_SLOT;
+    const requiredApifySlots = role === 'preflight' ? PREFLIGHT_APIFY_SLOTS : APIFY_SLOTS;
+    if (role === 'paid' && selectedSlot !== 'secondary') epochFail('SOURCE_INVALID');
+    if (role === 'preflight' && !PREFLIGHT_APIFY_SLOTS.includes(selectedSlot as typeof PREFLIGHT_APIFY_SLOTS[number])) epochFail('SOURCE_INVALID');
+    if (role === 'preflight'
+        && expectedEnvironment.PREFLIGHT_APIFY_API_TOKEN_SLOTS !== PREFLIGHT_APIFY_SLOTS.join(',')) epochFail('SOURCE_INVALID');
+    if (role === 'paid' && Object.prototype.hasOwnProperty.call(expectedEnvironment, 'PREFLIGHT_APIFY_API_TOKEN_SLOTS')) epochFail('SOURCE_INVALID');
+    const expectedSecretNames = [
+        ...requiredApifySlots.map(slot => `APIFY_${slot.toUpperCase()}_API_TOKEN`),
+        ...FIXED_SECRET_REFERENCE_NAMES,
+    ].sort();
+    const actualSecretNames = Object.keys(runtime.secretReferences).sort();
+    if (actualSecretNames.length !== expectedSecretNames.length
+        || actualSecretNames.some((name, index) => name !== expectedSecretNames[index])) epochFail('SOURCE_INVALID');
+    if (!Object.values(runtime.secretReferences).every(reference => /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}:[1-9][0-9]*$/.test(reference))) epochFail('SOURCE_INVALID');
 }
 
 function validateQueueInput(value: unknown): asserts value is ProtectedQueueInput {
