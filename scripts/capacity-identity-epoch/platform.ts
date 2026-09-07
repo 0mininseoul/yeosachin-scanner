@@ -191,11 +191,13 @@ export class AuthenticatedProtectedTransport {
         url: string;
         allowedHosts: ReadonlySet<string>;
         allowedPath: (path: string) => boolean;
+        allowedMethods?: readonly ProtectedHttpMethod[];
         allowedQueryKeys?: readonly string[];
         body?: string;
         acceptedStatuses?: readonly number[];
     }>): Promise<ProtectedHttpResponse> {
-        const url = this.parseAllowedUrl(options.url, options.allowedHosts, options.allowedPath, options.allowedQueryKeys);
+        const url = this.parseAllowedUrl(options.url, options.allowedHosts, options.allowedPath, options.allowedMethods, options.allowedQueryKeys);
+        if (options.allowedMethods === undefined || !options.allowedMethods.includes(options.method)) fail('ADAPTER_NOT_ALLOWED');
         if (options.body !== undefined) {
             if (typeof options.body !== 'string' || Buffer.byteLength(options.body, 'utf8') > this.maxResponseBytes) {
                 fail('ADAPTER_REQUEST_INVALID');
@@ -249,6 +251,7 @@ export class AuthenticatedProtectedTransport {
         url: string;
         allowedHosts: ReadonlySet<string>;
         allowedPath: (path: string) => boolean;
+        allowedMethods?: readonly ProtectedHttpMethod[];
         allowedQueryKeys?: readonly string[];
         body?: unknown;
         acceptedStatuses?: readonly number[];
@@ -259,6 +262,7 @@ export class AuthenticatedProtectedTransport {
             url: options.url,
             allowedHosts: options.allowedHosts,
             allowedPath: options.allowedPath,
+            ...(options.allowedMethods === undefined ? {} : { allowedMethods: options.allowedMethods }),
             ...(options.allowedQueryKeys === undefined ? {} : { allowedQueryKeys: options.allowedQueryKeys }),
             ...(body === undefined ? {} : { body }),
             ...(options.acceptedStatuses === undefined ? {} : { acceptedStatuses: options.acceptedStatuses }),
@@ -266,20 +270,21 @@ export class AuthenticatedProtectedTransport {
         return { response, value: parseProtectedJson(response.body, this.maxResponseBytes) };
     }
 
-    private parseAllowedUrl(raw: string, allowedHosts: ReadonlySet<string>, allowedPath: (path: string) => boolean, allowedQueryKeys?: readonly string[]): URL {
+    private parseAllowedUrl(raw: string, allowedHosts: ReadonlySet<string>, allowedPath: (path: string) => boolean, allowedMethods?: readonly ProtectedHttpMethod[], allowedQueryKeys?: readonly string[]): URL {
         let url: URL;
         try {
             url = new URL(raw);
         } catch {
             fail('ADAPTER_REQUEST_INVALID');
         }
-        if (url.protocol !== 'https:' || url.username || url.password || !allowedHosts.has(url.hostname)
-            || !CONTROL_PLANE_HOSTS.has(url.hostname) || !allowedPath(url.pathname)) fail('ADAPTER_NOT_ALLOWED');
-        if (allowedQueryKeys !== undefined) {
-            const actual = [...url.searchParams.keys()].sort();
-            const expected = [...allowedQueryKeys].sort();
-            if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) fail('ADAPTER_NOT_ALLOWED');
-        }
+        if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash
+            || !allowedHosts.has(url.hostname)
+            || (!CONTROL_PLANE_HOSTS.has(url.hostname) && !/^[a-z0-9-]+-run\.googleapis\.com$/.test(url.hostname))
+            || !allowedPath(url.pathname)) fail('ADAPTER_NOT_ALLOWED');
+        if (allowedQueryKeys === undefined) fail('ADAPTER_NOT_ALLOWED');
+        const actual = [...url.searchParams.keys()].sort();
+        const expected = [...allowedQueryKeys].sort();
+        if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) fail('ADAPTER_NOT_ALLOWED');
         return url;
     }
 

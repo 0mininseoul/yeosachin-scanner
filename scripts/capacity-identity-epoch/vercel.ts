@@ -8,6 +8,7 @@ import {
 import {
     AuthenticatedProtectedTransport,
     FetchProtectedTransport,
+    type ProtectedTokenProvider,
     parseProtectedObject,
     type ProtectedHttpResponse,
     type ProtectedTransport,
@@ -22,10 +23,11 @@ import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-a
 const HOSTS = new Set(['api.vercel.com']);
 const DEPLOYMENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const PROJECT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const TEAM_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const ALIAS = /^[A-Za-z0-9.-]{1,253}$/;
 
-function fail(code: 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_NOT_ALLOWED' | 'ADAPTER_TIMEOUT' | 'ADAPTER_REDIRECT' | 'READINESS_INVALID' | 'SOURCE_INVALID'): never {
+function fail(code: 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_NOT_ALLOWED' | 'ADAPTER_TIMEOUT' | 'ADAPTER_REDIRECT' | 'READINESS_INVALID' | 'SOURCE_INVALID' | 'OBSERVATION_RACE'): never {
     epochFail(code);
 }
 
@@ -34,7 +36,7 @@ function object(value: unknown): Record<string, unknown> {
     return value;
 }
 
-type PublicReadinessFetcher = (url: string) => Promise<ProtectedHttpResponse>;
+type PublicReadinessFetcher = (url: string, signal?: AbortSignal) => Promise<ProtectedHttpResponse>;
 
 export type VercelDeploymentObservation = Readonly<{
     id: string;
@@ -49,31 +51,59 @@ export type VercelAdapterOptions = Readonly<{
     transport: AuthenticatedProtectedTransport;
     publicTransport?: ProtectedTransport;
     readinessFetcher?: PublicReadinessFetcher;
+    publicReadinessOrigin: string;
+    readinessTimeoutMs?: number;
 }>;
+
+/** Vercel's bearer token is deliberately supplied independently of Google ADC. */
+export function createVercelProtectedTransport(options: Readonly<{
+    tokenProvider: ProtectedTokenProvider;
+    transport?: ProtectedTransport;
+    maxResponseBytes?: number;
+    timeoutMs?: number;
+}>): AuthenticatedProtectedTransport {
+    return new AuthenticatedProtectedTransport({
+        transport: options.transport ?? new FetchProtectedTransport(options.maxResponseBytes),
+        tokenProvider: options.tokenProvider,
+        timeoutMs: options.timeoutMs,
+        maxResponseBytes: options.maxResponseBytes,
+    });
+}
 
 /** Vercel deployment/alias adapter plus strict raw v3 readiness consumption. */
 export class VercelAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
     private readonly readinessFetcher: PublicReadinessFetcher;
+    private readonly publicReadinessOrigin?: string;
+    private readonly readinessTimeoutMs: number;
 
     constructor(options: VercelAdapterOptions) {
         this.transport = options.transport;
+        let publicOrigin: URL;
+        try { publicOrigin = new URL(options.publicReadinessOrigin); } catch { fail('ADAPTER_REQUEST_INVALID'); }
+        if (publicOrigin.protocol !== 'https:' || publicOrigin.username || publicOrigin.password || publicOrigin.port || publicOrigin.pathname !== '/' || publicOrigin.search || publicOrigin.hash) fail('ADAPTER_REQUEST_INVALID');
+        this.publicReadinessOrigin = publicOrigin.origin;
+        const timeoutMs = options.readinessTimeoutMs ?? 15_000;
+        if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) fail('ADAPTER_REQUEST_INVALID');
+        this.readinessTimeoutMs = timeoutMs;
         const publicTransport = options.publicTransport ?? new FetchProtectedTransport(65_536);
-        this.readinessFetcher = options.readinessFetcher ?? (async (url: string) => {
+        this.readinessFetcher = options.readinessFetcher ?? (async (url: string, signal?: AbortSignal) => {
             let parsed: URL;
             try {
                 parsed = new URL(url);
             } catch {
                 fail('ADAPTER_REQUEST_INVALID');
             }
-            if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) fail('ADAPTER_NOT_ALLOWED');
+            if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
+                || parsed.pathname !== '/api/analysis/capacity/readiness') fail('ADAPTER_NOT_ALLOWED');
+            if (parsed.origin !== this.publicReadinessOrigin) fail('ADAPTER_NOT_ALLOWED');
             let response: ProtectedHttpResponse;
             try {
                 response = await publicTransport.request({
                     method: 'GET',
                     url: parsed.toString(),
                     headers: { accept: 'application/json' },
-                });
+                }, signal);
             } catch (error) {
                 if (error instanceof EpochError) throw error;
                 fail('ADAPTER_TIMEOUT');
@@ -83,19 +113,22 @@ export class VercelAdapter {
         });
     }
 
-    async getDeployment(options: Readonly<{ projectId: string; deploymentId: string }>): Promise<VercelDeploymentObservation> {
-        if (!PROJECT_ID.test(options.projectId) || !DEPLOYMENT_ID.test(options.deploymentId)) fail('ADAPTER_REQUEST_INVALID');
+    async getDeployment(options: Readonly<{ projectId: string; teamId: string; deploymentId: string }>): Promise<VercelDeploymentObservation> {
+        if (!PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId) || !DEPLOYMENT_ID.test(options.deploymentId)) fail('ADAPTER_REQUEST_INVALID');
         const path = `/v13/deployments/${encodeURIComponent(options.deploymentId)}`;
         const { value } = await this.transport.json({
             method: 'GET',
-            url: `https://api.vercel.com${path}?projectId=${encodeURIComponent(options.projectId)}`,
+            url: `https://api.vercel.com${path}?withGitRepoInfo=true&teamId=${encodeURIComponent(options.teamId)}&slug=${encodeURIComponent(options.projectId)}`,
             allowedHosts: HOSTS,
             allowedPath: candidate => candidate === path,
-            allowedQueryKeys: ['projectId'],
+            allowedMethods: ['GET'],
+            allowedQueryKeys: ['withGitRepoInfo', 'teamId', 'slug'],
             acceptedStatuses: [200],
         });
         const deployment = object(value);
-        if (deployment.id !== options.deploymentId || typeof deployment.readyState !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+        const project = object(deployment.project);
+        const team = object(deployment.team);
+        if (deployment.id !== options.deploymentId || project.id !== options.projectId || team.id !== options.teamId || typeof deployment.readyState !== 'string') fail('ADAPTER_RESPONSE_INVALID');
         const sourceSha = this.deploymentSourceSha(deployment);
         const aliases = Array.isArray(deployment.alias) ? deployment.alias : [];
         const aliasNames = aliases.map(alias => {
@@ -114,14 +147,16 @@ export class VercelAdapter {
         };
     }
 
-    async getAliases(deploymentId: string): Promise<readonly string[]> {
-        if (!DEPLOYMENT_ID.test(deploymentId)) fail('ADAPTER_REQUEST_INVALID');
-        const path = `/v2/deployments/${encodeURIComponent(deploymentId)}/aliases`;
+    async getAliases(options: Readonly<{ deploymentId: string; teamId: string }>): Promise<readonly string[]> {
+        if (!DEPLOYMENT_ID.test(options.deploymentId) || !TEAM_ID.test(options.teamId)) fail('ADAPTER_REQUEST_INVALID');
+        const path = `/v2/deployments/${encodeURIComponent(options.deploymentId)}/aliases`;
         const { value } = await this.transport.json({
             method: 'GET',
-            url: `https://api.vercel.com${path}`,
+            url: `https://api.vercel.com${path}?teamId=${encodeURIComponent(options.teamId)}`,
             allowedHosts: HOSTS,
             allowedPath: candidate => candidate === path,
+            allowedMethods: ['GET'],
+            allowedQueryKeys: ['teamId'],
             acceptedStatuses: [200],
         });
         const body = object(value);
@@ -134,20 +169,27 @@ export class VercelAdapter {
         });
     }
 
-    async assignAlias(options: Readonly<{ projectId: string; deploymentId: string; alias: string }>): Promise<readonly string[]> {
-        if (!PROJECT_ID.test(options.projectId) || !DEPLOYMENT_ID.test(options.deploymentId) || !ALIAS.test(options.alias)) fail('ADAPTER_REQUEST_INVALID');
+    async assignAlias(options: Readonly<{ projectId: string; teamId: string; deploymentId: string; expectedOldDeploymentId: string; expectedSourceSha: string; alias: string }>): Promise<readonly string[]> {
+        if (!PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId) || !DEPLOYMENT_ID.test(options.deploymentId) || !DEPLOYMENT_ID.test(options.expectedOldDeploymentId) || !SHA.test(options.expectedSourceSha) || !ALIAS.test(options.alias)) fail('ADAPTER_REQUEST_INVALID');
+        const deployment = await this.getDeployment({ projectId: options.projectId, teamId: options.teamId, deploymentId: options.deploymentId });
+        if (deployment.readyState !== 'READY' || deployment.sourceSha !== options.expectedSourceSha) fail('ADAPTER_RESPONSE_INVALID');
+        const prior = await this.getAlias({ alias: options.alias, projectId: options.projectId, teamId: options.teamId, allowMissing: true });
+        if (prior && prior.deploymentId === options.deploymentId) return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
+        if (prior && prior.deploymentId !== options.expectedOldDeploymentId) fail('OBSERVATION_RACE');
         const path = `/v2/deployments/${encodeURIComponent(options.deploymentId)}/aliases`;
         await this.transport.json({
             method: 'POST',
-            url: `https://api.vercel.com${path}`,
+            url: `https://api.vercel.com${path}?teamId=${encodeURIComponent(options.teamId)}`,
             allowedHosts: HOSTS,
             allowedPath: candidate => candidate === path,
+            allowedMethods: ['POST'],
+            allowedQueryKeys: ['teamId'],
             acceptedStatuses: [200, 201],
-            body: { alias: options.alias, projectId: options.projectId },
+            body: { alias: options.alias, redirect: null },
         });
-        const aliases = await this.getAliases(options.deploymentId);
-        if (!aliases.includes(options.alias)) fail('ADAPTER_RESPONSE_INVALID');
-        return aliases;
+        const assigned = await this.getAlias({ alias: options.alias, projectId: options.projectId, teamId: options.teamId, expectedDeploymentId: options.deploymentId });
+        if (!assigned || assigned.alias !== options.alias) fail('ADAPTER_RESPONSE_INVALID');
+        return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
     }
 
     async readPublicReadiness(options: Readonly<{
@@ -161,8 +203,27 @@ export class VercelAdapter {
             fail('ADAPTER_REQUEST_INVALID');
         }
         if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) fail('ADAPTER_NOT_ALLOWED');
-        const response = await this.readinessFetcher(parsed.toString());
+        if (parsed.pathname !== '/api/analysis/capacity/readiness') fail('ADAPTER_NOT_ALLOWED');
+        if (parsed.port || parsed.origin !== this.publicReadinessOrigin) fail('ADAPTER_NOT_ALLOWED');
+        const controller = new AbortController();
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        let response: ProtectedHttpResponse;
+        try {
+            response = await Promise.race([
+                this.readinessFetcher(parsed.toString(), controller.signal),
+                new Promise<ProtectedHttpResponse>((_, reject) => {
+                    timeoutHandle = setTimeout(() => { controller.abort(); reject(new EpochError('ADAPTER_TIMEOUT')); }, this.readinessTimeoutMs);
+                }),
+            ]);
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_TIMEOUT');
+        } finally {
+            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+            controller.abort();
+        }
         if (response.status !== 200) fail('READINESS_INVALID');
+        if (typeof response.body !== 'string' || Buffer.byteLength(response.body, 'utf8') > 65_536) fail('READINESS_INVALID');
         let dto: LegacyPublicReadiness;
         try {
             // Parse the strict raw v3 contract before any normalized helper.
@@ -194,9 +255,25 @@ export class VercelAdapter {
 
     private deploymentSourceSha(deployment: Record<string, unknown>): string {
         const gitSource = object(deployment.gitSource ?? {});
-        const sha = gitSource.sha ?? gitSource.ref;
+        const sha = gitSource.sha;
         if (typeof sha !== 'string' || !SHA.test(sha)) fail('SOURCE_INVALID');
         return sha;
+    }
+
+    private async getAlias(options: Readonly<{ alias: string; projectId: string; teamId: string; expectedDeploymentId?: string; allowMissing?: boolean }>): Promise<{ alias: string; projectId: string; teamId: string; deploymentId: string } | null> {
+        if (!ALIAS.test(options.alias) || !PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId)
+            || (options.expectedDeploymentId !== undefined && !DEPLOYMENT_ID.test(options.expectedDeploymentId))) fail('ADAPTER_REQUEST_INVALID');
+        const path = `/v4/aliases/${encodeURIComponent(options.alias)}`;
+        const response = await this.transport.request({
+            method: 'GET', url: `https://api.vercel.com${path}?teamId=${encodeURIComponent(options.teamId)}`,
+            allowedHosts: HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: ['teamId'], acceptedStatuses: options.allowMissing ? [200, 404] : [200],
+        });
+        if (response.status === 404 && options.allowMissing) return null;
+        const value = parseProtectedObject(response.body, this.transport.maxResponseBytes);
+        const alias = object(value);
+        if (alias.alias !== options.alias || alias.projectId !== options.projectId || typeof alias.deploymentId !== 'string' || !DEPLOYMENT_ID.test(alias.deploymentId)) fail('ADAPTER_RESPONSE_INVALID');
+        if (options.expectedDeploymentId !== undefined && alias.deploymentId !== options.expectedDeploymentId) fail('ADAPTER_RESPONSE_INVALID');
+        return { alias: options.alias, projectId: options.projectId, teamId: options.teamId, deploymentId: alias.deploymentId };
     }
 }
 

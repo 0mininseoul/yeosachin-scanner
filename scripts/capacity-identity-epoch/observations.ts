@@ -209,7 +209,7 @@ export function validateIamObservation(value: unknown, expected: IamObservation)
             || typeof binding.member !== 'string' || !safe(binding.member, 1024)
             || (binding.condition !== null && typeof binding.condition !== 'string' && !isObject(binding.condition))) epochFail('OBSERVATION_INVALID');
         if (typeof binding.condition === 'string' && !safe(binding.condition, 2048)) epochFail('OBSERVATION_INVALID');
-        if (isObject(binding.condition) && (!Object.keys(binding.condition).every(key => ['title', 'description', 'expression'].includes(key))
+        if (isObject(binding.condition) && (!Object.keys(binding.condition).every(key => ['title', 'description', 'expression', 'location'].includes(key))
             || !Object.values(binding.condition).every(item => typeof item === 'string' && safe(item, 4096)))) epochFail('OBSERVATION_INVALID');
         if (binding.member !== 'allUsers' && binding.member !== 'allAuthenticatedUsers'
             && !/^(?:user|group|domain|principal|principalSet|serviceAccount):[^\u0000-\u001f\u007f]{1,1023}$/.test(binding.member)) epochFail('OBSERVATION_INVALID');

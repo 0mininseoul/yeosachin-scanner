@@ -199,6 +199,17 @@ describe('generation-fenced epoch journal', () => {
         await expect(journal.deriveState()).rejects.toThrow('JOURNAL_INVALID');
     });
 
+    it('rejects an expired active lock for unleased replay inspection', async () => {
+        let now = 1_000;
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 100 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-expired-inspection'));
+        await journal.append(lease, transition(1, null, 'PREPARED', lease.lock.lockFence));
+        now = 1_101;
+        await expect(journal.readValidatedState()).rejects.toThrow('LOCK_LOST');
+    });
+
     it('retains a late stale append but forces resumed-owner reconciliation', async () => {
         const storage = new TakeoverDuringAppendStorage();
         const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });

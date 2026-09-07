@@ -372,7 +372,9 @@ export class EpochJournal {
         if (!current) epochFail('LOCK_LOST');
         assertGeneration(current.generation);
         validateLock(current.value, this.epochHeaderDigest);
-        return { generation: current.generation, lock: current.value as EpochLock };
+        const lock = current.value as EpochLock;
+        if (isExpired(lock, this.now())) epochFail('LOCK_LOST');
+        return { generation: current.generation, lock };
     }
 }
 
