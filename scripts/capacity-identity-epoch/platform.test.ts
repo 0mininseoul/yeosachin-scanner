@@ -50,6 +50,9 @@ function runService(generation = '2', traffic = [{ revisionName: 'preflight-revi
 }
 
 describe('protected platform adapters', () => {
+    const pauseEvidence = (resource: string) => ({ resource, operation: 'PAUSE', observedAtMs: 1 });
+    const pauseProvenance = (resource: string) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidence: pauseEvidence(resource), evidenceDigest: canonicalDigest(pauseEvidence(resource)), complete: true as const });
+
     it('rejects an unallowlisted host before token acquisition', async () => {
         let tokens = 0;
         const fake = new FakeTransport(() => { throw new Error('transport must not run'); });
@@ -372,9 +375,21 @@ describe('protected platform adapters', () => {
         const fake = new FakeTransport(request => {
             return response(request, 200, schedulerWire);
         });
-        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }), now: () => 2_000 }).pauseScheduler(scheduler);
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).pauseScheduler(scheduler);
         expect(observed.state).toBe('PAUSED');
         expect(fake.requests.find(request => request.method === 'POST')?.url).toContain(':pause');
+    });
+
+    it('rejects pause provenance whose evidence object is not resource-correlated', async () => {
+        const scheduler: ProtectedSchedulerInput = {
+            resource: schedulerResource, project, location: 'asia-northeast3',
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
+            configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
+        };
+        const schedulerWire = { name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: 'maintenance@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } };
+        const fake = new FakeTransport(request => response(request, 200, schedulerWire));
+        const evidence = { resource: 'projects/fixture-project/locations/asia-northeast3/jobs/other', operation: 'PAUSE', observedAtMs: 1 };
+        await expect(new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true }), now: () => 2_000 }).observeScheduler(scheduler)).rejects.toThrow('EVIDENCE_UNAVAILABLE');
     });
 
     it('validates queue and scheduler resource scope before state mutation', async () => {
@@ -393,7 +408,7 @@ describe('protected platform adapters', () => {
             configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
         };
         const schedulerFake = new FakeTransport(() => { throw new Error('scheduler mutation must not run'); });
-        await expect(new WorkPlaneClient({ transport: authenticated(schedulerFake, 'fixture-token'), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }) }).pauseScheduler(scheduler)).rejects.toThrow('RESOURCE_INVALID');
+        await expect(new WorkPlaneClient({ transport: authenticated(schedulerFake, 'fixture-token'), pauseProvenance: async ({ resource }) => pauseProvenance(resource) }).pauseScheduler(scheduler)).rejects.toThrow('RESOURCE_INVALID');
         expect(schedulerFake.requests).toHaveLength(0);
     });
 
@@ -440,7 +455,7 @@ describe('protected platform adapters', () => {
             gets += 1;
             return response(request, 200, wire(gets === 1 ? oldTarget : desiredTarget));
         });
-        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }), now: () => 2_000 }).updateSchedulerTarget({ input, expectedOldTarget: oldTarget, desiredTarget });
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).updateSchedulerTarget({ input, expectedOldTarget: oldTarget, desiredTarget });
         expect(observed.target).toEqual(desiredTarget);
     });
 

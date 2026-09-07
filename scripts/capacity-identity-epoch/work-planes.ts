@@ -88,6 +88,8 @@ export type PauseProvenance = Readonly<{
     pauseEpochMs: number;
     observedAtMs: number;
     source: string;
+    /** Correlated provider event/object payload retained only in memory. */
+    evidence: Readonly<Record<string, unknown>>;
     evidenceDigest: string;
     complete: true;
 }>;
@@ -313,12 +315,16 @@ export class WorkPlaneClient {
                 controller.abort();
             }
             if (!isObject(provenance)
-                || !hasExactKeys(provenance, ['resource', 'pauseEpochMs', 'observedAtMs', 'source', 'evidenceDigest', 'complete'])
+                || !hasExactKeys(provenance, ['resource', 'pauseEpochMs', 'observedAtMs', 'source', 'evidence', 'evidenceDigest', 'complete'])
                 || provenance.resource !== input.resource
                 || provenance.complete !== true
                 || typeof provenance.source !== 'string' || provenance.source.length === 0 || provenance.source.length > 2048
                 || /[\u0000-\u001f\u007f]/.test(provenance.source)
+                || !isObject(provenance.evidence)
+                || provenance.evidence.resource !== input.resource
+                || provenance.evidence.operation !== 'PAUSE'
                 || typeof provenance.evidenceDigest !== 'string' || !/^[0-9a-f]{64}$/.test(provenance.evidenceDigest)
+                || canonicalDigest(provenance.evidence) !== provenance.evidenceDigest
                 || !Number.isSafeInteger(provenance.pauseEpochMs) || provenance.pauseEpochMs <= 0
                 || !Number.isSafeInteger(provenance.observedAtMs) || provenance.observedAtMs < provenance.pauseEpochMs
                 || provenance.observedAtMs > this.now()) fail('EVIDENCE_UNAVAILABLE');
