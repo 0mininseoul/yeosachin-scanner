@@ -180,10 +180,10 @@ The following invariants are hard gates for every transition and postcondition:
    both Vercel gates false, no-traffic revisions, paused/empty queues, paused
    recovery schedulers, and provider-free authenticated malformed-body probes
    that return reviewed 4xx responses before any provider call.
-10. Each mutation is preceded by the applicable native concurrency token or
-    exact resource observation digest and is followed by a read-back
-    postcondition. A stale owner or stale observation cannot mutate the next
-    epoch.
+10. Each mutation is preceded by the applicable native CAS token, Cloud Run
+    metadata observation barrier, or exact resource observation digest and is
+    followed by a read-back postcondition. A stale owner or stale observation
+    cannot mutate the next epoch.
 
 ## 4. Exact manifests and protected release packet
 
@@ -233,8 +233,9 @@ rejects a value that merely has a valid shape but belongs to another project.
 
 The release packet records the canonical digest of each complete manifest and
 the digest of the protected packet as a whole. The journal records only those
-digests, slot-key names, state markers, and allowlisted proof markers. An
-implementation must never print or persist the actual identity, URL, queue,
+digests, slot-key names, transition state/version markers, and allowlisted
+proof markers. An implementation must never print or persist the actual
+identity, URL, queue,
 scheduler, project, task body, manifest, or credential value.
 
 ### 4.1 Manifest comparison rules
@@ -263,9 +264,9 @@ non-secret digest. The actual values remain protected.
 
 The coordinator cannot enter `PREPARED` until every proof below succeeds in
 one bounded read-only admission pass. A later mutation boundary revalidates
-the relevant native concurrency token or exact resource observation digest
-immediately before mutation; the initial proof is not a lease over cloud
-state.
+the relevant native CAS token, Cloud Run metadata observation barrier, or
+exact resource observation digest immediately before mutation; the initial
+proof is not a lease over cloud state.
 
 ### 5.1 Capability and source proof
 
@@ -494,11 +495,12 @@ The coordinator has four boundaries:
    protected values.
 2. **Observation boundary**: reads platform, queue, scheduler, IAM, revision,
    Vercel, readiness, and ledger facts; returns typed facts plus each
-   resource's native concurrency token or exact observation digest.
+   resource's native CAS token, Cloud Run metadata observation, or exact
+   observation digest.
 3. **Mutation boundary**: acquires or renews the single lock, revalidates the
-   applicable native token or observation digest immediately before a
-   mutation, performs one bounded idempotent mutation, and reads the
-   postcondition before advancing.
+   applicable native CAS token, metadata observation barrier, or observation
+   digest immediately before a mutation, performs one bounded idempotent
+   mutation, and reads the postcondition before appending the transition.
 4. **Activation boundary**: proves the public readiness aggregate and both
    independent Vercel admission facts, retains the private worker gate proven
    from the exact revision, resumes both recovery schedulers before either
@@ -514,52 +516,67 @@ protected manifest or to an independently observed public/runtime fingerprint.
 The concrete durable storage boundary is the existing private
 `ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET` GCS bucket. The bucket name and object
 contents are protected and never appear in this document or ordinary logs.
-The coordinator uses two digest-derived object families inside that bucket:
+The coordinator uses three distinct digest-derived object families inside
+that bucket; none contains a secret or a recoverable manifest value.
 
-- one coordinated epoch lock object keyed by the epoch and desired-manifest
-  digests. Its logical key components are `epoch-lock/`, the epoch digest,
-  the desired-manifest digest, and the `.lock` suffix; and
-- append-only journal objects under a prefix derived from the epoch digest,
-  with logical key components `epoch-journal/`, the epoch digest, a bounded
-  sequence marker, the transition digest, and the `.json` suffix.
+1. **Immutable epoch header.** One header is created once under a logical key
+   composed of `epoch-header/`, the epoch digest, the desired-manifest
+   digest, and a `.json` suffix. Creation uses
+   `ifGenerationMatch=0`. Its only fields are fixed epoch, capability,
+   old-manifest, desired-manifest, role-set, and source-plan metadata digests
+   plus `createdAt`. It has no current state, state version, lock owner,
+   fencing value, lock expiry, `updatedAt`, or evolving proof digest. Any
+   attempt to rewrite the header is rejected.
+2. **Mutable epoch lock.** One lock object is keyed by the epoch/header
+   digest under `epoch-lock/` with a `.lock` suffix. It contains the bound
+   epoch/header digest, owner digest, fencing counter, and bounded expiry.
+   Acquisition, renewal, and takeover change it only with an exact observed
+   GCS object-generation precondition; initial creation uses
+   `ifGenerationMatch=0`. The lock fences ownership and is not the state
+   source of truth. A stale owner, expired lease without a new fence, or
+   capability/header mismatch is rejected.
+3. **Append-only transition objects.** Each transition is a separate object
+   under `epoch-journal/`, the epoch digest, and a bounded contiguous sequence
+   number, with a transition digest and `.json` suffix. It is created once
+   with `ifGenerationMatch=0` and contains the state, version, proof, and
+   result data for that transition. An owner cannot rewrite an earlier
+   transition or advance a separate mutable state marker.
 
-The lock object contains only non-secret hashes, the state marker, owner
-digest, fencing counter, and bounded expiry. Lock acquisition/replacement and
-renewal use GCS object-generation preconditions; creation uses
-`ifGenerationMatch=0` and takeover uses the exact observed object generation.
-A stale owner, expired lease without a new fence, mismatched
-capability, or different manifest digest is rejected. Journal objects are
-created with an object-generation precondition and read back before the state
-marker advances. The journal is append-only: an owner cannot rewrite an
-earlier transition.
-
-The lock binds the epoch identifier, desired-manifest digest, both role keys,
-owner token digest, monotonic fencing token, and bounded expiry/renewal
-deadline. A per-role lock cannot substitute for this lock because it would
-permit the two roles to observe different epochs.
+The current state is derived by reading the immutable header and the
+transition objects, validating a contiguous sequence, exact `fromState` to
+`toState` links, monotonically increasing versions, epoch binding, and the
+active lock fence. A missing, duplicate, out-of-order, or invalid transition
+blocks resume and activation. The lock only fences the writer; it never
+authorizes a state by itself, and a per-role lock cannot substitute for this
+single epoch lock because it would permit the two roles to observe different
+epochs.
 
 ### 6.3 Durable private epoch journal
 
-The journal is private, durable, append-only for transitions, and accessible
-only to the coordinator and authorized operators. It stores no secret or
-operational payload. It stores only non-secret hashes, state markers, bounded
-timestamps, allowlisted reason codes, and proof outcomes. See section 8 for
-the schema and recovery rules.
+The journal is private, durable, append-only, and accessible only to the
+coordinator and authorized operators. Its immutable header, mutable lock, and
+append-only transition objects store only non-secret hashes, abstract role or
+slot names, bounded timestamps, allowlisted reason codes, proof outcomes, and
+state/version markers. The header is written once, the lock is changed only
+through exact GCS generation preconditions, and each transition is appended
+with `ifGenerationMatch=0` after its postcondition succeeds. There is no
+mutable current-state field or `updatedAt` field in the header.
 
-The journal is not the source of truth for cloud state. It is a resume ledger.
-Every resume reads the current resource and readiness state again, then
-decides whether the recorded transition remains valid.
+The journal is not the source of truth for cloud state. It is a resume ledger
+whose current state is the validated contiguous transition sequence. Every
+resume reads the current resource and readiness state again, then decides
+whether the recorded transition remains valid under the active lock fence.
 
 ### 6.4 Resource concurrency controls
 
 The coordinator never invents an etag or generation for a platform that does
 not expose one. It uses the following resource-specific protocol:
 
-| Resource | Native concurrency token | Before mutation | Mutation and postcondition |
+| Resource | Concurrency token or observation control | Before mutation | Mutation and postcondition |
 | --- | --- | --- | --- |
 | IAM policy | Provider policy `etag` | Fresh policy read and exact etag comparison | CAS policy update with etag; exact policy read-back. Any CAS mismatch fails closed. |
-| Cloud Run service/revision and traffic | Metadata `generation`/`resourceVersion` | Fresh service metadata read plus exact desired revision/traffic proof | Mutate or promote with the observed resource version; read exact serving traffic, revision, source SHA, and runtime gate back. |
-| GCS epoch lock/journal | Object `generation` | Fresh object generation read | Create/rewrite with `ifGenerationMatch`; read object generation and content digest back. |
+| Cloud Run service/revision and traffic | Metadata `generation`/`resourceVersion` observation (not a request-level CAS token in this design) | Fresh service metadata read plus exact desired revision/traffic proof under the GCS epoch lock | Issue one bounded deploy or traffic operation only after the fresh metadata observation; do not assume the API request is conditionally bound to `resourceVersion`; read exact serving traffic, revision, source SHA, and runtime gate back. |
+| GCS epoch header/lock/transitions | Object `generation` | Fresh object generation read for the lock; fixed key and absence proof for a new header/transition | Create immutable header/transition with `ifGenerationMatch=0`; rewrite the lock only with its exact observed generation; read object generation and content digest back. |
 | Cloud Tasks queue | No native CAS token used by this design | Immediate complete configuration/task-list read and canonical observation digest under the epoch lock | One bounded pause/resume operation; immediate exact config/state/task-list read-back. Any digest drift fails closed. |
 | Cloud Scheduler recovery job | No native CAS token used by this design | Immediate complete job/config/status read and canonical observation digest under the epoch lock | One bounded pause/resume operation; immediate exact status/config/pause-epoch read-back. Any digest drift fails closed. |
 | Vercel producer deployment/gates | No cross-resource CAS token used by this design | Exact selected Git SHA, readiness v3 facts, and immutable deployment evidence read immediately before the operation | Deploy/select only the reviewed immutable source; read public readiness and source/fingerprint facts back. Any source or fact drift fails closed. |
@@ -573,10 +590,11 @@ invented etag is allowed.
 ## 7. State machine
 
 The coordinator may advance only in the order shown below. A state is entered
-after its entry evidence is durable. A state may be retried idempotently when
-the same epoch, lock fence, manifest digest, native concurrency tokens, and
-resource observation digests still hold. Any unrecognized evidence or external
-drift fails closed.
+after its entry evidence is durable in the contiguous transition sequence. A
+state may be retried idempotently when the same epoch, lock fence, manifest
+digest, native CAS tokens, metadata observation barriers, and resource
+observation digests still hold. Any unrecognized evidence or external drift
+fails closed.
 
 ### `PREPARED`
 
@@ -595,11 +613,13 @@ drift fails closed.
   deterministic revision naming plan, Vercel Git-backed SHA, both producer
   fingerprints, queue PAUSED/empty proofs, both aged scheduler pause proofs,
   retention enabled, readiness `ready: true`, and both Vercel admission facts
-  false are observed. The private worker provider-admission value is proven
-  from the exact desired `INITIAL` manifest as true; it is not read from the
-  public endpoint.
+  false are observed. The desired `INITIAL` manifest requirement
+  `ANALYSIS_PROVIDER_ADMISSION_ENABLED: true` is validated and recorded as a
+  reviewed input only. `PREPARED` does not claim that a desired revision
+  exists or that its runtime gate has been observed or remains true; the old
+  serving revisions remain separately observed against the old manifest.
 - The single GCS lock is acquired and the initial resource-specific
-  concurrency-token/observation digests are recorded.
+  CAS-token, metadata-observation, and observation-digest proofs are recorded.
 
 **Allowed mutations**
 
@@ -609,10 +629,13 @@ deployment, IAM, queue, scheduler, provider, or readiness mutation is allowed.
 **Completion evidence**
 
 The journal records the canonical old/desired manifest digests, source and
-resource proof digests, lock fence, and `PREPARED` marker. The public
-readiness proof shows `ready: true`, `analysisV2AdmissionEnabled: false`, and
-`earlybirdWebhookAutoAdmissionEnabled: false`; the private target worker
-gate remains the exact desired `INITIAL` value true.
+resource proof digests, lock fence, and a `PREPARED` transition whose proof
+includes the reviewed manifest requirement
+`ANALYSIS_PROVIDER_ADMISSION_ENABLED: true`. The public readiness proof shows
+`ready: true`, `analysisV2AdmissionEnabled: false`, and
+`earlybirdWebhookAutoAdmissionEnabled: false`. No `PREPARED` completion
+evidence claims a desired revision exists or supplies a desired runtime-gate
+observation; `STAGED` is the first state that can provide that evidence.
 
 **Retry and idempotency**
 
@@ -634,9 +657,11 @@ readiness schema mismatch, or lock race stops before `STAGED`.
 `PREPARED` is complete, both Vercel work-producing gates remain false, and the
 two role deployment inputs resolve to the desired source/build/runtime inputs
 and deterministic revision naming plan. The desired private worker
-provider-admission value is true in both target `INITIAL` manifests. The
-readiness v3 deployment is already serving with `ready: true`, both Vercel
-admission facts false, and its exact additive public schema observed.
+provider-admission requirement is true in both target `INITIAL` manifests;
+`STAGED` is the first state that creates or reuses the exact revisions and
+proves that runtime gate from them. The readiness v3 deployment is already
+serving with `ready: true`, both Vercel admission facts false, and its exact
+additive public schema observed.
 
 **Allowed mutations**
 
@@ -648,11 +673,13 @@ admission facts false, and its exact additive public schema observed.
 - Perform no traffic promotion, queue resume, scheduler resume, IAM grant
   removal, provider call, or user-work mutation.
 
-Each deployment mutation is preceded by a fresh Cloud Run metadata
-generation/resourceVersion proof and exact source/build/runtime proof. The
-desired deterministic naming plan is used to create or look up the exact
-revision; its immutable observed revision ID/digest is captured in the
-journal only after the platform confirms it.
+Each deployment or traffic operation is preceded by a fresh Cloud Run
+metadata generation/resourceVersion observation barrier under the GCS epoch
+lock and exact source/build/runtime proof. The API request is not assumed to
+be conditionally bound to resourceVersion; the coordinator reads the exact
+postcondition immediately afterward. The desired deterministic naming plan is
+used to create or look up the exact revision; its immutable observed revision
+ID/digest is captured in the journal only after the platform confirms it.
 
 **Completion evidence**
 
@@ -785,8 +812,10 @@ Both producers are closed and aligned, both queues/schedulers are paused and
 empty/quiescent, retention is enabled, both staged revisions are exact, and
 the public readiness proof is `ready: true` with both Vercel admission facts
 false. The private worker provider-admission value is true in both exact
-staged `INITIAL` revisions. The current IAM etags and Cloud Run
-generation/resourceVersion values are freshly observed.
+staged `INITIAL` revisions. The current IAM etags and Cloud Run metadata
+generation/resourceVersion observations are freshly read as pre-mutation
+barriers under the GCS epoch lock; they are not assumed to be request-level
+CAS tokens.
 
 **Allowed mutations**
 
@@ -855,11 +884,17 @@ promotion boundary.
   etags and a separate read-back for each policy. Old service accounts are
   never deleted.
 
-Promotions and grant removals are separate mutations but share the epoch lock
-and activation fence. The removal step is not permitted until both promoted
-revisions, source SHAs, runtime identities, producer fingerprints, and
-desired IAM additions are exact. No `latest`, mutable alias, cross-role
-revision, queue resume, scheduler resume, or provider call is allowed.
+Before each promotion, the coordinator takes a fresh Cloud Run metadata
+generation/resourceVersion observation under the GCS epoch lock, verifies the
+captured revision/source/runtime expectation, and issues one bounded traffic
+operation. The API request is not assumed to be conditionally bound to the
+observed resourceVersion; exact traffic and revision read-back is the
+postcondition. Promotions and grant removals are separate mutations but share
+the epoch lock and activation fence. The removal step is not permitted until
+both promoted revisions, source SHAs, runtime identities, producer
+fingerprints, and desired IAM additions are exact. No `latest`, mutable alias,
+cross-role revision, queue resume, scheduler resume, or provider call is
+allowed.
 
 **Completion evidence**
 
@@ -1062,42 +1097,27 @@ changes payment status, or resumes the other role to compensate.
 
 ### 9.1 Journal schema
 
-The private journal has one epoch header and append-only transition records.
-The logical schema is:
+The private journal has one immutable epoch header, one mutable epoch lock,
+and append-only sequenced transition objects. The logical schemas are:
 
 ```text
-epoch:
+epochHeader:
   epochIdDigest
   capabilityDigest
   oldManifestDigest
   desiredManifestDigest
   roleSetDigest
-  state
-  stateVersion
-  lockFence
-  ownerDigest
-  lockExpiresAt
-  activationFenceDigest
-  sourceProofDigest
-  preflightStagedRevisionDigest
-  paidStagedRevisionDigest
-  producerProofDigest
-  queueProofDigest
-  schedulerProofDigest
-  retentionProofDigest
-  iamProofDigest
-  readinessProofDigest
-  gcsObjectGenerationDigest
-  iamEtagDigest
-  cloudRunGenerationResourceVersionDigest
-  queueObservationDigest
-  schedulerObservationDigest
-  vercelProofDigest
-  lastReasonCode
+  sourcePlanDigest
   createdAt
-  updatedAt
+
+epochLock:
+  epochHeaderDigest
+  ownerDigest
+  lockFence
+  lockExpiresAt
 
 transition:
+  sequence
   epochIdDigest
   fromState
   toState
@@ -1106,30 +1126,46 @@ transition:
   preconditionDigest
   mutationDigest
   postconditionDigest
+  proofDigest
   nativeConcurrencyTokenDigest
   resourceObservationDigest
   resultCode
   recordedAt
 ```
 
-All fields are non-secret hashes, state markers, allowlisted result codes, or
-bounded timestamps. The journal does not store identities, credentials,
-URLs, project names, queue/scheduler names, task bodies, deployment names,
-raw logs, user IDs, provider IDs, run IDs, or manifest values. A digest must
+The epoch header is created once with GCS `ifGenerationMatch=0` and contains
+only fixed epoch/capability/manifest/role/source metadata plus `createdAt`; it
+never receives mutable state, lock ownership, lock expiry, `updatedAt`, or
+evolving proof digests. The epoch lock is changed only with an exact observed
+GCS object-generation precondition. Each transition object is created once
+with `ifGenerationMatch=0`; its `sequence` values must be contiguous, and its
+state/version/proof/result fields describe one completed transition. Captured
+staged revision and resource proof values are represented only by their
+non-secret digests in transition objects.
+
+All fields are non-secret hashes, transition state/version markers, allowlisted
+result codes, or bounded timestamps. The journal does not store identities,
+credentials, URLs, project names, queue/scheduler names, task bodies,
+deployment names, raw logs, user IDs, provider IDs, run IDs, or manifest
+values. A digest must
 be computed from a canonical protected value without making the value
-recoverable in ordinary logs. The two staged-revision fields are digests of the
-immutable observed revision IDs plus their exact manifest/source proof; the
-protected revision IDs themselves remain outside the journal.
+recoverable in ordinary logs. Current state is derived from a validated
+contiguous transition sequence, not from the epoch lock or a mutable header
+field. Missing, duplicated, reordered, or invalid transitions block resume
+and activation.
 
 ### 9.2 Lock ownership and expiry
 
 The lock owner is the coordinator process bound to the capability and epoch;
 the journal stores only its digest. Acquisition is compare-and-set on an
 unowned or expired GCS lock object and returns a monotonic fencing token.
-Renewal uses the observed lock-object generation and is bounded to precede
-expiry. Every mutation verifies the live fence and the applicable native token
-or resource observation digest. An expired owner cannot renew or mutate, even
-if its process later resumes.
+Creation uses `ifGenerationMatch=0`; renewal, replacement, and takeover use
+the exact observed lock-object generation and are bounded to precede expiry.
+The lock is ownership/fencing metadata only, not the state source of truth:
+the coordinator derives state from the validated contiguous transition
+objects. Every mutation verifies the live fence and the applicable native
+token, metadata observation barrier, or resource observation digest. An
+expired owner cannot renew or mutate, even if its process later resumes.
 
 An operator may not force-unlock a live owner by changing a marker in the
 journal. After expiry, a new owner must re-read all cloud state and either
@@ -1138,8 +1174,13 @@ new reviewed epoch.
 
 ### 9.3 Resume rules for every state
 
-- **`PREPARED`**: reacquire the lock, re-read every precondition, and resume
-  only if the old/desired packet digests and resource proofs still match.
+- **`PREPARED`**: reacquire the lock, validate the contiguous transition
+  sequence, and re-read every precondition. Resume only if the old/desired
+  packet digests and resource proofs still match; the desired provider-gate
+  value is still only a manifest requirement here, while old serving
+  revisions remain separately observed. Do not claim or reuse a desired
+  runtime-gate observation until `STAGED` creates or reuses the exact
+  no-traffic revisions.
 - **`STAGED`**: verify each captured no-traffic revision ID/digest. Create or
   reuse only the deterministic-plan revision with identical inputs; never
   adopt a different revision or latest alias.
@@ -1155,12 +1196,15 @@ new reviewed epoch.
   reviewed additions using a new etag. Retain old invoker/enqueuer grants
   until both revisions are exact; never restore the old policy automatically.
 - **`SERVICES_PROMOTED`**: observe both serving revisions and promote only a
-  missing captured revision using fresh Cloud Run metadata
-  generation/resourceVersion evidence. Once both are exact, remove retired
-  invoker/enqueuer grants with fresh IAM etags. If traffic or removal is
-  ambiguous, keep both Vercel gates false and require an operator decision.
+  missing captured revision after a fresh Cloud Run metadata
+  generation/resourceVersion observation barrier under the GCS lock; the
+  deploy/traffic request is not assumed to be conditionally bound to that
+  metadata value. Read exact traffic and revision postconditions. Once both
+  are exact, remove retired invoker/enqueuer grants with fresh IAM etags. If
+  traffic or removal is ambiguous, keep both Vercel gates false and require
+  an operator decision.
 - **`VERIFIED`**: rerun all read-only proofs and provider-free probes; the
-  journal marker alone cannot authorize activation.
+  validated `VERIFIED` transition alone cannot authorize activation.
 - **`ACTIVATED`**: prove public readiness and both Vercel admission facts plus
   all four resumed resources. If activation is partial, close both Vercel
   gates and pause every resumed resource, preserve any newly admitted tasks,
@@ -1171,26 +1215,30 @@ new reviewed epoch.
 
 Every mutation follows the resource-specific protocol in section 6.4:
 
-1. Read the exact resource and its native token, or its complete observation
-   digest when the platform has no native CAS token.
+1. Read the exact resource and its native CAS token, metadata observation
+   barrier, or complete observation digest, as applicable.
 2. Compare that token/digest to the last proof and the protected expected
    resource key.
 3. Acquire or confirm the GCS epoch-lock fence immediately before mutation.
-4. For IAM, submit one etag CAS; for Cloud Run, submit one mutation bound to
-   metadata generation/resourceVersion; for GCS, use object-generation
-   preconditions; for Cloud Tasks, Cloud Scheduler, and Vercel, perform one
-   bounded operation under the lock after the immediate observation re-read.
+4. For IAM, submit one etag CAS; for Cloud Run, issue one bounded deploy or
+   traffic operation after a fresh metadata generation/resourceVersion
+   observation under the lock, without assuming request-level conditional
+   binding; for GCS, use object-generation preconditions; for Cloud Tasks,
+   Cloud Scheduler, and Vercel, perform one bounded operation under the lock
+   after the immediate observation re-read.
 5. Read the resource back and verify its exact postcondition, including the
    complete observation digest for resources without native CAS.
-6. Append the transition object with the applicable token/digest only after
-   the postcondition succeeds.
+6. Append the next transition object with the applicable token/digest only
+   after the postcondition succeeds; creation uses `ifGenerationMatch=0` and
+   the contiguous sequence is then revalidated.
 
-A changed native token or observation digest returns a race result, not a
-retryable success. The coordinator re-observes from current state, bounded to
-a reviewed number of attempts, and then stops closed. It never retries with a
-stale IAM etag, Cloud Run resourceVersion, or GCS object generation; it never
-uses an unconditional overwrite; and it never assumes a queue/scheduler
-observation remains current without the immediate post-read.
+A changed native CAS token, Cloud Run metadata observation, or observation
+digest returns a race result, not a retryable success. The coordinator
+re-observes from current state, bounded to a reviewed number of attempts, and
+then stops closed. It never retries with a stale IAM etag, Cloud Run
+resourceVersion observation, or GCS object generation; it never uses an
+unconditional overwrite; and it never assumes a queue/scheduler observation
+remains current without the immediate post-read.
 
 ### 9.5 Operator abort semantics
 
@@ -1259,10 +1307,10 @@ that protected values are absent from output and journal fixtures.
 | IAM | IAM etag changes between proof and mutation | Re-observe and fail/retry with fresh etag; stale CAS is never reused. |
 | IAM | Old grant removal occurs before both role planes are exact | Reject the coordinator implementation and fixture. |
 | IAM | Old grant removal is ambiguous | Remain closed; no automatic IAM rollback. |
-| Cloud Run | Service metadata generation/resourceVersion changes before mutation or traffic read-back differs | Fence the mutation, re-observe, and stop after bounded attempts. |
+| Cloud Run | Service metadata generation/resourceVersion changes between the fresh pre-mutation observation and exact post-read, or traffic read-back differs | Treat the metadata values as observation barriers under the GCS epoch lock, re-observe, and stop after bounded attempts; no request-level resourceVersion CAS is assumed. |
 | GCS | Lock/journal object generation precondition fails | Reject stale owner; acquire a new fence or stop closed. |
 | Observation race | Queue or scheduler complete configuration digest changes before or after mutation | Re-observe under the epoch lock; stop closed after bounded attempts. |
-| State failure | Failure before `PREPARED` completion | No mutation; both Vercel gates remain false and private worker gate is not changed. |
+| State failure | Failure before `PREPARED` completion | No mutation; both Vercel gates remain false and no desired revision or private worker runtime gate is created or changed. |
 | State failure | Failure before/after each `STAGED` revision | Existing exact revision is reused only when no-traffic and digest-exact. |
 | State failure | Failure before/after producer alignment | Both Vercel gates remain false; private worker gate may be true only in exact no-traffic `INITIAL` revisions; no task is created. |
 | State failure | Failure before/after queue alignment | Both queues/schedulers remain paused; no purge or replay. |
@@ -1334,7 +1382,8 @@ The readiness v3 implementation and every consumer must be updated together:
    retention proof, desired IAM, Vercel SHA, and both producer fingerprints.
 4. Start the guarded coordinator. It must complete `PREPARED`, then move
    through the states in order while both Vercel gates remain false. The
-   desired private worker gate is true in the staged no-traffic `INITIAL`
+   desired private worker gate requirement is true in the reviewed manifest;
+   `STAGED` then proves that value in the exact no-traffic `INITIAL`
    revisions.
 5. At `VERIFIED`, review exact revisions, IAM, queue/scheduler state,
    readiness, fingerprints, source SHAs, and zero-work ledgers/logs.
@@ -1407,12 +1456,14 @@ Alert on any of the following:
 - provider, billable, user-work, or task activity before the public activation
   boundary while both Vercel gates are false;
 - IAM mutation without the active epoch fence or a fresh CAS etag;
-- Cloud Run traffic/revision mutation without the active epoch fence or fresh
-  metadata generation/resourceVersion;
+- Cloud Run traffic/revision mutation without the active epoch fence and fresh
+  pre-mutation metadata generation/resourceVersion observation plus exact
+  post-read;
 - queue or scheduler mutation without the active epoch fence and immediate
   complete observation digest read-back;
 - an old service account deletion request;
-- journal state advancing without a postcondition digest; or
+- a transition object appended without a postcondition digest or contiguous
+  sequence proof; or
 - readiness v3 emitting an unknown key or a protected value.
 
 ### 12.3 Operator checklist
@@ -1490,11 +1541,12 @@ After failure or abort:
 
 ## Self-review result
 
-The document contains no implementation placeholders or unresolved markers.
+The document contains no implementation gaps or unresolved markers.
 State entry and activation ordering are consistent: both Vercel gates are
-false through `VERIFIED`, the private worker gate is true only in exact
-desired `INITIAL` revisions, desired IAM is exact before old grant removal,
-exact revisions are promoted before verification, public Vercel admission is
+false through `VERIFIED`, the private worker gate requirement is true in the
+reviewed manifest at `PREPARED` and is proven true only from exact desired
+`INITIAL` revisions from `STAGED` onward, desired IAM is exact before old
+grant removal, exact revisions are promoted before verification, public Vercel admission is
 proven true before both work planes resume, and retention remains enabled.
 Every mutation has a preceding proof and a postcondition, native-token and
 observation-digest races are bounded and fail closed, and
