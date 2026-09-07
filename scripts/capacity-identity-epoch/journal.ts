@@ -277,7 +277,23 @@ export class EpochJournal {
         await this.readLiveLock(lease);
     }
 
-    async deriveState(lease?: JournalLease): Promise<{ state: State | null; transitions: readonly EpochTransition[]; aborted: boolean }> {
+    /**
+     * Read the append-only state under the current lock fence.  A journal
+     * replay is never allowed to inspect an unowned epoch: without a live
+     * lock there is no fence against which a late object can be classified.
+     * Earlier fences remain valid history after a legitimate takeover, but a
+     * transition from a future fence is an invalid (or late) object and must
+     * stop resume.
+     */
+    async deriveState(lease?: JournalLease): Promise<{
+        state: State | null;
+        transitions: readonly EpochTransition[];
+        aborted: boolean;
+        activeFence: string;
+        requiresReconciliation: boolean;
+    }> {
+        const activeLock = lease ? await this.readLiveLock(lease) : await this.readCurrentLock();
+        const activeFence = activeLock.lock.lockFence;
         const headerObject = await this.storage.get(this.headerKey);
         if (!headerObject) epochFail('JOURNAL_INVALID');
         validateHeader(headerObject.value);
@@ -296,6 +312,10 @@ export class EpochJournal {
                 || sequences.has(transition.sequence)) epochFail('JOURNAL_INVALID');
             const fence = transition.lockFence;
             if (compareDecimal(fence, previousFence) < 0) epochFail('JOURNAL_INVALID');
+            // A prior owner may have committed valid history before a
+            // takeover, but an object carrying a fence newer than the live
+            // owner cannot be adopted by this replay.
+            if (compareDecimal(fence, activeFence) > 0) epochFail('JOURNAL_INVALID');
             previousFence = fence;
             sequences.add(transition.sequence);
             transitions.push(transition);
@@ -315,8 +335,23 @@ export class EpochJournal {
             if (STATES.indexOf(transition.toState as State) !== expectedNextIndex) epochFail('JOURNAL_INVALID');
             state = transition.toState as State;
         }
-        if (lease) await this.readLiveLock(lease);
-        return { state, transitions, aborted };
+        const finalLock = lease ? await this.readLiveLock(lease) : await this.readCurrentLock();
+        if (finalLock.generation !== activeLock.generation
+            || finalLock.lock.lockFence !== activeLock.lock.lockFence
+            || finalLock.lock.ownerDigest !== activeLock.lock.ownerDigest) {
+            // The lock changed while the full journal listing was in flight.
+            // Replaying a snapshot across two owners is not a safe state
+            // source, even if every object is otherwise well formed.
+            epochFail('OBSERVATION_RACE');
+        }
+        const requiresReconciliation = transitions.some((transition) =>
+            compareDecimal(transition.lockFence, activeFence) < 0);
+        return { state, transitions, aborted, activeFence, requiresReconciliation };
+    }
+
+    /** Explicit name used by resume callers; kept separate from mutation. */
+    async readValidatedState(lease?: JournalLease): Promise<ReturnType<EpochJournal['deriveState']> extends Promise<infer T> ? T : never> {
+        return this.deriveState(lease);
     }
 
     private async readLiveLock(lease: JournalLease): Promise<JournalLease> {
@@ -328,6 +363,14 @@ export class EpochJournal {
         if (lock.ownerDigest !== lease.lock.ownerDigest || lock.lockFence !== lease.lock.lockFence
             || current.generation !== lease.generation || isExpired(lock, this.now())) epochFail('LOCK_LOST');
         return { generation: current.generation, lock };
+    }
+
+    private async readCurrentLock(): Promise<JournalLease> {
+        const current = await this.storage.get(this.lockKey);
+        if (!current) epochFail('LOCK_LOST');
+        assertGeneration(current.generation);
+        validateLock(current.value, this.epochHeaderDigest);
+        return { generation: current.generation, lock: current.value as EpochLock };
     }
 }
 

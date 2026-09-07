@@ -37,6 +37,30 @@ class MemoryStorage implements JournalStorage {
     }
 }
 
+class TakeoverDuringAppendStorage extends MemoryStorage {
+    lockKey: string | undefined;
+    journalPrefix: string | undefined;
+    takeoverOwner: string | undefined;
+    private takenOver = false;
+
+    override async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        const stored = await super.put(key, value, options);
+        if (!this.takenOver && this.lockKey && this.journalPrefix && key.startsWith(this.journalPrefix) && this.takeoverOwner) {
+            const lock = await this.get(this.lockKey);
+            if (!lock) throw new Error('missing lock fixture');
+            const current = lock.value as EpochHeader & { ownerDigest: string; lockFence: string; lockExpiresAt: string; epochHeaderDigest: string };
+            await super.put(this.lockKey, {
+                ...current,
+                ownerDigest: this.takeoverOwner,
+                lockFence: '2',
+                lockExpiresAt: '2026-09-07T00:01:00.000Z',
+            }, { ifGenerationMatch: lock.generation });
+            this.takenOver = true;
+        }
+        return stored;
+    }
+}
+
 const digest = (value: string) => canonicalDigest(value);
 const header: EpochHeader = {
     epochIdDigest: digest('epoch'), capabilityDigest: digest('capability'), oldManifestDigest: digest('old'),
@@ -139,5 +163,55 @@ describe('generation-fenced epoch journal', () => {
         await expect(journal.append(stale, transition(1, null, 'PREPARED', lease.lock.lockFence))).rejects.toThrow('LOCK_LOST');
         const bad = { ...transition(1, null, 'PREPARED', lease.lock.lockFence), epochIdDigest: digest('wrong-epoch') };
         await expect(journal.append(lease, bad)).rejects.toThrow(EpochError);
+    });
+
+    it('rejects a transition carrying a future fence and requires a live lock for inspection', async () => {
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-future'));
+        await journal.append(lease, transition(1, null, 'PREPARED', lease.lock.lockFence));
+        const future = transition(2, 'PREPARED', 'STAGED', '999');
+        await storage.put(`${journal.journalPrefix}00000002/${canonicalDigest(future)}.json`, future, { ifGenerationMatch: '0' });
+        await expect(journal.deriveState(lease)).rejects.toThrow('JOURNAL_INVALID');
+
+        const lock = await storage.get(journal.lockKey);
+        if (!lock) throw new Error('missing lock fixture');
+        await storage.delete!(journal.lockKey, { ifGenerationMatch: lock.generation });
+        await expect(journal.deriveState()).rejects.toThrow('LOCK_LOST');
+    });
+
+    it('rejects malformed active locks and marks older-fence history for fresh reconciliation', async () => {
+        let now = 1_000;
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 100 });
+        await journal.ensureHeader();
+        const first = await journal.acquire(digest('owner-history'));
+        await journal.append(first, transition(1, null, 'PREPARED', first.lock.lockFence));
+        now = 1_101;
+        const second = await journal.acquire(digest('owner-history-new'));
+        const resumed = await journal.readValidatedState(second);
+        expect(resumed).toMatchObject({ state: 'PREPARED', activeFence: '2', requiresReconciliation: true });
+
+        const lock = await storage.get(journal.lockKey);
+        if (!lock) throw new Error('missing lock fixture');
+        await storage.put(journal.lockKey, { malformed: true }, { ifGenerationMatch: lock.generation });
+        await expect(journal.deriveState()).rejects.toThrow('JOURNAL_INVALID');
+    });
+
+    it('retains a late stale append but forces resumed-owner reconciliation', async () => {
+        const storage = new TakeoverDuringAppendStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const ownerA = await journal.acquire(digest('owner-late-a'));
+        storage.lockKey = journal.lockKey;
+        storage.journalPrefix = journal.journalPrefix;
+        storage.takeoverOwner = digest('owner-late-b');
+        await expect(journal.append(ownerA, transition(1, null, 'PREPARED', ownerA.lock.lockFence))).rejects.toThrow('LOCK_LOST');
+
+        const ownerB = await journal.acquire(digest('owner-late-b'));
+        const resumed = await journal.readValidatedState(ownerB);
+        expect(resumed).toMatchObject({ state: 'PREPARED', activeFence: '2', requiresReconciliation: true });
+        expect(resumed.transitions[0]?.lockFence).toBe('1');
     });
 });
