@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
 import { legacyAnalysisProducerGate } from './legacy-analysis-gate';
+import { isAnalysisV2AdmissionAvailable } from './v2-execution-gate';
+import { readEarlybirdAutoAdmissionConfig } from '../earlybird/auto-admission-config';
 
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const SERVICE_ACCOUNT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
 const PREFLIGHT_TARGET_PATH = '/api/analysis/preflight/worker';
 const PAID_TARGET_PATH = '/api/analysis/v2/worker';
-const PUBLIC_READINESS_SCHEMA_VERSION = 'analysis-public-freeze-readiness-v2' as const;
+export const PUBLIC_READINESS_SCHEMA_VERSION = 'analysis-public-freeze-readiness-v3' as const;
 
 export const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1' as const;
 export const PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'paid-producer-config-v1' as const;
@@ -35,6 +37,8 @@ export type LegacyPublicReadiness = {
         expectedStatus: 410 | 503;
         gateBeforeRuntime: true;
     }>;
+    analysisV2AdmissionEnabled: boolean;
+    earlybirdWebhookAutoAdmissionEnabled: boolean;
 };
 
 type ProducerConfig = {
@@ -173,6 +177,11 @@ export function getLegacyAnalysisPublicReadiness(
             gateBeforeRuntime: true,
         }]),
     ) as LegacyPublicReadiness['routes'];
+    // These are intentionally evaluated independently from the v2 aggregate
+    // freeze formula. Invalid values throw from the owning gate parser rather
+    // than being converted into a success-shaped boolean.
+    const analysisV2AdmissionEnabled = isAnalysisV2AdmissionAvailable(env);
+    const earlybirdWebhookAutoAdmissionEnabled = readEarlybirdAutoAdmissionConfig(env).enabled;
 
     return {
         schemaVersion: PUBLIC_READINESS_SCHEMA_VERSION,
@@ -195,5 +204,7 @@ export function getLegacyAnalysisPublicReadiness(
         paidProducerConfigFingerprint: paidProducerConfigFingerprintValue,
         paidProducerConfigReady,
         routes,
+        analysisV2AdmissionEnabled,
+        earlybirdWebhookAutoAdmissionEnabled,
     };
 }

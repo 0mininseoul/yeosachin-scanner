@@ -9,6 +9,23 @@ const sourceSha = '0123456789abcdef0123456789abcdef01234567';
 const expectedPreflightFingerprint = '6ab53812cdc725c34bf3409713a893ec7787482e17df16ef622f3173a57251f2';
 const expectedPaidFingerprint = 'd074cb79af9df1622cfff38f981e1f7ea0e892390c442d4504d6c77c9b398c1f';
 
+const validEnvironment = {
+    ANALYSIS_CAPACITY_STAGE: 'initial',
+    ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: 'true',
+    ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'drain-and-block',
+    ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: 'true',
+    ANALYSIS_CAPACITY_SOURCE_SHA: sourceSha,
+    VERCEL_GIT_COMMIT_SHA: sourceSha,
+    ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE: 'vercel:production:analysis-v1',
+    PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'preflight-task@example-project.iam.gserviceaccount.com',
+    PREFLIGHT_TASKS_TARGET_URL: 'https://preflight.example.com/api/analysis/preflight/worker',
+    PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://preflight.example.com',
+    ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'PAID-TASK@example-project.iam.gserviceaccount.com',
+    ANALYSIS_V2_TASKS_TARGET_URL: 'https://Paid.Example.com:443/api/analysis/v2/worker',
+    ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://PAID.example.com:443/',
+    EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: 'false',
+};
+
 describe('public freeze readiness observation', () => {
     it('reports non-sensitive active freeze evidence from the public runtime', () => {
         const result = getLegacyAnalysisPublicReadiness({
@@ -27,7 +44,7 @@ describe('public freeze readiness observation', () => {
             ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://PAID.example.com:443/',
         });
         expect(result.ready).toBe(true);
-        expect(result.schemaVersion).toBe('analysis-public-freeze-readiness-v2');
+        expect(result.schemaVersion).toBe('analysis-public-freeze-readiness-v3');
         expect(result.sourceSha).toBe(sourceSha);
         expect(result.preflightProducerConfigFingerprintVersion)
             .toBe(PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION);
@@ -36,6 +53,8 @@ describe('public freeze readiness observation', () => {
         expect(result.paidProducerConfigFingerprintVersion).toBe(PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION);
         expect(result.paidProducerConfigFingerprint).toBe(expectedPaidFingerprint);
         expect(result.paidProducerConfigReady).toBe(true);
+        expect(result.analysisV2AdmissionEnabled).toBe(false);
+        expect(result.earlybirdWebhookAutoAdmissionEnabled).toBe(false);
         expect(JSON.stringify(result)).not.toContain('PAID-TASK@example-project');
         expect(JSON.stringify(result)).not.toContain('Paid.Example.com');
         expect(JSON.stringify(result)).not.toContain('PAID.example.com');
@@ -51,8 +70,68 @@ describe('public freeze readiness observation', () => {
             'preflightProducerConfigFingerprint', 'preflightProducerConfigReady',
             'paidProducerConfigFingerprintVersion',
             'paidProducerConfigFingerprint', 'paidProducerConfigReady', 'routes',
+            'analysisV2AdmissionEnabled', 'earlybirdWebhookAutoAdmissionEnabled',
         ]);
     });
+
+    it.each([
+        [false, false],
+        [false, true],
+        [true, false],
+        [true, true],
+    ] as const)('preserves v2 ready and routes for every independent admission pair (%s, %s)',
+        (publicGate, paidGate) => {
+            const result = getLegacyAnalysisPublicReadiness({
+                ...validEnvironment,
+                ANALYSIS_V2_ADMISSION_ENABLED: String(publicGate),
+                EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: String(paidGate),
+                EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE: '2026-01-01T00:00:00Z',
+            });
+            expect(result.ready).toBe(true);
+            expect(result.analysisV2AdmissionEnabled).toBe(publicGate);
+            expect(result.earlybirdWebhookAutoAdmissionEnabled).toBe(paidGate);
+            expect(Object.keys(result).slice(-2)).toEqual([
+                'analysisV2AdmissionEnabled', 'earlybirdWebhookAutoAdmissionEnabled',
+            ]);
+        });
+
+    it('fails closed on malformed independent admission configuration', () => {
+        expect(() => getLegacyAnalysisPublicReadiness({
+            ...validEnvironment,
+            ANALYSIS_V2_ADMISSION_ENABLED: 'maybe',
+        })).toThrow('ANALYSIS_V2_ADMISSION_ENABLED');
+        expect(() => getLegacyAnalysisPublicReadiness({
+            ...validEnvironment,
+            EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: 'true',
+            EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE: 'not-a-date',
+        })).toThrow('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE_INVALID');
+    });
+
+    it.each([
+        ['stage', { ANALYSIS_CAPACITY_STAGE: 'unknown' }],
+        ['freeze mode', { ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE: 'open' }],
+        ['public freeze', { ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: 'false' }],
+        ['legacy producer gate', { ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN: 'false' }],
+        ['source provenance', { VERCEL_GIT_COMMIT_SHA: 'not-a-sha' }],
+        ['preflight producer', { PREFLIGHT_TASKS_TARGET_URL: 'https://wrong.example.com/worker' }],
+        ['paid producer', { ANALYSIS_V2_TASKS_TARGET_URL: 'https://wrong.example.com/worker' }],
+    ] as const)('keeps aggregate ready false when v2 %s is missing for every independent gate pair',
+        (_name, override) => {
+            for (const publicGate of [false, true]) {
+                for (const paidGate of [false, true]) {
+                    const result = getLegacyAnalysisPublicReadiness({
+                        ...validEnvironment,
+                        ...override,
+                        ANALYSIS_V2_ADMISSION_ENABLED: String(publicGate),
+                        EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: String(paidGate),
+                        EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE: '2026-01-01T00:00:00Z',
+                    });
+                    expect(result.ready).toBe(false);
+                    expect(result.analysisV2AdmissionEnabled).toBe(publicGate);
+                    expect(result.earlybirdWebhookAutoAdmissionEnabled).toBe(paidGate);
+                }
+            }
+        });
 
     it('fails closed when public freeze config or provenance is absent', () => {
         const result = getLegacyAnalysisPublicReadiness({
