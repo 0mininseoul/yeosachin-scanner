@@ -275,10 +275,18 @@ if ! public_freeze_json="$(curl --disable --proto '=https' --tlsv1.2 \
   --header 'Accept: application/json' 2>/dev/null)"; then
   die 'public freeze readiness observation failed'
 fi
+# Parse the wire payload with the duplicate-aware TypeScript contract before
+# any shell JSON consumer sees it. jq remains below for independently expected
+# release facts; it is never the duplicate-key detector.
+if ! readiness_contract_result="$(printf '%s' "$public_freeze_json" \
+  | npx --no-install tsx "$repo_dir/scripts/validate-analysis-public-readiness.ts" --shape-only 2>/dev/null)" \
+  || [[ "$readiness_contract_result" != 'PASS' ]]; then
+  die 'public freeze readiness failed strict v3 wire validation'
+fi
 jq -e --arg expected_sha "$expected_sha" \
   --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" '
-  (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-  and .schemaVersion == "analysis-public-freeze-readiness-v2"
+  (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+  and .schemaVersion == "analysis-public-freeze-readiness-v3"
   and .ready == true
   and (.stage == "initial" or .stage == "expanded")
   and .freezeMode == "drain-and-block"
@@ -291,6 +299,8 @@ jq -e --arg expected_sha "$expected_sha" \
   and .paidProducerConfigFingerprintVersion == "paid-producer-config-v1"
   and .paidProducerConfigReady == true
   and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
+  and .analysisV2AdmissionEnabled == false
+  and .earlybirdWebhookAutoAdmissionEnabled == false
   and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
   and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
 ' <<<"$public_freeze_json" >/dev/null 2>&1 \

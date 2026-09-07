@@ -135,6 +135,11 @@ printf 'npx' >>"${FAKE_COMMAND_LOG:?}"
 printf ' %q' "$@" >>"${FAKE_COMMAND_LOG:?}"
 printf '\n' >>"${FAKE_COMMAND_LOG:?}"
 
+if [[ "$*" == *'validate-analysis-public-readiness.ts'* && "$*" == *'--shape-only'* ]]; then
+  printf 'PASS\n'
+  exit 0
+fi
+
 case "${FAKE_IMAGE_PROXY_PROBE_RESULT:-pass}" in
   pass)
     printf 'PASS: image-proxy-signing compatibility signature_accepted_503_retryable\n'
@@ -161,7 +166,7 @@ export FAKE_REVISION_JSON="{\"metadata\":{\"name\":\"analysis-worker-active\",\"
 export FAKE_VERCEL_DEPLOYMENT_ID='dpl_selected'
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_VERCEL_ALIASES_JSON='{"aliases":[]}'
-export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v2\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"paidProducerConfigFingerprintVersion\":\"paid-producer-config-v1\",\"paidProducerConfigFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"paidProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}}}"
+export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v3\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"paidProducerConfigFingerprintVersion\":\"paid-producer-config-v1\",\"paidProducerConfigFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"paidProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}},\"analysisV2AdmissionEnabled\":false,\"earlybirdWebhookAutoAdmissionEnabled\":false}"
 export FAKE_SUPABASE_JSON='[{"version":"20260829120000","name":"add_analysis_v2_progress_signals_history"}]'
 export VERCEL_TOKEN="$vercel_token"
 export IMAGE_PROXY_SIGNING_SECRET="$image_proxy_secret"

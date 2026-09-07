@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Split-capacity Cloud Run deployment. The runtime manifest is the sole
 # non-secret environment source; build inputs and runtime secrets are supplied
 # through separate, externally-resolved files/Secret Manager references.
@@ -22,7 +24,7 @@ readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 # scheduler must therefore have been paused for longer than the deployed Cloud
 # Run request timeout (600s) plus grace before an empty queue proves anything.
 readonly PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS=660
-readonly PUBLIC_READINESS_SCHEMA_VERSION="analysis-public-freeze-readiness-v2"
+readonly PUBLIC_READINESS_SCHEMA_VERSION="analysis-public-freeze-readiness-v3"
 readonly PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION="preflight-producer-config-v1"
 readonly PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION="paid-producer-config-v1"
 
@@ -760,6 +762,16 @@ call_public_freeze_readiness() {
     --url "$public_freeze_readiness_url"
 }
 
+validate_public_readiness_v3_wire() {
+  local payload="$1"
+  local result
+  result="$(printf '%s' "$payload" \
+    | npx --no-install tsx "$SCRIPT_DIR/validate-analysis-public-readiness.ts" --shape-only 2>/dev/null)" \
+    || die "public freeze readiness failed strict v3 wire validation"
+  [[ "$result" == 'PASS' ]] \
+    || die "public freeze readiness failed strict v3 wire validation"
+}
+
 verify_legacy_quiescence() {
   [[ "$stage" != "bootstrap" ]] || return 0
   local queue_json
@@ -785,12 +797,13 @@ verify_legacy_quiescence() {
     || die "legacy Cloud Tasks queue is not empty"
   public_json="$(call_public_freeze_readiness)" \
     || die "public freeze readiness observation failed"
+  validate_public_readiness_v3_wire "$public_json"
   jq -e --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
     --arg source_sha "$source_sha" \
     --arg target_resource "$legacy_target_resource" \
     --arg preflight_version "$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
     --arg paid_version "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" '
-    (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+    (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
     and .schemaVersion == $schema_version
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
@@ -804,6 +817,8 @@ verify_legacy_quiescence() {
     and .paidProducerConfigFingerprintVersion == $paid_version
     and .paidProducerConfigReady == true
     and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
+    and .analysisV2AdmissionEnabled == false
+    and .earlybirdWebhookAutoAdmissionEnabled == false
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
@@ -1132,6 +1147,7 @@ verify_role_runtime_fingerprint() {
   local public_json
   public_json="$(call_public_freeze_readiness)" \
     || die "active Vercel $role_label producer readiness observation failed"
+  validate_public_readiness_v3_wire "$public_json"
   jq -e \
     --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
     --arg source_sha "$source_sha" \
@@ -1146,6 +1162,8 @@ verify_role_runtime_fingerprint() {
     '
       type == "object"
       and ((keys | sort) == [
+        "analysisV2AdmissionEnabled",
+        "earlybirdWebhookAutoAdmissionEnabled",
         "freezeMode",
         "legacyTargetResource",
         "paidProducerConfigFingerprint",
@@ -1183,6 +1201,8 @@ verify_role_runtime_fingerprint() {
       and (.[ $producer_fingerprint_field ] | type == "string")
       and (.[ $producer_fingerprint_field ] | test("^[0-9a-f]{64}$"))
       and .[$producer_fingerprint_field] == $expected
+      and .analysisV2AdmissionEnabled == false
+      and .earlybirdWebhookAutoAdmissionEnabled == false
     ' <<<"$public_json" >/dev/null 2>&1 \
     || die "active Vercel $role_label producer fingerprint does not match the reviewed contract"
   if [[ "$role" == 'preflight' ]]; then
