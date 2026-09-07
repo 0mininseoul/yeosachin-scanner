@@ -41,11 +41,20 @@ describe('independent epoch observations', () => {
     it('validates old source, complete runtime and exact readiness facts', () => {
         expect(() => validateSourceObservation({
             role: 'preflight', sourceSha: 'a'.repeat(40), revision: 'preflight-old', metadataDigest: digest('metadata'),
-        }, { oldSha: 'a'.repeat(40), oldRevision: 'preflight-old' }, 'old')).not.toThrow();
+        }, { role: 'preflight', oldSha: 'a'.repeat(40), oldRevision: 'preflight-old', desiredSha: 'b'.repeat(40) }, 'old')).not.toThrow();
+        expect(() => validateSourceObservation({
+            role: 'preflight', sourceSha: 'b'.repeat(40), revision: 'preflight-staged', metadataDigest: digest('metadata'),
+        }, { role: 'preflight', oldSha: 'a'.repeat(40), oldRevision: 'preflight-old', desiredSha: 'b'.repeat(40), desiredRevisionId: 'preflight-staged' }, 'desired')).not.toThrow();
+        expect(() => validateSourceObservation({
+            role: 'preflight', sourceSha: 'b'.repeat(40), revision: 'latest', metadataDigest: digest('metadata'),
+        }, { role: 'preflight', oldSha: 'a'.repeat(40), oldRevision: 'preflight-old', desiredSha: 'b'.repeat(40) }, 'desired')).toThrow('SOURCE_INVALID');
+        expect(() => validateSourceObservation({
+            role: 'paid', sourceSha: 'b'.repeat(40), revision: 'paid-staged', metadataDigest: digest('metadata'),
+        }, { role: 'preflight', oldSha: 'a'.repeat(40), oldRevision: 'preflight-old', desiredSha: 'b'.repeat(40), desiredRevisionId: 'paid-staged' }, 'desired')).toThrow('SOURCE_INVALID');
         expect(() => validateRuntimeObservation({
-            ...runtime, generation: '17', resourceVersion: 'resource-version', runtimeDigest: digest('runtime'),
+            ...runtime, mode: 'STAGED', revision: 'preflight-staged', generation: '17', resourceVersion: 'resource-version', runtimeDigest: digest(runtime),
             buildDigest: digest('build'), traffic: {},
-        }, runtime)).not.toThrow();
+        }, runtime, { mode: 'STAGED', revision: 'preflight-staged', runtimeDigest: digest(runtime), buildDigest: digest('build') })).not.toThrow();
         expect(() => validateReadinessObservation({
             schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40),
             legacyTargetResource: 'legacy-target', preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
@@ -55,36 +64,73 @@ describe('independent epoch observations', () => {
             preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
             analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false,
         })).not.toThrow();
+        expect(() => validateReadinessObservation({
+            schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40),
+            legacyTargetResource: 'legacy-target', preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
+            analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: false, ready: false,
+        }, {
+            schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40), legacyTargetResource: 'legacy-target',
+            preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
+            analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false,
+        })).toThrow('READINESS_INVALID');
+        expect(() => validateReadinessObservation({
+            schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40),
+            legacyTargetResource: 'legacy-target', preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
+            analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: true, ready: true,
+        }, {
+            schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40), legacyTargetResource: 'legacy-target',
+            preflightFingerprint: digest('preflight'), paidFingerprint: digest('paid'),
+            analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: true,
+        })).not.toThrow();
     });
 
     it('rejects runtime drift, mutable traffic, and wrong private provider gate', () => {
         const observed = {
-            ...runtime, generation: '17', resourceVersion: 'resource-version', runtimeDigest: digest('runtime'),
+            ...runtime, mode: 'STAGED', revision: 'preflight-staged', generation: '17', resourceVersion: 'resource-version', runtimeDigest: digest(runtime),
             buildDigest: digest('build'), traffic: {},
         };
-        expect(() => validateRuntimeObservation({ ...observed, environment: { ...runtime.environment, DRIFT: '1' } }, runtime)).toThrow('RUNTIME_MISMATCH');
-        expect(() => validateRuntimeObservation({ ...observed, traffic: { latest: 100 } }, runtime)).toThrow('RUNTIME_MISMATCH');
-        expect(() => validateRuntimeObservation({ ...observed, providerAdmissionEnabled: false }, runtime)).toThrow('RUNTIME_MISMATCH');
+        const staged = { mode: 'STAGED' as const, revision: 'preflight-staged', runtimeDigest: digest(runtime), buildDigest: digest('build') };
+        expect(() => validateRuntimeObservation(observed, runtime, undefined as never)).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation(observed, runtime, { mode: 'PROMOTED' } as never)).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation({ ...observed, environment: { ...runtime.environment, DRIFT: '1' } }, runtime, staged)).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation({ ...observed, traffic: { latest: 100 } }, runtime, staged)).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation({ ...observed, providerAdmissionEnabled: false }, runtime, staged)).toThrow('RUNTIME_MISMATCH');
+        const promoted = { mode: 'PROMOTED' as const, revision: 'preflight-staged', runtimeDigest: digest(runtime), buildDigest: digest('build') };
+        expect(() => validateRuntimeObservation({ ...observed, mode: 'PROMOTED', noTraffic: false, traffic: { 'preflight-staged': 100 } }, runtime, promoted)).not.toThrow();
+        expect(() => validateRuntimeObservation({ ...observed, mode: 'PROMOTED', noTraffic: false, traffic: { latest: 100 } }, runtime, promoted)).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation({ ...observed, mode: 'PROMOTED', noTraffic: false, traffic: { 'preflight-staged': 100 } }, runtime, { ...promoted, runtimeDigest: digest('other') })).toThrow('RUNTIME_MISMATCH');
+        expect(() => validateRuntimeObservation({ ...observed, mode: 'PROMOTED', noTraffic: false, traffic: { 'preflight-staged': 100 } }, runtime, { mode: 'PROMOTED', revision: 'preflight-staged', runtimeDigest: digest(runtime), buildDigest: digest('build') })).not.toThrow();
     });
 
     it('requires a complete paused empty queue and an aged scheduler pause', () => {
         expect(() => validateQueueObservation({
             role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
-        }, queue, digest(queue.configuration))).not.toThrow();
+        }, queue, digest(queue.configuration), 'preflight')).not.toThrow();
+        expect(() => validateQueueObservation({
+            role: 'paid', ...queue, target: { ...queue.target, url: 'https://unrelated.example.com/worker' },
+            configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
+        }, queue, digest(queue.configuration), 'preflight')).toThrow('OBSERVATION_INVALID');
+        expect(() => validateQueueObservation({
+            role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
+        }, queue, digest(queue.configuration), undefined as never)).toThrow('OBSERVATION_INVALID');
         expect(() => validateQueueObservation({
             role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED',
             tasks: [{ name: 'task', payloadDigest: digest('task'), createTime: new Date(1_000).toISOString() }], complete: true,
-        }, queue, digest(queue.configuration))).toThrow('QUEUE_NOT_EMPTY');
+        }, queue, digest(queue.configuration), 'preflight')).toThrow('QUEUE_NOT_EMPTY');
         expect(() => validateQueueObservation({
             role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: false,
-        }, queue, digest(queue.configuration))).toThrow('PAGINATION_INCOMPLETE');
+        }, queue, digest(queue.configuration), 'preflight')).toThrow('PAGINATION_INCOMPLETE');
         expect(() => validateSchedulerObservation({
             role: 'preflight', ...scheduler, configurationDigest: digest(scheduler.configuration), pauseEpochMs: 15_000, nowMs: 20_000,
-        }, scheduler, 20_000, 5_000, 5_000)).toThrow('SCHEDULER_NOT_QUIESCENT');
+        }, scheduler, 20_000, 5_000, 5_000, 'preflight')).toThrow('SCHEDULER_NOT_QUIESCENT');
         expect(() => validateSchedulerObservation({
             role: 'preflight', ...scheduler, configurationDigest: digest(scheduler.configuration), pauseEpochMs: 1_000,
             nowMs: 20_000,
-        }, scheduler, 20_000, 5_000, 5_000)).not.toThrow();
+        }, scheduler, 20_000, 5_000, 5_000, 'preflight')).not.toThrow();
+        expect(() => validateSchedulerObservation({
+            role: 'preflight', ...scheduler, target: { ...scheduler.target, uri: 'https://unrelated.example.com/recovery' },
+            configurationDigest: digest(scheduler.configuration), pauseEpochMs: 1_000, nowMs: 20_000,
+        }, scheduler, 20_000, 5_000, 5_000, 'preflight')).toThrow('OBSERVATION_INVALID');
     });
 
     it('binds IAM etag/read-back, retention, and independent zero-work coverage', () => {
@@ -97,13 +143,21 @@ describe('independent epoch observations', () => {
         expect(() => validateRetentionObservation({ role: 'retention', ...retention }, retention)).not.toThrow();
         const zeroWork = {
             windowStartMs: 1_000, windowEndMs: 20_000,
-            providerLedger: { digest: digest('provider'), observedAtMs: 20_000, complete: true },
-            billingLedger: { digest: digest('billing'), observedAtMs: 20_000, complete: true },
-            taskAudit: { digest: digest('tasks'), observedAtMs: 20_000, complete: true },
-            receiverLog: { digest: digest('logs'), observedAtMs: 20_000, complete: true },
+            providerLedger: { provenance: 'provider-source', digest: digest('provider'), observedAtMs: 20_000, coveredStartMs: 1_000, coveredEndMs: 20_000, coverageLagMs: 0, freshnessLagMs: 0, complete: true, eventCount: 0, deltaCount: 0 },
+            billingLedger: { provenance: 'billing-source', digest: digest('billing'), observedAtMs: 20_000, coveredStartMs: 1_000, coveredEndMs: 20_000, coverageLagMs: 0, freshnessLagMs: 0, complete: true, eventCount: 0, deltaCount: 0 },
+            taskAudit: { provenance: 'task-source', digest: digest('tasks'), observedAtMs: 20_000, coveredStartMs: 1_000, coveredEndMs: 20_000, coverageLagMs: 0, freshnessLagMs: 0, complete: true, eventCount: 0, deltaCount: 0 },
+            receiverLog: { provenance: 'receiver-source', digest: digest('logs'), observedAtMs: 20_000, coveredStartMs: 1_000, coveredEndMs: 20_000, coverageLagMs: 0, freshnessLagMs: 0, complete: true, eventCount: 0, deltaCount: 0 },
         };
-        expect(() => validateZeroWorkObservation(zeroWork, 20_000)).not.toThrow();
-        expect(() => validateZeroWorkObservation({ ...zeroWork, receiverLog: { ...zeroWork.receiverLog, complete: false } }, 20_000)).toThrow('ZERO_WORK_INCOMPLETE');
-        expect(() => validateZeroWorkObservation({ ...zeroWork, windowEndMs: 30_000 }, 20_000)).toThrow(EpochError);
+        const window = { windowStartMs: 1_000, windowEndMs: 20_000, provenance: {
+            providerLedger: 'provider-source', billingLedger: 'billing-source', taskAudit: 'task-source', receiverLog: 'receiver-source',
+        } } as const;
+        expect(() => validateZeroWorkObservation(zeroWork, 20_000, undefined as never)).toThrow('ZERO_WORK_INCOMPLETE');
+        expect(() => validateZeroWorkObservation(zeroWork, 20_000, window)).not.toThrow();
+        expect(() => validateZeroWorkObservation({ ...zeroWork, receiverLog: { ...zeroWork.receiverLog, complete: false } }, 20_000, window)).toThrow('ZERO_WORK_INCOMPLETE');
+        expect(() => validateZeroWorkObservation({ ...zeroWork, windowEndMs: 30_000 }, 20_000, window)).toThrow(EpochError);
+        expect(() => validateZeroWorkObservation({ ...zeroWork, taskAudit: { ...zeroWork.taskAudit, deltaCount: 1 } }, 20_000, window)).toThrow('ZERO_WORK_INCOMPLETE');
+        expect(() => validateZeroWorkObservation({ ...zeroWork, receiverLog: { ...zeroWork.receiverLog, coveredEndMs: 19_000, coverageLagMs: 1_000 } }, 20_000, window)).toThrow('ZERO_WORK_INCOMPLETE');
+        expect(() => validateZeroWorkObservation({ ...zeroWork, windowStartMs: 0, windowEndMs: 0 }, 20_000, { ...window, windowStartMs: 0, windowEndMs: 0 })).toThrow('ZERO_WORK_INCOMPLETE');
+        expect(() => validateZeroWorkObservation({ ...zeroWork, providerLedger: { ...zeroWork.providerLedger, provenance: 'unrelated' } }, 20_000, window)).toThrow('ZERO_WORK_INCOMPLETE');
     });
 });
