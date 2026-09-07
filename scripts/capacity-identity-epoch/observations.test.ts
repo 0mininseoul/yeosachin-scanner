@@ -27,6 +27,7 @@ const queue: ProtectedQueueInput = {
     target: { url: runtime.target.url, audience: runtime.target.audience, callerIdentity: identity },
     configuration: { maxConcurrentDispatches: 2 },
 };
+const observedQueueTarget = { ...queue.target, uriOverride: null };
 const scheduler: ProtectedSchedulerInput = {
     resource: `projects/${project}/locations/asia-northeast3/jobs/preflight-recovery`, project, location: 'asia-northeast3',
     target: { uri: 'https://preflight.example.com/api/recover', audience: runtime.target.audience, identity },
@@ -104,21 +105,21 @@ describe('independent epoch observations', () => {
 
     it('requires a complete paused empty queue and an aged scheduler pause', () => {
         expect(() => validateQueueObservation({
-            role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
+            role: 'preflight', ...queue, target: observedQueueTarget, httpTargetPresent: true, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
         }, queue, digest(queue.configuration), 'preflight')).not.toThrow();
         expect(() => validateQueueObservation({
-            role: 'paid', ...queue, target: { ...queue.target, url: 'https://unrelated.example.com/worker' },
+            role: 'paid', ...queue, target: { ...observedQueueTarget, url: 'https://unrelated.example.com/worker' }, httpTargetPresent: true,
             configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
         }, queue, digest(queue.configuration), 'preflight')).toThrow('OBSERVATION_INVALID');
         expect(() => validateQueueObservation({
-            role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
+            role: 'preflight', ...queue, target: observedQueueTarget, httpTargetPresent: true, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: true,
         }, queue, digest(queue.configuration), undefined as never)).toThrow('OBSERVATION_INVALID');
         expect(() => validateQueueObservation({
-            role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED',
+            role: 'preflight', ...queue, target: observedQueueTarget, httpTargetPresent: true, configurationDigest: digest(queue.configuration), state: 'PAUSED',
             tasks: [{ name: 'task', payloadDigest: digest('task'), createTime: new Date(1_000).toISOString() }], complete: true,
         }, queue, digest(queue.configuration), 'preflight')).toThrow('QUEUE_NOT_EMPTY');
         expect(() => validateQueueObservation({
-            role: 'preflight', ...queue, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: false,
+            role: 'preflight', ...queue, target: observedQueueTarget, httpTargetPresent: true, configurationDigest: digest(queue.configuration), state: 'PAUSED', tasks: [], complete: false,
         }, queue, digest(queue.configuration), 'preflight')).toThrow('PAGINATION_INCOMPLETE');
         expect(() => validateSchedulerObservation({
             role: 'preflight', ...scheduler, configurationDigest: digest(scheduler.configuration), pauseEpochMs: 15_000, nowMs: 20_000,

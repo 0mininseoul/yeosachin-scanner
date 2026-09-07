@@ -52,9 +52,19 @@ function timestamp(value: unknown): number | null {
 
 export type WorkTaskObservation = Readonly<{ name: string; payloadDigest: string; createTime: string }>;
 
+/** Actual Cloud Tasks HTTP target facts; URL is null when there is no URI override. */
+export type QueueTargetObservation = Readonly<{
+    url: string | null;
+    audience: string;
+    callerIdentity: ProtectedIdentity;
+    uriOverride: Readonly<Record<string, unknown>> | null;
+}>;
+
 export type QueueObservation = Readonly<{
     resource: string; project: string; location: string; state: 'PAUSED' | 'RUNNING';
-    target: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
+    target: QueueTargetObservation | null;
+    /** Presence is a provider fact; absence is never replaced with packet input. */
+    httpTargetPresent: boolean;
     configuration: Readonly<Record<string, unknown>>; configurationDigest: string;
     tasks: readonly WorkTaskObservation[]; complete: boolean;
 }>;
@@ -91,7 +101,7 @@ export class WorkPlaneClient {
         if (location !== input.location) fail('RESOURCE_INVALID');
         const config = await this.getQueue(input);
         const tasks = await this.listTasks(input);
-        return { resource: input.resource, project: input.project, location: input.location, state: config.state, target: config.target, configuration: config.configuration, configurationDigest: canonicalDigest(config.configuration), tasks, complete: true };
+        return { resource: input.resource, project: input.project, location: input.location, state: config.state, target: config.target, httpTargetPresent: config.httpTarget !== null, configuration: config.configuration, configurationDigest: canonicalDigest(config.configuration), tasks, complete: true };
     }
 
     async pauseQueue(input: ProtectedQueueInput): Promise<QueueObservation> { return this.changeQueueState(input, 'pause'); }
@@ -139,8 +149,9 @@ export class WorkPlaneClient {
         desiredTarget: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
     }>): Promise<QueueObservation> {
         const beforeRecord = await this.getQueue({ ...options.input, target: options.expectedOldTarget });
-        const before = { resource: options.input.resource, project: options.input.project, location: options.input.location, state: beforeRecord.state, target: beforeRecord.target, configuration: beforeRecord.configuration, configurationDigest: canonicalDigest(beforeRecord.configuration), tasks: await this.listTasks(options.input), complete: true as const };
-        if (before.state !== 'PAUSED' || canonicalDigest(before.target) !== canonicalDigest(options.expectedOldTarget)) fail('OBSERVATION_RACE');
+        const before = { resource: options.input.resource, project: options.input.project, location: options.input.location, state: beforeRecord.state, target: beforeRecord.target, httpTargetPresent: beforeRecord.httpTarget !== null, configuration: beforeRecord.configuration, configurationDigest: canonicalDigest(beforeRecord.configuration), tasks: await this.listTasks(options.input), complete: true as const };
+        if (before.state !== 'PAUSED' || !queueTargetMatches(before.target, options.expectedOldTarget)) fail('OBSERVATION_RACE');
+        if (beforeRecord.httpTarget === null) fail('OBSERVATION_RACE');
         const path = `/v2/${options.input.resource}`;
         const wireTarget = { ...beforeRecord.httpTarget, oidcToken: { serviceAccountEmail: options.desiredTarget.callerIdentity.identity, audience: options.desiredTarget.audience } };
         await this.transport.json({
@@ -149,7 +160,7 @@ export class WorkPlaneClient {
             body: { httpTarget: wireTarget }, acceptedStatuses: [200],
         });
         const after = await this.observeQueue(options.input);
-        if (after.state !== 'PAUSED' || canonicalDigest(after.target) !== canonicalDigest(options.desiredTarget)) fail('OBSERVATION_RACE');
+        if (after.state !== 'PAUSED' || !queueTargetMatches(after.target, options.desiredTarget)) fail('OBSERVATION_RACE');
         return after;
     }
 
@@ -163,7 +174,7 @@ export class WorkPlaneClient {
         return { role: 'retention' as const, resource: input.resource, project: input.project, location: input.location, enabled: state === 'ENABLED', configuration, configurationDigest: canonicalDigest(configuration) };
     }
 
-    private async getQueue(input: ProtectedQueueInput): Promise<{ state: 'PAUSED' | 'RUNNING'; target: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>; configuration: Record<string, unknown>; httpTarget: Record<string, unknown> }> {
+    private async getQueue(input: ProtectedQueueInput): Promise<{ state: 'PAUSED' | 'RUNNING'; target: QueueTargetObservation | null; configuration: Record<string, unknown>; httpTarget: Record<string, unknown> | null }> {
         const path = `/v2/${input.resource}`;
         const { value } = await this.transport.json({
             method: 'GET', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: [], acceptedStatuses: [200],
@@ -171,7 +182,7 @@ export class WorkPlaneClient {
         const queue = object(value);
         const state = queue.state;
         if (state !== 'PAUSED' && state !== 'RUNNING') fail('ADAPTER_RESPONSE_INVALID');
-        const httpTarget = object(queue.httpTarget);
+        const httpTarget = queue.httpTarget === undefined ? null : object(queue.httpTarget);
         return { state, target: this.queueTarget(queue, input), configuration: this.queueConfiguration(queue), httpTarget };
     }
 
@@ -279,24 +290,37 @@ export class WorkPlaneClient {
         return configuration;
     }
 
-    private queueTarget(queue: Record<string, unknown>, input: ProtectedQueueInput): Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }> {
+    private queueTarget(queue: Record<string, unknown>, input: ProtectedQueueInput): QueueTargetObservation | null {
+        if (queue.httpTarget === undefined) {
+            if (isObject(input.configuration.httpTarget)) fail('RESOURCE_INVALID');
+            return null;
+        }
         const httpTarget = object(queue.httpTarget);
         if (httpTarget.uri !== undefined) fail('ADAPTER_RESPONSE_INVALID');
         const oidcToken = object(httpTarget.oidcToken);
         if (typeof oidcToken.serviceAccountEmail !== 'string' || !SERVICE_ACCOUNT.test(oidcToken.serviceAccountEmail)
             || SERVICE_ACCOUNT.exec(oidcToken.serviceAccountEmail)?.[1] !== input.project || typeof oidcToken.audience !== 'string' || !/^https:\/\/[^\s]+$/.test(oidcToken.audience)
-            || oidcToken.serviceAccountEmail !== input.target.callerIdentity.identity || oidcToken.audience !== input.target.audience) fail('ADAPTER_RESPONSE_INVALID');
+        ) fail('ADAPTER_RESPONSE_INVALID');
         const override = httpTarget.uriOverride;
+        let overrideObject: Record<string, unknown> | null = null;
         if (override !== undefined) {
-            const overrideObject = object(override);
-            if (Object.keys(overrideObject).some(key => !['scheme', 'host', 'port', 'pathOverride', 'queryOverride', 'enforceMode'].includes(key))) fail('ADAPTER_RESPONSE_INVALID');
+            overrideObject = object(override);
+            if (Object.keys(overrideObject).some(key => !['scheme', 'host', 'port', 'pathOverride', 'queryOverride', 'uriOverrideEnforceMode'].includes(key))) fail('ADAPTER_RESPONSE_INVALID');
             if (!isObject(input.configuration.httpTarget) || canonicalDigest((input.configuration.httpTarget as Record<string, unknown>).uriOverride ?? null) !== canonicalDigest(overrideObject)) fail('RESOURCE_INVALID');
+        } else if (isObject(input.configuration.httpTarget) && (input.configuration.httpTarget as Record<string, unknown>).uriOverride !== undefined) {
+            fail('RESOURCE_INVALID');
         }
-        // Cloud Tasks has no Scheduler-style httpTarget.uri.  With no
-        // uriOverride, the effective producer target is the independently
-        // reviewed task contract whose OIDC tuple was just checked above.
-        return input.target;
+        // Cloud Tasks has no Scheduler-style httpTarget.uri. Preserve the
+        // actual OIDC tuple and override presence; never claim the packet's
+        // reviewed URL as an observed provider URL.
+        return { url: null, audience: oidcToken.audience, callerIdentity: { identity: oidcToken.serviceAccountEmail, project: input.project }, uriOverride: overrideObject };
     }
+}
+
+function queueTargetMatches(actual: QueueTargetObservation | null, expected: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>): boolean {
+    return actual !== null
+        && actual.audience === expected.audience
+        && canonicalDigest(actual.callerIdentity) === canonicalDigest(expected.callerIdentity);
 }
 
 export { EpochError };

@@ -67,11 +67,12 @@ function normalizeBindings(value: readonly ProtectedIamBinding[]): readonly Prot
 function decodeWirePolicy(value: unknown, resource: string, project: string): { snapshot: ProtectedIamPolicySnapshot; wire: WirePolicy } {
     if (!isObject(value) || (value.version !== undefined && (typeof value.version !== 'number' || !Number.isSafeInteger(value.version)))
         || ![0, 1, 3].includes((value.version ?? 0) as number)
-        || typeof value.etag !== 'string' || !ETAG.test(value.etag) || !Array.isArray(value.bindings)) fail('IAM_ETAG_REQUIRED');
+        || typeof value.etag !== 'string' || !ETAG.test(value.etag)
+        || (value.bindings !== undefined && !Array.isArray(value.bindings))) fail('IAM_ETAG_REQUIRED');
     const version = (value.version ?? 0) as number;
     const flattened: ProtectedIamBinding[] = [];
     const wireBindings: WireBinding[] = [];
-    for (const item of value.bindings as unknown[]) {
+    for (const item of (value.bindings ?? []) as unknown[]) {
         if (!isObject(item) || typeof item.role !== 'string' || !ROLE.test(item.role)
             || !Array.isArray(item.members) || item.members.length === 0
             || item.members.some(member => typeof member !== 'string' || !MEMBER.test(member))) fail('ADAPTER_RESPONSE_INVALID');
@@ -160,6 +161,7 @@ export class IamAdapter {
         });
         const readback = await this.getWirePolicy(input);
         if (canonicalDigest(readback.snapshot.bindings) !== canonicalDigest(normalizeBindings(policy.bindings))) fail('OBSERVATION_RACE');
+        if (canonicalDigest(readback.wire.auditConfigs ?? null) !== canonicalDigest(current.wire.auditConfigs ?? null)) fail('OBSERVATION_RACE');
         return readback.snapshot;
     }
 

@@ -7,6 +7,7 @@ import {
     isSha,
     type ProducerContract,
     type ProtectedQueueInput,
+    type ProtectedIdentity,
     type ProtectedRetentionInput,
     type ProtectedRuntimeInput,
     type ProtectedSchedulerInput,
@@ -37,8 +38,17 @@ export type RuntimeObservation = ProtectedRuntimeInput & Readonly<{
     traffic: Readonly<Record<string, number>>;
 }>;
 
-export type QueueObservation = ProtectedQueueInput & Readonly<{
+export type QueueTargetObservation = Readonly<{
+    url: string | null;
+    audience: string;
+    callerIdentity: ProtectedIdentity;
+    uriOverride: Readonly<Record<string, unknown>> | null;
+}>;
+
+export type QueueObservation = Omit<ProtectedQueueInput, 'target'> & Readonly<{
     role: Role;
+    target: QueueTargetObservation | null;
+    httpTargetPresent: boolean;
     configurationDigest: string;
     state: 'PAUSED' | 'RUNNING';
     tasks: readonly Readonly<{ name: string; payloadDigest: string; createTime: string }>[];
@@ -160,16 +170,33 @@ export function validateRuntimeObservation(value: unknown, expected: ProtectedRu
 }
 
 export function validateQueueObservation(value: unknown, expected: ProtectedQueueInput, expectedConfigurationDigest: string, expectedRole: Role): asserts value is QueueObservation {
-    if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'location', 'target', 'configuration', 'configurationDigest', 'state', 'tasks', 'complete'])
+    if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'location', 'target', 'httpTargetPresent', 'configuration', 'configurationDigest', 'state', 'tasks', 'complete'])
         || value.role !== expectedRole || value.resource !== expected.resource
         || value.project !== expected.project || value.location !== expected.location
-        || !isObject(value.target) || !isObject(value.configuration) || value.configurationDigest !== expectedConfigurationDigest
+        || typeof value.httpTargetPresent !== 'boolean' || !isObject(value.configuration) || value.configurationDigest !== expectedConfigurationDigest
         || value.state !== 'PAUSED' || !Array.isArray(value.tasks)) epochFail('OBSERVATION_INVALID');
-    if (canonicalDigest(value.configuration) !== canonicalDigest(expected.configuration)
-        || canonicalDigest(value.target) !== canonicalDigest(expected.target)) epochFail('OBSERVATION_INVALID');
-    https(value.target.url);
-    https(value.target.audience);
-    identity(value.target.callerIdentity);
+    if (canonicalDigest(value.configuration) !== canonicalDigest(expected.configuration)) epochFail('OBSERVATION_INVALID');
+    if (value.httpTargetPresent !== (value.target !== null)) epochFail('OBSERVATION_INVALID');
+    if (value.target === null) {
+        // An omitted Cloud Tasks httpTarget is an observed fact. It is not
+        // equivalent to the reviewed packet target and must remain explicit.
+        if (isObject(expected.configuration.httpTarget)) epochFail('OBSERVATION_INVALID');
+    } else {
+        const target = value.target;
+        if (!isObject(target) || !hasExactKeys(target, ['url', 'audience', 'callerIdentity', 'uriOverride'])
+            || (target.url !== null && typeof target.url !== 'string')
+            || typeof target.audience !== 'string' || !isObject(target.callerIdentity)
+            || (target.uriOverride !== null && !isObject(target.uriOverride))) epochFail('OBSERVATION_INVALID');
+        if (target.url !== null) https(target.url);
+        https(target.audience);
+        identity(target.callerIdentity);
+        if (target.audience !== expected.target.audience
+            || canonicalDigest(target.callerIdentity) !== canonicalDigest(expected.target.callerIdentity)) epochFail('OBSERVATION_INVALID');
+        const expectedHttpTarget = isObject(expected.configuration.httpTarget) ? expected.configuration.httpTarget : null;
+        const expectedOverride = expectedHttpTarget?.uriOverride ?? null;
+        if (canonicalDigest(target.uriOverride) !== canonicalDigest(expectedOverride)) epochFail('OBSERVATION_INVALID');
+        if (target.url !== null && target.url !== expected.target.url) epochFail('OBSERVATION_INVALID');
+    }
     if (value.tasks.length > 0) epochFail('QUEUE_NOT_EMPTY');
     for (const task of value.tasks) {
         if (!isObject(task) || !hasExactKeys(task, ['name', 'payloadDigest', 'createTime'])

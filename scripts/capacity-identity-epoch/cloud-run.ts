@@ -91,9 +91,11 @@ function parseEnvironment(container: Record<string, unknown>): { environment: Re
     if (!Array.isArray(container.env)) fail('ADAPTER_RESPONSE_INVALID');
     const environment: Record<string, string> = {};
     const secretReferences: Record<string, string> = {};
+    const names = new Set<string>();
     for (const item of container.env as unknown[]) {
         const env = object(item);
-        if (typeof env.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(env.name) || Object.prototype.hasOwnProperty.call(environment, env.name)) fail('ADAPTER_RESPONSE_INVALID');
+        if (typeof env.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(env.name) || names.has(env.name)) fail('ADAPTER_RESPONSE_INVALID');
+        names.add(env.name);
         if (typeof env.value === 'string') {
             environment[env.name] = env.value;
             continue;
@@ -102,7 +104,6 @@ function parseEnvironment(container: Record<string, unknown>): { environment: Re
         const ref = object(valueFrom.secretKeyRef);
         if (typeof ref.name !== 'string' || typeof ref.key !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/.test(ref.name) || !/^[1-9][0-9]*$/.test(ref.key)) fail('ADAPTER_RESPONSE_INVALID');
         secretReferences[env.name] = `${ref.name}:${ref.key}`;
-        environment[env.name] = `<secret:${env.name}>`;
     }
     return { environment, secretReferences };
 }

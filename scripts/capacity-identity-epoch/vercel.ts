@@ -42,6 +42,7 @@ export type VercelDeploymentObservation = Readonly<{
     id: string;
     sourceSha: string;
     readyState: string;
+    origin: string;
     target: string | null;
     aliasNames: readonly string[];
     digest: string;
@@ -52,6 +53,8 @@ export type VercelAdapterOptions = Readonly<{
     publicTransport?: ProtectedTransport;
     readinessFetcher?: PublicReadinessFetcher;
     publicReadinessOrigin: string;
+    /** Optional independently reviewed team slug; never derive it from projectId. */
+    teamSlug?: string;
     readinessTimeoutMs?: number;
 }>;
 
@@ -74,7 +77,8 @@ export function createVercelProtectedTransport(options: Readonly<{
 export class VercelAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
     private readonly readinessFetcher: PublicReadinessFetcher;
-    private readonly publicReadinessOrigin?: string;
+    private readonly publicReadinessOrigin: string;
+    private readonly teamSlug?: string;
     private readonly readinessTimeoutMs: number;
 
     constructor(options: VercelAdapterOptions) {
@@ -83,6 +87,8 @@ export class VercelAdapter {
         try { publicOrigin = new URL(options.publicReadinessOrigin); } catch { fail('ADAPTER_REQUEST_INVALID'); }
         if (publicOrigin.protocol !== 'https:' || publicOrigin.username || publicOrigin.password || publicOrigin.port || publicOrigin.pathname !== '/' || publicOrigin.search || publicOrigin.hash) fail('ADAPTER_REQUEST_INVALID');
         this.publicReadinessOrigin = publicOrigin.origin;
+        if (options.teamSlug !== undefined && !PROJECT_ID.test(options.teamSlug)) fail('ADAPTER_REQUEST_INVALID');
+        this.teamSlug = options.teamSlug;
         const timeoutMs = options.readinessTimeoutMs ?? 15_000;
         if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) fail('ADAPTER_REQUEST_INVALID');
         this.readinessTimeoutMs = timeoutMs;
@@ -94,9 +100,6 @@ export class VercelAdapter {
             } catch {
                 fail('ADAPTER_REQUEST_INVALID');
             }
-            if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
-                || parsed.pathname !== '/api/analysis/capacity/readiness') fail('ADAPTER_NOT_ALLOWED');
-            if (parsed.origin !== this.publicReadinessOrigin) fail('ADAPTER_NOT_ALLOWED');
             let response: ProtectedHttpResponse;
             try {
                 response = await publicTransport.request({
@@ -108,21 +111,24 @@ export class VercelAdapter {
                 if (error instanceof EpochError) throw error;
                 fail('ADAPTER_TIMEOUT');
             }
-            if (response.url !== undefined && response.url !== parsed.toString()) fail('ADAPTER_REDIRECT');
             return response;
         });
     }
 
-    async getDeployment(options: Readonly<{ projectId: string; teamId: string; deploymentId: string }>): Promise<VercelDeploymentObservation> {
+    async getDeployment(options: Readonly<{ projectId: string; teamId: string; deploymentId: string; teamSlug?: string }>): Promise<VercelDeploymentObservation> {
         if (!PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId) || !DEPLOYMENT_ID.test(options.deploymentId)) fail('ADAPTER_REQUEST_INVALID');
+        const teamSlug = options.teamSlug ?? this.teamSlug;
+        if (teamSlug !== undefined && !PROJECT_ID.test(teamSlug)) fail('ADAPTER_REQUEST_INVALID');
         const path = `/v13/deployments/${encodeURIComponent(options.deploymentId)}`;
+        const query = new URLSearchParams({ withGitRepoInfo: 'true', teamId: options.teamId });
+        if (teamSlug !== undefined) query.set('slug', teamSlug);
         const { value } = await this.transport.json({
             method: 'GET',
-            url: `https://api.vercel.com${path}?withGitRepoInfo=true&teamId=${encodeURIComponent(options.teamId)}&slug=${encodeURIComponent(options.projectId)}`,
+            url: `https://api.vercel.com${path}?${query.toString()}`,
             allowedHosts: HOSTS,
             allowedPath: candidate => candidate === path,
             allowedMethods: ['GET'],
-            allowedQueryKeys: ['withGitRepoInfo', 'teamId', 'slug'],
+            allowedQueryKeys: teamSlug === undefined ? ['withGitRepoInfo', 'teamId'] : ['withGitRepoInfo', 'teamId', 'slug'],
             acceptedStatuses: [200],
         });
         const deployment = object(value);
@@ -130,6 +136,9 @@ export class VercelAdapter {
         const team = object(deployment.team);
         if (deployment.id !== options.deploymentId || project.id !== options.projectId || team.id !== options.teamId || typeof deployment.readyState !== 'string') fail('ADAPTER_RESPONSE_INVALID');
         const sourceSha = this.deploymentSourceSha(deployment);
+        const deploymentUrl = deployment.url;
+        if (typeof deploymentUrl !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,251}[A-Za-z0-9]$/.test(deploymentUrl) || deploymentUrl.includes('..')) fail('ADAPTER_RESPONSE_INVALID');
+        const origin = `https://${deploymentUrl}`;
         const aliases = Array.isArray(deployment.alias) ? deployment.alias : [];
         const aliasNames = aliases.map(alias => {
             if (typeof alias !== 'string' || !ALIAS.test(alias)) fail('ADAPTER_RESPONSE_INVALID');
@@ -141,9 +150,10 @@ export class VercelAdapter {
             id: options.deploymentId,
             sourceSha,
             readyState: deployment.readyState,
+            origin,
             target,
             aliasNames,
-            digest: canonicalDigest({ id: deployment.id, sourceSha, readyState: deployment.readyState, target, aliasNames }),
+            digest: canonicalDigest({ id: deployment.id, sourceSha, readyState: deployment.readyState, origin, target, aliasNames }),
         };
     }
 
@@ -196,15 +206,24 @@ export class VercelAdapter {
         url: string;
         expected: PublicReadinessExpected;
     }>): Promise<LegacyPublicReadiness> {
+        return this.readReadinessAt(options.url, options.expected, this.publicReadinessOrigin);
+    }
+
+    /** Proves the desired immutable deployment before its alias can be changed. */
+    async readDeploymentReadiness(options: Readonly<{ deployment: VercelDeploymentObservation; expected: PublicReadinessExpected }>): Promise<LegacyPublicReadiness> {
+        return this.readReadinessAt(`${options.deployment.origin}/api/analysis/capacity/readiness`, options.expected, options.deployment.origin);
+    }
+
+    private async readReadinessAt(url: string, expected: PublicReadinessExpected, expectedOrigin: string): Promise<LegacyPublicReadiness> {
         let parsed: URL;
         try {
-            parsed = new URL(options.url);
+            parsed = new URL(url);
         } catch {
             fail('ADAPTER_REQUEST_INVALID');
         }
         if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash) fail('ADAPTER_NOT_ALLOWED');
         if (parsed.pathname !== '/api/analysis/capacity/readiness') fail('ADAPTER_NOT_ALLOWED');
-        if (parsed.port || parsed.origin !== this.publicReadinessOrigin) fail('ADAPTER_NOT_ALLOWED');
+        if (parsed.port || parsed.origin !== expectedOrigin) fail('ADAPTER_NOT_ALLOWED');
         const controller = new AbortController();
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         let response: ProtectedHttpResponse;
@@ -222,13 +241,14 @@ export class VercelAdapter {
             if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
             controller.abort();
         }
+        if (response.url !== undefined && response.url !== parsed.toString()) fail('ADAPTER_REDIRECT');
         if (response.status !== 200) fail('READINESS_INVALID');
         if (typeof response.body !== 'string' || Buffer.byteLength(response.body, 'utf8') > 65_536) fail('READINESS_INVALID');
         let dto: LegacyPublicReadiness;
         try {
             // Parse the strict raw v3 contract before any normalized helper.
             dto = parsePublicReadinessJson(response.body);
-            return assertPublicReadiness(dto, options.expected);
+            return assertPublicReadiness(dto, expected);
         } catch (error) {
             if (error instanceof EpochError) throw error;
             fail('READINESS_INVALID');
