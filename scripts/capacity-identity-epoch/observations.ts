@@ -1,5 +1,7 @@
 import {
     canonicalDigest,
+    canonicalQueueConfiguration,
+    canonicalRuntimeInputDigest,
     epochFail,
     hasExactKeys,
     isDigest,
@@ -43,6 +45,7 @@ export type QueueTargetObservation = Readonly<{
     audience: string;
     callerIdentity: ProtectedIdentity;
     uriOverride: Readonly<Record<string, unknown>> | null;
+    wireConfigurationDigest: string;
 }>;
 
 export type QueueObservation = Omit<ProtectedQueueInput, 'target'> & Readonly<{
@@ -69,7 +72,7 @@ export type IamObservation = Readonly<{
     bindings: readonly Readonly<{ role: string; member: string; condition: string | null | Readonly<Record<string, string>> }>[];
 }>;
 
-export type RetentionObservation = ProtectedRetentionInput & Readonly<{ role: 'retention' }>;
+export type RetentionObservation = ProtectedRetentionInput & Readonly<{ role: 'retention'; configurationDigest: string }>;
 export type ReadinessObservation = ReadinessContract & Readonly<{ ready: boolean }>;
 
 export type ZeroWorkObservation = Readonly<{
@@ -165,6 +168,12 @@ export function validateRuntimeObservation(value: unknown, expected: ProtectedRu
         || canonicalDigest(value.secretReferences) !== canonicalDigest(expected.secretReferences)
         || canonicalDigest(value.settings) !== canonicalDigest(expected.settings)
         || canonicalDigest(value.target) !== canonicalDigest(expected.target)) epochFail('RUNTIME_MISMATCH');
+    if (value.runtimeDigest !== canonicalRuntimeInputDigest({
+        identity: value.identity as ProtectedRuntimeInput['identity'],
+        environment: value.environment as ProtectedRuntimeInput['environment'],
+        secretReferences: value.secretReferences as ProtectedRuntimeInput['secretReferences'],
+        settings: value.settings as ProtectedRuntimeInput['settings'],
+    })) epochFail('RUNTIME_MISMATCH');
     https(value.target.url);
     https(value.target.audience);
 }
@@ -175,7 +184,7 @@ export function validateQueueObservation(value: unknown, expected: ProtectedQueu
         || value.project !== expected.project || value.location !== expected.location
         || typeof value.httpTargetPresent !== 'boolean' || !isObject(value.configuration) || value.configurationDigest !== expectedConfigurationDigest
         || value.state !== 'PAUSED' || !Array.isArray(value.tasks)) epochFail('OBSERVATION_INVALID');
-    if (canonicalDigest(value.configuration) !== canonicalDigest(expected.configuration)) epochFail('OBSERVATION_INVALID');
+    if (canonicalDigest(canonicalQueueConfiguration(value.configuration)) !== canonicalDigest(canonicalQueueConfiguration(expected.configuration))) epochFail('OBSERVATION_INVALID');
     if (value.httpTargetPresent !== (value.target !== null)) epochFail('OBSERVATION_INVALID');
     if (value.target === null) {
         // An omitted Cloud Tasks httpTarget is an observed fact. It is not
@@ -183,10 +192,10 @@ export function validateQueueObservation(value: unknown, expected: ProtectedQueu
         if (isObject(expected.configuration.httpTarget)) epochFail('OBSERVATION_INVALID');
     } else {
         const target = value.target;
-        if (!isObject(target) || !hasExactKeys(target, ['url', 'audience', 'callerIdentity', 'uriOverride'])
+        if (!isObject(target) || !hasExactKeys(target, ['url', 'audience', 'callerIdentity', 'uriOverride', 'wireConfigurationDigest'])
             || (target.url !== null && typeof target.url !== 'string')
             || typeof target.audience !== 'string' || !isObject(target.callerIdentity)
-            || (target.uriOverride !== null && !isObject(target.uriOverride))) epochFail('OBSERVATION_INVALID');
+            || (target.uriOverride !== null && !isObject(target.uriOverride)) || !isDigest(target.wireConfigurationDigest)) epochFail('OBSERVATION_INVALID');
         if (target.url !== null) https(target.url);
         https(target.audience);
         identity(target.callerIdentity);
@@ -209,7 +218,7 @@ export function validateSchedulerObservation(value: unknown, expected: Protected
     if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'location', 'target', 'configuration', 'configurationDigest', 'state', 'pauseEpochMs', 'lastAttemptMs', 'nowMs'])
         || value.role !== expectedRole || value.resource !== expected.resource
         || value.project !== expected.project || value.location !== expected.location || value.state !== 'PAUSED'
-        || value.nowMs !== nowMs || !Number.isSafeInteger(value.pauseEpochMs) || (value.pauseEpochMs as number) < 0
+        || value.nowMs !== nowMs || !Number.isSafeInteger(value.pauseEpochMs) || (value.pauseEpochMs as number) <= 0
         || !Number.isSafeInteger(value.lastAttemptMs) && value.lastAttemptMs !== null
         || (value.lastAttemptMs !== null && (value.lastAttemptMs as number) < 0)
         || !isObject(value.target) || !isObject(value.configuration) || value.configurationDigest !== canonicalDigest(expected.configuration)
@@ -239,14 +248,16 @@ export function validateIamObservation(value: unknown, expected: IamObservation)
         if (isObject(binding.condition) && (!Object.keys(binding.condition).every(key => ['title', 'description', 'expression', 'location'].includes(key))
             || !Object.values(binding.condition).every(item => typeof item === 'string' && safe(item, 4096)))) epochFail('OBSERVATION_INVALID');
         if (binding.member !== 'allUsers' && binding.member !== 'allAuthenticatedUsers'
-            && !/^(?:user|group|domain|principal|principalSet|serviceAccount):[^\u0000-\u001f\u007f]{1,1023}$/.test(binding.member)) epochFail('OBSERVATION_INVALID');
+            && !/^(?:user|group|domain|principal|principalSet|serviceAccount):[^\u0000-\u001f\u007f]{1,1023}$/.test(binding.member)
+            && !/^deleted:(?:user|group|domain|serviceAccount|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$/.test(binding.member)) epochFail('OBSERVATION_INVALID');
     }
 }
 
 export function validateRetentionObservation(value: unknown, expected: ProtectedRetentionInput): asserts value is RetentionObservation {
-    if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'location', 'enabled', 'configuration'])
+    if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'location', 'enabled', 'configuration', 'configurationDigest'])
         || value.role !== 'retention' || value.resource !== expected.resource || value.project !== expected.project
         || value.location !== expected.location || value.enabled !== true || !isObject(value.configuration)
+        || value.configurationDigest !== canonicalDigest(expected.configuration)
         || canonicalDigest(value.configuration) !== canonicalDigest(expected.configuration)) epochFail('OBSERVATION_INVALID');
 }
 
@@ -284,8 +295,14 @@ export function validateZeroWorkObservation(value: unknown, nowMs: number, expec
             || (proof.coveredEndMs as number) > (proof.observedAtMs as number)
             || !Number.isSafeInteger(proof.coverageLagMs) || proof.coverageLagMs !== (proof.observedAtMs as number) - (proof.coveredEndMs as number)
             || proof.coverageLagMs < 0 || proof.coverageLagMs > maxCoverageLagMs
-            || !Number.isSafeInteger(proof.freshnessLagMs) || proof.freshnessLagMs !== nowMs - (proof.observedAtMs as number)
-            || proof.freshnessLagMs < 0 || proof.freshnessLagMs > maxLagMs
+            // `observedAtMs` is source evidence, while `nowMs` is the trusted
+            // coordinator validation boundary.  The collector may complete
+            // asynchronously, so it cannot predict the caller's later clock
+            // value exactly.  Bound both the derived age and the reported
+            // source lag without requiring millisecond equality.
+            || !Number.isSafeInteger(proof.freshnessLagMs)
+            || (proof.freshnessLagMs as number) < 0 || (proof.freshnessLagMs as number) > maxLagMs
+            || nowMs - (proof.observedAtMs as number) < 0 || nowMs - (proof.observedAtMs as number) > maxLagMs
             || proof.eventCount !== 0 || proof.deltaCount !== 0) epochFail('ZERO_WORK_INCOMPLETE');
     }
 }

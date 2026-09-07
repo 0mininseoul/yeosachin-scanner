@@ -1,7 +1,9 @@
 import {
     EpochError,
+    canonicalQueueConfiguration,
     canonicalDigest,
     epochFail,
+    hasExactKeys,
     isObject,
     type ProtectedIdentity,
     type ProtectedQueueInput,
@@ -14,22 +16,23 @@ const TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
 const SCHEDULER_HOSTS = new Set(['cloudscheduler.googleapis.com']);
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
-const RESOURCE = /^[a-z][a-z0-9-]{0,62}$/;
+const QUEUE_RESOURCE = /^[A-Za-z0-9_-]{1,100}$/;
+const SCHEDULER_RESOURCE = /^[A-Za-z0-9_-]{1,500}$/;
 const SERVICE_ACCOUNT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
 
-function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'PAGINATION_INCOMPLETE' | 'QUEUE_NOT_EMPTY' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE'): never {
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_TIMEOUT' | 'PAGINATION_INCOMPLETE' | 'QUEUE_NOT_EMPTY' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE'): never {
     epochFail(code);
 }
 
 function parseQueueResource(resource: string, project: string): { location: string; name: string } {
     const match = resource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/queues\/([^/]+)$/);
-    if (!match || match[1] !== project || !PROJECT.test(project) || !LOCATION.test(match[2]!) || !RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
+    if (!match || match[1] !== project || !PROJECT.test(project) || !LOCATION.test(match[2]!) || !QUEUE_RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
     return { location: match[2]!, name: match[3]! };
 }
 
 function parseSchedulerResource(resource: string, project: string): { location: string; name: string } {
     const match = resource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/jobs\/([^/]+)$/);
-    if (!match || match[1] !== project || !PROJECT.test(project) || !LOCATION.test(match[2]!) || !RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
+    if (!match || match[1] !== project || !PROJECT.test(project) || !LOCATION.test(match[2]!) || !SCHEDULER_RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
     return { location: match[2]!, name: match[3]! };
 }
 
@@ -58,6 +61,8 @@ export type QueueTargetObservation = Readonly<{
     audience: string;
     callerIdentity: ProtectedIdentity;
     uriOverride: Readonly<Record<string, unknown>> | null;
+    /** Digest of all non-OIDC Cloud Tasks HTTP-target wire fields. */
+    wireConfigurationDigest: string;
 }>;
 
 export type QueueObservation = Readonly<{
@@ -77,22 +82,36 @@ export type SchedulerObservation = Readonly<{
     configuration: Readonly<Record<string, unknown>>; configurationDigest: string;
 }>;
 
+/** Independent, resource-correlated evidence for a completed pause. */
+export type PauseProvenance = Readonly<{
+    resource: string;
+    pauseEpochMs: number;
+    observedAtMs: number;
+    source: string;
+    evidenceDigest: string;
+    complete: true;
+}>;
+
 export type WorkPlaneClientOptions = Readonly<{
     transport: AuthenticatedProtectedTransport;
-    /** Independent audit-log/control-plane evidence of the last PAUSE. */
-    pauseProvenance?: (resource: string) => Promise<number>;
+    /** Independent correlated evidence of the last PAUSE, never a success bit. */
+    pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
+    pauseProvenanceTimeoutMs?: number;
     now?: () => number;
 }>;
 
 /** Cloud Tasks and Cloud Scheduler adapters. No synthetic task is ever created. */
 export class WorkPlaneClient {
     private readonly transport: AuthenticatedProtectedTransport;
-    private readonly pauseProvenance?: (resource: string) => Promise<number>;
+    private readonly pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
+    private readonly pauseProvenanceTimeoutMs: number;
     private readonly now: () => number;
 
     constructor(options: WorkPlaneClientOptions) {
         this.transport = options.transport;
         this.pauseProvenance = options.pauseProvenance;
+        this.pauseProvenanceTimeoutMs = options.pauseProvenanceTimeoutMs ?? 15_000;
+        if (!Number.isSafeInteger(this.pauseProvenanceTimeoutMs) || this.pauseProvenanceTimeoutMs <= 0 || this.pauseProvenanceTimeoutMs > 120_000) fail('ADAPTER_REQUEST_INVALID');
         this.now = options.now ?? (() => Date.now());
     }
 
@@ -160,7 +179,8 @@ export class WorkPlaneClient {
             body: { httpTarget: wireTarget }, acceptedStatuses: [200],
         });
         const after = await this.observeQueue(options.input);
-        if (after.state !== 'PAUSED' || !queueTargetMatches(after.target, options.desiredTarget)) fail('OBSERVATION_RACE');
+        if (after.state !== 'PAUSED' || !queueTargetMatches(after.target, options.desiredTarget)
+            || after.target?.wireConfigurationDigest !== before.target?.wireConfigurationDigest) fail('OBSERVATION_RACE');
         return after;
     }
 
@@ -210,7 +230,10 @@ export class WorkPlaneClient {
                 seenTasks.add(task.name);
                 results.push({ name: task.name, payloadDigest: canonicalDigest(bodyValue), createTime: task.createTime });
             }
-            if (body.nextPageToken === undefined) return results;
+            // Cloud APIs use both an omitted token and an empty token for the
+            // terminal page.  Treat either as complete; an actual repeated
+            // non-empty token remains a pagination failure.
+            if (body.nextPageToken === undefined || body.nextPageToken === '') return results;
             assertPageToken(body.nextPageToken);
             if (seenTokens.has(body.nextPageToken)) fail('ADAPTER_RESPONSE_INVALID');
             seenTokens.add(body.nextPageToken);
@@ -220,6 +243,13 @@ export class WorkPlaneClient {
     }
 
     private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume'): Promise<QueueObservation> {
+        const parsed = parseQueueResource(input.resource, input.project);
+        if (parsed.location !== input.location) fail('RESOURCE_INVALID');
+        const before = await this.observeQueue(input);
+        const targetMatches = before.target === null
+            ? !isObject(input.configuration.httpTarget)
+            : queueTargetMatches(before.target, input.target);
+        if (!targetMatches || !queueConfigurationMatches(before.configuration, input.configuration)) fail('OBSERVATION_RACE');
         const path = `/v2/${input.resource}:${action}`;
         await this.transport.json({
             method: 'POST', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
@@ -243,6 +273,11 @@ export class WorkPlaneClient {
     }
 
     private async changeSchedulerState(input: ProtectedSchedulerInput, action: 'pause' | 'resume'): Promise<SchedulerObservation> {
+        const parsed = parseSchedulerResource(input.resource, input.project);
+        if (parsed.location !== input.location) fail('RESOURCE_INVALID');
+        const before = await this.observeScheduler(input);
+        if (canonicalDigest(before.target) !== canonicalDigest(input.target)
+            || canonicalDigest(before.configuration) !== canonicalDigest(input.configuration)) fail('OBSERVATION_RACE');
         const path = `/v1/${input.resource}:${action}`;
         await this.transport.json({
             method: 'POST', url: `https://cloudscheduler.googleapis.com${path}`, allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
@@ -260,8 +295,34 @@ export class WorkPlaneClient {
         let pauseEpochMs = 0;
         if (state === 'PAUSED') {
             if (!this.pauseProvenance) fail('EVIDENCE_UNAVAILABLE');
-            pauseEpochMs = await this.pauseProvenance(input.resource);
-            if (!Number.isSafeInteger(pauseEpochMs) || pauseEpochMs < 0 || pauseEpochMs > this.now()) fail('EVIDENCE_UNAVAILABLE');
+            const controller = new AbortController();
+            let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+            let provenance: PauseProvenance;
+            try {
+                provenance = await Promise.race([
+                    this.pauseProvenance({ resource: input.resource, project: input.project, location: input.location, signal: controller.signal }),
+                    new Promise<PauseProvenance>((_, reject) => {
+                        timeoutHandle = setTimeout(() => { controller.abort(); reject(new EpochError('ADAPTER_TIMEOUT')); }, this.pauseProvenanceTimeoutMs);
+                    }),
+                ]);
+            } catch (error) {
+                if (error instanceof EpochError) throw error;
+                fail('EVIDENCE_UNAVAILABLE');
+            } finally {
+                if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+                controller.abort();
+            }
+            if (!isObject(provenance)
+                || !hasExactKeys(provenance, ['resource', 'pauseEpochMs', 'observedAtMs', 'source', 'evidenceDigest', 'complete'])
+                || provenance.resource !== input.resource
+                || provenance.complete !== true
+                || typeof provenance.source !== 'string' || provenance.source.length === 0 || provenance.source.length > 2048
+                || /[\u0000-\u001f\u007f]/.test(provenance.source)
+                || typeof provenance.evidenceDigest !== 'string' || !/^[0-9a-f]{64}$/.test(provenance.evidenceDigest)
+                || !Number.isSafeInteger(provenance.pauseEpochMs) || provenance.pauseEpochMs <= 0
+                || !Number.isSafeInteger(provenance.observedAtMs) || provenance.observedAtMs < provenance.pauseEpochMs
+                || provenance.observedAtMs > this.now()) fail('EVIDENCE_UNAVAILABLE');
+            pauseEpochMs = provenance.pauseEpochMs;
         }
         const configuration = this.schedulerConfiguration(job);
         return { resource: input.resource, project: input.project, location: input.location, state, pauseEpochMs, lastAttemptMs, target, configuration, configurationDigest: canonicalDigest(configuration) };
@@ -313,7 +374,15 @@ export class WorkPlaneClient {
         // Cloud Tasks has no Scheduler-style httpTarget.uri. Preserve the
         // actual OIDC tuple and override presence; never claim the packet's
         // reviewed URL as an observed provider URL.
-        return { url: null, audience: oidcToken.audience, callerIdentity: { identity: oidcToken.serviceAccountEmail, project: input.project }, uriOverride: overrideObject };
+        const stableTarget = { ...httpTarget };
+        delete stableTarget.oidcToken;
+        return {
+            url: null,
+            audience: oidcToken.audience,
+            callerIdentity: { identity: oidcToken.serviceAccountEmail, project: input.project },
+            uriOverride: overrideObject,
+            wireConfigurationDigest: canonicalDigest(stableTarget),
+        };
     }
 }
 
@@ -321,6 +390,16 @@ function queueTargetMatches(actual: QueueTargetObservation | null, expected: Rea
     return actual !== null
         && actual.audience === expected.audience
         && canonicalDigest(actual.callerIdentity) === canonicalDigest(expected.callerIdentity);
+}
+
+/**
+ * Protected queue inputs use the reviewed flat rate-limit names while the
+ * Cloud Tasks wire response nests them under `rateLimits`.  Normalize only
+ * those documented names and compare the complete provider configuration so
+ * a pause/resume cannot mutate a resource whose config changed underneath it.
+ */
+function queueConfigurationMatches(actual: Readonly<Record<string, unknown>>, expected: Readonly<Record<string, unknown>>): boolean {
+    return canonicalDigest(canonicalQueueConfiguration(actual)) === canonicalDigest(canonicalQueueConfiguration(expected));
 }
 
 export { EpochError };

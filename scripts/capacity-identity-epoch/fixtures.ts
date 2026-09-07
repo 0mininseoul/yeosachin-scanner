@@ -1,11 +1,19 @@
-import { canonicalDigest, type CapacityManifest, type ProtectedOldObservations, type ProtectedObservationTargets, type ProtectedPlatformInputs, type Role } from './contracts';
-import { ROLES, SLOTS, createProtectedPacket } from './packet';
+import { canonicalIamBindingDigests, canonicalIamPolicyDigest, canonicalRuntimeInputDigest, canonicalDigest, type CapacityManifest, type ProtectedOldObservations, type ProtectedObservationTargets, type ProtectedPlatformInputs, type Role } from './contracts';
+import { ROLES, SLOTS, createProtectedPacket, deriveObservationInputDigests, deriveRetiredIamBindingDigests } from './packet';
 
 /** Provider-free, synthetic packet fixture shared by coordinator/integration tests. */
 export const FIXTURE_PROJECT = 'example-project';
 
 function identity(value: string) {
     return { identity: value, project: FIXTURE_PROJECT };
+}
+
+function workerPath(role: Role): string {
+    return role === 'preflight' ? '/api/analysis/preflight/worker' : '/api/analysis/v2/worker';
+}
+
+function recoveryPath(role: Role): string {
+    return role === 'preflight' ? '/api/analysis/preflight/recover' : '/api/analysis/v2/recover';
 }
 
 function runtimeSettings(role: Role) {
@@ -35,7 +43,7 @@ function runtimeEnvironment(role: Role, suffix: 'old' | 'desired'): Record<strin
         [`${prefix}_PROJECT`]: FIXTURE_PROJECT,
         [`${prefix}_LOCATION`]: 'asia-northeast3',
         [`${prefix}_QUEUE`]: role,
-        [`${prefix}_TARGET_URL`]: `${targetOrigin}/api/analysis/${role}/worker`,
+        [`${prefix}_TARGET_URL`]: `${targetOrigin}${workerPath(role)}`,
         [`${prefix}_OIDC_AUDIENCE`]: targetOrigin,
         [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: taskCallerIdentity,
         [`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`]: maintenanceIdentity,
@@ -75,36 +83,54 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         role, service: `${role}-worker`, project: FIXTURE_PROJECT, location: 'asia-northeast3',
         identity: identity(`${role}-runtime-desired@example-project.iam.gserviceaccount.com`), sourceSha: 'b'.repeat(40),
         environment: runtimeEnvironment(role, 'desired'), secretReferences: runtimeSecretReferences(role), settings: runtimeSettings(role),
-        target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` }, noTraffic: true, providerAdmissionEnabled: true,
+        target: { url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com` }, noTraffic: true, providerAdmissionEnabled: true,
     });
     const source = (role: Role) => ({
         oldSha: 'a'.repeat(40), oldRevision: `${role}-old-revision`, desiredSha: 'b'.repeat(40),
-        desiredBuildDigest: canonicalDigest(buildInput), desiredRuntimeDigest: canonicalDigest(runtimeTarget(role)),
+        desiredBuildDigest: canonicalDigest(buildInput), desiredRuntimeDigest: canonicalRuntimeInputDigest(runtimeTarget(role)),
         desiredRuntimeEnvironment: runtimeEnvironment(role, 'desired'), desiredRuntimeSettings: runtimeSettings(role), revisionPlan: { prefix: `${role}-epoch`, suffix: 'fixture' },
     });
-    const producer = (role: Role) => ({ sourceSha: 'b'.repeat(40), fingerprintVersion: `${role}-producer-config-v1`, fingerprint: role === 'preflight' ? 'e'.repeat(64) : 'f'.repeat(64), admissionEnabled: false });
-    const queueTarget = (role: Role) => ({ url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com`, callerIdentity: identity(`${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`) });
-    const schedulerTarget = (role: Role) => ({ uri: `https://${role}.example.com/api/analysis/${role}/recover`, audience: `https://${role}.example.com`, identity: identity(`${role}-maintenance-${suffix}@example-project.iam.gserviceaccount.com`) });
-    const queue = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/queues/${role}`, project: FIXTURE_PROJECT, location: 'asia-northeast3', targetDigest: canonicalDigest(queueTarget(role)), configDigest: '1'.repeat(64), state: 'PAUSED' as const, empty: true, tasksDigest: '2'.repeat(64) });
-    const scheduler = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: FIXTURE_PROJECT, location: 'asia-northeast3', targetDigest: canonicalDigest(schedulerTarget(role)), configDigest: '3'.repeat(64), state: 'PAUSED' as const, pauseEpochMs: 1, lastAttemptMs: null });
-    const iam = (role: Role) => ({ policyDigest: '4'.repeat(64), desiredBindings: [`${role}:desired`], retiredBindings: [] });
-    return {
+    const producer = (role: Role) => ({ sourceSha: kind === 'old' ? 'a'.repeat(40) : 'b'.repeat(40), fingerprintVersion: `${role}-producer-config-v1`, fingerprint: role === 'preflight' ? (kind === 'old' ? '1'.repeat(64) : 'e'.repeat(64)) : (kind === 'old' ? '2'.repeat(64) : 'f'.repeat(64)), admissionEnabled: false });
+    const queueTarget = (role: Role) => ({ url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com`, callerIdentity: identity(`${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`) });
+    const schedulerTarget = (role: Role) => ({ uri: `https://${role}.example.com${recoveryPath(role)}`, audience: `https://${role}.example.com`, identity: identity(`${role}-maintenance-${suffix}@example-project.iam.gserviceaccount.com`) });
+    const queue = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/queues/${role}`, project: FIXTURE_PROJECT, location: 'asia-northeast3', targetDigest: canonicalDigest(queueTarget(role)), configDigest: canonicalDigest({ rateLimits: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 } }), state: 'PAUSED' as const, empty: true, tasksDigest: canonicalDigest([]) });
+    const scheduler = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: FIXTURE_PROJECT, location: 'asia-northeast3', targetDigest: canonicalDigest(schedulerTarget(role)), configDigest: canonicalDigest({ schedule: '* * * * *', method: 'POST' }), state: 'PAUSED' as const, pauseEpochMs: 1, lastAttemptMs: null });
+    const iam = (role: Role) => {
+        const policies = platformInputs(kind).iam[role];
+        return {
+            policyDigest: canonicalIamPolicyDigest(policies),
+            desiredBindings: canonicalIamBindingDigests(policies),
+            retiredBindings: [],
+        };
+    };
+    const baseManifest = {
         roleSlots,
         build: identity(kind === 'old' ? 'old-build@example-project.iam.gserviceaccount.com' : 'new-build@example-project.iam.gserviceaccount.com'),
         source: { preflight: source('preflight'), paid: source('paid') }, producer: { preflight: producer('preflight'), paid: producer('paid') },
         queues: { preflight: queue('preflight'), paid: queue('paid') }, recoverySchedulers: { preflight: scheduler('preflight'), paid: scheduler('paid') },
-        retention: { resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/retention`, project: FIXTURE_PROJECT, location: 'asia-northeast3', enabled: true, configDigest: '5'.repeat(64) },
+        retention: { resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/retention`, project: FIXTURE_PROJECT, location: 'asia-northeast3', enabled: true, configDigest: canonicalDigest({ enabled: true }) },
         iam: { preflight: iam('preflight'), paid: iam('paid') },
-        readiness: { schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40), legacyTargetResource: 'fixture-target', preflightFingerprint: 'e'.repeat(64), paidFingerprint: 'f'.repeat(64), analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false },
+        readiness: { schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: kind === 'old' ? 'a'.repeat(40) : 'b'.repeat(40), legacyTargetResource: 'fixture-target', preflightFingerprint: kind === 'old' ? '1'.repeat(64) : 'e'.repeat(64), paidFingerprint: kind === 'old' ? '2'.repeat(64) : 'f'.repeat(64), analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false },
     } as unknown as CapacityManifest;
+    if (kind === 'desired') {
+        const retired = deriveRetiredIamBindingDigests(manifest('old'), baseManifest, platformInputs('old'));
+        return {
+            ...baseManifest,
+            iam: {
+                preflight: { ...baseManifest.iam.preflight, retiredBindings: retired.preflight },
+                paid: { ...baseManifest.iam.paid, retiredBindings: retired.paid },
+            },
+        } as CapacityManifest;
+    }
+    return baseManifest;
 }
 
 function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
     const suffix = kind === 'old' ? 'old' : 'desired';
     const sourceSha = kind === 'old' ? 'a'.repeat(40) : 'b'.repeat(40);
-    const roleInput = (role: Role) => ({ role, service: `${role}-worker`, project: FIXTURE_PROJECT, location: 'asia-northeast3', identity: identity(`${role}-runtime-${suffix}@example-project.iam.gserviceaccount.com`), sourceSha, environment: runtimeEnvironment(role, suffix), secretReferences: runtimeSecretReferences(role), settings: runtimeSettings(role), target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` }, noTraffic: true, providerAdmissionEnabled: true });
-    const queueInput = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/queues/${role}`, project: FIXTURE_PROJECT, location: 'asia-northeast3', target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com`, callerIdentity: identity(`${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`) }, configuration: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 } });
-    const schedulerInput = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: FIXTURE_PROJECT, location: 'asia-northeast3', target: { uri: `https://${role}.example.com/api/analysis/${role}/recover`, audience: `https://${role}.example.com`, identity: identity(`${role}-maintenance-${suffix}@example-project.iam.gserviceaccount.com`) }, configuration: { schedule: '* * * * *', method: 'POST' }, state: 'PAUSED' as const, pauseEpochMs: 1, lastAttemptMs: null });
+    const roleInput = (role: Role) => ({ role, service: `${role}-worker`, project: FIXTURE_PROJECT, location: 'asia-northeast3', identity: identity(`${role}-runtime-${suffix}@example-project.iam.gserviceaccount.com`), sourceSha, environment: runtimeEnvironment(role, suffix), secretReferences: runtimeSecretReferences(role), settings: runtimeSettings(role), target: { url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com` }, noTraffic: true, providerAdmissionEnabled: true });
+    const queueInput = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/queues/${role}`, project: FIXTURE_PROJECT, location: 'asia-northeast3', target: { url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com`, callerIdentity: identity(`${role}-task-caller-${suffix}@example-project.iam.gserviceaccount.com`) }, configuration: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 } });
+    const schedulerInput = (role: Role) => ({ resource: `projects/${FIXTURE_PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: FIXTURE_PROJECT, location: 'asia-northeast3', target: { uri: `https://${role}.example.com${recoveryPath(role)}`, audience: `https://${role}.example.com`, identity: identity(`${role}-maintenance-${suffix}@example-project.iam.gserviceaccount.com`) }, configuration: { schedule: '* * * * *', method: 'POST' }, state: 'PAUSED' as const, pauseEpochMs: 1, lastAttemptMs: null });
     const iamInput = (role: Role) => {
         const oldTask = `${role}-task-caller-old@example-project.iam.gserviceaccount.com`, desiredTask = `${role}-task-caller-desired@example-project.iam.gserviceaccount.com`;
         const oldMaintenance = `${role}-maintenance-old@example-project.iam.gserviceaccount.com`, desiredMaintenance = `${role}-maintenance-desired@example-project.iam.gserviceaccount.com`;
@@ -136,7 +162,7 @@ function oldObservations(): ProtectedOldObservations {
     const platform = platformInputs('old');
     return {
         source: { preflight: { sourceSha: 'a'.repeat(40), revision: 'preflight-old-revision', metadataDigest: '1'.repeat(64) }, paid: { sourceSha: 'a'.repeat(40), revision: 'paid-old-revision', metadataDigest: '2'.repeat(64) } },
-        runtime: { preflight: { sourceSha: 'a'.repeat(40), service: platform.runtime.preflight.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'preflight-old-revision', generation: 'generation-preflight', resourceVersion: 'resource-preflight', identity: platform.runtime.preflight.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: '7'.repeat(64), buildDigest: '8'.repeat(64) }, paid: { sourceSha: 'a'.repeat(40), service: platform.runtime.paid.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'paid-old-revision', generation: 'generation-paid', resourceVersion: 'resource-paid', identity: platform.runtime.paid.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: '9'.repeat(64), buildDigest: 'a'.repeat(64) } },
+        runtime: { preflight: { sourceSha: 'a'.repeat(40), service: platform.runtime.preflight.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'preflight-old-revision', generation: 'generation-preflight', resourceVersion: 'resource-preflight', identity: platform.runtime.preflight.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: canonicalRuntimeInputDigest(platform.runtime.preflight), buildDigest: canonicalDigest({ image: 'fixture-preflight-image' }) }, paid: { sourceSha: 'a'.repeat(40), service: platform.runtime.paid.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'paid-old-revision', generation: 'generation-paid', resourceVersion: 'resource-paid', identity: platform.runtime.paid.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: canonicalRuntimeInputDigest(platform.runtime.paid), buildDigest: canonicalDigest({ image: 'fixture-paid-image' }) } },
         queues: { preflight: { resource: platform.queues.preflight.resource, project: FIXTURE_PROJECT, location: 'asia-northeast3', state: 'PAUSED', configuration: platform.queues.preflight.configuration, tasks: [], complete: true }, paid: { resource: platform.queues.paid.resource, project: FIXTURE_PROJECT, location: 'asia-northeast3', state: 'PAUSED', configuration: platform.queues.paid.configuration, tasks: [], complete: true } },
         schedulers: { preflight: { resource: platform.schedulers.preflight.resource, project: FIXTURE_PROJECT, location: 'asia-northeast3', state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, configuration: platform.schedulers.preflight.configuration }, paid: { resource: platform.schedulers.paid.resource, project: FIXTURE_PROJECT, location: 'asia-northeast3', state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, configuration: platform.schedulers.paid.configuration } },
         iam: platform.iam, retention: platform.retention, readiness: { ...manifest('old').readiness, ready: true },
@@ -154,10 +180,10 @@ function observationTargets(): ProtectedObservationTargets {
 }
 
 export function createFixturePacket(): ReturnType<typeof createProtectedPacket> {
-    return createProtectedPacket({
+    const input = {
         epochId: 'epoch-fixture', lockNamespace: 'fixture-lock', roleSet: [...ROLES], oldManifest: manifest('old'), desiredManifest: manifest('desired'), protectedInputs: { old: platformInputs('old'), desired: platformInputs('desired') },
         activation: { analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: true }, quiescence: { timeoutMs: 60_000, graceMs: 5_000 },
-        observationInputs: { sourceDigest: '6'.repeat(64), iamDigest: '7'.repeat(64), queueDigest: '8'.repeat(64), schedulerDigest: '9'.repeat(64), retentionDigest: 'a'.repeat(64), readinessDigest: 'b'.repeat(64), zeroWorkDigest: 'c'.repeat(64) },
-        protectedObservations: { old: oldObservations(), desired: observationTargets() }, probe: { bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 }, expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' } },
-    });
+        protectedObservations: { old: oldObservations(), desired: observationTargets() }, probe: { bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 } as const, expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' } as const },
+    };
+    return createProtectedPacket({ ...input, observationInputs: deriveObservationInputDigests(input) });
 }

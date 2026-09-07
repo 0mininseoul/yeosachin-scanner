@@ -3,6 +3,10 @@ import {
     MANIFEST_KEYS,
     ROLES,
     SLOTS,
+    canonicalIamBindingDigests,
+    canonicalIamPolicyDigest,
+    canonicalQueueConfiguration,
+    canonicalRuntimeInputDigest,
     canonicalDigest,
     epochFail,
     hasExactKeys,
@@ -176,25 +180,29 @@ function validateRuntimeEnvironment(value: unknown): asserts value is Record<str
         || !Object.values(value).every(item => safeString(item, 2048))) {
         epochFail('SOURCE_INVALID');
     }
+    // Provider credentials must be represented only as exact numeric-pinned
+    // secret references. A plaintext key in ordinary runtime env is invalid
+    // even when every packet copy is changed together.
+    const forbiddenSecretEnvNames = new Set([
+        ...APIFY_SLOTS.map(slot => `APIFY_${slot.toUpperCase()}_API_TOKEN`),
+        ...FIXED_SECRET_REFERENCE_NAMES,
+    ]);
+    if (Object.keys(value).some(key => forbiddenSecretEnvNames.has(key))) epochFail('SOURCE_INVALID');
 }
 
 function validateRevision(value: unknown): void {
     if (!isObject(value)
-        || (!hasExactKeys(value, SOURCE_KEYS.slice(0, -1)) && !hasExactKeys(value, SOURCE_KEYS))) {
+        || !hasExactKeys(value, SOURCE_KEYS.slice(0, -1))) {
         epochFail('SOURCE_INVALID');
     }
-    if (!isSha(value.oldSha) || !safeString(value.oldRevision, 128) || !isSha(value.desiredSha)
+    if (!isSha(value.oldSha) || typeof value.oldRevision !== 'string' || !REVISION_PATTERN.test(value.oldRevision) || value.oldRevision === 'latest' || !isSha(value.desiredSha)
         || !validDigest(value.desiredBuildDigest) || !validDigest(value.desiredRuntimeDigest)
         || !isObject(value.revisionPlan)) epochFail('SOURCE_INVALID');
     validateRuntimeEnvironment(value.desiredRuntimeEnvironment);
     validateRuntimeSettings(value.desiredRuntimeSettings);
     assertKeys(value.revisionPlan, ['prefix', 'suffix'], 'SOURCE_INVALID');
     if (!safeString(value.revisionPlan.prefix, 64)
-        || !safeString(value.revisionPlan.suffix, 64)
-        || (value.desiredRevisionId !== undefined
-            && (typeof value.desiredRevisionId !== 'string'
-                || !REVISION_PATTERN.test(value.desiredRevisionId)
-                || value.desiredRevisionId.includes('latest')))) {
+        || !safeString(value.revisionPlan.suffix, 64)) {
         epochFail('SOURCE_INVALID');
     }
 }
@@ -213,7 +221,8 @@ function validateQueue(value: unknown): void {
     if (!safeString(value.resource) || !safeString(value.project) || !safeString(value.location)
         || !validDigest(value.targetDigest) || !validDigest(value.configDigest) || typeof value.state !== 'string'
         || !['PAUSED', 'RUNNING'].includes(value.state)
-        || typeof value.empty !== 'boolean' || !validDigest(value.tasksDigest)) {
+        || typeof value.empty !== 'boolean' || !validDigest(value.tasksDigest)
+        || (value.empty === true && value.tasksDigest !== canonicalDigest([]))) {
         epochFail('RESOURCE_INVALID');
     }
 }
@@ -226,6 +235,7 @@ function validateScheduler(value: unknown): void {
         || !validDigest(value.targetDigest) || !validDigest(value.configDigest) || typeof value.state !== 'string'
         || !['PAUSED', 'ENABLED'].includes(value.state)
         || !Number.isSafeInteger(pauseEpochMs) || (pauseEpochMs as number) < 0
+        || (value.state === 'PAUSED' && (pauseEpochMs as number) <= 0)
         || (lastAttemptMs !== null
             && (!Number.isSafeInteger(lastAttemptMs) || (lastAttemptMs as number) < 0))) {
         epochFail('RESOURCE_INVALID');
@@ -242,8 +252,8 @@ function validateIam(value: unknown): void {
     assertKeys(value, IAM_KEYS);
     if (!validDigest(value.policyDigest) || !Array.isArray(value.desiredBindings)
         || !Array.isArray(value.retiredBindings)
-        || !value.desiredBindings.every(item => safeString(item, 512))
-        || !value.retiredBindings.every(item => safeString(item, 512))) epochFail('RESOURCE_INVALID');
+        || !value.desiredBindings.every(item => validDigest(item))
+        || !value.retiredBindings.every(item => validDigest(item))) epochFail('RESOURCE_INVALID');
 }
 
 function validateReadiness(value: unknown): void {
@@ -276,6 +286,15 @@ export function validateManifest(value: unknown): asserts value is CapacityManif
     }
     validateRetention(value.retention);
     validateReadiness(value.readiness);
+    const readiness = value.readiness as Record<string, unknown>;
+    for (const role of ROLES) {
+        const producer = value.producer[role] as Record<string, unknown>;
+        if (producer.sourceSha !== readiness.sourceSha
+            || producer.fingerprint !== (role === 'preflight' ? readiness.preflightFingerprint : readiness.paidFingerprint)
+            || producer.admissionEnabled !== (role === 'preflight' ? readiness.analysisV2AdmissionEnabled : readiness.earlybirdWebhookAutoAdmissionEnabled)) {
+            epochFail('SOURCE_INVALID');
+        }
+    }
     const buildIdentity = value.build as unknown as ProtectedIdentity;
     const firstSlotIdentity = value.roleSlots[SLOTS[0]] as unknown as ProtectedIdentity;
     if (buildIdentity.identity === firstSlotIdentity.identity) {
@@ -295,6 +314,33 @@ function validateUrl(value: unknown, uri = false): asserts value is string {
     }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.hash
         || (!uri && parsed.search)) epochFail('RESOURCE_INVALID');
+}
+
+function roleWorkerPath(role: Role): string {
+    return role === 'preflight' ? '/api/analysis/preflight/worker' : '/api/analysis/v2/worker';
+}
+
+function roleRecoveryPath(role: Role): string {
+    return role === 'preflight' ? '/api/analysis/preflight/recover' : '/api/analysis/v2/recover';
+}
+
+function validateRoleWorkerTarget(value: unknown, role: Role): void {
+    if (!isObject(value)) epochFail('RESOURCE_INVALID');
+    validateUrl(value.url);
+    validateUrl(value.audience);
+    const url = new URL(value.url as string);
+    const audience = new URL(value.audience as string);
+    if (url.pathname !== roleWorkerPath(role) || url.origin !== audience.origin || audience.pathname !== '/') epochFail('RESOURCE_INVALID');
+}
+
+function validateRoleRecoveryTarget(value: unknown, role: Role): void {
+    if (!isObject(value)) epochFail('RESOURCE_INVALID');
+    validateUrl(value.uri, true);
+    validateUrl(value.audience);
+    const uri = new URL(value.uri as string);
+    const audience = new URL(value.audience as string);
+    if (uri.pathname !== roleRecoveryPath(role) || uri.origin !== audience.origin || audience.pathname !== '/') epochFail('RESOURCE_INVALID');
+    validateProtectedIdentity(value.identity);
 }
 
 function validateConfigObject(value: unknown): asserts value is Record<string, unknown> {
@@ -323,8 +369,7 @@ function validateRuntimeInput(value: unknown, role: Role): asserts value is Prot
         || !isObject(value.secretReferences) || !Object.values(value.secretReferences).every(item => typeof item === 'string' && /^.{1,240}:[1-9][0-9]*$/.test(item))
         || !isObject(value.target) || !hasExactKeys(value.target, TARGET_KEYS)) epochFail('SOURCE_INVALID');
     validateRuntimeSettings(value.settings);
-    validateUrl(value.target.url);
-    validateUrl(value.target.audience);
+    validateRoleWorkerTarget(value.target, role);
     if (typeof value.noTraffic !== 'boolean' || typeof value.providerAdmissionEnabled !== 'boolean'
         || environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED !== String(value.providerAdmissionEnabled)) epochFail('SOURCE_INVALID');
 }
@@ -398,36 +443,35 @@ function validateDesiredInitialRuntimeContract(
     if (!Object.values(runtime.secretReferences).every(reference => /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}:[1-9][0-9]*$/.test(reference))) epochFail('SOURCE_INVALID');
 }
 
-function validateQueueInput(value: unknown): asserts value is ProtectedQueueInput {
+function validateQueueInput(value: unknown, role: Role): asserts value is ProtectedQueueInput {
     assertKeys(value, QUEUE_INPUT_KEYS, 'RESOURCE_INVALID');
     if (!safeString(value.resource) || !RESOURCE_PATTERN.test(value.resource)
         || !safeString(value.project, 128) || !safeString(value.location, 128)
         || !isObject(value.target) || !hasExactKeys(value.target, QUEUE_TARGET_KEYS)) epochFail('RESOURCE_INVALID');
-    validateUrl(value.target.url);
-    validateUrl(value.target.audience);
+    validateRoleWorkerTarget(value.target, role);
     validateProtectedIdentity(value.target.callerIdentity);
     validateConfigObject(value.configuration);
 }
 
-function validateSchedulerInput(value: unknown): asserts value is ProtectedSchedulerInput {
+function validateSchedulerInput(value: unknown, role: Role): asserts value is ProtectedSchedulerInput {
     assertKeys(value, SCHEDULER_INPUT_KEYS, 'RESOURCE_INVALID');
     if (!safeString(value.resource) || !RESOURCE_PATTERN.test(value.resource)
         || !safeString(value.project, 128) || !safeString(value.location, 128)
         || !isObject(value.target) || !hasExactKeys(value.target, SCHEDULER_TARGET_KEYS)) epochFail('RESOURCE_INVALID');
-    validateUrl(value.target.uri, true);
-    validateUrl(value.target.audience);
-    validateProtectedIdentity(value.target.identity);
+    validateRoleRecoveryTarget(value.target, role);
     validateConfigObject(value.configuration);
     const pauseEpochMs = value.pauseEpochMs as unknown;
     const lastAttemptMs = value.lastAttemptMs as unknown;
     if (typeof value.state !== 'string' || !['PAUSED', 'ENABLED'].includes(value.state)
         || !Number.isSafeInteger(pauseEpochMs) || (pauseEpochMs as number) < 0
+        || (value.state === 'PAUSED' && (pauseEpochMs as number) <= 0)
         || (lastAttemptMs !== null
             && (!Number.isSafeInteger(lastAttemptMs) || (lastAttemptMs as number) < 0))) epochFail('RESOURCE_INVALID');
 }
 
 const CLOUD_TASKS_SERVICE_AGENT = /^serviceAccount:service-([0-9]{6,20})@gcp-sa-cloudtasks\.iam\.gserviceaccount\.com$/;
 const PRINCIPAL_MEMBER = /^(?:user|group|domain|principal|principalSet):[^\u0000-\u001f\u007f]{1,511}$/;
+const DELETED_MEMBER = /^deleted:(?:user|group|domain|serviceAccount|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$/;
 
 function validateIamBinding(value: unknown, expectedProject?: string): asserts value is ProtectedIamBinding {
     assertKeys(value, IAM_BINDING_KEYS, 'RESOURCE_INVALID');
@@ -449,7 +493,8 @@ function validateIamBinding(value: unknown, expectedProject?: string): asserts v
         if (!match || (expectedProject !== undefined && match[1] !== expectedProject)) epochFail('IDENTITY_INVALID');
         return;
     }
-    if (!PRINCIPAL_MEMBER.test(value.member) && value.member !== 'allUsers' && value.member !== 'allAuthenticatedUsers') {
+    if (!PRINCIPAL_MEMBER.test(value.member) && !DELETED_MEMBER.test(value.member)
+        && value.member !== 'allUsers' && value.member !== 'allAuthenticatedUsers') {
         epochFail('RESOURCE_INVALID');
     }
 }
@@ -489,6 +534,16 @@ function validateQualifiedResource(resource: string, project: string): void {
     if (!match || match[1] !== project) epochFail('PROJECT_MISMATCH');
 }
 
+function validateScopedResource(resource: string, project: string, location: string, kind: 'queues' | 'jobs' | 'services'): void {
+    const namePattern = kind === 'queues' ? '[A-Za-z0-9_-]{1,100}' : kind === 'jobs' ? '[A-Za-z0-9_-]{1,500}' : '[a-z][a-z0-9-]{0,62}';
+    const match = resource.match(new RegExp(`^projects/([^/]+)/locations/([^/]+)\\/(queues|jobs|services)\\/(${namePattern})$`));
+    if (!match || match[1] !== project || match[2] !== location || match[3] !== kind) epochFail('RESOURCE_INVALID');
+}
+
+function validateServiceAccountResource(resource: string, project: string, identity: string): void {
+    if (resource !== `projects/${project}/serviceAccounts/${identity}`) epochFail('RESOURCE_INVALID');
+}
+
 function validatePlatformInputs(value: unknown, manifest: CapacityManifest, phase: 'old' | 'desired' = 'old'): asserts value is ProtectedPlatformInputs {
     assertKeys(value, PLATFORM_KEYS, 'INVALID_PACKET');
     validateBuildInput(value.build);
@@ -517,13 +572,17 @@ function validatePlatformInputs(value: unknown, manifest: CapacityManifest, phas
         if (phase === 'desired' && runtimeInputs[role].providerAdmissionEnabled !== true) epochFail('SOURCE_INVALID');
         if (phase === 'desired'
             && (canonicalDigest(value.build) !== manifest.source[role].desiredBuildDigest
-                || canonicalDigest(runtimeInputs[role]) !== manifest.source[role].desiredRuntimeDigest)) epochFail('SOURCE_INVALID');
-        validateQueueInput(queueInputs[role]);
-        validateSchedulerInput(schedulerInputs[role]);
+                || canonicalRuntimeInputDigest(runtimeInputs[role]) !== manifest.source[role].desiredRuntimeDigest)) epochFail('SOURCE_INVALID');
+        validateQueueInput(queueInputs[role], role);
+        validateSchedulerInput(schedulerInputs[role], role);
+        validateScopedResource(queueInputs[role].resource, expectedProject, queueInputs[role].location, 'queues');
+        validateScopedResource(schedulerInputs[role].resource, expectedProject, schedulerInputs[role].location, 'jobs');
         if (queueInputs[role].resource !== manifest.queues[role].resource
             || schedulerInputs[role].resource !== manifest.recoverySchedulers[role].resource
             || canonicalDigest(queueInputs[role].target) !== manifest.queues[role].targetDigest
             || canonicalDigest(schedulerInputs[role].target) !== manifest.recoverySchedulers[role].targetDigest) epochFail('RESOURCE_INVALID');
+        if (manifest.queues[role].configDigest !== canonicalDigest(canonicalQueueConfiguration(queueInputs[role].configuration))) epochFail('RESOURCE_INVALID');
+        if (manifest.recoverySchedulers[role].configDigest !== canonicalDigest(schedulerInputs[role].configuration)) epochFail('RESOURCE_INVALID');
         if (phase === 'desired' && runtimeInputs[role].noTraffic !== true) epochFail('SOURCE_INVALID');
         if (phase === 'desired') {
             if (canonicalDigest(runtimeInputs[role].environment)
@@ -541,6 +600,15 @@ function validatePlatformInputs(value: unknown, manifest: CapacityManifest, phas
         }
         if (!isObject(iamInputs[role]) || !hasExactKeys(iamInputs[role], IAM_INPUT_MAP_KEYS)) epochFail('RESOURCE_INVALID');
         for (const kind of IAM_INPUT_MAP_KEYS) validateIamInput(iamInputs[role][kind], expectedProject, kind);
+        const manifestIam = manifest.iam[role];
+        const expectedIamBindings = canonicalIamBindingDigests(iamInputs[role]);
+        if (manifestIam.policyDigest !== canonicalIamPolicyDigest(iamInputs[role])
+            || manifestIam.desiredBindings.length !== expectedIamBindings.length
+            || manifestIam.desiredBindings.some((digest, index) => digest !== expectedIamBindings[index])) epochFail('RESOURCE_INVALID');
+        validateScopedResource(iamInputs[role].run.resource, expectedProject, runtimeInputs[role].location, 'services');
+        validateScopedResource(iamInputs[role].maintenance.resource, expectedProject, runtimeInputs[role].location, 'services');
+        validateScopedResource(iamInputs[role].queue.resource, expectedProject, queueInputs[role].location, 'queues');
+        validateServiceAccountResource(iamInputs[role].taskCaller.resource, expectedProject, queueInputs[role].target.callerIdentity.identity);
         if (iamInputs[role].run.resource !== iamInputs[role].maintenance.resource
             || iamInputs[role].run.project !== iamInputs[role].maintenance.project
             || iamInputs[role].run.etag !== iamInputs[role].maintenance.etag
@@ -559,6 +627,8 @@ function validatePlatformInputs(value: unknown, manifest: CapacityManifest, phas
             || schedulerInputs[role].target.identity.identity !== manifest.roleSlots[`${role}.maintenance` as Slot].identity) epochFail('IDENTITY_CONFLICT');
     }
     validateRetentionInput(value.retention);
+    validateScopedResource(value.retention.resource, expectedProject, value.retention.location, 'jobs');
+    if (manifest.retention.configDigest !== canonicalDigest(value.retention.configuration)) epochFail('RESOURCE_INVALID');
     if (value.retention.project !== expectedProject) epochFail('PROJECT_MISMATCH');
     validateQualifiedResource(value.retention.resource, expectedProject);
     validateScopedIamGraph(value as ProtectedPlatformInputs, manifest);
@@ -582,6 +652,10 @@ function validateScopedIamGraph(value: ProtectedPlatformInputs, manifest: Capaci
         const has = (kind: keyof typeof resources, requiredRole: string, member: string): boolean =>
             resources[kind].bindings.some(binding => binding.role === requiredRole
                 && binding.member === `serviceAccount:${member}` && binding.condition === null);
+        for (const kind of ['run', 'maintenance'] as const) {
+            if (resources[kind].bindings.some(binding => binding.role === 'roles/run.invoker'
+                && (binding.member === 'allUsers' || binding.member === 'allAuthenticatedUsers'))) epochFail('RESOURCE_INVALID');
+        }
         if (!has('run', 'roles/run.invoker', taskCallerIdentity)
             || !has('run', 'roles/run.invoker', maintenanceIdentity)
             || !has('queue', 'roles/cloudtasks.enqueuer', enqueuerIdentity)
@@ -674,6 +748,41 @@ function validateIamAdditions(oldInputs: ProtectedPlatformInputs, desiredInputs:
     }
 }
 
+/** Digests of old workload grants that are intentionally removed after both promotions. */
+export function deriveRetiredIamBindingDigests(
+    oldManifest: CapacityManifest,
+    desiredManifest: CapacityManifest,
+    oldInputs: ProtectedPlatformInputs,
+): Readonly<Record<Role, readonly string[]>> {
+    const desiredIds = new Set(Object.values(desiredManifest.roleSlots).map(identity => identity.identity));
+    const oldIds = new Set(Object.values(oldManifest.roleSlots).map(identity => identity.identity));
+    const result = {} as Record<Role, readonly string[]>;
+    for (const role of ROLES) {
+        const digests: string[] = [];
+        for (const kind of IAM_INPUT_MAP_KEYS) {
+            for (const binding of oldInputs.iam[role][kind].bindings) {
+                if (!binding.member.startsWith('serviceAccount:')) continue;
+                const member = binding.member.slice('serviceAccount:'.length);
+                if (oldIds.has(member) && !desiredIds.has(member)) digests.push(bindingKey(binding));
+            }
+        }
+        result[role] = digests.sort();
+    }
+    return result;
+}
+
+function validateIamManifestRetirements(
+    oldManifest: CapacityManifest,
+    desiredManifest: CapacityManifest,
+    oldInputs: ProtectedPlatformInputs,
+): void {
+    const expected = deriveRetiredIamBindingDigests(oldManifest, desiredManifest, oldInputs);
+    for (const role of ROLES) {
+        const actual = [...desiredManifest.iam[role].retiredBindings].sort();
+        if (actual.length !== expected[role].length || actual.some((digest, index) => digest !== expected[role][index])) epochFail('RESOURCE_INVALID');
+    }
+}
+
 function validateSecretReferencePreservation(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs): void {
     for (const role of ROLES) {
         if (canonicalDigest(oldInputs.runtime[role].secretReferences)
@@ -737,9 +846,10 @@ function validateOldObservations(
             || queues[role].state !== 'PAUSED'
             || queues[role].complete !== true
             || !isObject(queues[role].configuration)
-            || canonicalDigest(queues[role].configuration) !== canonicalDigest(expectedQueue.configuration)
+            || canonicalDigest(canonicalQueueConfiguration(queues[role].configuration)) !== canonicalDigest(canonicalQueueConfiguration(expectedQueue.configuration))
             || !Array.isArray(queues[role].tasks)) epochFail('RESOURCE_INVALID');
-        if (queues[role].tasks.length > 0 && manifest.queues[role].empty) epochFail('EVIDENCE_UNAVAILABLE');
+        validateScopedResource(queues[role].resource as string, expectedQueue.project, expectedQueue.location, 'queues');
+        if (queues[role].tasks.length > 0 || !manifest.queues[role].empty) epochFail('QUEUE_NOT_EMPTY');
         for (const task of queues[role].tasks) {
             assertKeys(task, TASK_OBSERVATION_KEYS, 'RESOURCE_INVALID');
             if (!safeString(task.name, 512) || !RESOURCE_PATTERN.test(task.name)
@@ -759,6 +869,8 @@ function validateOldObservations(
             || schedulers[role].lastAttemptMs !== expectedScheduler.lastAttemptMs
             || !isObject(schedulers[role].configuration)
             || canonicalDigest(schedulers[role].configuration) !== canonicalDigest(expectedScheduler.configuration)) epochFail('RESOURCE_INVALID');
+        validateScopedResource(schedulers[role].resource as string, expectedScheduler.project, expectedScheduler.location, 'jobs');
+        if (schedulers[role].state !== 'PAUSED' || manifest.recoverySchedulers[role].state !== 'PAUSED') epochFail('EVIDENCE_UNAVAILABLE');
     }
 
     const iam = value.iam as ProtectedIamInputs;
@@ -776,7 +888,12 @@ function validateOldObservations(
     const readinessWithoutAggregate = { ...readiness };
     delete readinessWithoutAggregate.ready;
     validateReadiness(readinessWithoutAggregate);
+    if (readiness.ready !== true || readiness.analysisV2AdmissionEnabled !== false || readiness.earlybirdWebhookAutoAdmissionEnabled !== false) epochFail('READINESS_INVALID');
     if (canonicalDigest(readinessWithoutAggregate) !== canonicalDigest(manifest.readiness)) epochFail('READINESS_INVALID');
+    if (!manifest.queues.preflight.empty || !manifest.queues.paid.empty
+        || manifest.queues.preflight.state !== 'PAUSED' || manifest.queues.paid.state !== 'PAUSED'
+        || manifest.recoverySchedulers.preflight.state !== 'PAUSED' || manifest.recoverySchedulers.paid.state !== 'PAUSED'
+        || !manifest.retention.enabled) epochFail('EVIDENCE_UNAVAILABLE');
 }
 
 function validateObservationTargets(
@@ -911,6 +1028,47 @@ function deriveSourcePlanDigest(packet: CapacityEpochPacket): string {
     });
 }
 
+export type ProtectedObservationDigestInput = Pick<CapacityEpochPacket,
+    'oldManifest' | 'desiredManifest' | 'protectedInputs' | 'protectedObservations'>;
+
+/**
+ * Every observation-input digest is derived from the complete reviewed
+ * manifest, protected execution input, and its live/target evidence payload.
+ * A caller-provided marker can therefore never stand in for a real contract,
+ * while the projection remains safe to carry in the digest-only journal.
+ */
+export function deriveObservationInputDigests(input: ProtectedObservationDigestInput): CapacityEpochPacket['observationInputs'] {
+    const old = input.protectedObservations.old;
+    const desired = input.protectedObservations.desired;
+    return {
+        sourceDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.source, input: { build: input.protectedInputs.old.build, runtime: input.protectedInputs.old.runtime }, observation: old.source },
+            desired: { manifest: input.desiredManifest.source, input: { build: input.protectedInputs.desired.build, runtime: input.protectedInputs.desired.runtime }, target: desired.source },
+        }),
+        iamDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.iam, input: input.protectedInputs.old.iam, observation: old.iam },
+            desired: { manifest: input.desiredManifest.iam, input: input.protectedInputs.desired.iam, target: desired.iam },
+        }),
+        queueDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.queues, input: input.protectedInputs.old.queues, observation: old.queues },
+            desired: { manifest: input.desiredManifest.queues, input: input.protectedInputs.desired.queues, target: desired.queues },
+        }),
+        schedulerDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.recoverySchedulers, input: input.protectedInputs.old.schedulers, observation: old.schedulers },
+            desired: { manifest: input.desiredManifest.recoverySchedulers, input: input.protectedInputs.desired.schedulers, target: desired.schedulers },
+        }),
+        retentionDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.retention, input: input.protectedInputs.old.retention, observation: old.retention },
+            desired: { manifest: input.desiredManifest.retention, input: input.protectedInputs.desired.retention, target: desired.retention },
+        }),
+        readinessDigest: canonicalDigest({
+            old: { manifest: input.oldManifest.readiness, observation: old.readiness },
+            desired: { manifest: input.desiredManifest.readiness, target: desired.readiness },
+        }),
+        zeroWorkDigest: canonicalDigest(desired.zeroWorkSources),
+    };
+}
+
 function deriveCapabilityDigest(packet: CapacityEpochPacket): string {
     return canonicalDigest({
         epochId: packet.epochId,
@@ -962,8 +1120,11 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
     validateSecretReferencePreservation(protectedInputs.old, protectedInputs.desired);
     validateIamPreservesOld(protectedInputs.old, protectedInputs.desired);
     validateIamAdditions(protectedInputs.old, protectedInputs.desired, value.desiredManifest);
+    validateIamManifestRetirements(value.oldManifest, value.desiredManifest, protectedInputs.old);
     validateOldObservations(protectedObservations.old, value.oldManifest, protectedInputs.old);
     validateObservationTargets(protectedObservations.desired, value.desiredManifest, protectedInputs.desired);
+    const derivedObservationInputs = deriveObservationInputDigests(value as CapacityEpochPacket);
+    if (Object.keys(derivedObservationInputs).some(key => derivedObservationInputs[key as keyof typeof derivedObservationInputs] !== observationInputs[key])) epochFail('INVALID_PACKET');
     if (!isDigest(value.oldManifestDigest) || !isDigest(value.desiredManifestDigest)
         || !isDigest(value.capabilityDigest) || !isDigest(value.roleSetDigest) || !isDigest(value.sourcePlanDigest)) epochFail('INVALID_PACKET');
 }
@@ -979,6 +1140,11 @@ export function createProtectedPacket(input: ProtectedPacketInput): CapacityEpoc
     validateSecretReferencePreservation(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamPreservesOld(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamAdditions(input.protectedInputs.old, input.protectedInputs.desired, input.desiredManifest);
+    validateIamManifestRetirements(input.oldManifest, input.desiredManifest, input.protectedInputs.old);
+    validateOldObservations(input.protectedObservations.old, input.oldManifest, input.protectedInputs.old);
+    validateObservationTargets(input.protectedObservations.desired, input.desiredManifest, input.protectedInputs.desired);
+    const derivedObservationInputs = deriveObservationInputDigests(input);
+    if (Object.keys(derivedObservationInputs).some(key => derivedObservationInputs[key as keyof typeof derivedObservationInputs] !== input.observationInputs[key as keyof typeof input.observationInputs])) epochFail('INVALID_PACKET');
     const oldManifestDigest = canonicalDigest(input.oldManifest);
     const desiredManifestDigest = canonicalDigest(input.desiredManifest);
     const roleSetDigest = canonicalDigest([...input.roleSet].sort());

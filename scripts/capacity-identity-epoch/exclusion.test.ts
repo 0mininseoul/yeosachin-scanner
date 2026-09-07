@@ -5,6 +5,9 @@ import { EpochError, canonicalDigest } from './contracts';
 class MemoryStorage implements ReservationStorage {
     private readonly objects = new Map<string, { generation: string; value: unknown }>();
     private generation = 0;
+    writes = 0;
+
+    seed(key: string, generation: string, value: unknown): void { this.objects.set(key, { generation, value }); }
 
     async get(key: string) { return this.objects.get(key) ?? null; }
     async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }) {
@@ -13,6 +16,7 @@ class MemoryStorage implements ReservationStorage {
             throw new EpochError('GENERATION_PRECONDITION_FAILED');
         }
         const stored = { generation: String(++this.generation), value };
+        this.writes += 1;
         this.objects.set(key, stored);
         return stored;
     }
@@ -57,5 +61,16 @@ describe('common epoch/ordinary capacity reservation', () => {
         const reservation = new CapacityReservation(storage, { namespace: 'plane', now: Date.now });
         await expect(reservation.acquire('not-a-digest', digest('owner'))).rejects.toThrow('CAPABILITY_INVALID');
         await expect(reservation.acquire(digest('epoch'), 'not-a-digest')).rejects.toThrow('CAPABILITY_INVALID');
+    });
+
+    it('rejects malformed stored owner records before expired takeover writes', async () => {
+        const now = 10_000;
+        const storage = new MemoryStorage();
+        const reservation = new CapacityReservation(storage, { namespace: 'malformed-owner', now: () => now, leaseMs: 100 });
+        storage.seed(reservation.key, '1', {
+            epochDigest: digest('epoch-a'), ownerDigest: 42, lockFence: '1', lockExpiresAt: new Date(1_000).toISOString(),
+        });
+        await expect(reservation.acquire(digest('epoch-b'), digest('owner-b'))).rejects.toThrow('JOURNAL_INVALID');
+        expect(storage.writes).toBe(0);
     });
 });

@@ -2,6 +2,8 @@ import {
     STATES,
     EpochError,
     canonicalDigest,
+    canonicalQueueConfiguration,
+    canonicalRuntimeInputDigest,
     epochFail,
     isObject,
     type CapacityEpochPacket,
@@ -124,7 +126,10 @@ function transitionForEvidence(sequence: number, epochIdDigest: string, fromStat
 
 const activationRegistry = new WeakMap<object, Readonly<{
     packetDigest: string;
-    verifiedProofDigest: string;
+    /** Fresh read-only proof held by the caller at authorization time. */
+    freshVerifiedProofDigest: string;
+    /** Immutable journal proof anchoring the VERIFIED transition. */
+    durableVerifiedProofDigest: string;
     ownerDigest: string;
     lockFence: string;
     expiresAtMs: number;
@@ -151,6 +156,7 @@ export class EpochCoordinator {
     private readonly now: () => number;
     private lease: JournalLease | undefined;
     private verifiedProofDigest: string | undefined;
+    private durableVerifiedProofDigest: string | undefined;
 
     constructor(options: EpochCoordinatorOptions) {
         validateEpochPacket(options.packet);
@@ -166,6 +172,11 @@ export class EpochCoordinator {
     /** Runs the closed rollout through VERIFIED. It never invokes activation. */
     async runThroughVerified(): Promise<Readonly<{ state: 'VERIFIED'; lease: JournalLease; proofDigest: string }>> {
         this.assertCapabilityBinding();
+        // A proof is scoped to this invocation's fresh observations. Do not
+        // let a prior run on the same coordinator instance suppress a new
+        // owner/current-fence proof on a later resume.
+        this.verifiedProofDigest = undefined;
+        this.durableVerifiedProofDigest = undefined;
         await this.journal.ensureHeader();
         this.lease = await this.journal.acquire(this.ownerDigest);
         let state = await this.journal.readValidatedState(this.lease);
@@ -177,16 +188,21 @@ export class EpochCoordinator {
         if (nextIndex > verifiedIndex) {
             if (state.state !== 'VERIFIED') fail('JOURNAL_INVALID');
             // A VERIFIED journal transition is not a cached authorization. A
-            // fresh resume must repeat the read-only proof under the live
-            // fence before returning a proof to the caller.
-            this.assertCapabilityBinding();
-            await this.journal.assertLive(this.lease);
-            const before = await this.journal.readValidatedState(this.lease);
-            const evidence = await this.controlPlane.verify({ packet: this.packet, lease: this.lease });
-            validateEvidence(evidence);
-            const after = await this.journal.readValidatedState(this.lease);
-            if (after.state !== 'VERIFIED' || after.activeFence !== before.activeFence || after.transitions.length !== before.transitions.length) fail('OBSERVATION_RACE');
-            this.verifiedProofDigest = evidenceDigest(evidence.proof);
+            // new owner gets exactly one fresh read-only proof during
+            // reconciliation; do not execute the probe-bearing verification a
+            // second time merely because the historical fence is older.
+            if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) {
+                this.assertCapabilityBinding();
+                await this.journal.assertLive(this.lease);
+                const before = await this.journal.readValidatedState(this.lease);
+                const evidence = await this.controlPlane.verify({ packet: this.packet, lease: this.lease });
+                validateEvidence(evidence);
+                const after = await this.journal.readValidatedState(this.lease);
+                if (after.state !== 'VERIFIED' || after.activeFence !== before.activeFence || after.transitions.length !== before.transitions.length) fail('OBSERVATION_RACE');
+                this.durableVerifiedProofDigest = before.transitions[before.transitions.length - 1]?.proofDigest;
+                if (!this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
+                this.verifiedProofDigest = evidenceDigest(evidence.proof);
+            }
             return { state: 'VERIFIED', lease: this.lease, proofDigest: this.verifiedProofDigest };
         }
 
@@ -226,16 +242,18 @@ export class EpochCoordinator {
         const final = await this.journal.readValidatedState(this.lease);
         if (final.state !== 'VERIFIED' || final.aborted) fail('NOT_VERIFIED');
         this.verifiedProofDigest = final.transitions[final.transitions.length - 1]?.proofDigest;
-        if (!this.verifiedProofDigest) fail('NOT_VERIFIED');
+        this.durableVerifiedProofDigest = this.verifiedProofDigest;
+        if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
         return { state: 'VERIFIED', lease: this.lease, proofDigest: this.verifiedProofDigest };
     }
 
     issueActivationAuthorization(): ActivationAuthorization {
-        if (!this.lease || !this.verifiedProofDigest) fail('NOT_VERIFIED');
+        if (!this.lease || !this.verifiedProofDigest || !this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
         const token = Object.freeze(Object.create(null)) as ActivationAuthorization;
         activationRegistry.set(token, {
             packetDigest: canonicalDigest(this.packet),
-            verifiedProofDigest: this.verifiedProofDigest,
+            freshVerifiedProofDigest: this.verifiedProofDigest,
+            durableVerifiedProofDigest: this.durableVerifiedProofDigest,
             ownerDigest: this.ownerDigest,
             lockFence: this.lease.lock.lockFence,
             expiresAtMs: this.now() + 5 * 60_000,
@@ -249,13 +267,14 @@ export class EpochCoordinator {
         if (!isObject(authorization)) fail('ACTIVATION_AUTH_REQUIRED');
         const binding = activationRegistry.get(authorization);
         if (!binding || binding.packetDigest !== canonicalDigest(this.packet)
-            || binding.verifiedProofDigest !== this.verifiedProofDigest
+            || binding.freshVerifiedProofDigest !== this.verifiedProofDigest
+            || binding.durableVerifiedProofDigest !== this.durableVerifiedProofDigest
             || binding.ownerDigest !== this.ownerDigest || binding.expiresAtMs < this.now()
             || binding.gates.analysisV2AdmissionEnabled !== this.packet.activation.analysisV2AdmissionEnabled
             || binding.gates.earlybirdWebhookAutoAdmissionEnabled !== this.packet.activation.earlybirdWebhookAutoAdmissionEnabled) fail('ACTIVATION_AUTH_REQUIRED');
         if (!this.lease) fail('ACTIVATION_AUTH_REQUIRED');
         const state = await this.journal.readValidatedState(this.lease);
-        if (state.state !== 'VERIFIED' || state.aborted || state.transitions[state.transitions.length - 1]?.proofDigest !== binding.verifiedProofDigest) fail('NOT_VERIFIED');
+        if (state.state !== 'VERIFIED' || state.aborted || state.transitions[state.transitions.length - 1]?.proofDigest !== binding.durableVerifiedProofDigest) fail('NOT_VERIFIED');
         await this.journal.assertLive(this.lease);
         if (!this.controlPlane.activate) fail('ACTIVATION_AUTH_REQUIRED');
         try {
@@ -333,7 +352,14 @@ export class EpochCoordinator {
             const evidence = await this.controlPlane.reconcile({ packet: this.packet, lease: this.lease, state: state.state ?? 'PREPARED' });
             validateEvidence(evidence);
             const after = await this.journal.readValidatedState(this.lease);
-            if (this.reconciliationMarker(after) === this.reconciliationMarker(state)) return after;
+            if (this.reconciliationMarker(after) === this.reconciliationMarker(state)) {
+                if (state.state === 'VERIFIED' && after.state === 'VERIFIED') {
+                    this.durableVerifiedProofDigest = after.transitions[after.transitions.length - 1]?.proofDigest;
+                    this.verifiedProofDigest = evidenceDigest(evidence.proof);
+                    if (!this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
+                }
+                return after;
+            }
             state = after;
             mustReconcile = true;
         }
@@ -441,7 +467,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 || queueObservation.location !== expectedQueue.location
                 || queueObservation.state !== expectedQueue.state
                 || queueObservation.complete !== expectedQueue.complete
-                || canonicalDigest(queueObservation.configuration) !== canonicalDigest(expectedQueue.configuration)
+                || canonicalDigest(canonicalQueueConfiguration(queueObservation.configuration)) !== canonicalDigest(canonicalQueueConfiguration(expectedQueue.configuration))
                 || canonicalDigest(queueObservation.tasks) !== canonicalDigest(expectedQueue.tasks)) fail('OBSERVATION_RACE');
             queueFacts.push(queueObservation);
             const scheduler = await this.options.workPlanes.observeScheduler(packet.protectedInputs.old.schedulers[role]);
@@ -465,14 +491,28 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         const retention = await this.options.workPlanes.observeRetention(packet.protectedInputs.old.retention);
         validateRetentionObservation(retention, packet.protectedInputs.old.retention);
         if (canonicalDigest(readiness) !== canonicalDigest(packet.protectedObservations.old.readiness)
-            || canonicalDigest(retention) !== canonicalDigest({ role: 'retention', ...packet.protectedObservations.old.retention })) fail('OBSERVATION_RACE');
-        this.assertObservationDigest(packet, 'sourceDigest', sourceFacts);
-        this.assertObservationDigest(packet, 'queueDigest', queueFacts);
-        this.assertObservationDigest(packet, 'schedulerDigest', schedulerFacts);
-        this.assertObservationDigest(packet, 'iamDigest', iamFacts);
-        this.assertObservationDigest(packet, 'retentionDigest', retention);
-        this.assertObservationDigest(packet, 'readinessDigest', readiness);
-        return this.evidence('PREPARED', { readiness, services, queues, schedulers, policies, retention }, input.lease.lock.lockFence);
+            || canonicalDigest(retention) !== canonicalDigest({ role: 'retention', ...packet.protectedObservations.old.retention, configurationDigest: canonicalDigest(packet.protectedObservations.old.retention.configuration) })) fail('OBSERVATION_RACE');
+        // observationInputs are reviewed packet/input digests, not hashes of
+        // a differently-shaped live response. Keep both projections distinct:
+        // exact field-by-field checks above prove the old state, while these
+        // safe digests retain the observed payload for the journal.
+        return this.evidence('PREPARED', {
+            readiness,
+            services,
+            queues,
+            schedulers,
+            policies,
+            retention,
+            packetObservationInputs: packet.observationInputs,
+            observedDigests: {
+                source: canonicalDigest(sourceFacts),
+                queue: canonicalDigest(queueFacts),
+                scheduler: canonicalDigest(schedulerFacts),
+                iam: canonicalDigest(iamFacts),
+                retention: canonicalDigest(retention),
+                readiness: canonicalDigest(readiness),
+            },
+        }, input.lease.lock.lockFence);
     }
 
     async stage(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
@@ -488,8 +528,18 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             if (!captured) fail('SOURCE_INVALID');
             this.capturedRevisions.set(role, captured);
             const source = await this.readSource({ role, phase: 'desired', revision: captured, runtime });
-            const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision: captured, image: after.image });
-            const runtimeObservation = this.runtimeObservation(runtime, after, source.sourceSha, captured, 'STAGED', buildDigest);
+            // The service status may still legitimately report OLD=100 while
+            // the newly-created immutable revision receives 0%. Read the
+            // revision itself and construct STAGED evidence from that scoped
+            // object instead of relabeling whole-service traffic as no-op.
+            const revisionObservation = await this.options.cloudRun.observeRevision(runtime.project, runtime.location, captured);
+            const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision: captured, image: revisionObservation.image });
+            const runtimeObservation = this.runtimeObservation(runtime, {
+                ...revisionObservation,
+                noTraffic: true,
+                traffic: [],
+                url: after.url,
+            }, source.sourceSha, captured, 'STAGED', buildDigest);
             validateRuntimeObservation(runtimeObservation, runtime, {
                 mode: 'STAGED', revision: captured,
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
@@ -550,17 +600,14 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 await this.assertLive(input.lease);
                 queue = await this.options.workPlanes.pauseQueue(queueInput);
             }
-            if (canonicalDigest(scheduler.target) === canonicalDigest(oldSchedulerInput.target)) {
-                await this.assertLive(input.lease);
-                scheduler = await this.options.workPlanes.updateSchedulerTarget({ input: schedulerInput, expectedOldTarget: oldSchedulerInput.target, desiredTarget: schedulerInput.target });
-            } else if (canonicalDigest(scheduler.target) !== canonicalDigest(schedulerInput.target)) fail('OBSERVATION_RACE');
-            if (queueTargetMatches(queue.target, oldQueueInput.target)) {
-                await this.assertLive(input.lease);
-                queue = await this.options.workPlanes.updateQueueTarget({ input: queueInput, expectedOldTarget: oldQueueInput.target, desiredTarget: queueInput.target });
-            } else if (queue.target !== null && !queueTargetMatches(queue.target, queueInput.target)) fail('OBSERVATION_RACE');
+            // QUEUES_ALIGNED proves pause, quiescence, and the phase-correct
+            // OLD auth chain only. Desired OIDC identities are aligned later,
+            // after every desired IAM addition has independently read back.
+            if (canonicalDigest(scheduler.target) !== canonicalDigest(oldSchedulerInput.target)
+                || !queueTargetMatches(queue.target, oldQueueInput.target)) fail('OBSERVATION_RACE');
             if (queue.tasks.length !== 0) fail('QUEUE_NOT_EMPTY');
-            validateQueueObservation({ role, ...queue }, queueInput, input.packet.desiredManifest.queues[role].configDigest, role);
-            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, schedulerInput, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            validateQueueObservation({ role, ...queue }, oldQueueInput, input.packet.oldManifest.queues[role].configDigest, role);
+            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, oldSchedulerInput, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             schedulers.push({ role, digest: canonicalDigest(scheduler) });
             queues.push({ role, digest: canonicalDigest(queue) });
         }
@@ -578,7 +625,33 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 policies.push({ role, kind, digest: canonicalDigest(observed) });
             }
         }
-        return this.evidence('INVOKERS_ROTATED', policies, input.lease.lock.lockFence);
+        const alignments: unknown[] = [];
+        // IAM additions are complete and read back before touching any
+        // paused Scheduler/Tasks OIDC target. This ordering closes the auth
+        // chain before the first serving promotion.
+        for (const role of ['preflight', 'paid'] as const) {
+            await this.assertLive(input.lease);
+            const desiredScheduler = input.packet.protectedInputs.desired.schedulers[role];
+            const oldScheduler = input.packet.protectedInputs.old.schedulers[role];
+            let scheduler = await this.options.workPlanes.observeScheduler(desiredScheduler);
+            if (scheduler.state !== 'PAUSED') fail('SCHEDULER_NOT_QUIESCENT');
+            if (canonicalDigest(scheduler.target) === canonicalDigest(oldScheduler.target)) {
+                await this.assertLive(input.lease);
+                scheduler = await this.options.workPlanes.updateSchedulerTarget({ input: desiredScheduler, expectedOldTarget: oldScheduler.target, desiredTarget: desiredScheduler.target });
+            } else if (canonicalDigest(scheduler.target) !== canonicalDigest(desiredScheduler.target)) fail('OBSERVATION_RACE');
+            const desiredQueue = input.packet.protectedInputs.desired.queues[role];
+            const oldQueue = input.packet.protectedInputs.old.queues[role];
+            let queue = await this.options.workPlanes.observeQueue(desiredQueue);
+            if (queue.state !== 'PAUSED') fail('QUEUE_NOT_EMPTY');
+            if (queueTargetMatches(queue.target, oldQueue.target)) {
+                await this.assertLive(input.lease);
+                queue = await this.options.workPlanes.updateQueueTarget({ input: desiredQueue, expectedOldTarget: oldQueue.target, desiredTarget: desiredQueue.target });
+            } else if (!queueTargetMatches(queue.target, desiredQueue.target)) fail('OBSERVATION_RACE');
+            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, desiredScheduler, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            validateQueueObservation({ role, ...queue }, desiredQueue, input.packet.desiredManifest.queues[role].configDigest, role);
+            alignments.push({ role, scheduler: canonicalDigest(scheduler), queue: canonicalDigest(queue) });
+        }
+        return this.evidence('INVOKERS_ROTATED', { policies, alignments }, input.lease.lock.lockFence);
     }
 
     async promote(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence> {
@@ -670,18 +743,26 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             probes.push({ role, digest: canonicalDigest(probe) });
             lastProbeMs = this.now();
         }
-        const nowMs = this.now();
-        if (!Number.isSafeInteger(nowMs) || nowMs < lastProbeMs || nowMs < this.zeroWorkBaseline.capturedAtMs) fail('EVIDENCE_UNAVAILABLE');
+        // Freeze the end of the pre-activation evidence window immediately
+        // after the last provider-free probe.  The collector may need to wait
+        // for ingestion, so it must not be handed a clock value that is later
+        // reused as the validation boundary.
+        const windowEndMs = this.now();
+        if (!Number.isSafeInteger(windowEndMs) || windowEndMs < lastProbeMs || windowEndMs < this.zeroWorkBaseline.capturedAtMs) fail('EVIDENCE_UNAVAILABLE');
         const windowStartMs = this.zeroWorkBaseline.capturedAtMs;
-        const windowEndMs = nowMs;
         if (windowEndMs <= windowStartMs) fail('EVIDENCE_UNAVAILABLE');
-        const zeroWork = await this.options.zeroWorkObservation({ windowStartMs, windowEndMs, nowMs, baselineDigest: this.zeroWorkBaseline.digest });
+        const zeroWork = await this.options.zeroWorkObservation({ windowStartMs, windowEndMs, nowMs: windowEndMs, baselineDigest: this.zeroWorkBaseline.digest });
+        // Validate freshness at a new trusted boundary after the asynchronous
+        // collector returns.  This accepts honest positive collector latency
+        // without moving the covered interval beyond the last probe.
+        const validationNowMs = this.now();
+        if (!Number.isSafeInteger(validationNowMs) || validationNowMs < windowEndMs) fail('EVIDENCE_UNAVAILABLE');
         const expectedWindow = {
             windowStartMs,
             windowEndMs,
             provenance: Object.fromEntries(Object.entries(packet.protectedObservations.desired.zeroWorkSources).map(([name, source]) => [name, source.source])),
         } as never;
-        validateZeroWorkObservation(zeroWork, nowMs, expectedWindow);
+        validateZeroWorkObservation(zeroWork, validationNowMs, expectedWindow);
         return this.evidence('VERIFIED', { readiness, runtimes, queues, schedulers, policies, retention: canonicalDigest(retention), zeroWork: { digest: canonicalDigest(zeroWork), baselineDigest: this.zeroWorkBaseline.digest, windowStartMs, windowEndMs }, probes }, input.lease.lock.lockFence);
     }
 
@@ -692,10 +773,18 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const runtime = input.packet.protectedInputs.desired.runtime[role];
             const revision = this.desiredRevisionCandidate(input.packet, role);
             const service = await this.options.cloudRun.getService(this.serviceResource(runtime));
-            if (!service.noTraffic || (service.latestReadyRevision !== revision && service.latestCreatedRevision !== revision)) fail('RUNTIME_MISMATCH');
+            const stagedTraffic = service.traffic.find(entry => entry.revisionName === revision);
+            if ((stagedTraffic !== undefined && stagedTraffic.percent !== 0)
+                || (service.latestReadyRevision !== revision && service.latestCreatedRevision !== revision)) fail('RUNTIME_MISMATCH');
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
-            const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: service.image });
-            const observation = this.runtimeObservation(runtime, service, source.sourceSha, revision, 'STAGED', buildDigest);
+            const revisionObservation = await this.options.cloudRun.observeRevision(runtime.project, runtime.location, revision);
+            const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: revisionObservation.image });
+            const observation = this.runtimeObservation(runtime, {
+                ...revisionObservation,
+                noTraffic: true,
+                traffic: [],
+                url: service.url,
+            }, source.sourceSha, revision, 'STAGED', buildDigest);
             validateRuntimeObservation(observation, runtime, {
                 mode: 'STAGED', revision,
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
@@ -898,18 +987,23 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         return bindings.filter(binding => !retired.has(canonicalDigest(binding)));
     }
 
-    private assertObservationDigest(packet: CapacityEpochPacket, key: keyof CapacityEpochPacket['observationInputs'], value: unknown): void {
-        if (canonicalDigest(value) !== packet.observationInputs[key]) fail('OBSERVATION_RACE');
-    }
-
     private runtimeObservation(
         expected: ProtectedRuntimeInput,
-        observed: Readonly<{ identity: ProtectedRuntimeInput['identity']; environment: Readonly<Record<string, string>>; secretReferences: Readonly<Record<string, string>>; settings: ProtectedRuntimeInput['settings']; noTraffic: boolean; generation: string; resourceVersion: string; traffic: readonly Readonly<{ revisionName: string | null; percent: number }>[]}>,
+        observed: Readonly<{ identity: ProtectedRuntimeInput['identity']; environment: Readonly<Record<string, string>>; secretReferences: Readonly<Record<string, string>>; settings: ProtectedRuntimeInput['settings']; noTraffic: boolean; generation: string; resourceVersion: string; traffic: readonly Readonly<{ revisionName: string | null; percent: number }>[]; url: string }>,
         sourceSha: string,
         revision: string,
         mode: 'STAGED' | 'PROMOTED',
         buildDigest: string,
     ): Record<string, unknown> {
+        let observedOrigin: string;
+        let expectedOrigin: string;
+        try {
+            observedOrigin = new URL(observed.url).origin;
+            expectedOrigin = new URL(expected.target.url).origin;
+        } catch {
+            fail('RUNTIME_MISMATCH');
+        }
+        if (observedOrigin !== expectedOrigin) fail('RUNTIME_MISMATCH');
         const runtime = {
             ...expected,
             sourceSha,
@@ -927,7 +1021,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             revision,
             generation: observed.generation,
             resourceVersion: observed.resourceVersion,
-            runtimeDigest: canonicalDigest(runtime),
+            runtimeDigest: canonicalRuntimeInputDigest(runtime),
             buildDigest,
             traffic,
         };

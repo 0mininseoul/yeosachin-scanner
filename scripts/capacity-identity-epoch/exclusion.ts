@@ -49,6 +49,7 @@ function ensureRecord(value: unknown): asserts value is ReservationRecord {
     const record = value as Record<string, unknown>;
     if (Object.keys(record).sort().join(',') !== 'epochDigest,lockExpiresAt,lockFence,ownerDigest'
         || typeof record.epochDigest !== 'string' || !DIGEST.test(record.epochDigest)
+        || typeof record.ownerDigest !== 'string' || !DIGEST.test(record.ownerDigest)
         || typeof record.lockFence !== 'string' || !FENCE.test(record.lockFence)
         || typeof record.lockExpiresAt !== 'string' || !Number.isFinite(Date.parse(record.lockExpiresAt))) epochFail('JOURNAL_INVALID');
 }

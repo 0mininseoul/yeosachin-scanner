@@ -7,17 +7,21 @@ import {
     SLOTS,
     assertCoordinatorCapability,
     createProtectedPacket,
+    deriveObservationInputDigests,
+    deriveRetiredIamBindingDigests,
     issueCoordinatorCapability,
     loadProtectedPacket,
     validateEpochPacket,
     validateManifestComparison,
 } from './packet';
-import { EpochError, canonicalDigest } from './contracts';
+import { canonicalIamBindingDigests, canonicalIamPolicyDigest, canonicalRuntimeInputDigest, EpochError, canonicalDigest } from './contracts';
 import type { CapacityManifest, ProtectedOldObservations, ProtectedObservationTargets, ProtectedPlatformInputs } from './contracts';
 
 const PROJECT = 'example-project';
 const oldIdentity = (slot: string) => `${slot.replaceAll('.', '-')}-old@example-project.iam.gserviceaccount.com`;
 const desiredIdentity = (slot: string) => `${slot.replaceAll('.', '-')}-desired@example-project.iam.gserviceaccount.com`;
+const workerPath = (role: 'preflight' | 'paid') => role === 'preflight' ? '/api/analysis/preflight/worker' : '/api/analysis/v2/worker';
+const recoveryPath = (role: 'preflight' | 'paid') => role === 'preflight' ? '/api/analysis/preflight/recover' : '/api/analysis/v2/recover';
 
 function identity(value: string) {
     return { identity: value, project: PROJECT };
@@ -50,7 +54,7 @@ function runtimeEnvironment(role: 'preflight' | 'paid', suffix: 'old' | 'desired
         [`${prefix}_PROJECT`]: PROJECT,
         [`${prefix}_LOCATION`]: 'asia-northeast3',
         [`${prefix}_QUEUE`]: role,
-        [`${prefix}_TARGET_URL`]: `${targetOrigin}/api/analysis/${role}/worker`,
+        [`${prefix}_TARGET_URL`]: `${targetOrigin}${workerPath(role)}`,
         [`${prefix}_OIDC_AUDIENCE`]: targetOrigin,
         [`${prefix}_SERVICE_ACCOUNT_EMAIL`]: taskCallerIdentity,
         [`${maintenancePrefix}_MAINTENANCE_SERVICE_ACCOUNT_EMAIL`]: maintenanceIdentity,
@@ -97,15 +101,15 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         environment: runtimeEnvironment(role, 'desired'),
         secretReferences: runtimeSecretReferences(role),
         settings: runtimeSettings(role),
-        target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
+        target: { url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com` },
         noTraffic: true, providerAdmissionEnabled: true,
     });
     const queueTarget = (role: 'preflight' | 'paid') => ({
-        url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com`,
+        url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com`,
         callerIdentity: identity(`${role}.task-caller-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
     });
     const schedulerTarget = (role: 'preflight' | 'paid') => ({
-        uri: `https://${role}.example.com/api/analysis/${role}/recover`, audience: `https://${role}.example.com`,
+        uri: `https://${role}.example.com${recoveryPath(role)}`, audience: `https://${role}.example.com`,
         identity: identity(`${role}.maintenance-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
     });
     const revision = (role: 'preflight' | 'paid') => ({
@@ -113,7 +117,7 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
         oldRevision: `${role}-old-revision`,
         desiredSha: 'b'.repeat(40),
         desiredBuildDigest: canonicalDigest(buildInput),
-        desiredRuntimeDigest: canonicalDigest(runtimeTarget(role)),
+        desiredRuntimeDigest: canonicalRuntimeInputDigest(runtimeTarget(role)),
         desiredRuntimeEnvironment: runtimeEnvironment(role, 'desired'),
         desiredRuntimeSettings: runtimeSettings(role),
         revisionPlan: { prefix: `${role}-epoch`, suffix: 'fixture' },
@@ -127,24 +131,29 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
     const queue = (role: 'preflight' | 'paid') => ({
         resource: `projects/${PROJECT}/locations/asia-northeast3/queues/${role}`, project: PROJECT, location: 'asia-northeast3',
         targetDigest: canonicalDigest(queueTarget(role)),
-        configDigest: '1'.repeat(64), state: 'PAUSED', empty: true, tasksDigest: '2'.repeat(64),
+        configDigest: canonicalDigest({ rateLimits: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 } }), state: 'PAUSED', empty: true, tasksDigest: canonicalDigest([]),
     });
     const scheduler = (role: 'preflight' | 'paid') => ({
         resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: PROJECT, location: 'asia-northeast3',
         targetDigest: canonicalDigest(schedulerTarget(role)),
-        configDigest: '3'.repeat(64), state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
+        configDigest: canonicalDigest({ schedule: '* * * * *', method: 'POST' }), state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
     });
-    const iam = (role: 'preflight' | 'paid') => ({
-        policyDigest: '4'.repeat(64), desiredBindings: [`${role}:desired`], retiredBindings: [],
-    });
-    return {
+    const iam = (role: 'preflight' | 'paid') => {
+        const policies = platformInputs(kind).iam[role];
+        return {
+            policyDigest: canonicalIamPolicyDigest(policies),
+            desiredBindings: canonicalIamBindingDigests(policies),
+            retiredBindings: [],
+        };
+    };
+    const baseManifest = {
         roleSlots,
         build: identity(kind === 'old' ? 'old-build@example-project.iam.gserviceaccount.com' : 'new-build@example-project.iam.gserviceaccount.com'),
         source: { preflight: revision('preflight'), paid: revision('paid') },
         producer: { preflight: producer('preflight'), paid: producer('paid') },
         queues: { preflight: queue('preflight'), paid: queue('paid') },
         recoverySchedulers: { preflight: scheduler('preflight'), paid: scheduler('paid') },
-        retention: { resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/retention`, project: PROJECT, location: 'asia-northeast3', enabled: true, configDigest: '5'.repeat(64) },
+        retention: { resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/retention`, project: PROJECT, location: 'asia-northeast3', enabled: true, configDigest: canonicalDigest({ enabled: true }) },
         iam: { preflight: iam('preflight'), paid: iam('paid') },
         readiness: {
             schemaVersion: 'analysis-public-freeze-readiness-v3', sourceSha: 'b'.repeat(40),
@@ -152,6 +161,17 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
             analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false,
         },
     } as unknown as CapacityManifest;
+    if (kind === 'desired') {
+        const retired = deriveRetiredIamBindingDigests(manifest('old'), baseManifest, platformInputs('old'));
+        return {
+            ...baseManifest,
+            iam: {
+                preflight: { ...baseManifest.iam.preflight, retiredBindings: retired.preflight },
+                paid: { ...baseManifest.iam.paid, retiredBindings: retired.paid },
+            },
+        } as CapacityManifest;
+    }
+    return baseManifest;
 }
 
 function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
@@ -165,7 +185,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
         environment: runtimeEnvironment(role, suffix),
         secretReferences: runtimeSecretReferences(role),
         settings: runtimeSettings(role),
-        target: { url: `https://${role}.example.com/api/analysis/${role}/worker`, audience: `https://${role}.example.com` },
+        target: { url: `https://${role}.example.com${workerPath(role)}`, audience: `https://${role}.example.com` },
         noTraffic: true,
         providerAdmissionEnabled: true,
     });
@@ -174,7 +194,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
         project: PROJECT,
         location: 'asia-northeast3',
         target: {
-            url: `https://${role}.example.com/api/analysis/${role}/worker`,
+            url: `https://${role}.example.com${workerPath(role)}`,
             audience: `https://${role}.example.com`,
             callerIdentity: identity(`${role}.task-caller-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         },
@@ -185,7 +205,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
         project: PROJECT,
         location: 'asia-northeast3',
         target: {
-            uri: `https://${role}.example.com/api/analysis/${role}/recover`,
+            uri: `https://${role}.example.com${recoveryPath(role)}`,
             audience: `https://${role}.example.com`,
             identity: identity(`${role}.maintenance-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         },
@@ -338,19 +358,19 @@ function observationTargets(): ProtectedObservationTargets {
 }
 
 function packet() {
-    return createProtectedPacket({
+    const input = {
         epochId: 'epoch-fixture', lockNamespace: 'fixture-lock', roleSet: [...ROLES],
         oldManifest: manifest('old'), desiredManifest: manifest('desired'),
         protectedInputs: { old: platformInputs('old'), desired: platformInputs('desired') },
         activation: { analysisV2AdmissionEnabled: true, earlybirdWebhookAutoAdmissionEnabled: true },
         quiescence: { timeoutMs: 60_000, graceMs: 5_000 },
-        observationInputs: { sourceDigest: '6'.repeat(64), iamDigest: '7'.repeat(64), queueDigest: '8'.repeat(64), schedulerDigest: '9'.repeat(64), retentionDigest: 'a'.repeat(64), readinessDigest: 'b'.repeat(64), zeroWorkDigest: 'c'.repeat(64) },
         protectedObservations: { old: oldObservations(), desired: observationTargets() },
         probe: {
-            bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 },
-            expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' },
+            bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 } as const,
+            expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' } as const,
         },
-    });
+    };
+    return createProtectedPacket({ ...input, observationInputs: deriveObservationInputDigests(input) });
 }
 
 function synchronizeDesiredRuntimeProof(value: any, role: 'preflight' | 'paid') {
@@ -358,7 +378,7 @@ function synchronizeDesiredRuntimeProof(value: any, role: 'preflight' | 'paid') 
     value.protectedObservations.desired.runtime[role] = JSON.parse(JSON.stringify(runtime));
     value.desiredManifest.source[role].desiredRuntimeEnvironment = JSON.parse(JSON.stringify(runtime.environment));
     value.desiredManifest.source[role].desiredRuntimeSettings = { ...runtime.settings };
-    value.desiredManifest.source[role].desiredRuntimeDigest = canonicalDigest(runtime);
+    value.desiredManifest.source[role].desiredRuntimeDigest = canonicalRuntimeInputDigest(runtime);
     value.protectedObservations.desired.source[role].desiredRuntimeDigest = value.desiredManifest.source[role].desiredRuntimeDigest;
 }
 
@@ -418,6 +438,7 @@ describe('coordinated epoch protected packet', () => {
         value.protectedInputs.old.runtime.paid.sourceSha = paidOldSha;
         value.protectedObservations.old.source.paid.sourceSha = paidOldSha;
         value.protectedObservations.old.runtime.paid.sourceSha = paidOldSha;
+        value.observationInputs = deriveObservationInputDigests(value);
         expect(() => createProtectedPacket(value)).not.toThrow();
     });
 
@@ -531,6 +552,68 @@ describe('coordinated epoch protected packet', () => {
         expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
     });
 
+    it('rejects an old readiness proof that is not ready and closed', () => {
+        const value = packet() as any;
+        value.protectedObservations.old.readiness.ready = false;
+        expect(() => createProtectedPacket(value)).toThrow('READINESS_INVALID');
+    });
+
+    it('rejects mutable old revision provenance and preselected desired revision IDs', () => {
+        const oldAlias = packet() as any;
+        oldAlias.oldManifest.source.preflight.oldRevision = 'latest';
+        oldAlias.protectedInputs.old.runtime.preflight.revision = 'latest';
+        oldAlias.protectedObservations.old.source.preflight.revision = 'latest';
+        oldAlias.protectedObservations.old.runtime.preflight.revision = 'latest';
+        expect(() => createProtectedPacket(oldAlias)).toThrow('SOURCE_INVALID');
+
+        const preselected = packet() as any;
+        preselected.desiredManifest.source.preflight.desiredRevisionId = 'preflight-operator-picked';
+        expect(() => createProtectedPacket(preselected)).toThrow('SOURCE_INVALID');
+    });
+
+    it('joins each producer source to its reviewed Vercel readiness source', () => {
+        const value = packet() as any;
+        value.desiredManifest.producer.preflight.sourceSha = 'c'.repeat(40);
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+    });
+
+    it('rejects a valid-looking queue configuration digest that is not its canonical payload', () => {
+        const value = packet() as any;
+        value.desiredManifest.queues.preflight.configDigest = 'd'.repeat(64);
+        expect(() => createProtectedPacket(value)).toThrow('RESOURCE_INVALID');
+    });
+
+    it('rejects retention resources with the wrong provider kind even when copies agree', () => {
+        const value = packet() as any;
+        const wrong = `projects/${PROJECT}/locations/asia-northeast3/queues/retention`;
+        value.oldManifest.retention.resource = wrong;
+        value.desiredManifest.retention.resource = wrong;
+        value.protectedInputs.old.retention.resource = wrong;
+        value.protectedInputs.desired.retention.resource = wrong;
+        value.protectedObservations.old.retention.resource = wrong;
+        value.protectedObservations.desired.retention.resource = wrong;
+        expect(() => createProtectedPacket(value)).toThrow('RESOURCE_INVALID');
+    });
+
+    it('rejects plaintext provider credentials even when every copied env agrees', () => {
+        const value = packet() as any;
+        const runtime = value.protectedInputs.desired.runtime.preflight;
+        runtime.environment.SUPABASE_SERVICE_ROLE_KEY = 'plaintext-fixture-secret';
+        synchronizeDesiredRuntimeProof(value, 'preflight');
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+    });
+
+    it('rejects public Run invocation grants in the private auth graph', () => {
+        const value = packet() as any;
+        const publicGrant = { role: 'roles/run.invoker', member: 'allUsers', condition: null };
+        value.protectedInputs.old.iam.preflight.run.bindings.push(publicGrant);
+        value.protectedInputs.desired.iam.preflight.run.bindings.push(publicGrant);
+        value.protectedInputs.desired.iam.preflight.run.previous.bindings.push(publicGrant);
+        value.protectedObservations.old.iam.preflight.run.bindings.push(publicGrant);
+        value.protectedObservations.desired.iam.preflight.run.bindings.push(publicGrant);
+        expect(() => createProtectedPacket(value)).toThrow('RESOURCE_INVALID');
+    });
+
     it('rejects synchronized incomplete or wrong provider secret contracts', () => {
         const missingSecrets = packet() as any;
         missingSecrets.protectedInputs.desired.runtime.preflight.secretReferences = {};
@@ -562,8 +645,15 @@ describe('coordinated epoch protected packet', () => {
         preserved.protectedInputs.old.iam.preflight.maintenance.bindings.push(unrelated);
         preserved.protectedInputs.desired.iam.preflight.maintenance.bindings.push(unrelated);
         preserved.protectedInputs.desired.iam.preflight.maintenance.previous.bindings.push(unrelated);
+        for (const phase of ['oldManifest', 'desiredManifest'] as const) {
+            const source = phase === 'oldManifest' ? preserved.protectedInputs.old : preserved.protectedInputs.desired;
+            const roleIam = source.iam.preflight;
+            preserved[phase].iam.preflight.policyDigest = canonicalIamPolicyDigest(roleIam);
+            preserved[phase].iam.preflight.desiredBindings = canonicalIamBindingDigests(roleIam);
+        }
         preserved.protectedObservations.old.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.old.iam));
         preserved.protectedObservations.desired.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.desired.iam));
+        preserved.observationInputs = deriveObservationInputDigests(preserved);
         expect(() => createProtectedPacket(preserved)).not.toThrow();
 
         const dropped = packet() as any;
@@ -577,6 +667,21 @@ describe('coordinated epoch protected packet', () => {
             condition: null,
         });
         expect(() => createProtectedPacket(inventedMaintenanceGrant)).toThrow('RESOURCE_INVALID');
+    });
+
+    it('binds the exact old workload grants retired after promotion', () => {
+        const value = packet() as any;
+        for (const role of ROLES) {
+            expect(value.desiredManifest.iam[role].retiredBindings.length).toBeGreaterThan(0);
+        }
+
+        const missing = packet() as any;
+        missing.desiredManifest.iam.preflight.retiredBindings = [];
+        expect(() => createProtectedPacket(missing)).toThrow('RESOURCE_INVALID');
+
+        const altered = packet() as any;
+        altered.desiredManifest.iam.paid.retiredBindings[0] = 'f'.repeat(64);
+        expect(() => createProtectedPacket(altered)).toThrow('RESOURCE_INVALID');
     });
 
     it('rejects malformed, cross-project, wildcard, and user-managed-key identities', () => {

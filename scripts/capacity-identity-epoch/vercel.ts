@@ -184,10 +184,14 @@ export class VercelAdapter {
         const deployment = await this.getDeployment({ projectId: options.projectId, teamId: options.teamId, deploymentId: options.deploymentId });
         if (deployment.readyState !== 'READY' || deployment.sourceSha !== options.expectedSourceSha) fail('ADAPTER_RESPONSE_INVALID');
         const prior = await this.getAlias({ alias: options.alias, projectId: options.projectId, teamId: options.teamId, allowMissing: true });
+        // The reviewed transition is an ownership move from a known old
+        // deployment.  A missing alias is not equivalent to that owner and
+        // must fail closed before POST; there is no invented Vercel CAS field.
+        if (!prior) fail('OBSERVATION_RACE');
         if (prior && prior.deploymentId === options.deploymentId) return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });
         if (prior && prior.deploymentId !== options.expectedOldDeploymentId) fail('OBSERVATION_RACE');
         const path = `/v2/deployments/${encodeURIComponent(options.deploymentId)}/aliases`;
-        await this.transport.json({
+        const response = await this.transport.json({
             method: 'POST',
             url: `https://api.vercel.com${path}?teamId=${encodeURIComponent(options.teamId)}`,
             allowedHosts: HOSTS,
@@ -197,6 +201,12 @@ export class VercelAdapter {
             acceptedStatuses: [200, 201],
             body: { alias: options.alias, redirect: null },
         });
+        const post = object(response.value);
+        if (post.alias !== options.alias || post.projectId !== options.projectId || post.deploymentId !== options.deploymentId
+            || (post.oldDeploymentId !== undefined && post.oldDeploymentId !== options.expectedOldDeploymentId)) fail('OBSERVATION_RACE');
+        // The pre-read is an ownership barrier, not a provider-side atomic
+        // CAS.  The independent post-read below detects a race after POST and
+        // prevents this adapter from claiming success if another owner won.
         const assigned = await this.getAlias({ alias: options.alias, projectId: options.projectId, teamId: options.teamId, expectedDeploymentId: options.deploymentId });
         if (!assigned || assigned.alias !== options.alias) fail('ADAPTER_RESPONSE_INVALID');
         return this.getAliases({ deploymentId: options.deploymentId, teamId: options.teamId });

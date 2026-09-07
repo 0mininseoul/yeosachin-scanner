@@ -12,10 +12,11 @@ import { AuthenticatedProtectedTransport } from './platform';
 const HOSTS = new Set(['iam.googleapis.com', 'run.googleapis.com', 'cloudtasks.googleapis.com']);
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
-const RESOURCE = /^[a-z][a-z0-9-]{0,62}$/;
+const SERVICE_RESOURCE = /^[a-z][a-z0-9-]{0,62}$/;
+const QUEUE_RESOURCE = /^[A-Za-z0-9_-]{1,100}$/;
 const ETAG = /^[A-Za-z0-9+/_=-]{1,256}$/;
 const ROLE = /^(?:roles\/[A-Za-z0-9._-]{1,256}|projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/roles\/[A-Za-z0-9._-]{1,256}|organizations\/[0-9]+\/roles\/[A-Za-z0-9._-]{1,256})$/;
-const MEMBER = /^(?:allUsers|allAuthenticatedUsers|serviceAccount|group|user|domain|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$|^(?:allUsers|allAuthenticatedUsers)$/;
+const MEMBER = /^(?:allUsers|allAuthenticatedUsers|serviceAccount|group|user|domain|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$|^deleted:(?:user|group|domain|serviceAccount|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$|^(?:allUsers|allAuthenticatedUsers)$/;
 
 type WireCondition = Readonly<{ title?: string; description?: string; expression?: string; location?: string }>;
 type WireBinding = Readonly<{ role: string; members: readonly string[]; condition?: WireCondition }>;
@@ -120,12 +121,12 @@ function parseResource(resource: string, kind: ProtectedIamInput['kind'], projec
     assertProject(project);
     if (kind === 'run' || kind === 'maintenance') {
         const match = resource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/services\/([^/]+)$/);
-        if (!match || match[1] !== project || !LOCATION.test(match[2]!) || !RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
-        return { host: 'run.googleapis.com', path: `/v2/${resource}`, method: 'GET', queryKeys: ['options.requestedPolicyVersion'], body: undefined };
+        if (!match || match[1] !== project || !LOCATION.test(match[2]!) || !SERVICE_RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
+        return { host: `${match[2]}-run.googleapis.com`, path: `/v2/${resource}`, method: 'GET', queryKeys: ['options.requestedPolicyVersion'], body: undefined };
     }
     if (kind === 'queue') {
         const match = resource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/queues\/([^/]+)$/);
-        if (!match || match[1] !== project || !LOCATION.test(match[2]!) || !RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
+        if (!match || match[1] !== project || !LOCATION.test(match[2]!) || !QUEUE_RESOURCE.test(match[3]!)) fail('RESOURCE_INVALID');
         return { host: 'cloudtasks.googleapis.com', path: `/v2/${resource}`, method: 'POST', queryKeys: [], body: { options: { requestedPolicyVersion: 3 } } };
     }
     const match = resource.match(/^projects\/([^/]+)\/serviceAccounts\/([^/]+)$/);
@@ -155,7 +156,7 @@ export class IamAdapter {
         const endpoint = parseResource(input.resource, input.kind, input.project);
         const path = `${endpoint.path}:setIamPolicy`;
         await this.transport.json({
-            method: 'POST', url: `https://${endpoint.host}${path}`, allowedHosts: HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'],
+            method: 'POST', url: `https://${endpoint.host}${path}`, allowedHosts: new Set([...HOSTS, endpoint.host]), allowedPath: candidate => candidate === path, allowedMethods: ['POST'],
             allowedQueryKeys: [],
             acceptedStatuses: [200], body: { policy: wire },
         });
@@ -187,7 +188,7 @@ export class IamAdapter {
         const path = `${endpoint.path}:getIamPolicy`;
         const query = endpoint.queryKeys.length === 0 ? '' : '?options.requestedPolicyVersion=3';
         const { value } = await this.transport.json({
-            method: endpoint.method, url: `https://${endpoint.host}${path}${query}`, allowedHosts: HOSTS, allowedPath: candidate => candidate === path, allowedMethods: [endpoint.method],
+            method: endpoint.method, url: `https://${endpoint.host}${path}${query}`, allowedHosts: new Set([...HOSTS, endpoint.host]), allowedPath: candidate => candidate === path, allowedMethods: [endpoint.method],
             allowedQueryKeys: endpoint.queryKeys,
             ...(endpoint.body === undefined ? {} : { body: endpoint.body }), acceptedStatuses: [200],
         });

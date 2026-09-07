@@ -1,6 +1,7 @@
 import {
     EpochError,
     canonicalDigest,
+    canonicalRuntimeInputDigest,
     epochFail,
     isObject,
     type ProtectedIdentity,
@@ -17,7 +18,7 @@ const DECIMAL = /^[1-9][0-9]*$/;
 const IMAGE_REFERENCE = /^[^\s\u0000-\u001f\u007f]{1,2048}$/;
 const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/;
 
-function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'RUNTIME_MISMATCH'): never {
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_TIMEOUT' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'RUNTIME_MISMATCH'): never {
     epochFail(code);
 }
 
@@ -66,6 +67,8 @@ export type CloudRunServiceObservation = Readonly<{
     project: string;
     location: string;
     service: string;
+    /** Provider-reported service URL; never copied from the reviewed target. */
+    url: string;
     generation: string;
     resourceVersion: string;
     observedGeneration: string;
@@ -84,6 +87,23 @@ export type CloudRunServiceObservation = Readonly<{
     sourceSha: '';
     noTraffic: boolean;
     rawDigest: string;
+    raw: Readonly<Record<string, unknown>>;
+}>;
+
+export type CloudRunRevisionObservation = Readonly<{
+    project: string;
+    location: string;
+    revision: string;
+    generation: string;
+    resourceVersion: string;
+    ready: boolean;
+    identity: ProtectedIdentity;
+    environment: Readonly<Record<string, string>>;
+    secretReferences: Readonly<Record<string, string>>;
+    settings: RuntimeSettings;
+    image: string;
+    runtimeDigest: string;
+    buildDigest: string;
     raw: Readonly<Record<string, unknown>>;
 }>;
 
@@ -108,11 +128,20 @@ function parseEnvironment(container: Record<string, unknown>): { environment: Re
     return { environment, secretReferences };
 }
 
+function parseHttpsOrigin(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 2048) fail('ADAPTER_RESPONSE_INVALID');
+    let parsed: URL;
+    try { parsed = new URL(value); } catch { fail('ADAPTER_RESPONSE_INVALID'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') fail('ADAPTER_RESPONSE_INVALID');
+    return parsed.toString();
+}
+
 function parseService(resource: string, body: Record<string, unknown>): CloudRunServiceObservation {
     const { project, location, service } = parseResource(resource);
     const metadata = object(body.metadata);
     const spec = object(body.spec);
     const status = object(body.status);
+    const url = parseHttpsOrigin(status.url);
     const template = object(spec.template);
     const templateMetadata = object(template.metadata ?? {});
     const templateSpec = object(template.spec);
@@ -152,7 +181,10 @@ function parseService(resource: string, body: Record<string, unknown>): CloudRun
     const latestReadyRevision = status.latestReadyRevisionName ?? null;
     if (latestCreatedRevision !== null) assertRevision(latestCreatedRevision);
     if (latestReadyRevision !== null) assertRevision(latestReadyRevision);
-    const rawTraffic = status.traffic ?? spec.traffic ?? [];
+    // Serving traffic is an independent status fact.  Falling back to the
+    // requested spec would let a stale or incomplete provider response
+    // masquerade as an observed serving/no-traffic proof.
+    const rawTraffic = status.traffic;
     if (!Array.isArray(rawTraffic)) fail('ADAPTER_RESPONSE_INVALID');
     const traffic = rawTraffic.map(entry => {
         const item = object(entry);
@@ -163,10 +195,10 @@ function parseService(resource: string, body: Record<string, unknown>): CloudRun
         if (tag !== null && (typeof tag !== 'string' || !REVISION.test(tag))) fail('ADAPTER_RESPONSE_INVALID');
         return { revisionName, percent: item.percent as number, tag };
     });
-    const runtimeDigest = canonicalDigest({ identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings });
+    const runtimeDigest = canonicalRuntimeInputDigest({ identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings });
     const buildDigest = canonicalDigest({ image });
     return {
-        resource, project, location, service, generation: generationValue, resourceVersion, observedGeneration, ready, latestCreatedRevision, latestReadyRevision,
+        resource, project, location, service, url, generation: generationValue, resourceVersion, observedGeneration, ready, latestCreatedRevision, latestReadyRevision,
         traffic, identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings, image,
         runtimeDigest, buildDigest, sourceSha: '', noTraffic: traffic.length === 0 || traffic.every(entry => entry.percent === 0),
         rawDigest: canonicalDigest(body), raw: body,
@@ -177,14 +209,71 @@ function generationValueOrFail(value: unknown): string {
     return generation(value);
 }
 
-export type CloudRunAdapterOptions = Readonly<{ transport: AuthenticatedProtectedTransport }>;
+function parseRevisionObservation(project: string, location: string, revision: string, body: Record<string, unknown>): CloudRunRevisionObservation {
+    const metadata = object(body.metadata);
+    const spec = object(body.spec);
+    const status = object(body.status);
+    if (metadata.name !== revision) fail('ADAPTER_RESPONSE_INVALID');
+    const generation = generationValueOrFail(metadata.generation);
+    const resourceVersion = metadata.resourceVersion;
+    if (typeof resourceVersion !== 'string' || resourceVersion.length === 0 || resourceVersion.length > 512 || /[\u0000-\u001f\u007f]/.test(resourceVersion)) fail('ADAPTER_RESPONSE_INVALID');
+    const serviceAccountName = spec.serviceAccountName;
+    if (typeof serviceAccountName !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(serviceAccountName)) fail('ADAPTER_RESPONSE_INVALID');
+    const identity = { identity: serviceAccountName, project: serviceAccountName.split('@')[1]!.replace(/\.iam\.gserviceaccount\.com$/, '') };
+    if (identity.project !== project) fail('PROJECT_MISMATCH');
+    const containers = spec.containers;
+    if (!Array.isArray(containers) || containers.length !== 1) fail('ADAPTER_RESPONSE_INVALID');
+    const container = object(containers[0]);
+    const image = container.image;
+    if (typeof image !== 'string' || !IMAGE_REFERENCE.test(image)) fail('ADAPTER_RESPONSE_INVALID');
+    const parsedEnv = parseEnvironment(container);
+    const resources = object(container.resources);
+    const limits = object(resources.limits);
+    if (typeof limits.cpu !== 'string' || typeof limits.memory !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+    const annotations = object(metadata.annotations ?? {});
+    const settings: RuntimeSettings = {
+        cpu: limits.cpu,
+        memory: limits.memory,
+        concurrency: numberValue(spec.containerConcurrency),
+        timeoutSeconds: numberValue(spec.timeoutSeconds),
+        maxInstances: numberValue(annotations['autoscaling.knative.dev/maxScale']),
+    };
+    const conditions = status.conditions;
+    if (!Array.isArray(conditions)) fail('ADAPTER_RESPONSE_INVALID');
+    const ready = conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'True');
+    if (typeof status.imageDigest !== 'string' || !IMAGE_DIGEST.test(status.imageDigest)) fail('ADAPTER_RESPONSE_INVALID');
+    return {
+        project, location, revision, generation, resourceVersion, ready, identity,
+        environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings, image,
+        runtimeDigest: canonicalRuntimeInputDigest({ identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings }),
+        buildDigest: canonicalDigest({ image }), raw: body,
+    };
+}
+
+export type CloudRunAdapterOptions = Readonly<{
+    transport: AuthenticatedProtectedTransport;
+    now?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
+    pollTimeoutMs?: number;
+    pollIntervalMs?: number;
+}>;
 
 /** Cloud Run v1 regional adapter: GET/PUT Service and independent GET read-back. */
 export class CloudRunAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
+    private readonly now: () => number;
+    private readonly sleep: (milliseconds: number) => Promise<void>;
+    private readonly pollTimeoutMs: number;
+    private readonly pollIntervalMs: number;
 
     constructor(options: CloudRunAdapterOptions) {
         this.transport = options.transport;
+        this.now = options.now ?? (() => Date.now());
+        this.sleep = options.sleep ?? ((milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds)));
+        this.pollTimeoutMs = options.pollTimeoutMs ?? 120_000;
+        this.pollIntervalMs = options.pollIntervalMs ?? 250;
+        if (!Number.isSafeInteger(this.pollTimeoutMs) || this.pollTimeoutMs <= 0
+            || !Number.isSafeInteger(this.pollIntervalMs) || this.pollIntervalMs < 0) fail('ADAPTER_REQUEST_INVALID');
     }
 
     async getService(resource: string): Promise<CloudRunServiceObservation> {
@@ -212,6 +301,12 @@ export class CloudRunAdapter {
         return revisionObject;
     }
 
+    /** Independent immutable revision read used for STAGED evidence. */
+    async observeRevision(project: string, location: string, revision: string): Promise<CloudRunRevisionObservation> {
+        const body = await this.getRevision(project, location, revision);
+        return parseRevisionObservation(project, location, revision, body);
+    }
+
     async applyService(options: Readonly<{
         resource: string;
         expectedGeneration: string;
@@ -232,10 +327,25 @@ export class CloudRunAdapter {
             allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['PUT'],
             allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200],
         });
-        const after = await this.getService(options.resource);
-        if (after.generation === before.generation || after.resourceVersion === before.resourceVersion
-            || after.observedGeneration !== after.generation || !after.ready) fail('OBSERVATION_RACE');
-        return after;
+        const requestedSpec = object(body.spec);
+        return this.waitForServicePostcondition(options.resource, requestedSpec);
+    }
+
+    private async waitForServicePostcondition(resource: string, requestedSpec: Record<string, unknown>): Promise<CloudRunServiceObservation> {
+        const startedAt = this.now();
+        if (!Number.isSafeInteger(startedAt) || startedAt < 0) fail('ADAPTER_REQUEST_INVALID');
+        const deadline = startedAt + this.pollTimeoutMs;
+        for (;;) {
+            const after = await this.getService(resource);
+            const observedSpec = object(after.raw.spec);
+            const exactPostcondition = canonicalDigest(observedSpec) === canonicalDigest(requestedSpec);
+            if (after.observedGeneration === after.generation && after.ready && exactPostcondition) return after;
+            const status = object(after.raw.status);
+            if (Array.isArray(status.conditions) && status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'False')) fail('OBSERVATION_RACE');
+            const now = this.now();
+            if (!Number.isSafeInteger(now) || now < startedAt || now >= deadline) fail('ADAPTER_TIMEOUT');
+            await this.sleep(Math.min(this.pollIntervalMs, deadline - now));
+        }
     }
 
     async stageRevision(options: Readonly<{
@@ -293,32 +403,12 @@ export class CloudRunAdapter {
     }
 
     private assertRevisionMatches(body: Record<string, unknown>, runtime: ProtectedRuntimeInput, revision: string): void {
-        const metadata = object(body.metadata);
-        if (metadata.name !== revision) fail('OBSERVATION_RACE');
-        const spec = object(body.spec);
-        const serviceAccountName = spec.serviceAccountName;
-        if (serviceAccountName !== runtime.identity.identity) fail('OBSERVATION_RACE');
-        const containers = spec.containers;
-        if (!Array.isArray(containers) || containers.length !== 1) fail('ADAPTER_RESPONSE_INVALID');
-        const container = object(containers[0]);
-        if (typeof container.image !== 'string' || !IMAGE_REFERENCE.test(container.image)) fail('ADAPTER_RESPONSE_INVALID');
-        const parsedEnv = parseEnvironment(container);
-        const resources = object(container.resources);
-        const limits = object(resources.limits);
-        const annotations = object(metadata.annotations ?? {});
-        const actualSettings: RuntimeSettings = {
-            cpu: typeof limits.cpu === 'string' ? limits.cpu : fail('ADAPTER_RESPONSE_INVALID'),
-            memory: typeof limits.memory === 'string' ? limits.memory : fail('ADAPTER_RESPONSE_INVALID'),
-            concurrency: numberValue(spec.containerConcurrency),
-            timeoutSeconds: numberValue(spec.timeoutSeconds),
-            maxInstances: numberValue(annotations['autoscaling.knative.dev/maxScale']),
-        };
-        if (canonicalDigest(parsedEnv.environment) !== canonicalDigest(runtime.environment)
-            || canonicalDigest(parsedEnv.secretReferences) !== canonicalDigest(runtime.secretReferences)
-            || canonicalDigest(actualSettings) !== canonicalDigest(runtime.settings)) fail('RUNTIME_MISMATCH');
-        const status = object(body.status ?? {});
-        if (!Array.isArray(status.conditions) || !status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'True')) fail('OBSERVATION_RACE');
-        if (typeof status.imageDigest !== 'string' || !IMAGE_DIGEST.test(status.imageDigest)) fail('ADAPTER_RESPONSE_INVALID');
+        const observed = parseRevisionObservation(runtime.project, runtime.location, revision, body);
+        if (observed.identity.identity !== runtime.identity.identity
+            || canonicalDigest(observed.environment) !== canonicalDigest(runtime.environment)
+            || canonicalDigest(observed.secretReferences) !== canonicalDigest(runtime.secretReferences)
+            || canonicalDigest(observed.settings) !== canonicalDigest(runtime.settings)) fail('RUNTIME_MISMATCH');
+        if (!observed.ready) fail('OBSERVATION_RACE');
     }
 
     private validateRevisionWire(body: Record<string, unknown>, revision: string): void {

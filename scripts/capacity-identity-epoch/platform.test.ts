@@ -10,7 +10,7 @@ import { CloudRunAdapter } from './cloud-run';
 import { IamAdapter } from './iam';
 import { WorkPlaneClient } from './work-planes';
 import { VercelAdapter } from './vercel';
-import { canonicalDigest, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedSchedulerInput } from './contracts';
+import { canonicalDigest, canonicalRuntimeInputDigest, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedSchedulerInput } from './contracts';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
 class FakeTransport implements ProtectedTransport {
@@ -36,16 +36,16 @@ const serviceResource = `projects/${project}/locations/asia-northeast3/services/
 const queueResource = `projects/${project}/locations/asia-northeast3/queues/preflight`;
 const schedulerResource = `projects/${project}/locations/asia-northeast3/jobs/preflight-recovery`;
 
-function runService(generation = '2') {
+function runService(generation = '2', traffic = [{ revisionName: 'preflight-revision', percent: 0 }]) {
     return {
         metadata: { generation: Number(generation), resourceVersion: `rv-${generation}` },
         spec: {
             template: { metadata: { name: 'preflight-revision', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
                 spec: { serviceAccountName: 'worker@fixture-project.iam.gserviceaccount.com', containerConcurrency: 1, timeoutSeconds: 600,
                     containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }], }, },
-            traffic: [{ revisionName: 'preflight-revision', percent: 0 }],
+            traffic,
         },
-        status: { observedGeneration: Number(generation), conditions: [{ type: 'Ready', status: 'True' }], latestCreatedRevisionName: 'preflight-revision', latestReadyRevisionName: 'preflight-revision', traffic: [{ revisionName: 'preflight-revision', percent: 0 }] },
+        status: { url: 'https://worker.example.invalid/', observedGeneration: Number(generation), conditions: [{ type: 'Ready', status: 'True' }], latestCreatedRevisionName: 'preflight-revision', latestReadyRevisionName: 'preflight-revision', traffic },
     };
 }
 
@@ -90,6 +90,26 @@ describe('protected platform adapters', () => {
         expect(fake.requests[2]?.body).toContain('resourceVersion');
     });
 
+    it('accepts an idempotent Cloud Run PUT only after exact spec read-back', async () => {
+        const service = runService('2');
+        const fake = new FakeTransport(request => {
+            if (request.method === 'PUT') return response(request, 200, service);
+            return response(request, 200, service);
+        });
+        const observed = await new CloudRunAdapter({ transport: authenticated(fake) }).applyService({
+            resource: serviceResource, expectedGeneration: '2', body: service,
+        });
+        expect(observed.generation).toBe('2');
+        expect(observed.resourceVersion).toBe('rv-2');
+    });
+
+    it('requires independent Cloud Run status traffic evidence', async () => {
+        const service = runService();
+        delete (service.status as Record<string, unknown>).traffic;
+        const fake = new FakeTransport(request => response(request, 200, service));
+        await expect(new CloudRunAdapter({ transport: authenticated(fake) }).getService(serviceResource)).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+    });
+
     it('keeps secret references separate from nonsecret environment in a full v1 runtime', async () => {
         const service = runService();
         const container = service.spec.template.spec.containers[0] as Record<string, unknown>;
@@ -127,7 +147,7 @@ describe('protected platform adapters', () => {
             target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid' }, noTraffic: true, providerAdmissionEnabled: true,
         };
         const revision = {
-            metadata: { name: 'preflight-revision', generation: 1, annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
+            metadata: { name: 'preflight-revision', generation: 1, resourceVersion: 'revision-rv-1', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
             spec: { serviceAccountName: runtime.identity.identity, containerConcurrency: 1, timeoutSeconds: 600,
                 containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
             status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
@@ -140,6 +160,49 @@ describe('protected platform adapters', () => {
         const after = await new CloudRunAdapter({ transport: authenticated(fake) }).stageRevision({ runtime, revision: 'preflight-revision', expectedGeneration: '2', serviceBody: runService('3') });
         expect(after.noTraffic).toBe(true);
         expect(fake.requests.at(-1)?.url).toContain('/revisions/preflight-revision');
+        const revisionObserved = await new CloudRunAdapter({ transport: authenticated(new FakeTransport(request => response(request, 200, revision))) }).observeRevision(project, 'asia-northeast3', 'preflight-revision');
+        expect(revisionObserved.runtimeDigest).toBe(canonicalRuntimeInputDigest(runtime));
+        expect(revisionObserved.buildDigest).toBe(canonicalDigest({ image: revision.spec.containers[0].image }));
+    });
+
+    it('keeps one immutable runtime digest across OLD100, staged DESIRED0, and DESIRED100', async () => {
+        const oldTraffic = [{ revisionName: 'old-revision', percent: 100 }];
+        const stagedTraffic = [...oldTraffic, { revisionName: 'preflight-revision', percent: 0 }];
+        const promotedTraffic = [{ revisionName: 'preflight-revision', percent: 100 }];
+        let phase: 'old' | 'staged' | 'promoted' = 'old';
+        const runtime = {
+            role: 'preflight' as const, service: 'preflight-worker', project, location: 'asia-northeast3',
+            identity: { identity: 'worker@fixture-project.iam.gserviceaccount.com', project }, sourceSha: 'a'.repeat(40),
+            environment: { ROLE: 'preflight' }, secretReferences: {}, settings: { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: 2 },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid' }, noTraffic: true, providerAdmissionEnabled: true,
+        };
+        const revision = {
+            metadata: { name: 'preflight-revision', generation: 1, resourceVersion: 'revision-rv-1', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
+            spec: { serviceAccountName: runtime.identity.identity, containerConcurrency: 1, timeoutSeconds: 600,
+                containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
+            status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
+        };
+        const fake = new FakeTransport(request => {
+            if (request.url.includes('/revisions/')) return response(request, 200, revision);
+            if (request.method === 'PUT') {
+                const body = JSON.parse(request.body!) as Record<string, any>;
+                const traffic = body.spec.traffic as Array<{ revisionName: string; percent: number }>;
+                phase = traffic.some(entry => entry.revisionName === 'preflight-revision' && entry.percent === 100) ? 'promoted' : 'staged';
+                return response(request, 200, runService(phase === 'promoted' ? '4' : '3', phase === 'promoted' ? promotedTraffic : stagedTraffic));
+            }
+            if (phase === 'old') return response(request, 200, runService('2', oldTraffic));
+            if (phase === 'staged') return response(request, 200, runService('3', stagedTraffic));
+            return response(request, 200, runService('4', promotedTraffic));
+        });
+        const adapter = new CloudRunAdapter({ transport: authenticated(fake) });
+        const staged = await adapter.stageRevision({ runtime, revision: 'preflight-revision', expectedGeneration: '2', serviceBody: runService('3', stagedTraffic) });
+        expect(staged.traffic).toEqual([
+            { revisionName: 'old-revision', percent: 100, tag: null },
+            { revisionName: 'preflight-revision', percent: 0, tag: null },
+        ]);
+        const promoted = await adapter.setTraffic({ resource: serviceResource, expectedGeneration: '3', expectedRevision: 'preflight-revision', expectedPercent: 100, traffic: promotedTraffic });
+        expect(promoted.traffic).toEqual([{ revisionName: 'preflight-revision', percent: 100, tag: null }]);
+        expect(staged.runtimeDigest).toBe(promoted.runtimeDigest);
     });
 
     it('performs IAM etag read/write while preserving unrelated bindings', async () => {
@@ -191,6 +254,8 @@ describe('protected platform adapters', () => {
         const get = fake.requests.find(request => request.url.includes(':getIamPolicy'))!;
         expect(get.method).toBe('GET');
         expect(get.body).toBeUndefined();
+        expect(new URL(get.url).hostname).toBe('asia-northeast3-run.googleapis.com');
+        expect(new URL(get.url).pathname).toBe(`/v2/${serviceResource}:getIamPolicy`);
         expect(get.url).toContain('options.requestedPolicyVersion=3');
     });
 
@@ -237,6 +302,12 @@ describe('protected platform adapters', () => {
             return response(request, 200, { state: 'PAUSED', rateLimits: {}, httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } });
         });
         await expect(new WorkPlaneClient({ transport: authenticated(repeated) }).observeQueue(queue)).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+
+        const emptyTerminal = new FakeTransport(request => {
+            if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [], nextPageToken: '' });
+            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } });
+        });
+        await expect(new WorkPlaneClient({ transport: authenticated(emptyTerminal) }).observeQueue(queue)).resolves.toMatchObject({ tasks: [] });
     });
 
     it('keeps absent Cloud Tasks httpTarget explicit and never creates a reviewed override', async () => {
@@ -257,6 +328,27 @@ describe('protected platform adapters', () => {
         expect(fake.requests.some(request => request.method === 'PATCH')).toBe(false);
     });
 
+    it('permits state mutation for a queue whose optional httpTarget is explicitly absent', async () => {
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            configuration: { maxConcurrentDispatches: 2 },
+        };
+        let state: 'PAUSED' | 'RUNNING' = 'PAUSED';
+        const fake = new FakeTransport(request => {
+            if (request.method === 'POST') {
+                state = 'RUNNING';
+                return response(request, 200, {});
+            }
+            if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [], nextPageToken: '' });
+            return response(request, 200, { state, rateLimits: { maxConcurrentDispatches: 2 } });
+        });
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake) }).resumeQueue(queue);
+        expect(observed.state).toBe('RUNNING');
+        expect(observed.target).toBeNull();
+        expect(fake.requests.some(request => request.method === 'POST')).toBe(true);
+    });
+
     it('rejects the non-wire Cloud Tasks enforceMode spelling', async () => {
         const override = { scheme: 'https', host: 'worker.example.invalid', enforceMode: 'IF_NOT_EXISTS' };
         const queue: ProtectedQueueInput = {
@@ -273,16 +365,36 @@ describe('protected platform adapters', () => {
     it('pauses Scheduler through the real operation endpoint and reads state back', async () => {
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3',
-            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@example-project.iam.gserviceaccount.com', project } },
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
             configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
         };
         const schedulerWire = { name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: 'maintenance@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } };
         const fake = new FakeTransport(request => {
             return response(request, 200, schedulerWire);
         });
-        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async () => 1, now: () => 2_000 }).pauseScheduler(scheduler);
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }), now: () => 2_000 }).pauseScheduler(scheduler);
         expect(observed.state).toBe('PAUSED');
-        expect(fake.requests[0]?.url).toContain(':pause');
+        expect(fake.requests.find(request => request.method === 'POST')?.url).toContain(':pause');
+    });
+
+    it('validates queue and scheduler resource scope before state mutation', async () => {
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'wrong-location',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            configuration: { maxConcurrentDispatches: 2 },
+        };
+        const queueFake = new FakeTransport(() => { throw new Error('queue mutation must not run'); });
+        await expect(new WorkPlaneClient({ transport: authenticated(queueFake) }).pauseQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
+        expect(queueFake.requests).toHaveLength(0);
+
+        const scheduler: ProtectedSchedulerInput = {
+            resource: schedulerResource, project, location: 'wrong-location',
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
+            configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
+        };
+        const schedulerFake = new FakeTransport(() => { throw new Error('scheduler mutation must not run'); });
+        await expect(new WorkPlaneClient({ transport: authenticated(schedulerFake, 'fixture-token'), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }) }).pauseScheduler(scheduler)).rejects.toThrow('RESOURCE_INVALID');
+        expect(schedulerFake.requests).toHaveLength(0);
     });
 
     it('preserves Cloud Tasks uriOverride, method, headers, and auth while changing only reviewed OIDC', async () => {
@@ -328,7 +440,7 @@ describe('protected platform adapters', () => {
             gets += 1;
             return response(request, 200, wire(gets === 1 ? oldTarget : desiredTarget));
         });
-        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async () => 1, now: () => 2_000 }).updateSchedulerTarget({ input, expectedOldTarget: oldTarget, desiredTarget });
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidenceDigest: 'a'.repeat(64), complete: true }), now: () => 2_000 }).updateSchedulerTarget({ input, expectedOldTarget: oldTarget, desiredTarget });
         expect(observed.target).toEqual(desiredTarget);
     });
 
@@ -418,6 +530,17 @@ describe('protected platform adapters', () => {
             const url = new URL(request.url);
             if (url.pathname.includes('/v13/deployments/')) return response(request, 200, { id: 'dpl-desired', url: 'desired-fixture.vercel.app', readyState: 'READY', project: { id: 'project-fixture' }, team: { id: 'team-fixture' }, gitSource: { sha: 'a'.repeat(40) } });
             return response(request, 200, { alias: 'desired.example.invalid', projectId: 'project-fixture', deploymentId: 'dpl-other' });
+        });
+        const adapter = new VercelAdapter({ transport: authenticated(fake), publicReadinessOrigin: 'https://public.example.invalid', readinessFetcher: vi.fn() });
+        await expect(adapter.assignAlias({ projectId: 'project-fixture', teamId: 'team-fixture', deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', expectedSourceSha: 'a'.repeat(40), alias: 'desired.example.invalid' })).rejects.toThrow('OBSERVATION_RACE');
+        expect(fake.requests.some(request => request.method === 'POST')).toBe(false);
+    });
+
+    it('rejects a missing alias owner before POST', async () => {
+        const fake = new FakeTransport(request => {
+            const url = new URL(request.url);
+            if (url.pathname.includes('/v13/deployments/')) return response(request, 200, { id: 'dpl-desired', url: 'desired-fixture.vercel.app', readyState: 'READY', project: { id: 'project-fixture' }, team: { id: 'team-fixture' }, gitSource: { sha: 'a'.repeat(40) } });
+            return response(request, 404, {});
         });
         const adapter = new VercelAdapter({ transport: authenticated(fake), publicReadinessOrigin: 'https://public.example.invalid', readinessFetcher: vi.fn() });
         await expect(adapter.assignAlias({ projectId: 'project-fixture', teamId: 'team-fixture', deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', expectedSourceSha: 'a'.repeat(40), alias: 'desired.example.invalid' })).rejects.toThrow('OBSERVATION_RACE');

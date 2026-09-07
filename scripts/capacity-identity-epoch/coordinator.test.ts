@@ -36,6 +36,7 @@ function evidence(state: string, sequence: number): OperationEvidence {
 
 class FixtureControlPlane implements EpochControlPlane {
     readonly calls: string[] = [];
+    verifyCalls = 0;
     failAt: string | undefined;
 
     private run(state: string): OperationEvidence {
@@ -49,8 +50,10 @@ class FixtureControlPlane implements EpochControlPlane {
     async alignQueues(): Promise<OperationEvidence> { return this.run('QUEUES_ALIGNED'); }
     async rotateInvokers(): Promise<OperationEvidence> { return this.run('INVOKERS_ROTATED'); }
     async promote(): Promise<OperationEvidence> { return this.run('SERVICES_PROMOTED'); }
-    async verify(): Promise<OperationEvidence> { return this.run('VERIFIED'); }
-    async reconcile(input: { state: State }): Promise<OperationEvidence> { return this.run(`RECONCILE_${input.state}`); }
+    async verify(): Promise<OperationEvidence> { this.verifyCalls += 1; return this.run('VERIFIED'); }
+    async reconcile(input: { state: State }): Promise<OperationEvidence> {
+        return input.state === 'VERIFIED' ? this.verify() : this.run(`RECONCILE_${input.state}`);
+    }
     async compensateActivation(): Promise<OperationEvidence> { return this.run('COMPENSATED'); }
     async activate(): Promise<OperationEvidence> { return this.run('ACTIVATED'); }
 }
@@ -90,6 +93,15 @@ describe('ordered coordinator', () => {
         expect(first.controlPlane.calls).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED', 'VERIFIED']);
     });
 
+    it('activates after a resumed fresh proof while retaining the durable VERIFIED anchor', async () => {
+        const first = setup();
+        const initial = await first.coordinator.runThroughVerified();
+        const resumed = await first.coordinator.runThroughVerified();
+        expect(resumed.proofDigest).not.toBe(initial.proofDigest);
+        const authorization = first.coordinator.issueActivationAuthorization();
+        await expect(first.coordinator.activate(authorization)).resolves.toMatchObject({ state: 'ACTIVATED' });
+    });
+
     it('requires opaque fresh authorization for offline activation and rejects copied tokens', async () => {
         const { coordinator, controlPlane } = setup();
         const result = await coordinator.runThroughVerified();
@@ -119,6 +131,28 @@ describe('ordered coordinator', () => {
         const state = await journal.readValidatedState(lease);
         expect(state.state).toBe('PRODUCERS_CLOSED_ALIGNED');
         expect(state.transitions).toHaveLength(3);
+    });
+
+    it('runs one fresh VERIFIED proof when a new owner reconciles an expired lease', async () => {
+        let now = 1_000;
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 10_000 });
+        const firstPlane = new FixtureControlPlane();
+        const first = new EpochCoordinator({ packet, journal, controlPlane: firstPlane, ownerDigest: canonicalDigest('owner-a'), now: () => now });
+        await first.runThroughVerified();
+        expect(firstPlane.verifyCalls).toBe(1);
+        now = 12_000;
+        const secondPlane = new FixtureControlPlane();
+        const second = new EpochCoordinator({ packet, journal, controlPlane: secondPlane, ownerDigest: canonicalDigest('owner-b'), now: () => now });
+        await second.runThroughVerified();
+        expect(secondPlane.verifyCalls).toBe(1);
     });
 
     it('rejects a capability bound to a different owner before journal work', () => {

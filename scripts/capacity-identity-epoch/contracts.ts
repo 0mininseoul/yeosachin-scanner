@@ -234,6 +234,55 @@ export type ProtectedIamInputs = Readonly<Record<Role, Readonly<{
     maintenance: ProtectedIamInput;
 }>>>;
 
+/**
+ * The provider adapters expose bindings as a flat list while the reviewed
+ * packet carries one policy contract per role.  Keep the projection shared
+ * by packet validation, fixtures, and live evidence so a digest cannot be a
+ * caller-selected marker disconnected from the policy payload.
+ */
+export function canonicalIamPolicyProjection(value: ProtectedIamInputs[Role]): readonly Readonly<{
+    kind: ProtectedIamInput['kind'];
+    resource: string;
+    project: string;
+    bindings: readonly ProtectedIamBinding[];
+}>[] {
+    return (['run', 'queue', 'taskCaller', 'maintenance'] as const).map(kind => ({
+        kind,
+        resource: value[kind].resource,
+        project: value[kind].project,
+        bindings: [...value[kind].bindings].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right))),
+    }));
+}
+
+export function canonicalIamPolicyDigest(value: ProtectedIamInputs[Role]): string {
+    return canonicalDigest(canonicalIamPolicyProjection(value));
+}
+
+export function canonicalIamBindingDigests(value: ProtectedIamInputs[Role]): readonly string[] {
+    return (['run', 'queue', 'taskCaller', 'maintenance'] as const)
+        .flatMap(kind => value[kind].bindings.map(binding => canonicalDigest(binding)))
+        .sort();
+}
+
+/**
+ * Runtime/config identity is immutable across STAGED and PROMOTED. Routing
+ * state (`noTraffic`) is an operation postcondition and must never be folded
+ * into the revision digest, otherwise one reviewed digest cannot describe
+ * both the staged zero-percent revision and its later serving state.
+ */
+export function canonicalRuntimeInputProjection(value: Pick<ProtectedRuntimeInput, 'identity' | 'environment' | 'secretReferences' | 'settings'>): Readonly<Pick<ProtectedRuntimeInput, 'identity' | 'environment' | 'secretReferences' | 'settings'>> {
+    return {
+        identity: value.identity,
+        environment: value.environment,
+        secretReferences: value.secretReferences,
+        settings: value.settings,
+    };
+}
+
+export function canonicalRuntimeInputDigest(value: Pick<ProtectedRuntimeInput, 'identity' | 'environment' | 'secretReferences' | 'settings'>): string {
+    return canonicalDigest(canonicalRuntimeInputProjection(value));
+}
+
 export type ProtectedRetentionInput = Readonly<{
     resource: string;
     project: string;
@@ -416,6 +465,27 @@ export const MANIFEST_KEYS = [
 
 export function isObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Normalize the reviewed queue config shape to the Cloud Tasks provider
+ * projection.  Protected fixtures may use flat rate-limit names, while the
+ * wire API returns them under `rateLimits`; `httpTarget` is intentionally
+ * excluded because it is validated as a separate full target observation.
+ */
+export function canonicalQueueConfiguration(value: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
+    const result: Record<string, unknown> = {};
+    const rateLimits: Record<string, unknown> = {};
+    const nested = value.rateLimits;
+    if (isObject(nested)) Object.assign(rateLimits, nested);
+    if (value.maxDispatchesPerSecond !== undefined) rateLimits.maxDispatchesPerSecond = value.maxDispatchesPerSecond;
+    if (value.maxConcurrentDispatches !== undefined) rateLimits.maxConcurrentDispatches = value.maxConcurrentDispatches;
+    if (Object.keys(rateLimits).length > 0) result.rateLimits = rateLimits;
+    for (const key of Object.keys(value)) {
+        if (key === 'rateLimits' || key === 'maxDispatchesPerSecond' || key === 'maxConcurrentDispatches' || key === 'httpTarget') continue;
+        result[key] = value[key];
+    }
+    return result;
 }
 
 export function hasExactKeys(value: object, expected: readonly string[]): boolean {
