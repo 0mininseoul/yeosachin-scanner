@@ -1339,7 +1339,10 @@ export function loadProtectedPacket(descriptor: ProtectedPacketDescriptor): Capa
     } catch {
         epochFail('PROTECTED_INPUT_UNAVAILABLE');
     }
-    if ((!stat.isFile() && !stat.isFIFO())
+    // Descriptor reads are synchronous and bounded; a FIFO could block an
+    // operator process indefinitely, so only a private regular file is
+    // accepted as the inherited protected channel.
+    if (!stat.isFile()
         || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
         || (stat.mode & 0o077) !== 0) epochFail('PROTECTED_INPUT_UNAVAILABLE');
     const chunks: Buffer[] = [];

@@ -6,6 +6,9 @@ import { createFixturePacket } from './capacity-identity-epoch/fixtures';
 import { EpochCoordinator, type EpochControlPlane, type OperationEvidence } from './capacity-identity-epoch/coordinator';
 import { EpochJournal, type JournalStorage, type StoredObject } from './capacity-identity-epoch/journal';
 import { canonicalDigest, EpochError, type EpochHeader, type State } from './capacity-identity-epoch/contracts';
+import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
+import { chmodSync, closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 
@@ -107,5 +110,34 @@ describe('provider-free coordinated identity epoch integration', () => {
         expect(result.stderr).toBe('PROTECTED_INPUT_UNAVAILABLE\n');
         expect(result.stdout).not.toMatch(/example-project|https?:\/\//);
         expect(result.stderr).not.toMatch(/example-project|https?:\/\//);
+    });
+
+    it('constructs the real adapter graph only after packet-bound bootstrap validation', () => {
+        const packet = createFixturePacket();
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('provider-free-bootstrap-owner'), lockNamespace: packet.lockNamespace,
+            bucket: 'fixture-epoch-bucket', publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
+            projectId: 'example-project', teamId: 'fixture-team', deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old',
+            producerAlias: 'desired.example.invalid', vercelToken: 'fixture-vercel-token',
+            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } },
+        } as const;
+        const directory = mkdtempSync(join(tmpdir(), 'identity-epoch-bootstrap-'));
+        const descriptorPath = join(directory, 'bootstrap.json');
+        writeFileSync(descriptorPath, JSON.stringify(descriptor), { mode: 0o600 });
+        const fd = openSync(descriptorPath, 'r');
+        try {
+            chmodSync(descriptorPath, 0o600);
+            const loaded = loadProtectedLiveBootstrap(fd);
+            const live = buildLiveBootstrap(packet, loaded);
+            expect(live.missingEvidence).toEqual([
+                'sourceObservation', 'buildObservation', 'pauseProvenance',
+                'zeroWorkBaseline', 'zeroWorkObservation', 'probe',
+            ]);
+            expect(live.journal.headerKey).toContain('epoch-header');
+        } finally {
+            closeSync(fd);
+            rmSync(directory, { recursive: true, force: true });
+        }
+        expect(() => buildLiveBootstrap(packet, { ...descriptor, packetDigest: 'f'.repeat(64) })).toThrow('CAPABILITY_BINDING_MISMATCH');
     });
 });

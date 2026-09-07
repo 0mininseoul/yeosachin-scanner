@@ -1,55 +1,24 @@
 /**
  * Safe operator entrypoint for the coordinated capacity identity epoch.
  *
- * This command intentionally has no dotenv loading and no fixture mode.  A
- * read-only check requires a protected inherited packet descriptor.  Apply is
- * an explicit, separately reviewed operation and refuses to construct a live
- * mutation path until protected adapter descriptors are supplied by the
- * operator integration.  In particular, no arbitrary URL, boolean bypass, or
- * serialized capability can authorize a run.
+ * No dotenv loading, fixture mode, arbitrary URL, or boolean bypass is
+ * supported. The packet and live bootstrap are both private inherited
+ * descriptors; bootstrap binds their protected resource scope before any
+ * authenticated adapter is constructed. `apply --through VERIFIED` stops at
+ * VERIFIED and is separate from the coordinator's proof-bound activation API.
  */
-import { fstatSync, readSync } from 'node:fs';
-import { canonicalDigest, EpochError, epochFail, hasExactKeys, isObject } from './capacity-identity-epoch/contracts';
+import { canonicalDigest, EpochError, epochFail } from './capacity-identity-epoch/contracts';
 import { loadProtectedPacket } from './capacity-identity-epoch/packet';
-
-const MAX_DESCRIPTOR_BYTES = 65_536;
-const DIGEST = /^[0-9a-f]{64}$/;
+import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
 
 type Command = 'check' | 'apply';
 
-function fail(code: 'ADAPTER_REQUEST_INVALID' | 'PROTECTED_INPUT_UNAVAILABLE' | 'ACTIVATION_AUTH_REQUIRED'): never {
+function fail(code: 'ADAPTER_REQUEST_INVALID' | 'PROTECTED_INPUT_UNAVAILABLE' | 'ACTIVATION_AUTH_REQUIRED' | 'CAPABILITY_BINDING_MISMATCH'): never {
     epochFail(code);
 }
 
 function usage(): void {
-    process.stdout.write('usage: run-capacity-identity-epoch.ts [check|apply] --packet-fd FD [--through VERIFIED]\n');
-}
-
-function readDescriptor(fd: number): unknown {
-    if (!Number.isInteger(fd) || fd < 0) fail('PROTECTED_INPUT_UNAVAILABLE');
-    let stat;
-    try { stat = fstatSync(fd); } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
-    if ((!stat.isFile() && !stat.isFIFO())
-        || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
-        || (stat.mode & 0o077) !== 0) fail('PROTECTED_INPUT_UNAVAILABLE');
-    const chunks: Buffer[] = [];
-    let total = 0;
-    try {
-        while (true) {
-            const buffer = Buffer.allocUnsafe(Math.min(16_384, MAX_DESCRIPTOR_BYTES + 1 - total));
-            const count = readSync(fd, buffer, 0, buffer.length, null);
-            if (count === 0) break;
-            total += count;
-            if (total > MAX_DESCRIPTOR_BYTES) fail('PROTECTED_INPUT_UNAVAILABLE');
-            chunks.push(buffer.subarray(0, count));
-        }
-    } catch (error) {
-        if (error instanceof EpochError) throw error;
-        fail('PROTECTED_INPUT_UNAVAILABLE');
-    }
-    let value: unknown;
-    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail('PROTECTED_INPUT_UNAVAILABLE'); }
-    return value;
+    process.stdout.write('usage: run-capacity-identity-epoch.ts [check|apply] --packet-fd FD --bootstrap-fd FD [--through VERIFIED]\n');
 }
 
 function parseFd(value: string | undefined): number {
@@ -59,14 +28,14 @@ function parseFd(value: string | undefined): number {
     return fd;
 }
 
-function parseArguments(argv: readonly string[]): Readonly<{ command: Command; packetFd?: number; through?: string; capabilityFd?: number; help: boolean }> {
+function parseArguments(argv: readonly string[]): Readonly<{ command: Command; packetFd?: number; bootstrapFd?: number; through?: string; help: boolean }> {
     let command: Command = 'check';
     let packetFd: number | undefined;
-    let capabilityFd: number | undefined;
+    let bootstrapFd: number | undefined;
     let through: string | undefined;
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
-        if (arg === '--help' || arg === '-h') return { command, packetFd, capabilityFd, through, help: true };
+        if (arg === '--help' || arg === '-h') return { command, packetFd, bootstrapFd, through, help: true };
         if ((arg === 'check' || arg === 'apply') && index === 0) {
             command = arg;
             continue;
@@ -76,9 +45,9 @@ function parseArguments(argv: readonly string[]): Readonly<{ command: Command; p
             packetFd = parseFd(argv[++index]);
             continue;
         }
-        if (arg === '--capability-fd') {
-            if (capabilityFd !== undefined) fail('ADAPTER_REQUEST_INVALID');
-            capabilityFd = parseFd(argv[++index]);
+        if (arg === '--bootstrap-fd') {
+            if (bootstrapFd !== undefined) fail('ADAPTER_REQUEST_INVALID');
+            bootstrapFd = parseFd(argv[++index]);
             continue;
         }
         if (arg === '--through') {
@@ -88,38 +57,38 @@ function parseArguments(argv: readonly string[]): Readonly<{ command: Command; p
         }
         fail('ADAPTER_REQUEST_INVALID');
     }
-    return { command, packetFd, capabilityFd, through, help: false };
+    return { command, packetFd, bootstrapFd, through, help: false };
 }
 
-function run(): void {
+async function run(): Promise<void> {
     const options = parseArguments(process.argv.slice(2));
     if (options.help) {
         usage();
         return;
     }
-    if (options.packetFd === undefined) fail('PROTECTED_INPUT_UNAVAILABLE');
+    if (options.packetFd === undefined || options.bootstrapFd === undefined) fail('PROTECTED_INPUT_UNAVAILABLE');
     const packet = loadProtectedPacket({ fd: options.packetFd });
-    const packetDigest = canonicalDigest(packet);
+    const bootstrapDescriptor = loadProtectedLiveBootstrap(options.bootstrapFd);
+    const live = buildLiveBootstrap(packet, bootstrapDescriptor);
     if (options.command === 'check') {
         if (options.through !== undefined && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
-        process.stdout.write(`CHECK_OK packetDigest=${packetDigest}\n`);
+        // Adapter construction and packet/resource binding are part of the
+        // read-only preflight. No journal header/lock or provider request is
+        // written by this command. Missing independent source/ledger/probe
+        // channels are a fixed, non-success outcome.
+        if (live.missingEvidence.length > 0) fail('PROTECTED_INPUT_UNAVAILABLE');
+        process.stdout.write(`CHECK_OK packetDigest=${canonicalDigest(packet)}\n`);
         return;
     }
-    if (options.through !== 'VERIFIED' || options.capabilityFd === undefined) fail('ACTIVATION_AUTH_REQUIRED');
-    // A serialized capability is never accepted as authorization.  Reading a
-    // descriptor here only proves that the protected operator channel exists;
-    // the in-process opaque capability must still be issued by a validated
-    // coordinator bootstrap.  Live adapters are intentionally not built by
-    // this initial provider-free command without their reviewed descriptors.
-    const descriptor = readDescriptor(options.capabilityFd);
-    if (!isObject(descriptor) || !hasExactKeys(descriptor, ['ownerDigest'])
-        || typeof descriptor.ownerDigest !== 'string' || !DIGEST.test(descriptor.ownerDigest)) fail('ACTIVATION_AUTH_REQUIRED');
-    fail('PROTECTED_INPUT_UNAVAILABLE');
+    if (options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
+    if (live.missingEvidence.length > 0) fail('PROTECTED_INPUT_UNAVAILABLE');
+    // This path is deliberately closed until the reviewed evidence channels
+    // are supplied to the bootstrap descriptor. When supplied, the concrete
+    // coordinator runs through VERIFIED; it never calls activation.
+    await live.coordinator.runThroughVerified();
 }
 
-try {
-    run();
-} catch (error) {
+void run().catch((error: unknown) => {
     if (error instanceof EpochError) {
         process.stderr.write(`${error.code}\n`);
         process.exitCode = 2;
@@ -127,5 +96,4 @@ try {
         process.stderr.write('ADAPTER_REQUEST_INVALID\n');
         process.exitCode = 2;
     }
-}
-
+});
