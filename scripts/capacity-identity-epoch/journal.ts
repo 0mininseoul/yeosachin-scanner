@@ -124,6 +124,7 @@ function nextFence(lock: EpochLock | null): string {
 }
 
 export class EpochJournal {
+    readonly epochIdDigest: string;
     readonly epochHeaderDigest: string;
     readonly headerKey: string;
     readonly lockKey: string;
@@ -143,6 +144,7 @@ export class EpochJournal {
         validateHeader(options.header);
         this.storage = storage;
         this.header = options.header;
+        this.epochIdDigest = options.header.epochIdDigest;
         this.epochHeaderDigest = canonicalDigest(options.header);
         const prefix = options.keyPrefix ?? 'epoch';
         if (!/^[a-z0-9-]{1,32}$/.test(prefix)) epochFail('JOURNAL_INVALID');
