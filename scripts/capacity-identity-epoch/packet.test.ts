@@ -545,6 +545,11 @@ describe('coordinated epoch protected packet', () => {
         preflightWrongPool.protectedInputs.desired.runtime.preflight.environment.PREFLIGHT_APIFY_API_TOKEN_SLOTS = 'primary';
         synchronizeDesiredRuntimeProof(preflightWrongPool, 'preflight');
         expect(() => createProtectedPacket(preflightWrongPool)).toThrow('SOURCE_INVALID');
+
+        const changedSecretVersion = packet() as any;
+        changedSecretVersion.protectedInputs.desired.runtime.preflight.secretReferences.APIFY_PRIMARY_API_TOKEN = 'fixture-secret:987';
+        synchronizeDesiredRuntimeProof(changedSecretVersion, 'preflight');
+        expect(() => createProtectedPacket(changedSecretVersion)).toThrow('SOURCE_INVALID');
     });
 
     it('preserves unrelated old IAM policy bindings and rejects unapproved additions', () => {

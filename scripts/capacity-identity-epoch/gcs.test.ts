@@ -27,7 +27,9 @@ describe('protected GCS journal storage', () => {
         const transport = new FakeTransport([
             response(200, '{"name":"fixture.json","generation":"900719925474099312345"}', { 'x-goog-generation': '900719925474099312345' }),
             response(200, '{"epoch":"value"}', { 'x-goog-generation': '900719925474099312345' }),
-            response(200, '{"generation":"900719925474099312346"}', { 'x-goog-generation': '900719925474099312346' }),
+            response(200, '{"name":"fixture.json","generation":"900719925474099312346"}', { 'x-goog-generation': '900719925474099312346' }),
+            response(200, '{"name":"fixture.json","generation":"900719925474099312346"}'),
+            response(200, '{"next":true}', { 'x-goog-generation': '900719925474099312346' }),
         ]);
         const storage = new GcsJournalStorage({
             bucket: 'fixture-bucket', transport, tokenProvider: async () => 'fixture-token',
@@ -37,6 +39,8 @@ describe('protected GCS journal storage', () => {
         expect(found?.value).toEqual({ epoch: 'value' });
         const stored = await storage.put('fixture.json', { next: true }, { ifGenerationMatch: found!.generation });
         expect(stored.generation).toBe('900719925474099312346');
+        expect(transport.requests[2]?.method).toBe('POST');
+        expect(transport.requests[2]?.url).toContain('uploadType=media');
         expect(transport.requests[2]?.url).toContain('ifGenerationMatch=900719925474099312345');
         expect(transport.requests[2]?.headers.authorization).toBe('Bearer fixture-token');
     });
@@ -74,5 +78,67 @@ describe('protected GCS journal storage', () => {
 
         expect(() => new GcsJournalStorage({ bucket: 'fixture/bucket', transport: cas, tokenProvider: async () => 'x' })).toThrow(EpochError);
         expect(canonicalDigest('fixture')).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('pins media reads to metadata generations and rejects generation drift', async () => {
+        const drift = new FakeTransport([
+            response(200, '{"name":"fixture.json","generation":"11"}'),
+            response(200, '{"value":1}', { 'x-goog-generation': '12' }),
+        ]);
+        const storage = new GcsJournalStorage({ bucket: 'fixture-bucket', transport: drift, tokenProvider: async () => 'x' });
+        await expect(storage.get('fixture.json')).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+        expect(drift.requests[1]?.url).toContain('generation=11');
+    });
+
+    it('rejects malformed pagination, repeated tokens, duplicate keys, and out-of-prefix rows', async () => {
+        const malformedToken = new FakeTransport([response(200, '{"items":[],"nextPageToken":7}')]);
+        await expect(new GcsJournalStorage({ bucket: 'fixture-bucket', transport: malformedToken, tokenProvider: async () => 'x' }).list('epoch/')).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+
+        const repeatedToken = new FakeTransport([
+            response(200, '{"items":[],"nextPageToken":"same"}'),
+            response(200, '{"items":[],"nextPageToken":"same"}'),
+        ]);
+        await expect(new GcsJournalStorage({ bucket: 'fixture-bucket', transport: repeatedToken, tokenProvider: async () => 'x' }).list('epoch/')).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+
+        const duplicateKey = new FakeTransport([
+            response(200, '{"items":[{"name":"epoch/a.json","generation":"1"}],"nextPageToken":"next"}'),
+            response(200, '{"a":1}', { 'x-goog-generation': '1' }),
+            response(200, '{"items":[{"name":"epoch/a.json","generation":"1"}]}'),
+        ]);
+        await expect(new GcsJournalStorage({ bucket: 'fixture-bucket', transport: duplicateKey, tokenProvider: async () => 'x' }).list('epoch/')).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+
+        const outsidePrefix = new FakeTransport([response(200, '{"items":[{"name":"other/a.json","generation":"1"}]}')]);
+        await expect(new GcsJournalStorage({ bucket: 'fixture-bucket', transport: outsidePrefix, tokenProvider: async () => 'x' }).list('epoch/')).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+    });
+
+    it('bounds token acquisition and verifies put read-back content', async () => {
+        const timeoutStorage = new GcsJournalStorage({
+            bucket: 'fixture-bucket', transport: new FakeTransport([]), tokenProvider: () => new Promise<string>(() => undefined), timeoutMs: 5,
+        });
+        await expect(timeoutStorage.get('fixture.json')).rejects.toThrow('ADAPTER_TIMEOUT');
+
+        const mismatchedReadback = new FakeTransport([
+            response(200, '{"name":"fixture.json","generation":"2"}'),
+            response(200, '{"name":"fixture.json","generation":"2"}'),
+            response(200, '{"other":true}', { 'x-goog-generation': '2' }),
+        ]);
+        const storage = new GcsJournalStorage({ bucket: 'fixture-bucket', transport: mismatchedReadback, tokenProvider: async () => 'x' });
+        await expect(storage.put('fixture.json', { expected: true }, { ifGenerationMatch: '0' })).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+    });
+
+    it('rejects invalid write keys before token acquisition or transport mutation', async () => {
+        const requests: GcsHttpRequest[] = [];
+        const transport = new FakeTransport([]);
+        const storage = new GcsJournalStorage({
+            bucket: 'fixture-bucket', transport: {
+                request: async request => {
+                    requests.push(request);
+                    return transport.request(request);
+                },
+            }, tokenProvider: async () => 'x',
+        });
+        await expect(storage.put('../outside.json', {}, { ifGenerationMatch: '0' })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
+        await expect(storage.put('bad object name', {}, { ifGenerationMatch: '0' })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
+        expect(requests).toHaveLength(0);
     });
 });

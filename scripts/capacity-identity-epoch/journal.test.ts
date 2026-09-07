@@ -58,6 +58,8 @@ describe('generation-fenced epoch journal', () => {
     it('creates an immutable header and derives contiguous state', async () => {
         const storage = new MemoryStorage();
         const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        expect(journal.headerKey).toBe(`epoch/epoch-header/${header.epochIdDigest}/${header.desiredManifestDigest}.json`);
+        expect(journal.journalPrefix).toBe(`epoch/epoch-journal/${header.epochIdDigest}/`);
         await journal.ensureHeader();
         await journal.ensureHeader();
         const lease = await journal.acquire(digest('owner-a'));
@@ -66,6 +68,35 @@ describe('generation-fenced epoch journal', () => {
         const state = await journal.deriveState();
         expect(state.state).toBe('STAGED');
         expect(state.transitions).toHaveLength(2);
+    });
+
+    it('rejects a conflicting desired header in the same epoch namespace', async () => {
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        const conflicting = { ...header, desiredManifestDigest: digest('other-desired') };
+        await storage.put(`epoch/epoch-header/${header.epochIdDigest}/${conflicting.desiredManifestDigest}.json`, conflicting, { ifGenerationMatch: '0' });
+        await expect(journal.ensureHeader()).rejects.toThrow('JOURNAL_INVALID');
+    });
+
+    it('makes ABORTED a terminal append marker', async () => {
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-abort'));
+        await journal.append(lease, { ...transition(1, null, null, lease.lock.lockFence), resultCode: 'ABORTED' });
+        const state = await journal.deriveState();
+        expect(state).toMatchObject({ state: null, aborted: true });
+        await expect(journal.append(lease, transition(2, null, 'PREPARED', lease.lock.lockFence))).rejects.toThrow('ABORTED_EPOCH');
+
+        const laterStorage = new MemoryStorage();
+        const laterJournal = new EpochJournal(laterStorage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await laterJournal.ensureHeader();
+        const laterLease = await laterJournal.acquire(digest('owner-abort-later'));
+        await laterJournal.append(laterLease, transition(1, null, 'PREPARED', laterLease.lock.lockFence));
+        await laterJournal.append(laterLease, { ...transition(2, 'PREPARED', 'STAGED', laterLease.lock.lockFence) });
+        await laterJournal.append(laterLease, { ...transition(3, 'STAGED', 'STAGED', laterLease.lock.lockFence), resultCode: 'ABORTED' });
+        await expect(laterJournal.append(laterLease, transition(4, 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', laterLease.lock.lockFence))).rejects.toThrow('ABORTED_EPOCH');
+        expect((await laterJournal.deriveState()).state).toBe('STAGED');
     });
 
     it('rejects duplicate, missing, reordered, or content-mismatched transitions', async () => {
@@ -80,7 +111,7 @@ describe('generation-fenced epoch journal', () => {
 
         const entries = await storage.list(journal.journalPrefix);
         const duplicate = transition(1, null, 'PREPARED', lease.lock.lockFence);
-        await storage.put(`${journal.journalPrefix}00000001-${digest('other')}.json`, duplicate, { ifGenerationMatch: '0' });
+        await storage.put(`${journal.journalPrefix}00000001/${digest('other')}.json`, duplicate, { ifGenerationMatch: '0' });
         await expect(journal.deriveState()).rejects.toThrow('JOURNAL_INVALID');
         expect(entries.length).toBe(1);
     });

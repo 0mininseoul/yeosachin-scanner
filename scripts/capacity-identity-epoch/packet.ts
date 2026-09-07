@@ -674,6 +674,13 @@ function validateIamAdditions(oldInputs: ProtectedPlatformInputs, desiredInputs:
     }
 }
 
+function validateSecretReferencePreservation(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs): void {
+    for (const role of ROLES) {
+        if (canonicalDigest(oldInputs.runtime[role].secretReferences)
+            !== canonicalDigest(desiredInputs.runtime[role].secretReferences)) epochFail('SOURCE_INVALID');
+    }
+}
+
 function validateOldObservations(
     value: unknown,
     manifest: CapacityManifest,
@@ -952,6 +959,7 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
     validateManifestComparison(value.oldManifest, value.desiredManifest);
     validatePlatformInputs(protectedInputs.old, value.oldManifest, 'old');
     validatePlatformInputs(protectedInputs.desired, value.desiredManifest, 'desired');
+    validateSecretReferencePreservation(protectedInputs.old, protectedInputs.desired);
     validateIamPreservesOld(protectedInputs.old, protectedInputs.desired);
     validateIamAdditions(protectedInputs.old, protectedInputs.desired, value.desiredManifest);
     validateOldObservations(protectedObservations.old, value.oldManifest, protectedInputs.old);
@@ -968,6 +976,7 @@ export function createProtectedPacket(input: ProtectedPacketInput): CapacityEpoc
     validateManifestComparison(input.oldManifest, input.desiredManifest);
     validatePlatformInputs(input.protectedInputs.old, input.oldManifest, 'old');
     validatePlatformInputs(input.protectedInputs.desired, input.desiredManifest, 'desired');
+    validateSecretReferencePreservation(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamPreservesOld(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamAdditions(input.protectedInputs.old, input.protectedInputs.desired, input.desiredManifest);
     const oldManifestDigest = canonicalDigest(input.oldManifest);

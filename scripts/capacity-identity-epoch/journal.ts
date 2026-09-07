@@ -74,18 +74,22 @@ function validateTransition(value: unknown, header: EpochHeader, expectedFence?:
     const transition = value as Record<string, unknown>;
     const sequence = transition.sequence as unknown;
     const stateVersion = transition.stateVersion as unknown;
-    if (!Number.isSafeInteger(sequence) || (sequence as number) < 1
+    if (!Number.isSafeInteger(sequence) || (sequence as number) < 1 || (sequence as number) > 99_999_999
         || !Number.isSafeInteger(stateVersion) || stateVersion !== sequence
         || transition.epochIdDigest !== header.epochIdDigest
         || (transition.fromState !== null && !isState(transition.fromState))
-        || !isState(transition.toState)
         || typeof transition.lockFence !== 'string' || !GENERATION.test(transition.lockFence)
         || (expectedFence !== undefined && transition.lockFence !== expectedFence)
         || !isDigest(transition.preconditionDigest) || !isDigest(transition.mutationDigest)
         || !isDigest(transition.postconditionDigest) || !isDigest(transition.proofDigest)
         || !isDigest(transition.nativeConcurrencyTokenDigest) || !isDigest(transition.resourceObservationDigest)
-        || !['OK', 'RECONCILED', 'ABORTED'].includes(String(transition.resultCode))
+        || (transition.resultCode !== 'OK' && transition.resultCode !== 'RECONCILED' && transition.resultCode !== 'ABORTED')
         || !safeTimestamp(transition.recordedAt)) epochFail('JOURNAL_INVALID');
+    if (transition.resultCode === 'ABORTED') {
+        if (transition.toState !== transition.fromState) epochFail('JOURNAL_INVALID');
+    } else if (!isState(transition.toState)) {
+        epochFail('JOURNAL_INVALID');
+    }
 }
 
 function lockExpiry(now: number, leaseMs: number): string {
@@ -124,6 +128,7 @@ export class EpochJournal {
     readonly headerKey: string;
     readonly lockKey: string;
     readonly journalPrefix: string;
+    private readonly headerPrefix: string;
     private readonly storage: JournalStorage;
     private readonly header: EpochHeader;
     private readonly now: () => number;
@@ -141,15 +146,25 @@ export class EpochJournal {
         this.epochHeaderDigest = canonicalDigest(options.header);
         const prefix = options.keyPrefix ?? 'epoch';
         if (!/^[a-z0-9-]{1,32}$/.test(prefix)) epochFail('JOURNAL_INVALID');
-        this.headerKey = `${prefix}/epoch-header/${this.epochHeaderDigest}.json`;
+        this.headerPrefix = `${prefix}/epoch-header/${options.header.epochIdDigest}/`;
+        this.headerKey = `${this.headerPrefix}${options.header.desiredManifestDigest}.json`;
         this.lockKey = `${prefix}/epoch-lock/${this.epochHeaderDigest}.lock`;
-        this.journalPrefix = `${prefix}/epoch-journal/${this.epochHeaderDigest}/`;
+        this.journalPrefix = `${prefix}/epoch-journal/${options.header.epochIdDigest}/`;
         this.now = options.now ?? (() => Date.now());
         this.leaseMs = options.leaseMs ?? 60_000;
         if (!Number.isSafeInteger(this.leaseMs) || this.leaseMs <= 0 || this.leaseMs > MAX_LEASE_MS) epochFail('JOURNAL_INVALID');
     }
 
     async ensureHeader(): Promise<void> {
+        const headerEntries = await this.storage.list(this.headerPrefix);
+        for (const entry of headerEntries) {
+            assertGeneration(entry.generation);
+            validateHeader(entry.value);
+            const entryHeader = entry.value as EpochHeader;
+            if (entry.key !== this.headerKey || entryHeader.epochIdDigest !== this.header.epochIdDigest
+                || entryHeader.desiredManifestDigest !== this.header.desiredManifestDigest
+                || canonicalDigest(entryHeader) !== this.epochHeaderDigest) epochFail('JOURNAL_INVALID');
+        }
         const existing = await this.storage.get(this.headerKey);
         if (existing) {
             assertGeneration(existing.generation);
@@ -162,10 +177,13 @@ export class EpochJournal {
             assertGeneration(created.generation);
         } catch (error) {
             if (error instanceof EpochError && error.code === 'GENERATION_PRECONDITION_FAILED') {
-                const raced = await this.storage.get(this.headerKey);
-                if (raced) {
+                const racedEntries = await this.storage.list(this.headerPrefix);
+                for (const raced of racedEntries) {
+                    assertGeneration(raced.generation);
                     validateHeader(raced.value);
-                    if (canonicalDigest(raced.value) === this.epochHeaderDigest) return;
+                    const racedHeader = raced.value as EpochHeader;
+                    if (raced.key === this.headerKey && canonicalDigest(racedHeader) === this.epochHeaderDigest) return;
+                    epochFail('JOURNAL_INVALID');
                 }
             }
             epochFail('GENERATION_PRECONDITION_FAILED');
@@ -231,28 +249,35 @@ export class EpochJournal {
         if (isExpired(currentLock.lock, this.now())) epochFail('LOCK_LOST');
         validateTransition(transition, this.header, currentLock.lock.lockFence);
         const transitionDigest = canonicalDigest(transition);
-        const key = `${this.journalPrefix}${String(transition.sequence).padStart(8, '0')}-${transitionDigest}.json`;
+        const key = `${this.journalPrefix}${String(transition.sequence).padStart(8, '0')}/${transitionDigest}.json`;
         const existing = await this.storage.get(key);
         if (existing) epochFail('GENERATION_PRECONDITION_FAILED');
-        const current = await this.deriveState();
+        const current = await this.deriveState(lease);
+        if (current.aborted) epochFail('ABORTED_EPOCH');
         const expectedSequence = current.transitions.length + 1;
-        if (transition.sequence !== expectedSequence
-            || transition.fromState !== current.state
-            || STATES.indexOf(transition.toState) !== STATES.indexOf(current.state as State) + 1) epochFail('JOURNAL_INVALID');
+        const expectedNextIndex = current.state === null ? 0 : STATES.indexOf(current.state) + 1;
+        const isAbort = transition.resultCode === 'ABORTED';
+        if (transition.sequence !== expectedSequence || transition.fromState !== current.state
+            || (isAbort
+                ? transition.toState !== current.state
+                : STATES.indexOf(transition.toState as State) !== expectedNextIndex)) epochFail('JOURNAL_INVALID');
         try {
             const stored = await this.storage.put(key, transition, { ifGenerationMatch: '0' });
             assertGeneration(stored.generation);
         } catch {
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
-        await this.deriveState();
+        // A takeover can race between the append PUT and its read-back.  The
+        // stale owner must fail closed before reporting a successful append.
+        await this.readLiveLock(lease);
+        await this.deriveState(lease);
     }
 
     async assertLive(lease: JournalLease): Promise<void> {
         await this.readLiveLock(lease);
     }
 
-    async deriveState(): Promise<{ state: State | null; transitions: readonly EpochTransition[] }> {
+    async deriveState(lease?: JournalLease): Promise<{ state: State | null; transitions: readonly EpochTransition[]; aborted: boolean }> {
         const headerObject = await this.storage.get(this.headerKey);
         if (!headerObject) epochFail('JOURNAL_INVALID');
         validateHeader(headerObject.value);
@@ -261,11 +286,12 @@ export class EpochJournal {
         const transitions: EpochTransition[] = [];
         const sequences = new Set<number>();
         let previousFence = '0';
-        for (const entry of entries) {
+        const orderedEntries = [...entries].sort((left, right) => left.key.localeCompare(right.key));
+        for (const entry of orderedEntries) {
             assertGeneration(entry.generation);
             validateTransition(entry.value, this.header);
             const transition = entry.value as EpochTransition;
-            const suffix = entry.key.slice(this.journalPrefix.length).match(/^([0-9]{8})-([0-9a-f]{64})\.json$/);
+            const suffix = entry.key.slice(this.journalPrefix.length).match(/^([0-9]{8})\/([0-9a-f]{64})\.json$/);
             if (!suffix || Number(suffix[1]) !== transition.sequence || suffix[2] !== canonicalDigest(transition)
                 || sequences.has(transition.sequence)) epochFail('JOURNAL_INVALID');
             const fence = transition.lockFence;
@@ -276,14 +302,21 @@ export class EpochJournal {
         }
         transitions.sort((left, right) => left.sequence - right.sequence);
         let state: State | null = null;
+        let aborted = false;
         for (let index = 0; index < transitions.length; index += 1) {
             const transition = transitions[index]!;
-            if (transition.sequence !== index + 1
-                || transition.fromState !== state
-                || STATES.indexOf(transition.toState) !== STATES.indexOf(state as State) + 1) epochFail('JOURNAL_INVALID');
-            state = transition.toState;
+            if (transition.sequence !== index + 1 || transition.fromState !== state || aborted) epochFail('JOURNAL_INVALID');
+            if (transition.resultCode === 'ABORTED') {
+                if (transition.toState !== state) epochFail('JOURNAL_INVALID');
+                aborted = true;
+                continue;
+            }
+            const expectedNextIndex = state === null ? 0 : STATES.indexOf(state) + 1;
+            if (STATES.indexOf(transition.toState as State) !== expectedNextIndex) epochFail('JOURNAL_INVALID');
+            state = transition.toState as State;
         }
-        return { state, transitions };
+        if (lease) await this.readLiveLock(lease);
+        return { state, transitions, aborted };
     }
 
     private async readLiveLock(lease: JournalLease): Promise<JournalLease> {

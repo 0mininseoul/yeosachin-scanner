@@ -395,7 +395,8 @@ export type EpochTransition = Readonly<{
     sequence: number;
     epochIdDigest: string;
     fromState: State | null;
-    toState: State;
+    /** ABORTED records keep the last successful state by using toState=fromState (including null before PREPARED). */
+    toState: State | null;
     stateVersion: number;
     lockFence: string;
     preconditionDigest: string;
