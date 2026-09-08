@@ -12,6 +12,8 @@ import {
     type EpochTransition,
     type State,
 } from './contracts';
+import { CapacityReservation } from './exclusion';
+import type { GuardedJournalStorage } from './gcs';
 
 export type StoredObject = Readonly<{
     generation: string;
@@ -215,6 +217,30 @@ export class EpochJournal {
     }
 
     /**
+     * Return the generation-fenced reservation shared by epochs and ordinary
+     * capacity writers.  It uses this journal's storage and clock, but has a
+     * separate reservation object family so it cannot become a second state
+     * machine or be mistaken for the append-only epoch journal.
+     */
+    createSharedReservation(resources: readonly string[], leaseMs = this.leaseMs): CapacityReservation {
+        return new CapacityReservation(this.storage, { resources, now: this.now, leaseMs });
+    }
+
+    private async putWithLeaseGuard(
+        key: string,
+        value: unknown,
+        options: { ifGenerationMatch: '0' | string },
+        guard: () => Promise<void>,
+    ): Promise<StoredObject> {
+        const guarded = this.storage as JournalStorage & Partial<GuardedJournalStorage>;
+        if (typeof guarded.putWithDispatchGuard === 'function') {
+            return guarded.putWithDispatchGuard(key, value, options, guard);
+        }
+        await guard();
+        return this.storage.put(key, value, options);
+    }
+
+    /**
      * Read-only admission helper.  Callers use this before a fresh epoch is
      * initialized so a rejected PREPARED admission cannot create a header or
      * lock as a side effect.  The retained object is validated exactly as it
@@ -287,7 +313,14 @@ export class EpochJournal {
         }
         await this.assertWritableLease(lease);
         try {
-            const stored = await this.storage.put(this.baselineKey, baseline, { ifGenerationMatch: '0' });
+            const stored = 'putWithDispatchGuard' in this.storage
+                ? await (this.storage as JournalStorage & GuardedJournalStorage).putWithDispatchGuard(
+                    this.baselineKey,
+                    baseline,
+                    { ifGenerationMatch: '0' },
+                    async () => { await this.assertWritableLease(lease); },
+                )
+                : await this.storage.put(this.baselineKey, baseline, { ifGenerationMatch: '0' });
             assertGeneration(stored.generation);
         } catch {
             const retained = await this.readEvidenceBaseline(lease);
@@ -372,7 +405,8 @@ export class EpochJournal {
             const replaced = await this.storage.put(this.lockKey, takeover, { ifGenerationMatch: existing.generation });
             assertGeneration(replaced.generation);
             return { generation: replaced.generation, lock: takeover };
-        } catch {
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
     }
@@ -382,10 +416,16 @@ export class EpochJournal {
         if (isExpired(current.lock, this.now())) epochFail('LOCK_LOST');
         const renewed: EpochLock = { ...current.lock, lockExpiresAt: lockExpiry(this.now(), this.leaseMs) };
         try {
-            const stored = await this.storage.put(this.lockKey, renewed, { ifGenerationMatch: current.generation });
+            const stored = await this.putWithLeaseGuard(
+                this.lockKey,
+                renewed,
+                { ifGenerationMatch: current.generation },
+                async () => { await this.assertWritableLease(lease); },
+            );
             assertGeneration(stored.generation);
             return { generation: stored.generation, lock: renewed };
-        } catch {
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
     }
@@ -408,9 +448,23 @@ export class EpochJournal {
                 ? transition.toState !== current.state
                 : STATES.indexOf(transition.toState as State) !== expectedNextIndex)) epochFail('JOURNAL_INVALID');
         try {
-            const stored = await this.storage.put(key, transition, { ifGenerationMatch: '0' });
+            const stored = await this.putWithLeaseGuard(
+                key,
+                transition,
+                { ifGenerationMatch: '0' },
+                async () => {
+                    // Credential acquisition is an asynchronous authority
+                    // boundary.  Re-check not only ownership/abort state but
+                    // also the exact transition that was eligible before the
+                    // upload began; another same-owner writer may have
+                    // committed a different transition while the token was
+                    // pending.
+                    await this.assertWritableAppendIntent(lease, transition, key);
+                },
+            );
             assertGeneration(stored.generation);
-        } catch {
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
         // A takeover can race between the append PUT and its read-back.  The
@@ -522,6 +576,27 @@ export class EpochJournal {
         const state = await this.deriveState(lease);
         if (state.aborted) epochFail('ABORTED_EPOCH');
         return current;
+    }
+
+    private async assertWritableAppendIntent(
+        lease: JournalLease,
+        transition: EpochTransition,
+        key: string,
+    ): Promise<void> {
+        await this.assertWritableLease(lease);
+        const current = await this.deriveState(lease);
+        const expectedSequence = current.transitions.length + 1;
+        const expectedNextIndex = current.state === null ? 0 : STATES.indexOf(current.state) + 1;
+        const isAbort = transition.resultCode === 'ABORTED';
+        const validState = isAbort
+            ? transition.toState === current.state
+            : STATES.indexOf(transition.toState as State) === expectedNextIndex;
+        if (transition.sequence !== expectedSequence
+            || transition.fromState !== current.state
+            || !validState
+            || current.aborted) epochFail(current.aborted ? 'ABORTED_EPOCH' : 'JOURNAL_INVALID');
+        const existing = await this.storage.get(key);
+        if (existing) epochFail('GENERATION_PRECONDITION_FAILED');
     }
 
     private async readCurrentLock(): Promise<JournalLease> {

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
 
 # Split-capacity Cloud Run deployment. The runtime manifest is the sole
 # non-secret environment source; build inputs and runtime secrets are supplied
@@ -2627,7 +2629,10 @@ if [[ "$mode" == "check" ]]; then
 fi
 
 if [[ "$mode" == "apply" ]]; then
-  acquire_deploy_lock
+  capacity_exclusion_start role-deployer "$role" "${original_args[@]}"
+  if [[ -z "${ANALYSIS_CAPACITY_EXCLUSION_CONTROL_WRITE_FD:-}" ]]; then
+    acquire_deploy_lock
+  fi
 fi
 
 # Existing services are checked against their observed stage before any

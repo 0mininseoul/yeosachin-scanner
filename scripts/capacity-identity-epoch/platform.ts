@@ -196,6 +196,8 @@ export class AuthenticatedProtectedTransport {
         allowedQueryKeys?: readonly string[];
         body?: string;
         acceptedStatuses?: readonly number[];
+        /** Runs after token acquisition and immediately before dispatch. */
+        beforeDispatch?: () => Promise<void>;
     }>): Promise<ProtectedHttpResponse> {
         const url = this.parseAllowedUrl(options.url, options.allowedHosts, options.allowedPath, options.allowedMethods, options.allowedQueryKeys);
         if (options.allowedMethods === undefined || !options.allowedMethods.includes(options.method)) fail('ADAPTER_NOT_ALLOWED');
@@ -222,6 +224,7 @@ export class AuthenticatedProtectedTransport {
             },
             ...(options.body === undefined ? {} : { body: options.body }),
         };
+        if (options.beforeDispatch) await options.beforeDispatch();
         let response: ProtectedHttpResponse;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -256,6 +259,7 @@ export class AuthenticatedProtectedTransport {
         allowedQueryKeys?: readonly string[];
         body?: unknown;
         acceptedStatuses?: readonly number[];
+        beforeDispatch?: () => Promise<void>;
     }>): Promise<{ response: ProtectedHttpResponse; value: unknown }> {
         const body = options.body === undefined ? undefined : JSON.stringify(options.body);
         const response = await this.request({
@@ -267,6 +271,7 @@ export class AuthenticatedProtectedTransport {
             ...(options.allowedQueryKeys === undefined ? {} : { allowedQueryKeys: options.allowedQueryKeys }),
             ...(body === undefined ? {} : { body }),
             ...(options.acceptedStatuses === undefined ? {} : { acceptedStatuses: options.acceptedStatuses }),
+            ...(options.beforeDispatch === undefined ? {} : { beforeDispatch: options.beforeDispatch }),
         });
         return { response, value: parseProtectedJson(response.body, this.maxResponseBytes) };
     }

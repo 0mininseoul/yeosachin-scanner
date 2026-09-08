@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CAPACITY_EXCLUSION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 readonly SCHEDULER_API="cloudscheduler.googleapis.com"
 readonly RECOVERY_SCHEDULE="* * * * *"
 readonly RETENTION_SCHEDULE="*/5 * * * *"
@@ -368,6 +372,9 @@ validate_job "$retention_job"
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
+if [[ "$mode" == "apply" ]]; then
+  capacity_exclusion_start paid-maintenance paid "${original_args[@]}"
+fi
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
 [[ -n "$active_account" ]] || die "gcloud has no active authenticated account"
 

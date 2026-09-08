@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CAPACITY_EXCLUSION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 for name in \
   PREFLIGHT_TASKS_PROJECT \
   PREFLIGHT_TASKS_LOCATION \
@@ -26,6 +30,7 @@ preflight_maintenance_service_account="${PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACC
 }
 
 export ANALYSIS_TASKS_PROJECT="$PREFLIGHT_TASKS_PROJECT"
+export ANALYSIS_CAPACITY_ROLE="preflight"
 export ANALYSIS_TASKS_LOCATION="$PREFLIGHT_TASKS_LOCATION"
 export ANALYSIS_TASKS_QUEUE="$PREFLIGHT_TASKS_QUEUE"
 export ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL"
@@ -47,5 +52,14 @@ export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$PREFLIGHT_TASKS_RUNTIME_SE
 # order at admission until the binding was restored by hand.
 export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="enqueue-view"
 export ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS="serviceAccount:$PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL,serviceAccount:$preflight_maintenance_service_account"
+
+preflight_queue_mode="apply"
+for argument in "$@"; do
+  [[ "$argument" == "--dry-run" || "$argument" == "--check" ]] && preflight_queue_mode="${argument#--}"
+  [[ "$argument" == "--apply" ]] && preflight_queue_mode="apply"
+done
+if [[ "$preflight_queue_mode" == "apply" ]]; then
+  capacity_exclusion_start capacity-queue preflight "${original_args[@]}"
+fi
 
 exec bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"

@@ -19,6 +19,7 @@ import {
     type CoordinatorCapability,
 } from './packet';
 import { EpochJournal, transitionCommitment, type JournalLease } from './journal';
+import { type CapacityReservation, type ReservationLease } from './exclusion';
 import { CloudRunAdapter, type LeaseCheck } from './cloud-run';
 import { issueLeaseCheck } from './lease-capability';
 import { IamAdapter } from './iam';
@@ -76,7 +77,7 @@ export interface EpochControlPlane {
     compensateActivation(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence>;
     activate?(input: Readonly<{ packet: CapacityEpochPacket; lease: JournalLease }>): Promise<OperationEvidence>;
     /** Live implementations notify the coordinator when a lease is renewed mid-operation. */
-    bindLeaseUpdated?(callback: (lease: JournalLease) => void): void;
+    bindLeaseUpdated?(callback: (lease: JournalLease) => Promise<void> | void): void;
 }
 
 type StateOperation = Exclude<State, 'ACTIVATED'>;
@@ -97,6 +98,40 @@ function evidenceDigest(value: unknown): string {
 
 function bindingsDigest(bindings: readonly unknown[]): string {
     return canonicalDigest([...bindings].sort((left, right) => canonicalDigest(left).localeCompare(canonicalDigest(right))));
+}
+
+/**
+ * Derive the common mutation scope from the reviewed packet's exact provider
+ * identities.  `lockNamespace` is intentionally absent: two epochs with
+ * different labels but the same services, queues, schedulers, IAM policies,
+ * retention job, and Vercel producer resources must contend on one key.
+ */
+export function sharedReservationResources(packet: CapacityEpochPacket): readonly string[] {
+    const resources = new Set<string>();
+    // Bucket/project/team values are validation context, not mutation atoms.
+    // Reserve only the exact provider resources that ordinary entry points
+    // can mutate, using the same kind:value spelling as the bridge.
+    resources.add(`vercel:deployment:${packet.providerScope.vercelDeploymentId}`);
+    resources.add(`vercel:deployment:${packet.providerScope.vercelExpectedOldDeploymentId}`);
+    resources.add(`vercel:alias:${packet.providerScope.vercelProducerAlias}`);
+    for (const phase of ['old', 'desired'] as const) {
+        const inputs = packet.protectedInputs[phase];
+        for (const role of ['preflight', 'paid'] as const) {
+            const runtime = inputs.runtime[role];
+            resources.add(`service:projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`);
+            const queue = inputs.queues[role];
+            resources.add(`queue:${queue.resource}`);
+            const scheduler = inputs.schedulers[role];
+            resources.add(`scheduler:${scheduler.resource}`);
+            for (const kind of ['run', 'queue', 'taskCaller', 'maintenance'] as const) {
+                const iam = inputs.iam[role][kind];
+                resources.add(`iam:${iam.resource}`);
+                if (iam.previous) resources.add(`iam:${iam.previous.resource}`);
+            }
+        }
+        resources.add(`retention:${inputs.retention.resource}`);
+    }
+    return Object.freeze([...resources].sort());
 }
 
 function freezeDeep<T>(value: T, seen = new WeakSet<object>()): T {
@@ -169,6 +204,9 @@ export class EpochCoordinator {
     private readonly ownerDigest: string;
     private readonly capability: CoordinatorCapability;
     private readonly now: () => number;
+    /** Common reservation shared with ordinary capacity writers. */
+    private readonly sharedReservation: CapacityReservation;
+    private sharedReservationLease: ReservationLease | undefined;
     private lease: JournalLease | undefined;
     private verifiedProofDigest: string | undefined;
     private durableVerifiedProofDigest: string | undefined;
@@ -182,14 +220,17 @@ export class EpochCoordinator {
         this.capability = options.capability ?? issueCoordinatorCapability(this.packet, options.ownerDigest);
         assertCoordinatorCapability(this.packet, this.capability, options.ownerDigest);
         this.now = options.now ?? (() => Date.now());
-        this.controlPlane.bindLeaseUpdated?.((lease) => {
+        this.sharedReservation = options.journal.createSharedReservation(sharedReservationResources(this.packet));
+        this.controlPlane.bindLeaseUpdated?.(async (lease) => {
             this.lease = lease;
+            await this.renewSharedReservation();
         });
     }
 
     /** Runs the closed rollout through VERIFIED. It never invokes activation. */
     async runThroughVerified(): Promise<Readonly<{ state: 'VERIFIED'; lease: JournalLease; proofDigest: string }>> {
         this.assertCapabilityBinding();
+        try {
         // A proof is scoped to this invocation's fresh observations. Do not
         // let a prior run on the same coordinator instance suppress a new
         // owner/current-fence proof on a later resume.
@@ -198,6 +239,7 @@ export class EpochCoordinator {
         if (!(await this.journal.hasHeader())) {
             await this.controlPlane.admit?.({ packet: this.packet });
         }
+        await this.ensureSharedReservation();
         await this.journal.ensureHeader();
         this.lease = await this.journal.acquire(this.ownerDigest);
         let state = await this.journal.readValidatedState(this.lease);
@@ -225,7 +267,9 @@ export class EpochCoordinator {
                 if (!this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
                 this.verifiedProofDigest = evidenceDigest(evidence.proof);
             }
-            return { state: 'VERIFIED', lease: this.lease, proofDigest: this.verifiedProofDigest };
+            const result = { state: 'VERIFIED' as const, lease: this.lease, proofDigest: this.verifiedProofDigest };
+            await this.releaseSharedReservation();
+            return result;
         }
 
         while (nextIndex <= verifiedIndex) {
@@ -256,6 +300,7 @@ export class EpochCoordinator {
                 evidence,
                 this.now(),
             );
+            await this.assertSharedReservation();
             await this.journal.append(this.lease, transition);
             state = await this.journal.readValidatedState(this.lease);
             state = await this.reconcileUntilStable(state);
@@ -266,7 +311,13 @@ export class EpochCoordinator {
         this.verifiedProofDigest = final.transitions[final.transitions.length - 1]?.proofDigest;
         this.durableVerifiedProofDigest = this.verifiedProofDigest;
         if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
-        return { state: 'VERIFIED', lease: this.lease, proofDigest: this.verifiedProofDigest };
+        const result = { state: 'VERIFIED' as const, lease: this.lease, proofDigest: this.verifiedProofDigest };
+        await this.releaseSharedReservation();
+            return result;
+        } catch (error) {
+            try { await this.releaseSharedReservation(); } catch { /* retain the original fail-closed error */ }
+            throw error;
+        }
     }
 
     issueActivationAuthorization(): ActivationAuthorization {
@@ -295,6 +346,7 @@ export class EpochCoordinator {
             || binding.gates.analysisV2AdmissionEnabled !== this.packet.activation.analysisV2AdmissionEnabled
             || binding.gates.earlybirdWebhookAutoAdmissionEnabled !== this.packet.activation.earlybirdWebhookAutoAdmissionEnabled) fail('ACTIVATION_AUTH_REQUIRED');
         if (!this.lease) fail('ACTIVATION_AUTH_REQUIRED');
+        await this.ensureSharedReservation();
         const state = await this.journal.readValidatedState(this.lease);
         if (state.state !== 'VERIFIED' || state.aborted || state.transitions[state.transitions.length - 1]?.proofDigest !== binding.durableVerifiedProofDigest) fail('NOT_VERIFIED');
         await this.journal.assertLive(this.lease);
@@ -304,9 +356,12 @@ export class EpochCoordinator {
             const current = await this.journal.readValidatedState(this.lease);
             const transition = transitionForEvidence(current.transitions.length + 1, this.journal.epochIdDigest, 'VERIFIED', 'ACTIVATED', this.lease.lock.lockFence, evidence, this.now());
             await this.journal.append(this.lease, transition);
-            return { state: 'ACTIVATED', lease: this.lease };
+            const result = { state: 'ACTIVATED' as const, lease: this.lease };
+            await this.releaseSharedReservation();
+            return result;
         } catch (error) {
             try { await this.controlPlane.compensateActivation({ packet: this.packet, lease: this.lease }); } catch { /* closure remains unknown and is never claimed successful */ }
+            try { await this.releaseSharedReservation(); } catch { /* preserve the activation failure */ }
             throw error instanceof EpochError ? error : new EpochError('PROBE_FAILED');
         }
     }
@@ -314,8 +369,11 @@ export class EpochCoordinator {
     async abort(reasonCode: 'OPERATOR_ABORT' | 'CONTROL_PLANE_FAILURE'): Promise<Readonly<{ state: State | null; aborted: true }>> {
         this.assertCapabilityBinding();
         if (!this.lease) {
+            await this.ensureSharedReservation();
             await this.journal.ensureHeader();
             this.lease = await this.journal.acquire(this.ownerDigest);
+        } else {
+            await this.ensureSharedReservation();
         }
         const state = await this.journal.readValidatedState(this.lease);
         if (state.aborted) fail('ABORTED_EPOCH');
@@ -335,7 +393,34 @@ export class EpochCoordinator {
             toState: state.state,
             resultCode: 'ABORTED',
         });
+        await this.releaseSharedReservation();
         return { state: state.state, aborted: true };
+    }
+
+    private async ensureSharedReservation(): Promise<void> {
+        if (this.sharedReservationLease) {
+            await this.sharedReservation.assert(this.sharedReservationLease);
+            return;
+        }
+        this.sharedReservationLease = await this.sharedReservation.acquire(this.journal.epochIdDigest, this.ownerDigest);
+    }
+
+    private async assertSharedReservation(): Promise<void> {
+        if (!this.sharedReservationLease) fail('LOCK_LOST');
+        await this.sharedReservation.assert(this.sharedReservationLease);
+    }
+
+    private async renewSharedReservation(): Promise<void> {
+        const lease = this.sharedReservationLease;
+        if (!lease) fail('LOCK_LOST');
+        this.sharedReservationLease = await this.sharedReservation.renew(lease);
+    }
+
+    private async releaseSharedReservation(): Promise<void> {
+        const lease = this.sharedReservationLease;
+        if (!lease) return;
+        await this.sharedReservation.release(lease);
+        this.sharedReservationLease = undefined;
     }
 
     private assertCapabilityBinding(): void {
@@ -361,6 +446,7 @@ export class EpochCoordinator {
         let mustReconcile = state.requiresReconciliation;
         for (let attempt = 0; attempt < 4; attempt += 1) {
             this.assertCapabilityBinding();
+            await this.assertSharedReservation();
             if (!this.lease) fail('LOCK_LOST');
             const confirmed = await this.journal.readValidatedState(this.lease);
             if (this.reconciliationMarker(confirmed) !== this.reconciliationMarker(state)) {
@@ -389,6 +475,7 @@ export class EpochCoordinator {
     }
 
     private async runOperation(target: StateOperation, lease: JournalLease): Promise<OperationEvidence> {
+        await this.assertSharedReservation();
         const input = { packet: this.packet, lease };
         switch (target) {
             case 'PREPARED': return this.controlPlane.prepare(input);
@@ -449,14 +536,14 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     private readonly capturedRevisions = new Map<Role, string>();
     private readonly now: () => number;
     private zeroWorkBaseline: Readonly<{ capturedAtMs: number; digest: string }> | undefined;
-    private leaseUpdated?: (lease: JournalLease) => void;
+    private leaseUpdated?: (lease: JournalLease) => Promise<void> | void;
 
     constructor(options: LiveEpochControlPlaneOptions) {
         this.options = options;
         this.now = options.now ?? (() => Date.now());
     }
 
-    bindLeaseUpdated(callback: (lease: JournalLease) => void): void {
+    bindLeaseUpdated(callback: (lease: JournalLease) => Promise<void> | void): void {
         this.leaseUpdated = callback;
     }
 
@@ -480,7 +567,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             resource: resources,
             journal: this.options.journal,
             renew: this.options.renewLease !== undefined,
-            onRenew: updated => this.leaseUpdated?.(updated),
+            onRenew: async updated => { await this.leaseUpdated?.(updated); },
         });
     }
 

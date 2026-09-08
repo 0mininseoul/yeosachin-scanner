@@ -33,6 +33,14 @@ class MemoryStorage implements JournalStorage {
             .filter(([key]) => key.startsWith(prefix))
             .map(([key, value]) => ({ key, ...value }));
     }
+
+    async delete(key: string, options: { ifGenerationMatch: string }): Promise<void> {
+        const current = this.objects.get(key);
+        if (!current || current.generation !== options.ifGenerationMatch) {
+            throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        }
+        this.objects.delete(key);
+    }
 }
 
 function evidence(state: string, sequence: number): OperationEvidence {

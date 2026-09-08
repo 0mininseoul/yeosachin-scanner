@@ -182,4 +182,35 @@ describe('opaque lease capability authority', () => {
         });
         await expect(staleChild()).rejects.toThrow('LOCK_LOST');
     });
+
+    it('awaits the shared reservation renewal before releasing an operation fence', async () => {
+        const current = authority();
+        const queue = current.packet.protectedInputs.desired.queues.preflight;
+        let releaseRenewal!: () => void;
+        const renewal = new Promise<void>(resolveRenewal => { releaseRenewal = resolveRenewal; });
+        let callbackFinished = false;
+        const check = issueLeaseCheck({
+            packet: current.packet,
+            capability: current.capability,
+            ownerDigest: current.ownerDigest,
+            lease: current.lease,
+            operation: 'queue.pause',
+            resource: queue.resource,
+            journal: current.journal,
+            renew: true,
+            onRenew: async () => {
+                await renewal;
+                callbackFinished = true;
+            },
+        });
+        const running = check();
+        let settled = false;
+        void running.then(() => { settled = true; });
+        await new Promise(resolvePromise => setImmediate(resolvePromise));
+        expect(settled).toBe(false);
+        expect(callbackFinished).toBe(false);
+        releaseRenewal();
+        await running;
+        expect(callbackFinished).toBe(true);
+    });
 });

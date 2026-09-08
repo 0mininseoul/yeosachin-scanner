@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { EpochError, canonicalDigest, type EpochHeader, type State } from './contracts';
-import { EpochJournal, type JournalStorage, type StoredObject } from './journal';
-import { EpochCoordinator, type EpochControlPlane, type OperationEvidence } from './coordinator';
+import { EpochJournal, type JournalLease, type JournalStorage, type StoredObject } from './journal';
+import { EpochCoordinator, sharedReservationResources, type EpochControlPlane, type OperationEvidence } from './coordinator';
+import { deriveEntryPointResources } from './exclusion-bridge';
 import { createFixturePacket } from './fixtures';
 import { issueCoordinatorCapability } from './packet';
 
@@ -58,6 +59,36 @@ class FixtureControlPlane implements EpochControlPlane {
     async activate(): Promise<OperationEvidence> { return this.run('ACTIVATED'); }
 }
 
+class RenewalControlPlane implements EpochControlPlane {
+    readonly calls: string[] = [];
+    private leaseUpdated?: (lease: JournalLease) => Promise<void> | void;
+
+    constructor(private readonly journal: EpochJournal, private readonly now: { value: number }) {}
+
+    bindLeaseUpdated(callback: (lease: JournalLease) => Promise<void> | void): void {
+        this.leaseUpdated = callback;
+    }
+
+    private async operation(state: string, input: { lease: JournalLease }): Promise<OperationEvidence> {
+        this.calls.push(state);
+        this.now.value += 7_000;
+        const renewed = await this.journal.renew(input.lease);
+        await this.leaseUpdated?.(renewed);
+        return evidence(state, this.calls.length);
+    }
+
+    async prepare(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('PREPARED', input); }
+    async stage(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('STAGED', input); }
+    async closeAndAlignProducers(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('PRODUCERS_CLOSED_ALIGNED', input); }
+    async alignQueues(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('QUEUES_ALIGNED', input); }
+    async rotateInvokers(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('INVOKERS_ROTATED', input); }
+    async promote(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('SERVICES_PROMOTED', input); }
+    async verify(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('VERIFIED', input); }
+    async reconcile(): Promise<OperationEvidence> { return evidence('RECONCILE', 0); }
+    async compensateActivation(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('COMPENSATED', input); }
+    async activate(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('ACTIVATED', input); }
+}
+
 function setup(now = 1_000) {
     const packet = createFixturePacket();
     const header: EpochHeader = {
@@ -74,6 +105,22 @@ function setup(now = 1_000) {
 }
 
 describe('ordered coordinator', () => {
+    it('renews the shared reservation on every renewed journal lease across the whole interval', async () => {
+        const now = { value: 1_000 };
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const journal = new EpochJournal(new MemoryStorage(), { header, now: () => now.value, leaseMs: 10_000 });
+        const controlPlane = new RenewalControlPlane(journal, now);
+        const coordinator = new EpochCoordinator({ packet, journal, controlPlane, ownerDigest: canonicalDigest('renewing-owner'), now: () => now.value });
+        await expect(coordinator.runThroughVerified()).resolves.toMatchObject({ state: 'VERIFIED' });
+        expect(controlPlane.calls).toHaveLength(7);
+    });
+
     it('runs concrete operation barriers exactly through VERIFIED and keeps gates closed', async () => {
         const { coordinator, controlPlane, journal } = setup();
         const result = await coordinator.runThroughVerified();
@@ -175,5 +222,43 @@ describe('ordered coordinator', () => {
         expect(() => {
             (packet.protectedInputs.desired.runtime.preflight.environment as Record<string, string>).MUTATED = 'true';
         }).toThrow();
+    });
+
+    it('uses the same individual resource atoms as ordinary entry-point selectors', () => {
+        const packet = createFixturePacket();
+        const runtime = packet.protectedInputs.desired.runtime.preflight;
+        const queue = packet.protectedInputs.desired.queues.preflight;
+        const scheduler = packet.protectedInputs.desired.schedulers.preflight;
+        const iam = packet.protectedInputs.desired.iam.preflight.run;
+        const serviceResource = `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
+        const shared = new Set(sharedReservationResources(packet));
+        const selectors = [
+            deriveEntryPointResources({
+                entryPoint: 'epoch',
+                resources: [
+                    { kind: 'service' as const, resource: serviceResource },
+                    { kind: 'queue' as const, resource: queue.resource },
+                    { kind: 'scheduler' as const, resource: scheduler.resource },
+                    { kind: 'iam' as const, resource: iam.resource },
+                ],
+            }),
+            deriveEntryPointResources({ entryPoint: 'role-deployer', resources: [{ kind: 'service' as const, resource: serviceResource }] }),
+            deriveEntryPointResources({
+                entryPoint: 'capacity-queue',
+                role: 'preflight',
+                resources: [
+                    { kind: 'service' as const, resource: serviceResource },
+                    { kind: 'queue' as const, resource: queue.resource },
+                ],
+            }),
+        ];
+        for (const selector of selectors) for (const atom of selector) expect(shared.has(atom)).toBe(true);
+        expect(shared.has(`service:${serviceResource}`)).toBe(true);
+        expect(shared.has(`queue:${queue.resource}`)).toBe(true);
+        expect(shared.has(`scheduler:${scheduler.resource}`)).toBe(true);
+        expect(shared.has(`iam:${iam.resource}`)).toBe(true);
+        expect([...shared].some(atom => atom.startsWith('gcs-bucket:'))).toBe(false);
+        expect([...shared].some(atom => atom.startsWith('google-project:'))).toBe(false);
+        expect([...shared].some(atom => atom.startsWith('cloud-run-identity:'))).toBe(false);
     });
 });

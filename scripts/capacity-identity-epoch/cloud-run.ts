@@ -336,7 +336,7 @@ export class CloudRunAdapter {
         await this.transport.json({
             method: 'PUT', url: `https://${parsed.location}-run.googleapis.com${path}`,
             allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['PUT'],
-            allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200],
+            allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200], beforeDispatch: leaseCheck,
         });
         const requestedSpec = object(body.spec);
         return this.waitForServicePostcondition(options.resource, requestedSpec, leaseCheck);

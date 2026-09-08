@@ -94,7 +94,7 @@ export function issueLeaseCheck(context: Readonly<{
     resource: string | readonly string[];
     journal: EpochJournal;
     renew?: boolean;
-    onRenew?: (lease: JournalLease) => void;
+    onRenew?: (lease: JournalLease) => Promise<void> | void;
 }>): BoundLeaseCheck {
     if (!(context.journal instanceof EpochJournal)
         || typeof context.ownerDigest !== 'string' || !isDigest(context.ownerDigest)) epochFail('CAPABILITY_INVALID');
@@ -130,7 +130,7 @@ export function issueLeaseCheck(context: Readonly<{
             const after = await context.journal.readValidatedState(renewed);
             if (after.aborted) epochFail('ABORTED_EPOCH');
             current = immutableLease(renewed);
-            context.onRenew?.(current);
+            await context.onRenew?.(current);
             return;
         }
     }) as BoundLeaseCheck;

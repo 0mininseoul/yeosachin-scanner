@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CAPACITY_EXCLUSION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 # Read-only validation is the safe default.  Mutation requires an explicit
 # --apply acknowledgement after a successful --check/dry-run review.
 mode="check"
@@ -219,6 +223,7 @@ for ((identity_index = 0; identity_index < ${#identity_values[@]}; identity_inde
   done
 done
 export ANALYSIS_TASKS_PROJECT="$project"
+export ANALYSIS_CAPACITY_ROLE="$role"
 export ANALYSIS_TASKS_LOCATION="$location"
 export ANALYSIS_TASKS_QUEUE="$queue"
 export ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL="$task_sa"
@@ -247,6 +252,7 @@ generic_args=()
 
 if [[ "$mode" == "dry-run" ]]; then
   print_command env \
+    "ANALYSIS_CAPACITY_ROLE=$role" \
     "ANALYSIS_TASKS_PROJECT=$project" \
     "ANALYSIS_TASKS_LOCATION=$location" \
     "ANALYSIS_TASKS_QUEUE=$queue" \
@@ -269,5 +275,8 @@ fi
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud is required for --check/--apply"
 command -v jq >/dev/null 2>&1 || die "jq is required for --check/--apply"
+if [[ "$mode" == "apply" ]]; then
+  capacity_exclusion_start capacity-queue "$role" "${original_args[@]}"
+fi
 bash "$generic_script" "${generic_args[@]}"
 printf 'verified: %s capacity queue and queue-scoped IAM\n' "$role"

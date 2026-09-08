@@ -171,7 +171,7 @@ export class IamAdapter {
         await this.transport.json({
             method: 'POST', url: `https://${endpoint.host}${path}`, allowedHosts: new Set([...HOSTS, endpoint.host]), allowedPath: candidate => candidate === path, allowedMethods: ['POST'],
             allowedQueryKeys: [],
-            acceptedStatuses: [200], body: { policy: wire },
+            acceptedStatuses: [200], body: { policy: wire }, beforeDispatch: leaseCheck,
         });
         await leaseCheck();
         const readback = await this.getWirePolicy(input);

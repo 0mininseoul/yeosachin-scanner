@@ -21,6 +21,24 @@ export type GcsHttpResponse = Readonly<{
     url?: string;
 }>;
 
+export type RawStoredObject = Readonly<{ generation: string; body: string }>;
+
+/** Raw object access is restricted to the legacy text lock bridge. */
+export interface GcsRawStorage {
+    getRaw(key: string): Promise<RawStoredObject | null>;
+    putRaw(key: string, body: string, options: { ifGenerationMatch: '0' | string }): Promise<RawStoredObject>;
+    deleteRaw(key: string, options: { ifGenerationMatch: string }): Promise<void>;
+}
+
+export interface GuardedJournalStorage {
+    putWithDispatchGuard(
+        key: string,
+        value: unknown,
+        options: { ifGenerationMatch: '0' | string },
+        beforeDispatch: () => Promise<void>,
+    ): Promise<StoredObject>;
+}
+
 export interface GcsTransport {
     request(request: GcsHttpRequest, signal?: AbortSignal): Promise<GcsHttpResponse>;
 }
@@ -148,7 +166,7 @@ function header(headers: Readonly<Record<string, string>>, name: string): string
     return entry?.[1];
 }
 
-export class GcsJournalStorage implements JournalStorage {
+export class GcsJournalStorage implements JournalStorage, GcsRawStorage {
     private readonly bucket: string;
     private readonly transport: GcsTransport;
     private readonly tokenProvider: () => Promise<string>;
@@ -194,10 +212,65 @@ export class GcsJournalStorage implements JournalStorage {
         return { generation, value };
     }
 
+    async getRaw(key: string): Promise<RawStoredObject | null> {
+        this.assertKey(key);
+        const encoded = this.objectUrl(key);
+        const metadataResponse = await this.request({ method: 'GET', url: `${encoded}?alt=json` });
+        if (metadataResponse.status === 404) return null;
+        this.assertSuccess(metadataResponse.status);
+        const metadata = parseJson(metadataResponse.body, this.maxResponseBytes);
+        const metadataGeneration = metadata.generation;
+        assertGeneration(metadataGeneration);
+        if (metadata.name !== key) fail('ADAPTER_RESPONSE_INVALID');
+        const mediaResponse = await this.request({ method: 'GET', url: `${encoded}?alt=media&generation=${encodeURIComponent(metadataGeneration)}` });
+        this.assertSuccess(mediaResponse.status);
+        const generation = header(mediaResponse.headers, 'x-goog-generation');
+        assertGeneration(generation);
+        if (generation !== metadataGeneration) fail('ADAPTER_RESPONSE_INVALID');
+        assertBodySize(mediaResponse.body, this.maxResponseBytes);
+        return { generation, body: mediaResponse.body };
+    }
+
     async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        return this.putInternal(key, value, options);
+    }
+
+    async putWithDispatchGuard(
+        key: string,
+        value: unknown,
+        options: { ifGenerationMatch: '0' | string },
+        beforeDispatch: () => Promise<void>,
+    ): Promise<StoredObject> {
+        return this.putInternal(key, value, options, beforeDispatch);
+    }
+
+    private async putInternal(
+        key: string,
+        value: unknown,
+        options: { ifGenerationMatch: '0' | string },
+        beforeDispatch?: () => Promise<void>,
+    ): Promise<StoredObject> {
         this.assertKey(key);
         this.assertPrecondition(options.ifGenerationMatch);
         const body = canonicalJson(value);
+        assertBodySize(body, this.maxResponseBytes);
+        const url = `${this.uploadBucketUrl()}?uploadType=media&name=${encodeURIComponent(key)}&ifGenerationMatch=${encodeURIComponent(options.ifGenerationMatch)}`;
+        const response = await this.request({ method: 'POST', url, body }, beforeDispatch);
+        if (response.status === 412) fail('GENERATION_PRECONDITION_FAILED');
+        this.assertSuccess(response.status);
+        const metadata = parseJson(response.body, this.maxResponseBytes);
+        const generation = header(response.headers, 'x-goog-generation') ?? metadata.generation;
+        assertGeneration(generation);
+        if (metadata.name !== key || metadata.generation !== generation) fail('ADAPTER_RESPONSE_INVALID');
+        const readback = await this.get(key);
+        if (!readback || readback.generation !== generation || canonicalJson(readback.value) !== body) fail('ADAPTER_RESPONSE_INVALID');
+        return readback;
+    }
+
+    async putRaw(key: string, body: string, options: { ifGenerationMatch: '0' | string }): Promise<RawStoredObject> {
+        this.assertKey(key);
+        this.assertPrecondition(options.ifGenerationMatch);
+        if (typeof body !== 'string') fail('ADAPTER_REQUEST_INVALID');
         assertBodySize(body, this.maxResponseBytes);
         const url = `${this.uploadBucketUrl()}?uploadType=media&name=${encodeURIComponent(key)}&ifGenerationMatch=${encodeURIComponent(options.ifGenerationMatch)}`;
         const response = await this.request({ method: 'POST', url, body });
@@ -207,8 +280,8 @@ export class GcsJournalStorage implements JournalStorage {
         const generation = header(response.headers, 'x-goog-generation') ?? metadata.generation;
         assertGeneration(generation);
         if (metadata.name !== key || metadata.generation !== generation) fail('ADAPTER_RESPONSE_INVALID');
-        const readback = await this.get(key);
-        if (!readback || readback.generation !== generation || canonicalJson(readback.value) !== body) fail('ADAPTER_RESPONSE_INVALID');
+        const readback = await this.getRaw(key);
+        if (!readback || readback.generation !== generation || readback.body !== body) fail('ADAPTER_RESPONSE_INVALID');
         return readback;
     }
 
@@ -268,7 +341,14 @@ export class GcsJournalStorage implements JournalStorage {
         this.assertSuccess(response.status);
     }
 
-    private async request(input: { method: 'GET' | 'POST' | 'DELETE'; url: string; body?: string }): Promise<GcsHttpResponse> {
+    async deleteRaw(key: string, options: { ifGenerationMatch: string }): Promise<void> {
+        return this.delete(key, options);
+    }
+
+    private async request(
+        input: { method: 'GET' | 'POST' | 'DELETE'; url: string; body?: string },
+        beforeDispatch?: () => Promise<void>,
+    ): Promise<GcsHttpResponse> {
         let url: URL;
         try {
             url = new URL(input.url);
@@ -290,6 +370,7 @@ export class GcsJournalStorage implements JournalStorage {
             headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
             ...(input.body === undefined ? {} : { body: input.body }),
         };
+        if (beforeDispatch) await beforeDispatch();
         let response: GcsHttpResponse;
         try {
             const controller = new AbortController();

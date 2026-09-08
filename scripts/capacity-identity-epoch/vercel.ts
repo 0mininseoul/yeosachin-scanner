@@ -207,6 +207,7 @@ export class VercelAdapter {
             allowedQueryKeys: ['teamId'],
             acceptedStatuses: [200, 201],
             body: { alias: options.alias, redirect: null },
+            beforeDispatch: leaseCheck,
         });
         const post = object(response.value);
         if (post.alias !== options.alias || post.projectId !== options.projectId || post.deploymentId !== options.deploymentId

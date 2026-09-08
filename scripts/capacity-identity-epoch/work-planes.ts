@@ -165,7 +165,7 @@ export class WorkPlaneClient {
         await this.transport.json({
             method: 'PATCH', url: `https://cloudscheduler.googleapis.com${path}?updateMask=${encodeURIComponent('httpTarget')}`,
             allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['PATCH'], allowedQueryKeys: ['updateMask'],
-            body: { httpTarget: wireTarget }, acceptedStatuses: [200],
+            body: { httpTarget: wireTarget }, acceptedStatuses: [200], beforeDispatch: leaseCheck,
         });
         await leaseCheck();
         const after = await this.schedulerObservation(options.input, await this.getScheduler(options.input), leaseCheck);
@@ -194,7 +194,7 @@ export class WorkPlaneClient {
         await this.transport.json({
             method: 'PATCH', url: `https://cloudtasks.googleapis.com${path}?updateMask=${encodeURIComponent('httpTarget')}`,
             allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['PATCH'], allowedQueryKeys: ['updateMask'],
-            body: { httpTarget: wireTarget }, acceptedStatuses: [200],
+            body: { httpTarget: wireTarget }, acceptedStatuses: [200], beforeDispatch: leaseCheck,
         });
         await leaseCheck();
         const after = await this.observeQueueWithLease(options.input, leaseCheck);
@@ -288,7 +288,7 @@ export class WorkPlaneClient {
         const path = `/v2/${input.resource}:${action}`;
         await leaseCheck();
         await this.transport.json({
-            method: 'POST', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
+            method: 'POST', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {}, beforeDispatch: leaseCheck,
         });
         await leaseCheck();
         const after = await this.observeQueueWithLease(input, leaseCheck);
@@ -321,7 +321,7 @@ export class WorkPlaneClient {
         const path = `/v1/${input.resource}:${action}`;
         await leaseCheck();
         await this.transport.json({
-            method: 'POST', url: `https://cloudscheduler.googleapis.com${path}`, allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {},
+            method: 'POST', url: `https://cloudscheduler.googleapis.com${path}`, allowedHosts: SCHEDULER_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], acceptedStatuses: [200], body: {}, beforeDispatch: leaseCheck,
         });
         await leaseCheck();
         const after = await this.schedulerObservation(input, await this.getScheduler(input), leaseCheck);

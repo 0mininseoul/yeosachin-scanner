@@ -16,7 +16,7 @@ import { issueLeaseCheck } from './lease-capability';
 import { createFixturePacket } from './fixtures';
 import { EpochJournal, type JournalStorage } from './journal';
 import { issueCoordinatorCapability } from './packet';
-import { canonicalDigest, canonicalRuntimeInputDigest, EpochError, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedSchedulerInput } from './contracts';
+import { canonicalDigest, canonicalRuntimeInputDigest, EpochError, type EpochTransition, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedSchedulerInput } from './contracts';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
 class FakeTransport implements ProtectedTransport {
@@ -35,6 +35,34 @@ function authenticated(fake: ProtectedTransport, token = 'fixture-token'): Authe
 
 function response(request: ProtectedHttpRequest, status: number, value: unknown): ProtectedHttpResponse {
     return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(value), url: request.url };
+}
+
+async function durableProbeAuthority(ownerDigest = 'b'.repeat(64), options: Readonly<{ now?: { value: number }; leaseMs?: number }> = {}, operation = 'probe.malformed', resource = serviceResource) {
+    const packet = createFixturePacket();
+    const header = {
+        epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+        oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+        roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+        createdAt: '2026-09-08T00:00:00.000Z',
+    } as const;
+    const storage = new MemoryStorage();
+    const now = options.now ?? { value: 100_000 };
+    const journal = new EpochJournal(storage, { header, now: () => now.value, leaseMs: options.leaseMs ?? 10_000 });
+    await journal.ensureHeader();
+    const lease = await journal.acquire(ownerDigest);
+    const capability = issueCoordinatorCapability(packet, ownerDigest);
+    const check = issueLeaseCheck({ packet, capability, ownerDigest, lease, operation, resource, journal });
+    return { packet, storage, journal, lease, check, now };
+}
+
+function durableAbortedTransition(journal: EpochJournal, lockFence: string): EpochTransition {
+    const value = canonicalDigest('aborted-probe-transition');
+    return {
+        sequence: 1, epochIdDigest: journal.epochIdDigest, fromState: null, toState: null,
+        stateVersion: 1, lockFence, preconditionDigest: value, mutationDigest: value,
+        postconditionDigest: value, proofDigest: value, nativeConcurrencyTokenDigest: value,
+        resourceObservationDigest: value, resultCode: 'ABORTED', recordedAt: '2026-09-08T00:00:01.000Z',
+    };
 }
 
 class MemoryStorage implements JournalStorage {
@@ -332,6 +360,90 @@ describe('protected platform adapters', () => {
         expect(fake.requests.filter(request => request.url.includes(':getIamPolicy'))[0]?.url).not.toContain('?');
     });
 
+    it('fences a real IAM mutation after deferred token minting when the journal is ABORTED', async () => {
+        const input: ProtectedIamInput = {
+            kind: 'queue', resource: queueResource, project,
+            etag: 'Bwfixture', bindings: [], previous: null,
+        };
+        const current = { version: 3, etag: 'Bwfixture', bindings: [] };
+        let posts = 0;
+        const fake = new FakeTransport(request => {
+            if (request.url.includes(':getIamPolicy')) return response(request, 200, current);
+            posts += 1;
+            return response(request, 200, current);
+        });
+        const durable = await durableProbeAuthority('b'.repeat(64), {}, 'iam.add', queueResource);
+        let tokenCalls = 0;
+        let tokenStarted!: () => void;
+        const tokenStartedPromise = new Promise<void>(resolve => { tokenStarted = resolve; });
+        let releaseToken!: () => void;
+        const deferredToken = new Promise<string>(resolve => { releaseToken = () => resolve('fixture-token'); });
+        const transport = new AuthenticatedProtectedTransport({
+            transport: fake,
+            tokenProvider: async () => {
+                tokenCalls += 1;
+                if (tokenCalls === 3) {
+                    tokenStarted();
+                    return deferredToken;
+                }
+                return 'fixture-token';
+            },
+            timeoutMs: 2_000,
+        });
+        const operation = new IamAdapter({ transport }).addBindings(input, [{
+            role: 'roles/cloudtasks.enqueuer', member: 'serviceAccount:worker@example-project.iam.gserviceaccount.com', condition: null,
+        }], durable.check);
+        await tokenStartedPromise;
+        await durable.journal.append(durable.lease, durableAbortedTransition(durable.journal, durable.lease.lock.lockFence));
+        releaseToken();
+        await expect(operation).rejects.toThrow('ABORTED_EPOCH');
+        expect(tokenCalls).toBe(3);
+        expect(posts).toBe(0);
+    });
+
+    it('fences a real IAM mutation after deferred token minting when the lease is taken over', async () => {
+        const input: ProtectedIamInput = {
+            kind: 'queue', resource: queueResource, project,
+            etag: 'Bwfixture', bindings: [], previous: null,
+        };
+        const current = { version: 3, etag: 'Bwfixture', bindings: [] };
+        let posts = 0;
+        const fake = new FakeTransport(request => {
+            if (request.url.includes(':getIamPolicy')) return response(request, 200, current);
+            posts += 1;
+            return response(request, 200, current);
+        });
+        const now = { value: 100_000 };
+        const durable = await durableProbeAuthority('b'.repeat(64), { now, leaseMs: 100 }, 'iam.add', queueResource);
+        let tokenCalls = 0;
+        let tokenStarted!: () => void;
+        const tokenStartedPromise = new Promise<void>(resolve => { tokenStarted = resolve; });
+        let releaseToken!: () => void;
+        const deferredToken = new Promise<string>(resolve => { releaseToken = () => resolve('fixture-token'); });
+        const transport = new AuthenticatedProtectedTransport({
+            transport: fake,
+            tokenProvider: async () => {
+                tokenCalls += 1;
+                if (tokenCalls === 3) {
+                    tokenStarted();
+                    return deferredToken;
+                }
+                return 'fixture-token';
+            },
+            timeoutMs: 2_000,
+        });
+        const operation = new IamAdapter({ transport }).addBindings(input, [{
+            role: 'roles/cloudtasks.enqueuer', member: 'serviceAccount:worker@example-project.iam.gserviceaccount.com', condition: null,
+        }], durable.check);
+        await tokenStartedPromise;
+        now.value = 100_101;
+        await durable.journal.acquire('c'.repeat(64));
+        releaseToken();
+        await expect(operation).rejects.toThrow('LOCK_LOST');
+        expect(tokenCalls).toBe(3);
+        expect(posts).toBe(0);
+    });
+
     it('does not let an iam.add capability relabel public full-policy replacement', async () => {
         const input: ProtectedIamInput = {
             kind: 'queue', resource: queueResource, project,
@@ -358,27 +470,55 @@ describe('protected platform adapters', () => {
         expect(() => new AuthenticatedReceiverProbe({ transport: fake, authority: Object.freeze({}), tokenProvider: async () => 'fixture-id-token' })).toThrow('CAPABILITY_INVALID');
     });
 
-    it('rechecks the live probe lease after token minting and never POSTs a lost owner', async () => {
+    it('rechecks a real durable ABORTED journal after deferred token minting and never POSTs', async () => {
         let posts = 0;
         const fake = new FakeTransport(request => {
             if (request.method === 'POST') posts += 1;
             return response(request, 400, { code: 'INVALID_REQUEST' });
         });
-        const packet = adapterAuthority.packet;
-        const authority = issueReceiverProbeAuthority({ packet, role: 'preflight', ownerDigest: 'b'.repeat(64), lease: adapterAuthority.lease, leaseCheck: adapterAuthority.check });
-        const journalRead = adapterAuthority.journal.readValidatedState.bind(adapterAuthority.journal);
-        let reads = 0;
-        adapterAuthority.journal.readValidatedState = (async lease => {
-            reads += 1;
-            if (reads === 2) throw new EpochError('ABORTED_EPOCH');
-            return journalRead(lease);
-        }) as typeof adapterAuthority.journal.readValidatedState;
+        const durable = await durableProbeAuthority();
+        const authority = issueReceiverProbeAuthority({ packet: durable.packet, role: 'preflight', ownerDigest: 'b'.repeat(64), lease: durable.lease, leaseCheck: durable.check });
+        let tokenStarted!: () => void;
+        const tokenStartedPromise = new Promise<void>(resolve => { tokenStarted = resolve; });
+        let releaseToken!: () => void;
+        const token = new Promise<string>(resolve => { releaseToken = () => resolve('fixture-id-token'); });
         const probe = new AuthenticatedReceiverProbe({
             transport: fake,
             authority,
-            tokenProvider: async () => 'fixture-id-token',
+            tokenProvider: async () => { tokenStarted(); return token; },
         });
-        await expect(probe.malformedBody()).rejects.toThrow('ABORTED_EPOCH');
+        const operation = probe.malformedBody();
+        await tokenStartedPromise;
+        await durable.journal.append(durable.lease, durableAbortedTransition(durable.journal, durable.lease.lock.lockFence));
+        releaseToken();
+        await expect(operation).rejects.toThrow('ABORTED_EPOCH');
+        expect(posts).toBe(0);
+    });
+
+    it('rechecks a real new-owner takeover after deferred token minting and never POSTs the stale owner', async () => {
+        let posts = 0;
+        const fake = new FakeTransport(request => {
+            if (request.method === 'POST') posts += 1;
+            return response(request, 400, { code: 'INVALID_REQUEST' });
+        });
+        const now = { value: 100_000 };
+        const durable = await durableProbeAuthority('b'.repeat(64), { now, leaseMs: 100 });
+        const authority = issueReceiverProbeAuthority({ packet: durable.packet, role: 'preflight', ownerDigest: 'b'.repeat(64), lease: durable.lease, leaseCheck: durable.check });
+        let tokenStarted!: () => void;
+        const tokenStartedPromise = new Promise<void>(resolve => { tokenStarted = resolve; });
+        let releaseToken!: () => void;
+        const token = new Promise<string>(resolve => { releaseToken = () => resolve('fixture-id-token'); });
+        const probe = new AuthenticatedReceiverProbe({
+            transport: fake,
+            authority,
+            tokenProvider: async () => { tokenStarted(); return token; },
+        });
+        const operation = probe.malformedBody();
+        await tokenStartedPromise;
+        now.value = 100_101;
+        await durable.journal.acquire('c'.repeat(64));
+        releaseToken();
+        await expect(operation).rejects.toThrow('LOCK_LOST');
         expect(posts).toBe(0);
     });
 

@@ -52,6 +52,12 @@ class FakeGcsTransport implements GcsTransport {
         const key = decodeURIComponent(objectMatch[1]!);
         const stored = this.objects.get(key);
         if (!stored) return this.response(request, 404, {});
+        if (request.method === 'DELETE') {
+            const precondition = query.get('ifGenerationMatch');
+            if (!precondition || precondition !== stored.generation) return this.response(request, 412, {});
+            this.objects.delete(key);
+            return this.response(request, 204, {});
+        }
         if (query.get('alt') === 'json') return this.response(request, 200, { name: key, generation: stored.generation });
         if (query.get('alt') === 'media' && query.get('generation') === stored.generation) {
             return this.response(request, 200, stored.value, { 'x-goog-generation': stored.generation });
@@ -684,7 +690,7 @@ describe('provider-free live adapter vertical', () => {
 
     it('recovers retained target mutations after the INVOKERS_ROTATED append fails', async () => {
         const harness = createHarness({ failAppendSequence: 5 });
-        await expect(harness.coordinator.runThroughVerified()).rejects.toThrow('GENERATION_PRECONDITION_FAILED');
+        await expect(harness.coordinator.runThroughVerified()).rejects.toThrow('ADAPTER_TIMEOUT');
         const afterCrash = await harness.journal.readValidatedState(await harness.journal.acquire(canonicalDigest('live-vertical-owner')));
         expect(afterCrash.state).toBe('QUEUES_ALIGNED');
         expect([...harness.provider.schedulers.values()].some(item => item.identity.includes('-desired@'))).toBe(true);

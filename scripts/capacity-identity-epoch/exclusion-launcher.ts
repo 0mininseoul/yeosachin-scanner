@@ -1,0 +1,431 @@
+/**
+ * Portable mapped child lifecycle for ordinary mutation entry points.
+ *
+ * The shell entry point re-enters itself under this fixed launcher when it
+ * lacks an inherited control channel.  This Node process owns the supervisor,
+ * maps its anonymous pipes to fixed child descriptors, and releases the lease
+ * after the allowlisted child exits.  No arbitrary command or script path is
+ * accepted from argv.
+ */
+import { randomBytes } from 'node:crypto';
+import { spawn, type ChildProcess, type StdioOptions } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import type { Writable } from 'node:stream';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { EpochError, epochFail, isObject, type EpochErrorCode, type Role } from './contracts';
+import { rejectDuplicateJsonKeys } from './packet';
+import { validateDescriptor, type BridgeDescriptor } from '../check-capacity-identity-epoch-exclusion';
+import { deriveLegacyServices, deriveResources } from './exclusion-ipc';
+import type { ExclusionEntryPoint } from './exclusion-bridge';
+
+const ENTRY_POINTS = ['role-deployer', 'capacity-queue', 'preflight-maintenance', 'paid-maintenance'] as const;
+const ROLES = ['preflight', 'paid'] as const;
+const SCRIPT_TOKENS = [
+    'capacity-queues',
+    'tasks-queue',
+    'v2-tasks-queue',
+    'preflight-tasks-queue',
+    'preflight-maintenance',
+    'v2-maintenance',
+    'capacity-workers',
+] as const;
+const CONTROL_READ_FD = 4;
+const CONTROL_WRITE_FD = 5;
+const MAX_LINE = 4096;
+const CHANNEL_NONCE = /^[0-9a-f]{64}$/;
+
+type ScriptToken = typeof SCRIPT_TOKENS[number];
+type LauncherOptions = Readonly<{
+    entryPoint: ExclusionEntryPoint;
+    role: Role;
+    scriptToken: ScriptToken;
+    scriptArgs: readonly string[];
+}>;
+
+function fail(): never {
+    epochFail('ADAPTER_REQUEST_INVALID');
+}
+
+function parseArguments(argv: readonly string[]): LauncherOptions {
+    let entryPoint: ExclusionEntryPoint | undefined;
+    let role: Role | undefined;
+    let scriptToken: ScriptToken | undefined;
+    const scriptArgs: string[] = [];
+    for (let index = 0; index < argv.length; index += 1) {
+        const flag = argv[index];
+        if (flag === '--entry-point' && entryPoint === undefined) {
+            const value = argv[++index];
+            if (value === undefined || !ENTRY_POINTS.includes(value as (typeof ENTRY_POINTS)[number])) fail();
+            entryPoint = value as ExclusionEntryPoint;
+        } else if (flag === '--role' && role === undefined) {
+            const value = argv[++index];
+            if (value === undefined || !ROLES.includes(value as Role)) fail();
+            role = value as Role;
+        } else if (flag === '--script-token' && scriptToken === undefined) {
+            const value = argv[++index];
+            if (value === undefined || !SCRIPT_TOKENS.includes(value as ScriptToken)) fail();
+            scriptToken = value as ScriptToken;
+        } else if (flag === '--script-arg') {
+            const value = argv[++index];
+            if (value === undefined || value.length > 128) fail();
+            scriptArgs.push(value);
+        } else {
+            fail();
+        }
+    }
+    if (entryPoint === undefined || role === undefined || scriptToken === undefined) fail();
+    validateScriptArgs(scriptToken, scriptArgs);
+    return Object.freeze({ entryPoint, role, scriptToken, scriptArgs: Object.freeze(scriptArgs) });
+}
+
+function validateScriptArgs(token: ScriptToken, args: readonly string[]): void {
+    const allowed = new Set<string>();
+    const add = (...values: string[]): void => values.forEach(value => allowed.add(value));
+    add('--dry-run', '--check', '--apply', '--reconcile-iam', '--reconcile-jobs', '--help', '-h');
+    if (token === 'capacity-queues') add('--role=preflight', '--role=paid');
+    if (token === 'capacity-workers') {
+        add('--role=preflight', '--role=paid', '--allow-bootstrap-initial-transition', '--allow-initial-identity-roll-forward');
+    }
+    for (const arg of args) if (!allowed.has(arg)) fail();
+    const modes = args.filter(arg => arg === '--dry-run' || arg === '--check' || arg === '--apply');
+    if (modes.length > 1) fail();
+    if (token === 'capacity-workers' && args.filter(arg => arg === '--role=preflight' || arg === '--role=paid').length > 1) fail();
+}
+
+function buildDescriptor(options: LauncherOptions): BridgeDescriptor {
+    const bucket = process.env.ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET;
+    if (typeof bucket !== 'string' || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucket)) fail();
+    const selectorSource = options.scriptToken === 'tasks-queue' ? 'generic' : 'role';
+    const primaryResources = deriveResources(options.entryPoint, options.role, selectorSource);
+    const nestedResources = options.scriptToken === 'capacity-workers' && options.role === 'preflight'
+        ? deriveResources('preflight-maintenance', 'preflight')
+        : [];
+    const resources = [...new Map(
+        [...primaryResources, ...nestedResources]
+            .map(resource => [resource.kind + ':' + resource.resource, resource] as const),
+    ).values()];
+    const descriptor = {
+        bucket,
+        entryPoint: options.entryPoint,
+        role: options.role,
+        resources,
+        legacyServices: deriveLegacyServices(options.entryPoint, options.role),
+        epochDigest: randomBytes(32).toString('hex'),
+        ownerDigest: randomBytes(32).toString('hex'),
+        leaseMs: 60_000,
+        lease: null,
+    };
+    return validateDescriptor(descriptor);
+}
+
+function scriptPath(token: ScriptToken): string {
+    const scripts = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const relative = {
+        'capacity-queues': 'configure-analysis-capacity-queues.sh',
+        'tasks-queue': 'configure-analysis-tasks-queue.sh',
+        'v2-tasks-queue': 'configure-analysis-v2-tasks-queue.sh',
+        'preflight-tasks-queue': 'configure-preflight-tasks-queue.sh',
+        'preflight-maintenance': 'configure-analysis-preflight-maintenance.sh',
+        'v2-maintenance': 'configure-analysis-v2-maintenance.sh',
+        'capacity-workers': 'deploy-analysis-capacity-workers.sh',
+    } satisfies Record<ScriptToken, string>;
+    return resolve(scripts, relative[token]);
+}
+
+const RESPONSE_CODES = new Set([
+    'ASSERT_OK', 'ADOPTED', 'RENEWED', 'RELEASED',
+    'ADAPTER_REQUEST_INVALID', 'ADAPTER_RESPONSE_INVALID', 'ABORTED_EPOCH',
+    'CAPABILITY_BINDING_MISMATCH', 'CAPABILITY_INVALID', 'GENERATION_PRECONDITION_FAILED',
+    'JOURNAL_INVALID', 'LOCK_LOST', 'PROTECTED_INPUT_UNAVAILABLE', 'RESOURCE_INVALID',
+]);
+
+function requestId(): string {
+    return randomBytes(16).toString('hex');
+}
+
+type SupervisorResponse = Readonly<{ id: string; code: string }>;
+
+function parseSupervisorResponse(line: string, nonce: string): SupervisorResponse {
+    if (line.length > MAX_LINE) fail();
+    const match = /^([0-9a-f]{32}) ([0-9a-f]{64}) (ASSERT_OK|ADOPTED|RENEWED|RELEASED|ERR [A-Z_]+)(?: [A-Za-z0-9_-]{1,32768})?$/.exec(line);
+    if (!match || match[2] !== nonce) fail();
+    const code = match[3]!;
+    if (code.startsWith('ERR ') && !RESPONSE_CODES.has(code.slice(4))) fail();
+    if (!code.startsWith('ERR ') && !RESPONSE_CODES.has(code)) fail();
+    if (code === 'RELEASED' && line.split(' ').length !== 3) fail();
+    return { id: match[1]!, code };
+}
+
+function parseChildRequest(line: string, nonce: string): string {
+    if (line.length === 0 || line.length > MAX_LINE) fail();
+    let value: unknown;
+    try {
+        rejectDuplicateJsonKeys(line);
+        value = JSON.parse(line) as unknown;
+    } catch {
+        fail();
+    }
+    if (!isObject(value) || typeof value.id !== 'string' || !/^[0-9a-f]{32}$/.test(value.id)
+        || value.nonce !== nonce || !['assert', 'adopt', 'release'].includes(String(value.op))) fail();
+    return value.id as string;
+}
+
+type PendingControlRequest = Readonly<{
+    expected?: string;
+    target?: Writable;
+    resolve: (code: string) => void;
+    reject: (error: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+}>;
+
+/**
+ * The supervisor stdout stream has exactly one owner: this dispatcher. Child
+ * requests are proxied through it, while release uses the same response
+ * reader after the child exits. This prevents two readline consumers from
+ * racing and losing a response line.
+ */
+export class ControlChannelDispatcher {
+    private readonly supervisor: ChildProcess;
+    private nonce: string | undefined;
+    private readonly input: ReturnType<typeof createInterface>;
+    private readonly pending = new Map<string, PendingControlRequest>();
+    private readonly readyPromise: Promise<string>;
+    private readyResolve!: (nonce: string) => void;
+    private readyReject!: (error: unknown) => void;
+    private readyNonce: string | undefined;
+    private closed = false;
+
+    constructor(supervisor: ChildProcess, nonce?: string) {
+        if (!supervisor.stdout || !supervisor.stdin || (nonce !== undefined && !CHANNEL_NONCE.test(nonce))) fail();
+        this.supervisor = supervisor;
+        this.nonce = nonce;
+        this.input = createInterface({ input: supervisor.stdout, crlfDelay: Infinity });
+        this.readyPromise = new Promise<string>((resolvePromise, rejectPromise) => {
+            this.readyResolve = resolvePromise;
+            this.readyReject = rejectPromise;
+        });
+        this.input.on('line', line => this.handleSupervisorLine(line));
+        supervisor.once('error', error => this.failAll(error));
+        supervisor.once('exit', () => this.failAll(new EpochError('LOCK_LOST')));
+    }
+
+    async waitForReady(timeoutMs = 10_000): Promise<string> {
+        if (this.readyNonce !== undefined) return this.readyNonce;
+        return await this.withTimeout(this.readyPromise, timeoutMs);
+    }
+
+    async sendSupervisorRequest(op: 'release' | 'renew' | 'assert'): Promise<string> {
+        if (this.nonce === undefined) throw new EpochError('LOCK_LOST');
+        const id = requestId();
+        const response = this.register(id, 'RELEASED');
+        this.writeSupervisor(JSON.stringify({ id, nonce: this.nonce, op }) + '\n');
+        return await response;
+    }
+
+    async forwardChildRequest(line: string, target: Writable): Promise<void> {
+        if (this.nonce === undefined) throw new EpochError('LOCK_LOST');
+        const id = parseChildRequest(line, this.nonce);
+        const response = this.register(id, undefined, target);
+        this.writeSupervisor(line + (line.endsWith('\n') ? '' : '\n'));
+        await response;
+    }
+
+    close(): void {
+        if (this.closed) return;
+        this.closed = true;
+        this.input.close();
+        this.failAll(new EpochError('LOCK_LOST'));
+    }
+
+    private register(id: string, expected?: string, target?: Writable): Promise<string> {
+        if (this.closed || this.pending.has(id)) throw new EpochError('ADAPTER_REQUEST_INVALID');
+        let resolvePromise!: (code: string) => void;
+        let rejectPromise!: (error: unknown) => void;
+        const response = new Promise<string>((resolveResponse, rejectResponse) => {
+            resolvePromise = resolveResponse;
+            rejectPromise = rejectResponse;
+        });
+        const timer = setTimeout(() => {
+            const pending = this.pending.get(id);
+            if (!pending) return;
+            this.pending.delete(id);
+            pending.reject(new EpochError('ADAPTER_TIMEOUT'));
+        }, 30_000);
+        this.pending.set(id, { expected, target, resolve: resolvePromise, reject: rejectPromise, timer });
+        return response;
+    }
+
+    private writeSupervisor(line: string): void {
+        if (this.closed || !this.supervisor.stdin || this.supervisor.stdin.destroyed) throw new EpochError('LOCK_LOST');
+        this.supervisor.stdin.write(line);
+    }
+
+    private handleSupervisorLine(line: string): void {
+        try {
+            if (this.readyNonce === undefined) {
+                const ready = /^READY ([0-9a-f]{64})$/.exec(line);
+                if (!ready || (this.nonce !== undefined && ready[1] !== this.nonce)) throw new EpochError('ADAPTER_REQUEST_INVALID');
+                this.readyNonce = ready[1];
+                this.nonce = ready[1];
+                this.readyResolve(this.readyNonce);
+                return;
+            }
+            if (this.nonce === undefined) throw new EpochError('ADAPTER_REQUEST_INVALID');
+            const response = parseSupervisorResponse(line, this.nonce);
+            const pending = this.pending.get(response.id);
+            if (!pending) throw new EpochError('ADAPTER_RESPONSE_INVALID');
+            this.pending.delete(response.id);
+            clearTimeout(pending.timer);
+            if (pending.expected !== undefined && response.code !== pending.expected) {
+                const errorCode = response.code.startsWith('ERR ')
+                    ? response.code.slice(4) as EpochErrorCode
+                    : 'ADAPTER_RESPONSE_INVALID';
+                throw new EpochError(errorCode);
+            }
+            if (pending.target) pending.target.write(line + '\n');
+            pending.resolve(response.code);
+        } catch (error) {
+            this.failAll(error);
+        }
+    }
+
+    private failAll(error: unknown): void {
+        if (this.readyNonce === undefined) this.readyReject(error);
+        for (const [id, pending] of this.pending) {
+            this.pending.delete(id);
+            clearTimeout(pending.timer);
+            pending.reject(error);
+        }
+    }
+
+    private async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return await Promise.race([
+                promise,
+                new Promise<T>((_, reject) => {
+                    timer = setTimeout(() => reject(new EpochError('ADAPTER_TIMEOUT')), timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
+    }
+}
+
+async function waitForExit(child: ChildProcess): Promise<number> {
+    return await new Promise<number>((resolvePromise, reject) => {
+        child.once('error', reject);
+        child.once('exit', code => resolvePromise(code ?? 2));
+    });
+}
+
+export async function waitForProcessGroup(child: ChildProcess, timeoutMs = 5_000): Promise<void> {
+    if (process.platform === 'win32' || child.pid === undefined) return;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        try {
+            process.kill(-child.pid, 0);
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+            if ((error as NodeJS.ErrnoException).code !== 'EPERM') throw error;
+        }
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
+    }
+    throw new EpochError('ADAPTER_TIMEOUT');
+}
+
+export function terminateProcessGroup(child: ChildProcess, signal: NodeJS.Signals = 'SIGTERM'): void {
+    if (child.pid !== undefined && process.platform !== 'win32') {
+        try { process.kill(-child.pid, signal); } catch { /* already gone */ }
+    }
+    if (child.exitCode === null) child.kill(signal);
+}
+
+async function run(options: LauncherOptions): Promise<void> {
+    const supervisorPath = resolve(dirname(fileURLToPath(import.meta.url)), 'exclusion-supervisor.ts');
+    const descriptor = buildDescriptor(options);
+    const supervisor = spawn(process.execPath, [
+        '--import', 'tsx', supervisorPath,
+        '--entry-point', options.entryPoint,
+        '--descriptor-fd', '3',
+    ], {
+        env: process.env,
+        stdio: ['pipe', 'pipe', 'inherit', 'pipe'],
+    });
+    let child: ChildProcess | undefined;
+    let childStatus = 2;
+    let dispatcher: ControlChannelDispatcher | undefined;
+    let childInput: ReturnType<typeof createInterface> | undefined;
+    try {
+        const descriptorPipe = supervisor.stdio[3];
+        if (!descriptorPipe || typeof descriptorPipe === 'string' || !('write' in descriptorPipe)) fail();
+        descriptorPipe.write(JSON.stringify(descriptor));
+        descriptorPipe.end();
+        // Keep the supervisor streams private to the parent. The child gets
+        // two independent anonymous pipes; this parent remains the only
+        // reader of supervisor stdout and forwards responses to the child.
+        dispatcher = new ControlChannelDispatcher(supervisor);
+        const nonce = await dispatcher.waitForReady();
+        const childStdio = ['inherit', 'inherit', 'inherit', 'ignore', 'pipe', 'pipe'] as unknown as StdioOptions;
+        const environment = {
+            ...process.env,
+            ANALYSIS_CAPACITY_EXCLUSION_CONTROL_READ_FD: String(CONTROL_READ_FD),
+            ANALYSIS_CAPACITY_EXCLUSION_CONTROL_WRITE_FD: String(CONTROL_WRITE_FD),
+            ANALYSIS_CAPACITY_EXCLUSION_CONTROL_NONCE: nonce,
+        };
+        const mappedChild = spawn('/bin/bash', [scriptPath(options.scriptToken), ...options.scriptArgs], {
+            env: environment,
+            stdio: childStdio,
+            detached: process.platform !== 'win32',
+        }) as ChildProcess;
+        child = mappedChild;
+        const mappedStdio = mappedChild.stdio as unknown as Array<NodeJS.ReadableStream | Writable | null | undefined>;
+        const childRequestPipe = mappedStdio[CONTROL_WRITE_FD];
+        const childResponsePipe = mappedStdio[CONTROL_READ_FD];
+        if (!childRequestPipe || typeof childRequestPipe === 'string'
+            || !childResponsePipe || typeof childResponsePipe === 'string'
+            || !('write' in childResponsePipe)) fail();
+        childInput = createInterface({ input: childRequestPipe as NodeJS.ReadableStream, crlfDelay: Infinity });
+        childInput.on('line', line => {
+            void dispatcher!.forwardChildRequest(line, childResponsePipe as Writable).catch(() => {
+                terminateProcessGroup(mappedChild, 'SIGTERM');
+            });
+        });
+        childStatus = await waitForExit(mappedChild);
+        childInput.close();
+        await waitForProcessGroup(mappedChild);
+        await dispatcher.sendSupervisorRequest('release');
+    } finally {
+        childInput?.close();
+        if (child) terminateProcessGroup(child, 'SIGTERM');
+        dispatcher?.close();
+        if (supervisor.stdin && !supervisor.stdin.destroyed) supervisor.stdin.end();
+        if (supervisor.exitCode === null) {
+            await new Promise<void>(resolvePromise => {
+                const timer = setTimeout(() => {
+                    supervisor.kill('SIGTERM');
+                    resolvePromise();
+                }, 5_000);
+                supervisor.once('exit', () => {
+                    clearTimeout(timer);
+                    resolvePromise();
+                });
+            });
+        }
+    }
+    process.exitCode = childStatus;
+}
+
+const invokedScript = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
+if (import.meta.url === invokedScript) {
+    void run(parseArguments(process.argv.slice(2))).catch((error: unknown) => {
+        if (error instanceof EpochError) {
+            process.stderr.write(error.code + '\n');
+        } else {
+            process.stderr.write('ADAPTER_REQUEST_INVALID\n');
+        }
+        process.exitCode = 2;
+    });
+}

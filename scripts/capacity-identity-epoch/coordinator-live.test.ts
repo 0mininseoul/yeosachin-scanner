@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createFixturePacket } from './fixtures';
 import { LiveEpochControlPlane } from './coordinator';
-import { EpochJournal, type JournalStorage } from './journal';
+import { EpochJournal, transitionCommitment, type JournalStorage } from './journal';
 import { issueCoordinatorCapability } from './packet';
 import { VercelAdapter } from './vercel';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from './platform';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
-import { canonicalDigest, canonicalQueueConfiguration, canonicalRuntimeInputDigest, EpochError, type EpochLock, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedRetentionInput, type ProtectedSchedulerInput, type Role } from './contracts';
+import { canonicalDigest, canonicalQueueConfiguration, canonicalRuntimeInputDigest, EpochError, type EpochLock, type EpochTransition, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedRetentionInput, type ProtectedSchedulerInput, type Role } from './contracts';
 import type { PublicReadinessExpected } from '../../lib/services/analysis/public-readiness-contract';
 
 class MemoryStorage implements JournalStorage {
@@ -27,6 +27,12 @@ class MemoryStorage implements JournalStorage {
         return [...this.values.entries()]
             .filter(([key]) => key.startsWith(prefix))
             .map(([key, value]) => ({ key, ...value }));
+    }
+
+    async delete(key: string, options: { ifGenerationMatch: string }) {
+        const current = this.values.get(key);
+        if (!current || current.generation !== options.ifGenerationMatch) throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        this.values.delete(key);
     }
 
     seed(key: string, generation: string, value: unknown): void {
@@ -69,7 +75,7 @@ function liveAuthority(
             return { state: null, transitions: [], aborted: false, activeFence: currentLease!.lock.lockFence, requiresReconciliation: false };
         }) as typeof journal.readValidatedState;
     }
-    return { journal, capability: issueCoordinatorCapability(packet, ownerDigest), ownerDigest, lease };
+    return { journal, storage, capability: issueCoordinatorCapability(packet, ownerDigest), ownerDigest, lease };
 }
 
 class FakeTransport implements ProtectedTransport {
@@ -100,6 +106,16 @@ function readiness(packet: ReturnType<typeof createFixturePacket>, phase: 'old' 
             '/api/analysis/run': { gateState: 'frozen', expectedStatus: 410, gateBeforeRuntime: true },
         },
         analysisV2AdmissionEnabled: false, earlybirdWebhookAutoAdmissionEnabled: false,
+    };
+}
+
+function preparedTransition(journal: EpochJournal, lockFence: string): EpochTransition {
+    const value = canonicalDigest('live-resume-prepared');
+    return {
+        sequence: 1, epochIdDigest: journal.epochIdDigest, fromState: null, toState: 'PREPARED', stateVersion: 1,
+        lockFence, preconditionDigest: value, mutationDigest: value, postconditionDigest: value,
+        proofDigest: value, nativeConcurrencyTokenDigest: value, resourceObservationDigest: value,
+        resultCode: 'OK', recordedAt: '2026-09-08T00:00:01.000Z',
     };
 }
 
@@ -358,5 +374,99 @@ describe('live coordinator producer wire ordering', () => {
         await expect(oldOperation).rejects.toThrow('LOCK_LOST');
         expect(checks).toEqual(['1', '2', '1']);
         expect(pauseQueueCalls).toBe(0);
+    });
+
+    it('rejects valid-format Live.resume baseline tampering and missing committed evidence', async () => {
+        const packet = createFixturePacket();
+        const authority = liveAuthority(packet);
+        const prepared = preparedTransition(authority.journal, authority.lease.lock.lockFence);
+        await authority.journal.append(authority.lease, prepared);
+        const observed = { capturedAtMs: 100_000, ledger: 'fixture-baseline' };
+        const baseline = {
+            capturedAtMs: observed.capturedAtMs,
+            digest: canonicalDigest(observed),
+            epochHeaderDigest: authority.journal.epochHeaderDigest,
+            packetDigest: canonicalDigest(packet),
+            transitionCommitment: transitionCommitment(prepared),
+            ownerDigest: authority.lease.lock.ownerDigest,
+            lockFence: authority.lease.lock.lockFence,
+        } as const;
+        await authority.storage.put(authority.journal.baselineKey, baseline, { ifGenerationMatch: '0' });
+
+        const control = () => new LiveEpochControlPlane({
+            cloudRun: {} as never, iam: {} as never, workPlanes: {} as never, vercel: {} as never,
+            publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
+            deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
+            serviceBodies: { preflight: {}, paid: {} }, journal: authority.journal, capability: authority.capability,
+            ownerDigest: authority.ownerDigest, zeroWorkBaseline: async () => observed, now: () => 100_000,
+        });
+        await expect(control().resume({ packet, lease: authority.lease, state: 'PREPARED' })).resolves.toBeUndefined();
+        const tamperCases: readonly [keyof typeof baseline, unknown, string][] = [
+            ['capturedAtMs', 100_001, 'OBSERVATION_RACE'],
+            ['digest', 'f'.repeat(64), 'OBSERVATION_RACE'],
+            ['packetDigest', 'f'.repeat(64), 'CAPABILITY_BINDING_MISMATCH'],
+            ['epochHeaderDigest', 'f'.repeat(64), 'JOURNAL_INVALID'],
+            ['transitionCommitment', 'f'.repeat(64), 'OBSERVATION_RACE'],
+        ];
+        for (const [key, value, errorCode] of tamperCases) {
+            const current = await authority.storage.get(authority.journal.baselineKey);
+            if (!current) throw new Error('missing baseline fixture');
+            const tampered = await authority.storage.put(authority.journal.baselineKey, { ...(current.value as object), [key]: value }, { ifGenerationMatch: current.generation });
+            await expect(control().resume({ packet, lease: authority.lease, state: 'PREPARED' }), key).rejects.toThrow(errorCode);
+            await authority.storage.put(authority.journal.baselineKey, baseline, { ifGenerationMatch: tampered.generation });
+        }
+
+        const current = await authority.storage.get(authority.journal.baselineKey);
+        if (!current) throw new Error('missing baseline fixture');
+        await authority.storage.delete!(authority.journal.baselineKey, { ifGenerationMatch: current.generation });
+        await expect(control().resume({ packet, lease: authority.lease, state: 'PREPARED' })).rejects.toThrow('EVIDENCE_UNAVAILABLE');
+    });
+
+    it('refuses pre-PREPARED baseline adoption after a real owner takeover without recapturing or mutating', async () => {
+        const packet = createFixturePacket();
+        const now = { value: 100_000 };
+        const header = {
+            epochIdDigest: canonicalDigest(packet.epochId),
+            capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest,
+            desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest,
+            sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-08T00:00:00.000Z',
+        } as const;
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => now.value, leaseMs: 100 });
+        await journal.ensureHeader();
+        const oldOwner = 'b'.repeat(64);
+        const oldLease = await journal.acquire(oldOwner);
+        const observed = { capturedAtMs: 100_000, ledger: 'fixture-baseline' };
+        const baseline = {
+            capturedAtMs: observed.capturedAtMs,
+            digest: canonicalDigest(observed),
+            epochHeaderDigest: journal.epochHeaderDigest,
+            packetDigest: canonicalDigest(packet),
+            transitionCommitment: canonicalDigest('uncommitted-prepared'),
+            ownerDigest: oldLease.lock.ownerDigest,
+            lockFence: oldLease.lock.lockFence,
+        } as const;
+        await journal.persistEvidenceBaseline(oldLease, baseline);
+        const retainedBefore = await storage.get(journal.baselineKey);
+        if (!retainedBefore) throw new Error('missing baseline fixture');
+        const newOwner = 'c'.repeat(64);
+        now.value += 101;
+        const newLease = await journal.acquire(newOwner);
+        await expect(journal.assertLive(newLease)).resolves.toBeUndefined();
+        let recaptures = 0;
+        const control = new LiveEpochControlPlane({
+            cloudRun: {} as never, iam: {} as never, workPlanes: {} as never, vercel: {} as never,
+            publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
+            deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
+            serviceBodies: { preflight: {}, paid: {} }, journal,
+            capability: issueCoordinatorCapability(packet, newOwner), ownerDigest: newOwner,
+            zeroWorkBaseline: async () => { recaptures += 1; return observed; }, now: () => now.value,
+        });
+        await expect(control.resume({ packet, lease: newLease, state: null })).rejects.toThrow('LOCK_LOST');
+        expect(recaptures).toBe(0);
+        await expect(storage.get(journal.baselineKey)).resolves.toEqual(retainedBefore);
     });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { EpochError, canonicalDigest } from './contracts';
+import { EpochError, canonicalDigest, type EpochHeader, type EpochTransition } from './contracts';
 import { GcsJournalStorage, type GcsHttpRequest, type GcsHttpResponse } from './gcs';
+import { EpochJournal } from './journal';
 
 class FakeTransport {
     readonly requests: GcsHttpRequest[] = [];
@@ -15,6 +16,52 @@ class FakeTransport {
         const response = this.responses.shift();
         if (!response) throw new Error('unexpected fake request');
         return response;
+    }
+}
+
+class InMemoryTransport {
+    readonly requests: GcsHttpRequest[] = [];
+    private readonly values = new Map<string, { generation: string; body: string }>();
+    private generation = 0;
+
+    async request(request: GcsHttpRequest): Promise<GcsHttpResponse> {
+        this.requests.push(request);
+        const url = new URL(request.url);
+        if (request.method === 'POST') {
+            const key = url.searchParams.get('name');
+            const expected = url.searchParams.get('ifGenerationMatch');
+            if (!key || !expected) return response(400, '');
+            const current = this.values.get(key);
+            if (expected === '0' ? current !== undefined : current?.generation !== expected) return response(412, '');
+            const stored = { generation: String(++this.generation), body: request.body ?? '' };
+            this.values.set(key, stored);
+            return response(200, JSON.stringify({ name: key, generation: stored.generation }), { 'x-goog-generation': stored.generation });
+        }
+        const objectMarker = '/o/';
+        const marker = url.pathname.indexOf(objectMarker);
+        if (marker >= 0 && url.pathname !== '/storage/v1/b/fixture-bucket/o') {
+            const key = decodeURIComponent(url.pathname.slice(marker + objectMarker.length));
+            const current = this.values.get(key);
+            if (!current) return response(404, '');
+            if (request.method === 'DELETE') {
+                const expected = url.searchParams.get('ifGenerationMatch');
+                if (expected !== current.generation) return response(412, '');
+                this.values.delete(key);
+                return response(204, '');
+            }
+            if (url.searchParams.get('alt') === 'json') {
+                return response(200, JSON.stringify({ name: key, generation: current.generation }));
+            }
+            return response(200, current.body, { 'x-goog-generation': current.generation });
+        }
+        if (request.method === 'GET') {
+            const prefix = url.searchParams.get('prefix') ?? '';
+            const items = [...this.values.entries()]
+                .filter(([key]) => key.startsWith(prefix))
+                .map(([name, value]) => ({ name, generation: value.generation }));
+            return response(200, JSON.stringify({ items }));
+        }
+        return response(400, '');
     }
 }
 
@@ -140,5 +187,49 @@ describe('protected GCS journal storage', () => {
         await expect(storage.put('../outside.json', {}, { ifGenerationMatch: '0' })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
         await expect(storage.put('bad object name', {}, { ifGenerationMatch: '0' })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
         expect(requests).toHaveLength(0);
+    });
+
+    it('rechecks the real GCS adapter append intent after a token-await race', async () => {
+        const header: EpochHeader = {
+            epochIdDigest: '1'.repeat(64), capabilityDigest: '2'.repeat(64),
+            oldManifestDigest: '3'.repeat(64), desiredManifestDigest: '4'.repeat(64),
+            roleSetDigest: '5'.repeat(64), sourcePlanDigest: '6'.repeat(64),
+            createdAt: '2026-09-08T00:00:00.000Z',
+        };
+        const transport = new InMemoryTransport();
+        let pauseNextToken = false;
+        let tokenPaused!: () => void;
+        const paused = new Promise<void>(resolvePaused => { tokenPaused = resolvePaused; });
+        let releaseToken!: () => void;
+        const tokenProvider = async (): Promise<string> => {
+            if (pauseNextToken) {
+                pauseNextToken = false;
+                tokenPaused();
+                await new Promise<void>(resolveRelease => { releaseToken = resolveRelease; });
+            }
+            return 'fixture-token';
+        };
+        const storage = new GcsJournalStorage({ bucket: 'fixture-bucket', transport, tokenProvider });
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 60_000 });
+        const lease = await journal.acquire('a'.repeat(64));
+        const transition = (proofDigest: string): EpochTransition => ({
+            sequence: 1, epochIdDigest: header.epochIdDigest, fromState: null, toState: 'PREPARED', stateVersion: 1,
+            lockFence: lease.lock.lockFence, preconditionDigest: '7'.repeat(64), mutationDigest: '8'.repeat(64),
+            postconditionDigest: '9'.repeat(64), proofDigest, nativeConcurrencyTokenDigest: 'a'.repeat(64),
+            resourceObservationDigest: 'b'.repeat(64), resultCode: 'OK', recordedAt: '2026-09-08T00:00:01.000Z',
+        });
+        pauseNextToken = true;
+        const staleAppend = journal.append(lease, transition('c'.repeat(64)));
+        await paused;
+        await journal.append(lease, transition('d'.repeat(64)));
+        releaseToken();
+        await expect(staleAppend).rejects.toThrow('JOURNAL_INVALID');
+        const state = await journal.readValidatedState(lease);
+        expect(state.state).toBe('PREPARED');
+        const journalPosts = transport.requests.filter(request => request.method === 'POST'
+            && request.url.includes('epoch-journal'));
+        expect(journalPosts).toHaveLength(1);
+        expect(journalPosts[0]?.body).toContain('"proofDigest":"' + 'd'.repeat(64) + '"');
+        expect(journalPosts[0]?.body).not.toContain('"proofDigest":"' + 'c'.repeat(64) + '"');
     });
 });
