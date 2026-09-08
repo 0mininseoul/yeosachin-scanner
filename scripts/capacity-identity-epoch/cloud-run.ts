@@ -3,6 +3,7 @@ import {
     canonicalDigest,
     canonicalRuntimeInputDigest,
     epochFail,
+    hasExactKeys,
     isObject,
     type ProtectedIdentity,
     type ProtectedRuntimeInput,
@@ -120,11 +121,15 @@ function parseEnvironment(container: Record<string, unknown>): { environment: Re
         if (typeof env.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(env.name) || names.has(env.name)) fail('ADAPTER_RESPONSE_INVALID');
         names.add(env.name);
         if (typeof env.value === 'string') {
+            if (!hasExactKeys(env, ['name', 'value'])) fail('ADAPTER_RESPONSE_INVALID');
             environment[env.name] = env.value;
             continue;
         }
+        if (!hasExactKeys(env, ['name', 'valueFrom'])) fail('ADAPTER_RESPONSE_INVALID');
         const valueFrom = object(env.valueFrom);
+        if (!hasExactKeys(valueFrom, ['secretKeyRef'])) fail('ADAPTER_RESPONSE_INVALID');
         const ref = object(valueFrom.secretKeyRef);
+        if (!hasExactKeys(ref, ['name', 'key'])) fail('ADAPTER_RESPONSE_INVALID');
         if (typeof ref.name !== 'string' || typeof ref.key !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/.test(ref.name) || !/^[1-9][0-9]*$/.test(ref.key)) fail('ADAPTER_RESPONSE_INVALID');
         secretReferences[env.name] = `${ref.name}:${ref.key}`;
     }

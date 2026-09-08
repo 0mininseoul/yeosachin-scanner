@@ -425,6 +425,10 @@ export class WorkPlaneClient {
     }
 
     private queueConfiguration(queue: Record<string, unknown>): Record<string, unknown> {
+        // appEngineRoutingOverride is only reviewed inside the provider's
+        // appEngineHttpTarget union. Never silently drop a rogue top-level
+        // response field while constructing the canonical configuration.
+        if (queue.appEngineRoutingOverride !== undefined) fail('RESOURCE_INVALID');
         const configuration: Record<string, unknown> = {};
         // Preserve the complete provider configuration in the canonical queue
         // observation.  The evidence collector independently checks
@@ -435,6 +439,7 @@ export class WorkPlaneClient {
     }
 
     private queueTarget(queue: Record<string, unknown>, input: ProtectedQueueInput): QueueTargetObservation | null {
+        if (queue.appEngineRoutingOverride !== undefined) fail('RESOURCE_INVALID');
         const appEngineHttpTarget = queue.appEngineHttpTarget;
         if (appEngineHttpTarget !== undefined) {
             if (queue.httpTarget !== undefined) fail('RESOURCE_INVALID');

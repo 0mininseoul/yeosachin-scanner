@@ -263,6 +263,25 @@ GREEN bash -n <changed shell scripts> && git diff --check
       checks passed
 ```
 
+## Final Cloud Run and Cloud Tasks response re-review
+
+Cloud Run's shared `parseEnvironment` boundary now requires exact
+`{name,value}` or `{name,valueFrom}` entries (including exact secret-key
+reference keys), so both stage and promotion reject extra raw response fields
+before a PUT. Cloud Tasks observations reject a provider response carrying a
+rogue top-level `appEngineRoutingOverride`; reviewed nested
+`appEngineHttpTarget.appEngineRoutingOverride` forms continue to be validated
+and bound by the queue target union.
+
+```text
+RED  npx vitest run scripts/capacity-identity-epoch/platform.test.ts -t 'extra raw Cloud Run env|rogue top-level Cloud Tasks' --reporter=dot
+     2 focused failures: promotion issued one PUT for extra raw env keys and rogue routing override was accepted
+GREEN npx vitest run scripts/capacity-identity-epoch/platform.test.ts -t 'extra raw Cloud Run env|rogue top-level Cloud Tasks' --reporter=dot
+      2 passed; extra raw env produces zero PUTs
+GREEN gtimeout --foreground --signal=TERM --kill-after=10s 180s npm run test:identity-epoch -- --reporter=dot
+      22 files, 270 tests passed
+```
+
 ## Remaining limitations
 
 - No provider-backed or production evidence was collected in this worktree.

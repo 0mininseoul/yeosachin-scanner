@@ -192,6 +192,28 @@ describe('protected platform adapters', () => {
         expect(observed.resourceVersion).toBe('rv-2');
     });
 
+    it('rejects extra raw Cloud Run env-entry keys before promotion PUT', async () => {
+        const service = runService('3', [{ revisionName: 'preflight-revision', percent: 0 }]);
+        const container = service.spec.template.spec.containers[0] as Record<string, unknown>;
+        const env = container.env as Array<Record<string, unknown>>;
+        env[0]!.unreviewed = 'rogue';
+        const promoted = runService('4', [{ revisionName: 'preflight-revision', percent: 100 }]);
+        const promotedContainer = promoted.spec.template.spec.containers[0] as Record<string, unknown>;
+        const promotedEnv = promotedContainer.env as Array<Record<string, unknown>>;
+        promotedEnv[0]!.unreviewed = 'rogue';
+        let puts = 0;
+        const fake = new FakeTransport(request => {
+            if (request.method === 'PUT') puts += 1;
+            return response(request, 200, request.method === 'PUT' ? promoted : service);
+        });
+        const adapter = new CloudRunAdapter({ transport: authenticated(fake), pollTimeoutMs: 100, pollIntervalMs: 0 });
+        await expect(adapter.setTraffic({
+            resource: serviceResource, expectedGeneration: '3', expectedRevision: 'preflight-revision', expectedPercent: 100,
+            traffic: [{ revisionName: 'preflight-revision', percent: 100 }], leaseCheck: noLease,
+        })).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+        expect(puts).toBe(0);
+    });
+
     it('rejects absent and forged Cloud Run lease authorities before provider access', async () => {
         const fake = new FakeTransport(() => { throw new Error('provider must not run'); });
         const adapter = new CloudRunAdapter({ transport: authenticated(fake) });
@@ -732,6 +754,18 @@ describe('protected platform adapters', () => {
         const fake = new FakeTransport(() => { throw new Error('provider must not run'); });
         await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
         expect(fake.requests).toHaveLength(0);
+    });
+
+    it('rejects a rogue top-level Cloud Tasks App Engine routing override', async () => {
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { maxConcurrentDispatches: 2 },
+        };
+        const fake = new FakeTransport(request => request.url.includes('/tasks?')
+            ? response(request, 200, { tasks: [] })
+            : response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, appEngineRoutingOverride: { service: 'rogue', version: 'v1', instance: 'i1' } }));
+        await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
     });
 
     it('pauses Scheduler through the real operation endpoint and reads state back', async () => {
