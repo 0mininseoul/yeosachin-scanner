@@ -224,7 +224,43 @@ revision name to the packet-derived desired revision before any PUT.
 RED  npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'metadata or revision drift' --reporter=dot
      1 failed: resourceVersion drift was accepted
 GREEN npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'metadata or revision drift' --reporter=dot
-      1 focused test passed
+     1 focused test passed
+```
+
+## Re-review contract corrections
+
+The protected Cloud Tasks queue projection now retains the complete reviewed
+`appEngineHttpTarget` (including `appEngineRoutingOverride`) and rejects
+mutually-exclusive or unreviewed target fields before transport. Cloud Run
+service-body validation requires literal env entries to have exactly `name`
+and `value`, and secret entries exactly `name` and `valueFrom`, before a PUT.
+The V2 deploy wrapper validates both recovery and retention Scheduler IDs with
+the provider grammar (ASCII letters/digits, `_` and `-`, maximum 500) before
+any composed operation; shell validators use the same grammar with a separate
+length check for Bash 3.2 compatibility.
+
+```text
+RED  npx vitest run scripts/capacity-identity-epoch/platform.test.ts -t 'App Engine target|changed or mutually' --reporter=dot
+     2 focused failures: App Engine configuration was dropped and changed target was accepted
+RED  npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'extra unreviewed Cloud Run env' --reporter=dot
+     1 focused failure: extra env-entry key was accepted
+RED  npx vitest run scripts/capacity-identity-epoch/exclusion-shell-mapping.test.ts -t 'provider grammar|deploy-v2 Scheduler' --reporter=dot
+     2 focused failures: deploy-v2 had no early Scheduler validator or provider grammar contract
+GREEN npx vitest run scripts/capacity-identity-epoch/platform.test.ts -t 'App Engine target|changed or mutually|unreviewed Cloud Tasks' --reporter=dot
+      3 passed
+GREEN npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'extra unreviewed Cloud Run env' --reporter=dot
+      1 passed
+GREEN npx vitest run scripts/capacity-identity-epoch/exclusion-shell-mapping.test.ts -t 'provider grammar|deploy-v2 Scheduler' --reporter=dot
+      2 passed
+GREEN gtimeout --foreground --signal=TERM --kill-after=10s 180s npm run test:identity-epoch -- --reporter=dot
+      22 files, 268 tests passed
+GREEN npx tsc --noEmit --pretty false
+GREEN npm run lint
+      0 errors (pre-existing warnings only)
+GREEN env NEXT_PUBLIC_SUPABASE_URL=https://fixture.example.test NEXT_PUBLIC_SUPABASE_ANON_KEY=fixture-anon NEXT_PUBLIC_SITE_URL=https://fixture.example.test gtimeout --foreground --signal=TERM --kill-after=10s 180s npm run build
+      production fixture build completed
+GREEN bash -n <changed shell scripts> && git diff --check
+      checks passed
 ```
 
 ## Remaining limitations

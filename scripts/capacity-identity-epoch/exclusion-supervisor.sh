@@ -16,7 +16,7 @@ readonly CAPACITY_EXCLUSION_PROJECT_PATTERN='^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
 readonly CAPACITY_EXCLUSION_LOCATION_PATTERN='^[a-z][a-z0-9-]{0,62}$'
 readonly CAPACITY_EXCLUSION_SERVICE_PATTERN='^[a-z][a-z0-9-]{0,62}$'
 readonly CAPACITY_EXCLUSION_QUEUE_PATTERN='^[A-Za-z0-9-]{1,100}$'
-readonly CAPACITY_EXCLUSION_SCHEDULER_PATTERN='^[A-Za-z0-9_-]{1,500}$'
+readonly CAPACITY_EXCLUSION_SCHEDULER_PATTERN='^[A-Za-z0-9_-]+$'
 readonly CAPACITY_EXCLUSION_ACCOUNT_PATTERN='^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}(\.[a-z0-9-]{2,63})+$'
 
 CAPACITY_EXCLUSION_ACTIVE="false"
@@ -93,10 +93,12 @@ capacity_exclusion_validate_selector_atoms() {
       recovery_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
     fi
     [[ "$maintenance_location" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
-    [[ "$recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN ]] || capacity_exclusion_die
+    [[ "$recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
+      && ${#recovery_job} -le 500 ]] || capacity_exclusion_die
     if [[ "$entry_point" == 'paid-maintenance' ]]; then
       retention_job="${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"
-      [[ "$retention_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN ]] || capacity_exclusion_die
+      [[ "$retention_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
+        && ${#retention_job} -le 500 ]] || capacity_exclusion_die
     fi
   fi
 }

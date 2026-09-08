@@ -685,6 +685,55 @@ describe('protected platform adapters', () => {
         expect(fake.requests).toHaveLength(0);
     });
 
+    it('preserves and binds the reviewed Cloud Tasks App Engine target and routing override', async () => {
+        const appEngineHttpTarget = { appEngineRoutingOverride: { service: 'preflight', version: 'v1', instance: 'i1' } };
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { maxConcurrentDispatches: 2, appEngineHttpTarget },
+        };
+        const fake = new FakeTransport(request => request.url.includes('/tasks?')
+            ? response(request, 200, { tasks: [] })
+            : response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, appEngineHttpTarget }));
+        const observed = await new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue);
+        expect(observed.configuration).toEqual({ rateLimits: { maxConcurrentDispatches: 2 }, appEngineHttpTarget });
+    });
+
+    it('rejects changed or mutually exclusive Cloud Tasks target forms before mutation', async () => {
+        const appEngineHttpTarget = { appEngineRoutingOverride: { service: 'preflight', version: 'v1', instance: 'i1' } };
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { maxConcurrentDispatches: 2, appEngineHttpTarget },
+        };
+        const changed = new FakeTransport(request => request.url.includes('/tasks?')
+            ? response(request, 200, { tasks: [] })
+            : response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, appEngineHttpTarget: { appEngineRoutingOverride: { service: 'paid', version: 'v1', instance: 'i1' } } }));
+        await expect(new WorkPlaneClient({ transport: authenticated(changed) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
+        expect(changed.requests.some(request => request.method === 'POST' || request.method === 'PATCH')).toBe(false);
+
+        const mutuallyExclusive = new FakeTransport(request => request.url.includes('/tasks?')
+            ? response(request, 200, { tasks: [] })
+            : response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } }, appEngineHttpTarget }));
+        const bothTargets = { ...queue, configuration: {
+            ...queue.configuration,
+            httpTarget: { httpMethod: 'POST' },
+        } };
+        await expect(new WorkPlaneClient({ transport: authenticated(mutuallyExclusive) }).observeQueue(bothTargets)).rejects.toThrow('RESOURCE_INVALID');
+        expect(mutuallyExclusive.requests.some(request => request.method === 'POST' || request.method === 'PATCH')).toBe(false);
+    });
+
+    it('rejects unreviewed Cloud Tasks App Engine target fields before transport', async () => {
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { appEngineHttpTarget: { relativeUri: '/reviewed', unreviewed: true } },
+        };
+        const fake = new FakeTransport(() => { throw new Error('provider must not run'); });
+        await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
+        expect(fake.requests).toHaveLength(0);
+    });
+
     it('pauses Scheduler through the real operation endpoint and reads state back', async () => {
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3',

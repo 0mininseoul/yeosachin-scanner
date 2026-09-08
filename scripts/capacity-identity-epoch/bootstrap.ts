@@ -283,9 +283,11 @@ export function validateServiceBodies(
             if (!isObject(item) || typeof item.name !== 'string' || (typeof item.value !== 'string' && item.valueFrom === undefined)
                 || (item.value !== undefined && item.valueFrom !== undefined)) fail('CAPABILITY_BINDING_MISMATCH');
             if (item.value !== undefined) {
+                if (!hasExactKeys(item, ['name', 'value'])) fail('CAPABILITY_BINDING_MISMATCH');
                 if (Object.prototype.hasOwnProperty.call(env, item.name) || Object.prototype.hasOwnProperty.call(secrets, item.name)) fail('CAPABILITY_BINDING_MISMATCH');
                 env[item.name] = item.value as string;
             } else {
+                if (!hasExactKeys(item, ['name', 'valueFrom'])) fail('CAPABILITY_BINDING_MISMATCH');
                 if (!isObject(item.valueFrom) || !hasExactKeys(item.valueFrom, ['secretKeyRef']) || !isObject(item.valueFrom.secretKeyRef)
                     || !hasExactKeys(item.valueFrom.secretKeyRef, ['name', 'key'])
                     || typeof item.valueFrom.secretKeyRef.name !== 'string' || typeof item.valueFrom.secretKeyRef.key !== 'string') fail('CAPABILITY_BINDING_MISMATCH');

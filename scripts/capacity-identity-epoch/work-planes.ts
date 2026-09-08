@@ -5,6 +5,7 @@ import {
     epochFail,
     hasExactKeys,
     isObject,
+    validateQueueTargetConfiguration,
     type ProtectedIdentity,
     type ProtectedQueueInput,
     type ProtectedSchedulerInput,
@@ -122,6 +123,7 @@ export class WorkPlaneClient {
     }
 
     async observeQueue(input: ProtectedQueueInput): Promise<QueueObservation> {
+        validateQueueTargetConfiguration(input.configuration);
         const { location } = parseQueueResource(input.resource, input.project);
         if (location !== input.location) fail('RESOURCE_INVALID');
         const config = await this.getQueue(input);
@@ -191,6 +193,7 @@ export class WorkPlaneClient {
         desiredTarget: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
         leaseCheck?: LeaseCheck;
     }>): Promise<QueueObservation> {
+        validateQueueTargetConfiguration(options.input.configuration);
         const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'queue.target', resource: options.input.resource });
         await leaseCheck();
         const beforeRecord = await this.getQueue({ ...options.input, target: options.expectedOldTarget });
@@ -229,6 +232,7 @@ export class WorkPlaneClient {
     }
 
     private async observeQueueWithLease(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> {
+        validateQueueTargetConfiguration(input.configuration);
         const { location } = parseQueueResource(input.resource, input.project);
         if (location !== input.location) fail('RESOURCE_INVALID');
         if (leaseCheck) await leaseCheck();
@@ -239,6 +243,7 @@ export class WorkPlaneClient {
     }
 
     private async getQueue(input: ProtectedQueueInput): Promise<{ state: 'PAUSED' | 'RUNNING'; target: QueueTargetObservation | null; configuration: Record<string, unknown>; httpTarget: Record<string, unknown> | null }> {
+        validateQueueTargetConfiguration(input.configuration);
         const path = `/v2/${input.resource}`;
         const { value } = await this.transport.json({
             method: 'GET', url: `https://cloudtasks.googleapis.com${path}`, allowedHosts: TASKS_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: [], acceptedStatuses: [200],
@@ -288,6 +293,7 @@ export class WorkPlaneClient {
     }
 
     private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume', leaseCheckInput: LeaseCheck | undefined, operation: 'queue.pause' | 'queue.resume'): Promise<QueueObservation> {
+        validateQueueTargetConfiguration(input.configuration);
         const leaseCheck = requireLeaseCheck(leaseCheckInput, { operation, resource: input.resource });
         const parsed = parseQueueResource(input.resource, input.project);
         if (parsed.location !== input.location) fail('RESOURCE_INVALID');
@@ -424,11 +430,20 @@ export class WorkPlaneClient {
         // observation.  The evidence collector independently checks
         // samplingRatio=1, while this projection ensures drift cannot be
         // hidden from the packet's queue/configuration digest.
-        for (const key of ['rateLimits', 'retryConfig', 'stackdriverLoggingConfig']) if (queue[key] !== undefined) configuration[key] = queue[key];
+        for (const key of ['rateLimits', 'retryConfig', 'stackdriverLoggingConfig', 'appEngineHttpTarget']) if (queue[key] !== undefined) configuration[key] = queue[key];
         return configuration;
     }
 
     private queueTarget(queue: Record<string, unknown>, input: ProtectedQueueInput): QueueTargetObservation | null {
+        const appEngineHttpTarget = queue.appEngineHttpTarget;
+        if (appEngineHttpTarget !== undefined) {
+            if (queue.httpTarget !== undefined) fail('RESOURCE_INVALID');
+            if (!isObject(input.configuration.appEngineHttpTarget)
+                || canonicalDigest(input.configuration.appEngineHttpTarget) !== canonicalDigest(appEngineHttpTarget)) fail('RESOURCE_INVALID');
+            validateQueueTargetConfiguration({ appEngineHttpTarget });
+            return null;
+        }
+        if (input.configuration.appEngineHttpTarget !== undefined) fail('RESOURCE_INVALID');
         if (queue.httpTarget === undefined) {
             if (isObject(input.configuration.httpTarget)) fail('RESOURCE_INVALID');
             return null;

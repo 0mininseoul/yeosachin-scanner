@@ -812,6 +812,20 @@ describe('provider-free live adapter vertical', () => {
         expect(() => validateServiceBodies(packet, revisionDrift)).toThrow('CAPABILITY_BINDING_MISMATCH');
     });
 
+    it('rejects extra unreviewed Cloud Run env-entry keys before a PUT', () => {
+        const packet = createFixturePacket();
+        const bodies = reviewedBodies(packet);
+        const spec = (bodies.preflight.spec as Record<string, unknown>);
+        const template = spec.template as Record<string, unknown>;
+        const templateSpec = template.spec as Record<string, unknown>;
+        const container = (templateSpec.containers as Array<Record<string, unknown>>)[0]!;
+        const env = container.env as Array<Record<string, unknown>>;
+        const literal = env.find(item => typeof item.value === 'string');
+        if (!literal) throw new Error('fixture env literal missing');
+        literal.unreviewed = 'not-in-packet';
+        expect(() => validateServiceBodies(packet, bodies)).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
     it('builds the default production graph with concrete collectors and reaches VERIFIED through fake transports', async () => {
         const packet = createFixturePacket();
         const provider = new FakeProvider(packet);

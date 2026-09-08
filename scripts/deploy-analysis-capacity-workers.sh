@@ -593,9 +593,10 @@ if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
   # validated here, before any gcloud command can receive them.
   recovery_scheduler_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
   recovery_scheduler_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
-  # Bounded repetition above 255 is not portable in this regex engine, so the
+  # Bounded repetition above 255 is not portable in Bash 3.2, so the
   # documented 500-character Scheduler job-id limit is checked separately.
-  [[ "$recovery_scheduler_job" =~ ^[A-Za-z0-9_-]{1,500}$ ]] \
+  [[ "$recovery_scheduler_job" =~ ^[A-Za-z0-9_-]+$ \
+    && ${#recovery_scheduler_job} -le 500 ]] \
     || die "initial identity roll-forward recovery scheduler job name is invalid"
   [[ "$recovery_scheduler_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
     || die "initial identity roll-forward recovery scheduler location is invalid"

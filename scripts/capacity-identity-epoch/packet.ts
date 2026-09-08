@@ -15,6 +15,7 @@ import {
     isObject,
     isRole,
     isSha,
+    validateQueueTargetConfiguration,
     type CapacityEpochPacket,
     type CapacityManifest,
     type EpochErrorCode,
@@ -484,6 +485,7 @@ function validateQueueInput(value: unknown, role: Role): asserts value is Protec
     validateRoleWorkerTarget(value.target, role);
     validateProtectedIdentity(value.target.callerIdentity);
     validateConfigObject(value.configuration);
+    validateQueueTargetConfiguration(value.configuration);
 }
 
 function validateSchedulerInput(value: unknown, role: Role): asserts value is ProtectedSchedulerInput {

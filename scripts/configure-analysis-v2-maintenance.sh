@@ -83,7 +83,7 @@ validate_service() {
 }
 
 validate_job() {
-  [[ "$1" =~ ^[A-Za-z0-9_-]{1,500}$ ]] || die "invalid scheduler job"
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ && ${#1} -le 500 ]] || die "invalid scheduler job"
 }
 
 validate_service_account() {

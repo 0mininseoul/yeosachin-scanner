@@ -496,6 +496,42 @@ export function isObject(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const APP_ENGINE_HTTP_TARGET_KEYS = ['appEngineRoutingOverride', 'relativeUri'] as const;
+const APP_ENGINE_ROUTING_OVERRIDE_KEYS = ['service', 'version', 'instance'] as const;
+const SAFE_APP_ENGINE_ATOM = /^[^\u0000-\u001f\u007f]{1,256}$/;
+
+/**
+ * Validate the mutually-exclusive Cloud Tasks target union before any
+ * provider request. App Engine targets are retained in the queue
+ * configuration digest, so every reviewed wire field is compared as a whole
+ * rather than treating routing override as an informational hint.
+ */
+export function validateQueueTargetConfiguration(value: Readonly<Record<string, unknown>>): void {
+    const httpTarget = value.httpTarget;
+    const appEngineHttpTarget = value.appEngineHttpTarget;
+    if (value.appEngineRoutingOverride !== undefined
+        || (httpTarget !== undefined && appEngineHttpTarget !== undefined)) epochFail('RESOURCE_INVALID');
+    if (appEngineHttpTarget === undefined) return;
+    if (!isObject(appEngineHttpTarget)
+        || Object.keys(appEngineHttpTarget).length === 0
+        || Object.keys(appEngineHttpTarget).some(key => !(APP_ENGINE_HTTP_TARGET_KEYS as readonly string[]).includes(key))) {
+        epochFail('RESOURCE_INVALID');
+    }
+    const relativeUri = appEngineHttpTarget.relativeUri;
+    if (relativeUri !== undefined && (typeof relativeUri !== 'string' || !SAFE_APP_ENGINE_ATOM.test(relativeUri) || !relativeUri.startsWith('/'))) {
+        epochFail('RESOURCE_INVALID');
+    }
+    const routing = appEngineHttpTarget.appEngineRoutingOverride;
+    if (routing !== undefined) {
+        if (!isObject(routing)
+            || Object.keys(routing).length === 0
+            || Object.keys(routing).some(key => !(APP_ENGINE_ROUTING_OVERRIDE_KEYS as readonly string[]).includes(key))
+            || !Object.values(routing).every(item => typeof item === 'string' && SAFE_APP_ENGINE_ATOM.test(item))) {
+            epochFail('RESOURCE_INVALID');
+        }
+    }
+}
+
 /**
  * Normalize the reviewed queue config shape to the Cloud Tasks provider
  * projection.  Protected fixtures may use flat rate-limit names, while the

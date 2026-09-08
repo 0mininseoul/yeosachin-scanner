@@ -59,7 +59,18 @@ describe('ordinary identity-epoch shell mappings', () => {
             'deploy-analysis-capacity-workers.sh',
         ];
         for (const file of schedulerScripts) {
-            expect(readFileSync(resolve(root, file), 'utf8'), file).toContain('^[A-Za-z0-9_-]{1,500}$');
+            const source = readFileSync(resolve(root, file), 'utf8');
+            expect(source, file).toContain('^[A-Za-z0-9_-]+$');
+            expect(source, file).toContain('-le 500');
         }
+    });
+
+    it('validates both deploy-v2 Scheduler selectors before any raw use', () => {
+        const source = readFileSync(resolve(root, 'deploy-analysis-v2-worker.sh'), 'utf8');
+        expect(source).toContain('^[A-Za-z0-9_-]+$');
+        expect(source).toContain('${#job} -le 500');
+        expect(source).toContain('validate_scheduler_job');
+        expect(source).toMatch(/validate_scheduler_job\s+"\$recovery_scheduler_job"/);
+        expect(source).toMatch(/validate_scheduler_job\s+"\$retention_scheduler_job"/);
     });
 });

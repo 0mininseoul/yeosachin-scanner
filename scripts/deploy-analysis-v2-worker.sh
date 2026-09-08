@@ -249,6 +249,13 @@ validate_queue() {
     || die "PREFLIGHT_TASKS_QUEUE is invalid"
 }
 
+validate_scheduler_job() {
+  local job="$1"
+  local label="$2"
+  [[ "$job" =~ ^[A-Za-z0-9_-]+$ && ${#job} -le 500 ]] \
+    || die "$label is invalid"
+}
+
 validate_bucket() {
   local bucket="$1"
   local label="$2"
@@ -2573,7 +2580,7 @@ recovery_scheduler_config_is_exact() {
 observe_known_good_scheduler_gate() {
   local config
   local current_state
-  local job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+  local job="$recovery_scheduler_job"
   local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
   known_good_scheduler_enabled="false"
   config="$(gcloud scheduler jobs describe "$job" \
@@ -2593,7 +2600,7 @@ restore_recovery_scheduler_gate() {
   local config
   local current_state
   local desired_state="PAUSED"
-  local job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+  local job="$recovery_scheduler_job"
   local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
   if [[ "$known_good_recovery_enabled" == "true" \
     && "$known_good_scheduler_enabled" == "true" ]]; then
@@ -2701,9 +2708,9 @@ rollback_live_traffic() {
   if [[ "$known_good_is_bootstrap" == "true" ]]; then
     printf 'rollback: pausing maintenance Schedulers before restoring the execution-disabled bootstrap revision\n' >&2
     if ! pause_scheduler_job_if_present \
-      "${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}" \
+      "$recovery_scheduler_job" \
       || ! pause_scheduler_job_if_present \
-        "${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"; then
+        "$retention_scheduler_job"; then
       printf 'critical: maintenance Schedulers could not be paused before bootstrap traffic rollback\n' >&2
       return 1
     fi
@@ -2897,6 +2904,8 @@ readonly result_image_r2_bucket="${ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET:-}"
 readonly r2_access_key_id_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION:-}"
 readonly r2_secret_access_key_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION:-}"
 readonly result_image_object_hmac_secret_version="${ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION:-}"
+readonly recovery_scheduler_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+readonly retention_scheduler_job="${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"
 readonly preflight_queue="${PREFLIGHT_TASKS_QUEUE:-analysis-preflight}"
 readonly preflight_apify_token_slots="$PREFLIGHT_APIFY_API_TOKEN_SLOTS"
 readonly instagram_route="$ANALYSIS_V2_INSTAGRAM_ROUTE"
@@ -2920,6 +2929,10 @@ validate_location "$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
   "ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
 validate_service "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE"
 validate_queue "$preflight_queue"
+validate_scheduler_job "$recovery_scheduler_job" \
+  ANALYSIS_V2_RECOVERY_SCHEDULER_JOB
+validate_scheduler_job "$retention_scheduler_job" \
+  ANALYSIS_V2_RETENTION_SCHEDULER_JOB
 validate_bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
   "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET"
 validate_deploy_lock_bucket "$ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
