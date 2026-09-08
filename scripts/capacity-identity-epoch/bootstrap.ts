@@ -196,6 +196,7 @@ export async function buildLiveBootstrap(
         ? candidate
         : await resolveHeader(storage, candidate, now);
     const journal = new EpochJournal(storage, { header, now });
+    const capability = issueCoordinatorCapability(packet, descriptor.ownerDigest);
     const options: LiveEpochControlPlaneOptions = {
         cloudRun,
         iam,
@@ -209,11 +210,12 @@ export async function buildLiveBootstrap(
         producerAlias: descriptor.vercelProducerAlias,
         serviceBodies: descriptor.serviceBodies,
         journal,
+        capability,
+        ownerDigest: descriptor.ownerDigest,
         renewLease: (lease) => journal.renew(lease),
         now,
     };
     const controlPlane = new LiveEpochControlPlane(options);
-    const capability = issueCoordinatorCapability(packet, descriptor.ownerDigest);
     const coordinator = new EpochCoordinator({ packet, journal, controlPlane, ownerDigest: descriptor.ownerDigest, capability, now });
     return {
         coordinator,

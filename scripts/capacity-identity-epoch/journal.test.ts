@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     EpochJournal,
+    transitionCommitment,
     type JournalStorage,
     type StoredObject,
 } from './journal';
@@ -58,6 +59,66 @@ class TakeoverDuringAppendStorage extends MemoryStorage {
             this.takenOver = true;
         }
         return stored;
+    }
+}
+
+class TakeoverDuringBaselineStorage extends MemoryStorage {
+    lockKey: string | undefined;
+    baselineKey: string | undefined;
+    takeoverOwner: string | undefined;
+    private takenOver = false;
+
+    override async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        const stored = await super.put(key, value, options);
+        if (!this.takenOver && this.lockKey && this.baselineKey && key === this.baselineKey && this.takeoverOwner) {
+            const lock = await this.get(this.lockKey);
+            if (!lock) throw new Error('missing lock fixture');
+            const current = lock.value as EpochHeader & { ownerDigest: string; lockFence: string; lockExpiresAt: string; epochHeaderDigest: string };
+            await super.put(this.lockKey, {
+                ...current,
+                ownerDigest: this.takeoverOwner,
+                lockFence: '2',
+                lockExpiresAt: '2099-01-01T00:01:00.000Z',
+            }, { ifGenerationMatch: lock.generation });
+            this.takenOver = true;
+        }
+        return stored;
+    }
+}
+
+class PauseBaselineGetStorage extends MemoryStorage {
+    baselineKey: string | undefined;
+    private paused = true;
+    private signalStarted!: () => void;
+    private release!: () => void;
+    readonly baselineGetStarted = new Promise<void>(resolve => {
+        this.signalStarted = resolve;
+    });
+    private readonly released = new Promise<void>(resolve => { this.release = resolve; });
+
+    override async get(key: string): Promise<StoredObject | null> {
+        if (this.paused && this.baselineKey === key) {
+            this.paused = false;
+            this.signalStarted();
+            await this.released;
+        }
+        return super.get(key);
+    }
+
+    releaseBaselineGet(): void {
+        this.release();
+    }
+
+    async takeover(lockKey: string, ownerDigest: string): Promise<void> {
+        const lock = await super.get(lockKey);
+        if (!lock) throw new Error('missing lock fixture');
+        const current = lock.value as EpochHeader & { ownerDigest: string; lockFence: string; lockExpiresAt: string; epochHeaderDigest: string };
+        await super.put(lockKey, {
+            ...current,
+            ownerDigest,
+            lockFence: '2',
+            lockExpiresAt: '2099-01-01T00:01:00.000Z',
+        }, { ifGenerationMatch: lock.generation });
     }
 }
 
@@ -224,5 +285,99 @@ describe('generation-fenced epoch journal', () => {
         const resumed = await journal.readValidatedState(ownerB);
         expect(resumed).toMatchObject({ state: 'PREPARED', activeFence: '2', requiresReconciliation: true });
         expect(resumed.transitions[0]?.lockFence).toBe('1');
+    });
+
+    it('binds the durable zero-work baseline to the header and PREPARED commitment', async () => {
+        const storage = new MemoryStorage();
+        const now = 1_000;
+        const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-baseline'));
+        const prepared = transition(1, null, 'PREPARED', lease.lock.lockFence);
+        const baseline = {
+            capturedAtMs: now,
+            digest: digest('ledger-baseline'),
+            epochHeaderDigest: journal.epochHeaderDigest,
+            packetDigest: digest('packet'),
+            transitionCommitment: transitionCommitment(prepared),
+            ownerDigest: lease.lock.ownerDigest,
+            lockFence: lease.lock.lockFence,
+        } as const;
+        await journal.persistEvidenceBaseline(lease, baseline);
+        await expect(journal.readEvidenceBaseline(lease)).resolves.toEqual(baseline);
+
+        const retained = await storage.get(journal.baselineKey);
+        if (!retained) throw new Error('missing baseline fixture');
+        await storage.put(journal.baselineKey, { ...retained.value as object, digest: 'not-a-digest' }, { ifGenerationMatch: retained.generation });
+        await expect(journal.readEvidenceBaseline(lease)).rejects.toThrow('JOURNAL_INVALID');
+    });
+
+    it('rejects missing or foreign baseline bindings and fences delayed writes', async () => {
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-baseline-invalid'));
+        const prepared = transition(1, null, 'PREPARED', lease.lock.lockFence);
+        const baseline = {
+            capturedAtMs: 1_000,
+            digest: digest('ledger-baseline'),
+            epochHeaderDigest: journal.epochHeaderDigest,
+            packetDigest: digest('packet'),
+            transitionCommitment: transitionCommitment(prepared),
+            ownerDigest: lease.lock.ownerDigest,
+            lockFence: lease.lock.lockFence,
+        } as const;
+        await storage.put(journal.baselineKey, { ...baseline, packetDigest: 'f'.repeat(64) }, { ifGenerationMatch: '0' });
+        await expect(journal.readEvidenceBaseline(lease)).resolves.toMatchObject({ packetDigest: 'f'.repeat(64) });
+
+        const delayedStorage = new TakeoverDuringBaselineStorage();
+        const delayedJournal = new EpochJournal(delayedStorage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await delayedJournal.ensureHeader();
+        const delayedLease = await delayedJournal.acquire(digest('owner-baseline-delayed'));
+        delayedStorage.lockKey = delayedJournal.lockKey;
+        delayedStorage.baselineKey = delayedJournal.baselineKey;
+        delayedStorage.takeoverOwner = digest('owner-baseline-takeover');
+        await expect(delayedJournal.persistEvidenceBaseline(delayedLease, {
+            ...baseline,
+            epochHeaderDigest: delayedJournal.epochHeaderDigest,
+            ownerDigest: delayedLease.lock.ownerDigest,
+            lockFence: delayedLease.lock.lockFence,
+        })).rejects.toThrow('LOCK_LOST');
+    });
+
+    it('rejects ABORTED and takeover races during the awaited baseline GET before any baseline write', async () => {
+        const makeBaseline = (journal: EpochJournal, lease: { lock: { ownerDigest: string; lockFence: string } }) => ({
+            capturedAtMs: 1_000,
+            digest: digest('ledger-baseline'),
+            epochHeaderDigest: journal.epochHeaderDigest,
+            packetDigest: digest('packet'),
+            transitionCommitment: transitionCommitment(transition(1, null, 'PREPARED', lease.lock.lockFence)),
+            ownerDigest: lease.lock.ownerDigest,
+            lockFence: lease.lock.lockFence,
+        });
+
+        const abortedStorage = new PauseBaselineGetStorage();
+        const abortedJournal = new EpochJournal(abortedStorage, { header, now: () => 1_000, leaseMs: 10_000 });
+        abortedStorage.baselineKey = abortedJournal.baselineKey;
+        await abortedJournal.ensureHeader();
+        const abortedLease = await abortedJournal.acquire(digest('owner-baseline-abort'));
+        const abortedWrite = abortedJournal.persistEvidenceBaseline(abortedLease, makeBaseline(abortedJournal, abortedLease));
+        await abortedStorage.baselineGetStarted;
+        await abortedJournal.append(abortedLease, { ...transition(1, null, null, abortedLease.lock.lockFence), resultCode: 'ABORTED' });
+        abortedStorage.releaseBaselineGet();
+        await expect(abortedWrite).rejects.toThrow('ABORTED_EPOCH');
+        expect(await abortedStorage.get(abortedJournal.baselineKey)).toBeNull();
+
+        const takeoverStorage = new PauseBaselineGetStorage();
+        const takeoverJournal = new EpochJournal(takeoverStorage, { header: { ...header, epochIdDigest: digest('epoch-takeover-baseline') }, now: () => 1_000, leaseMs: 10_000 });
+        takeoverStorage.baselineKey = takeoverJournal.baselineKey;
+        await takeoverJournal.ensureHeader();
+        const takeoverLease = await takeoverJournal.acquire(digest('owner-baseline-takeover-old'));
+        const takeoverWrite = takeoverJournal.persistEvidenceBaseline(takeoverLease, makeBaseline(takeoverJournal, takeoverLease));
+        await takeoverStorage.baselineGetStarted;
+        await takeoverStorage.takeover(takeoverJournal.lockKey, digest('owner-baseline-takeover-new'));
+        takeoverStorage.releaseBaselineGet();
+        await expect(takeoverWrite).rejects.toThrow('LOCK_LOST');
+        expect(await takeoverStorage.get(takeoverJournal.baselineKey)).toBeNull();
     });
 });

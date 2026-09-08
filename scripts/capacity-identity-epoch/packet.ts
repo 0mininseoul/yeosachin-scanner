@@ -1039,7 +1039,7 @@ function validateProbe(value: unknown): void {
     assertKeys(value, ['bodyDigest', 'expectedStatuses', 'expectedCodes'], 'PROBE_FAILED');
     const expectedStatuses = value.expectedStatuses as Record<string, unknown>;
     const expectedCodes = value.expectedCodes as Record<string, unknown>;
-    if (!validDigest(value.bodyDigest) || !isObject(expectedStatuses) || !isObject(expectedCodes)
+    if (value.bodyDigest !== canonicalDigest('{') || !validDigest(value.bodyDigest) || !isObject(expectedStatuses) || !isObject(expectedCodes)
         || !hasExactKeys(expectedStatuses, ROLES) || !hasExactKeys(expectedCodes, ROLES)
         || !ROLES.every(role => expectedStatuses[role] === 400 && expectedCodes[role] === 'INVALID_REQUEST')) epochFail('PROBE_FAILED');
 }

@@ -374,14 +374,25 @@ function packet() {
         quiescence: { timeoutMs: 60_000, graceMs: 5_000 },
         protectedObservations: { old: oldObservations(), desired: observationTargets() },
         probe: {
-            bodyDigest: 'd'.repeat(64), expectedStatuses: { preflight: 400, paid: 400 } as const,
+            bodyDigest: canonicalDigest('{'), expectedStatuses: { preflight: 400, paid: 400 } as const,
             expectedCodes: { preflight: 'INVALID_REQUEST', paid: 'INVALID_REQUEST' } as const,
         },
     };
     return createProtectedPacket({ ...input, observationInputs: deriveObservationInputDigests(input) });
 }
 
-function synchronizeDesiredRuntimeProof(value: any, role: 'preflight' | 'paid') {
+type MutableDeep<T> = T extends readonly (infer Item)[]
+    ? MutableDeep<Item>[]
+    : T extends object
+        ? { -readonly [Key in keyof T]: MutableDeep<T[Key]> }
+        : T;
+type MutablePacket = MutableDeep<ReturnType<typeof packet>>;
+
+function mutablePacket(): MutablePacket {
+    return packet() as unknown as MutablePacket;
+}
+
+function synchronizeDesiredRuntimeProof(value: MutablePacket, role: 'preflight' | 'paid') {
     const runtime = value.protectedInputs.desired.runtime[role];
     value.protectedObservations.desired.runtime[role] = JSON.parse(JSON.stringify(runtime));
     value.desiredManifest.source[role].desiredRuntimeEnvironment = JSON.parse(JSON.stringify(runtime.environment));
@@ -392,7 +403,7 @@ function synchronizeDesiredRuntimeProof(value: any, role: 'preflight' | 'paid') 
 
 describe('coordinated epoch protected packet', () => {
     it('accepts complete old and desired manifests and binds non-secret digests', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         expect(value.oldManifestDigest).toMatch(/^[0-9a-f]{64}$/);
         expect(value.desiredManifestDigest).toMatch(/^[0-9a-f]{64}$/);
         expect(validateEpochPacket(value).epochId).toBe('epoch-fixture');
@@ -400,7 +411,7 @@ describe('coordinated epoch protected packet', () => {
 
     it('rejects every missing or additional fixed slot before capability issuance', () => {
         for (const slot of SLOTS) {
-            const value = packet() as any;
+            const value = mutablePacket();
             delete (value.desiredManifest.roleSlots as Record<string, unknown>)[slot];
             expect(() => validateEpochPacket(value)).toThrow(EpochError);
         }
@@ -412,27 +423,27 @@ describe('coordinated epoch protected packet', () => {
     it('rejects all 28 desired workload identity collisions and build collisions', () => {
         for (let left = 0; left < SLOTS.length; left += 1) {
             for (let right = left + 1; right < SLOTS.length; right += 1) {
-                const value = packet() as any;
+                const value = mutablePacket();
                 const source = value.desiredManifest.roleSlots[SLOTS[left]];
                 value.desiredManifest.roleSlots[SLOTS[right]] = source;
                 expect(() => validateEpochPacket(value)).toThrow('IDENTITY_CONFLICT');
             }
         }
-        const buildCollision = packet() as any;
+        const buildCollision = mutablePacket();
         buildCollision.desiredManifest.build = buildCollision.desiredManifest.roleSlots[SLOTS[0]];
         expect(() => validateEpochPacket(buildCollision)).toThrow('IDENTITY_CONFLICT');
     });
 
     it('allows only same-slot unchanged identity and rejects old shared/retired reuse', () => {
-        const unchanged = packet() as any;
+        const unchanged = mutablePacket();
         unchanged.desiredManifest.roleSlots[SLOTS[0]] = unchanged.oldManifest.roleSlots[SLOTS[0]];
         expect(() => validateManifestComparison(unchanged.oldManifest, unchanged.desiredManifest)).not.toThrow();
 
-        const moved = packet() as any;
+        const moved = mutablePacket();
         moved.desiredManifest.roleSlots[SLOTS[1]] = moved.oldManifest.roleSlots[SLOTS[0]];
         expect(() => validateManifestComparison(moved.oldManifest, moved.desiredManifest)).toThrow('IDENTITY_CONFLICT');
 
-        const shared = packet() as any;
+        const shared = mutablePacket();
         shared.oldManifest.roleSlots[SLOTS[0]] = shared.oldManifest.roleSlots[SLOTS[1]];
         expect(() => validateManifestComparison(shared.oldManifest, shared.desiredManifest)).not.toThrow();
         shared.desiredManifest.roleSlots[SLOTS[2]] = shared.oldManifest.roleSlots[SLOTS[0]];
@@ -440,7 +451,7 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('allows heterogeneous old source provenance when each role is bound independently', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const paidOldSha = 'c'.repeat(40);
         value.oldManifest.source.paid.oldSha = paidOldSha;
         value.protectedInputs.old.runtime.paid.sourceSha = paidOldSha;
@@ -452,33 +463,33 @@ describe('coordinated epoch protected packet', () => {
 
     it('rejects every old workload/build alias reused by the desired build or workload set', () => {
         for (const slot of SLOTS) {
-            const value = packet() as any;
+            const value = mutablePacket();
             value.desiredManifest.build = value.oldManifest.roleSlots[slot];
             expect(() => validateManifestComparison(value.oldManifest, value.desiredManifest)).toThrow('IDENTITY_CONFLICT');
         }
-        const oldBuildMoved = packet() as any;
+        const oldBuildMoved = mutablePacket();
         oldBuildMoved.desiredManifest.roleSlots[SLOTS[0]] = oldBuildMoved.oldManifest.build;
         expect(() => validateManifestComparison(oldBuildMoved.oldManifest, oldBuildMoved.desiredManifest)).toThrow('IDENTITY_CONFLICT');
     });
 
     it('binds protected execution/observation contracts and probe status to the packet digests', () => {
-        const runtimeMutation = packet() as any;
+        const runtimeMutation = mutablePacket();
         runtimeMutation.protectedInputs.desired.runtime.preflight.environment.NODE_ENV = 'test';
         expect(() => validateEpochPacket(runtimeMutation)).toThrow(EpochError);
 
-        const observationMutation = packet() as any;
+        const observationMutation = mutablePacket();
         observationMutation.protectedObservations.desired.zeroWorkSources.providerLedger.lookbackMs = 0;
         expect(() => validateEpochPacket(observationMutation)).toThrow(EpochError);
 
-        const statusMutation = packet() as any;
-        statusMutation.probe.expectedStatuses.preflight = 403;
+        const statusMutation = mutablePacket();
+        Reflect.set(statusMutation.probe.expectedStatuses, 'preflight', 403);
         expect(() => validateEpochPacket(statusMutation)).toThrow('PROBE_FAILED');
 
-        const codeMutation = packet() as any;
-        codeMutation.probe.expectedCodes.paid = 'UNEXPECTED';
+        const codeMutation = mutablePacket();
+        Reflect.set(codeMutation.probe.expectedCodes, 'paid', 'UNEXPECTED');
         expect(() => validateEpochPacket(codeMutation)).toThrow('PROBE_FAILED');
 
-        const iamMutation = packet() as any;
+        const iamMutation = mutablePacket();
         iamMutation.protectedInputs.desired.iam.paid.run.bindings.push({
             role: 'roles/run.invoker', member: 'allUsers', condition: null,
         });
@@ -486,29 +497,29 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('rejects semantically invalid candidates even when their fresh digests are rebuilt', () => {
-        const badRole = packet() as any;
+        const badRole = mutablePacket();
         badRole.protectedInputs.desired.iam.paid.run.bindings[0].role = 'roles/owner';
         badRole.protectedObservations.desired.iam.paid.run.bindings[0].role = 'roles/owner';
         expect(() => createProtectedPacket(badRole)).toThrow(EpochError);
 
-        const badSource = packet() as any;
+        const badSource = mutablePacket();
         badSource.protectedInputs.desired.runtime.preflight.sourceSha = 'c'.repeat(40);
         badSource.protectedObservations.desired.runtime.preflight.sourceSha = 'c'.repeat(40);
         expect(() => createProtectedPacket(badSource)).toThrow(EpochError);
 
-        const badGate = packet() as any;
+        const badGate = mutablePacket();
         badGate.protectedInputs.desired.runtime.preflight.providerAdmissionEnabled = false;
         badGate.protectedInputs.desired.runtime.preflight.environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED = 'false';
         badGate.protectedObservations.desired.runtime.preflight.providerAdmissionEnabled = false;
         expect(() => createProtectedPacket(badGate)).toThrow(EpochError);
 
-        const badResource = packet() as any;
+        const badResource = mutablePacket();
         badResource.desiredManifest.queues.preflight.resource = 'projects/example-project/locations/asia-northeast3/queues/unrelated';
         expect(() => createProtectedPacket(badResource)).toThrow(EpochError);
     });
 
     it('rejects auth-graph, build, runtime, secret, and capacity setting drift with copied targets', () => {
-        const wrongInvoker = packet() as any;
+        const wrongInvoker = mutablePacket();
         const wrongInvokerGrant = {
             role: 'roles/run.invoker',
             member: `serviceAccount:${desiredIdentity('paid.runtime')}`,
@@ -518,7 +529,7 @@ describe('coordinated epoch protected packet', () => {
         wrongInvoker.protectedObservations.desired.iam.preflight.run.bindings.push(wrongInvokerGrant);
         expect(() => createProtectedPacket(wrongInvoker)).toThrow('RESOURCE_INVALID');
 
-        const arbitraryAgent = packet() as any;
+        const arbitraryAgent = mutablePacket();
         const agentGrant = {
             role: 'roles/iam.serviceAccountUser',
             member: 'serviceAccount:service-999999999999@gcp-sa-cloudtasks.iam.gserviceaccount.com',
@@ -528,29 +539,29 @@ describe('coordinated epoch protected packet', () => {
         arbitraryAgent.protectedObservations.desired.iam.preflight.taskCaller.bindings.push(agentGrant);
         expect(() => createProtectedPacket(arbitraryAgent)).toThrow('RESOURCE_INVALID');
 
-        const wrongBuildSource = packet() as any;
+        const wrongBuildSource = mutablePacket();
         wrongBuildSource.protectedInputs.desired.build.sourceSha = 'c'.repeat(40);
         wrongBuildSource.protectedObservations.desired.source.preflight.sourceSha = 'c'.repeat(40);
         expect(() => createProtectedPacket(wrongBuildSource)).toThrow('SOURCE_INVALID');
 
-        const trafficEnabled = packet() as any;
+        const trafficEnabled = mutablePacket();
         trafficEnabled.protectedInputs.desired.runtime.preflight.noTraffic = false;
         trafficEnabled.protectedObservations.desired.runtime.preflight.noTraffic = false;
         expect(() => createProtectedPacket(trafficEnabled)).toThrow('SOURCE_INVALID');
 
-        const mutableSecret = packet() as any;
+        const mutableSecret = mutablePacket();
         mutableSecret.protectedInputs.desired.runtime.preflight.secretReferences.ANALYSIS_SECRET = 'secret:latest';
         mutableSecret.protectedObservations.desired.runtime.preflight.secretReferences.ANALYSIS_SECRET = 'secret:latest';
         expect(() => createProtectedPacket(mutableSecret)).toThrow('SOURCE_INVALID');
 
-        const wrongCapacity = packet() as any;
+        const wrongCapacity = mutablePacket();
         wrongCapacity.protectedInputs.desired.runtime.preflight.settings.maxInstances = 99;
         wrongCapacity.protectedObservations.desired.runtime.preflight.settings.maxInstances = 99;
         expect(() => createProtectedPacket(wrongCapacity)).toThrow('SOURCE_INVALID');
     });
 
     it('rejects a coherently copied expanded desired contract and disabled required task gate', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const desiredRuntime = value.protectedInputs.desired.runtime.preflight;
         desiredRuntime.environment.ANALYSIS_CAPACITY_STAGE = 'expanded';
         desiredRuntime.environment.ANALYSIS_CAPACITY_EXPANSION_CANARY = 'true';
@@ -561,38 +572,37 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('rejects an old readiness proof that is not ready and closed', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         value.protectedObservations.old.readiness.ready = false;
         expect(() => createProtectedPacket(value)).toThrow('READINESS_INVALID');
     });
 
     it('rejects mutable old revision provenance and preselected desired revision IDs', () => {
-        const oldAlias = packet() as any;
+        const oldAlias = mutablePacket();
         oldAlias.oldManifest.source.preflight.oldRevision = 'latest';
-        oldAlias.protectedInputs.old.runtime.preflight.revision = 'latest';
         oldAlias.protectedObservations.old.source.preflight.revision = 'latest';
         oldAlias.protectedObservations.old.runtime.preflight.revision = 'latest';
         expect(() => createProtectedPacket(oldAlias)).toThrow('SOURCE_INVALID');
 
-        const preselected = packet() as any;
+        const preselected = mutablePacket();
         preselected.desiredManifest.source.preflight.desiredRevisionId = 'preflight-operator-picked';
         expect(() => createProtectedPacket(preselected)).toThrow('SOURCE_INVALID');
     });
 
     it('joins each producer source to its reviewed Vercel readiness source', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         value.desiredManifest.producer.preflight.sourceSha = 'c'.repeat(40);
         expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
     });
 
     it('rejects a valid-looking queue configuration digest that is not its canonical payload', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         value.desiredManifest.queues.preflight.configDigest = 'd'.repeat(64);
         expect(() => createProtectedPacket(value)).toThrow('RESOURCE_INVALID');
     });
 
     it('rejects retention resources with the wrong provider kind even when copies agree', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const wrong = `projects/${PROJECT}/locations/asia-northeast3/queues/retention`;
         value.oldManifest.retention.resource = wrong;
         value.desiredManifest.retention.resource = wrong;
@@ -604,7 +614,7 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('rejects plaintext provider credentials even when every copied env agrees', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const runtime = value.protectedInputs.desired.runtime.preflight;
         runtime.environment.SUPABASE_SERVICE_ROLE_KEY = 'plaintext-fixture-secret';
         synchronizeDesiredRuntimeProof(value, 'preflight');
@@ -612,63 +622,63 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('rejects public Run invocation grants in the private auth graph', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const publicGrant = { role: 'roles/run.invoker', member: 'allUsers', condition: null };
         value.protectedInputs.old.iam.preflight.run.bindings.push(publicGrant);
         value.protectedInputs.desired.iam.preflight.run.bindings.push(publicGrant);
-        value.protectedInputs.desired.iam.preflight.run.previous.bindings.push(publicGrant);
+        value.protectedInputs.desired.iam.preflight.run.previous!.bindings.push(publicGrant);
         value.protectedObservations.old.iam.preflight.run.bindings.push(publicGrant);
         value.protectedObservations.desired.iam.preflight.run.bindings.push(publicGrant);
         expect(() => createProtectedPacket(value)).toThrow('RESOURCE_INVALID');
     });
 
     it('rejects synchronized incomplete or wrong provider secret contracts', () => {
-        const missingSecrets = packet() as any;
+        const missingSecrets = mutablePacket();
         missingSecrets.protectedInputs.desired.runtime.preflight.secretReferences = {};
         synchronizeDesiredRuntimeProof(missingSecrets, 'preflight');
         expect(() => createProtectedPacket(missingSecrets)).toThrow('SOURCE_INVALID');
 
-        const paidWrongSlot = packet() as any;
+        const paidWrongSlot = mutablePacket();
         paidWrongSlot.protectedInputs.desired.runtime.paid.environment.ANALYSIS_V2_APIFY_API_TOKEN_SLOT = 'primary';
         synchronizeDesiredRuntimeProof(paidWrongSlot, 'paid');
         expect(() => createProtectedPacket(paidWrongSlot)).toThrow('SOURCE_INVALID');
 
-        const preflightWrongPool = packet() as any;
+        const preflightWrongPool = mutablePacket();
         preflightWrongPool.protectedInputs.desired.runtime.preflight.environment.PREFLIGHT_APIFY_API_TOKEN_SLOTS = 'primary';
         synchronizeDesiredRuntimeProof(preflightWrongPool, 'preflight');
         expect(() => createProtectedPacket(preflightWrongPool)).toThrow('SOURCE_INVALID');
 
-        const changedSecretVersion = packet() as any;
+        const changedSecretVersion = mutablePacket();
         changedSecretVersion.protectedInputs.desired.runtime.preflight.secretReferences.APIFY_PRIMARY_API_TOKEN = 'fixture-secret:987';
         synchronizeDesiredRuntimeProof(changedSecretVersion, 'preflight');
         expect(() => createProtectedPacket(changedSecretVersion)).toThrow('SOURCE_INVALID');
     });
 
     it('preserves unrelated old IAM policy bindings and rejects unapproved additions', () => {
-        const preserved = packet() as any;
+        const preserved = mutablePacket();
         const unrelated = { role: 'roles/logging.viewer', member: 'user:operator@example.test', condition: null };
         preserved.protectedInputs.old.iam.preflight.run.bindings.push(unrelated);
         preserved.protectedInputs.desired.iam.preflight.run.bindings.push(unrelated);
-        preserved.protectedInputs.desired.iam.preflight.run.previous.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.run.previous!.bindings.push(unrelated);
         preserved.protectedInputs.old.iam.preflight.maintenance.bindings.push(unrelated);
         preserved.protectedInputs.desired.iam.preflight.maintenance.bindings.push(unrelated);
-        preserved.protectedInputs.desired.iam.preflight.maintenance.previous.bindings.push(unrelated);
+        preserved.protectedInputs.desired.iam.preflight.maintenance.previous!.bindings.push(unrelated);
         for (const phase of ['oldManifest', 'desiredManifest'] as const) {
             const source = phase === 'oldManifest' ? preserved.protectedInputs.old : preserved.protectedInputs.desired;
             const roleIam = source.iam.preflight;
             preserved[phase].iam.preflight.policyDigest = canonicalIamPolicyDigest(roleIam);
-            preserved[phase].iam.preflight.desiredBindings = canonicalIamBindingDigests(roleIam);
+            preserved[phase].iam.preflight.desiredBindings = [...canonicalIamBindingDigests(roleIam)];
         }
         preserved.protectedObservations.old.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.old.iam));
         preserved.protectedObservations.desired.iam = JSON.parse(JSON.stringify(preserved.protectedInputs.desired.iam));
         preserved.observationInputs = deriveObservationInputDigests(preserved);
         expect(() => createProtectedPacket(preserved)).not.toThrow();
 
-        const dropped = packet() as any;
+        const dropped = mutablePacket();
         dropped.protectedInputs.old.iam.preflight.run.bindings.push(unrelated);
         expect(() => createProtectedPacket(dropped)).toThrow('RESOURCE_INVALID');
 
-        const inventedMaintenanceGrant = packet() as any;
+        const inventedMaintenanceGrant = mutablePacket();
         inventedMaintenanceGrant.protectedInputs.desired.iam.preflight.maintenance.bindings.push({
             role: 'roles/iam.serviceAccountTokenCreator',
             member: `serviceAccount:${oldIdentity('preflight.maintenance')}`,
@@ -678,16 +688,16 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('binds the exact old workload grants retired after promotion', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         for (const role of ROLES) {
             expect(value.desiredManifest.iam[role].retiredBindings.length).toBeGreaterThan(0);
         }
 
-        const missing = packet() as any;
+        const missing = mutablePacket();
         missing.desiredManifest.iam.preflight.retiredBindings = [];
         expect(() => createProtectedPacket(missing)).toThrow('RESOURCE_INVALID');
 
-        const altered = packet() as any;
+        const altered = mutablePacket();
         altered.desiredManifest.iam.paid.retiredBindings[0] = 'f'.repeat(64);
         expect(() => createProtectedPacket(altered)).toThrow('RESOURCE_INVALID');
     });
@@ -700,14 +710,14 @@ describe('coordinated epoch protected packet', () => {
             'worker@example-other.iam.gserviceaccount.com',
             'worker@example-project.iam.gserviceaccount.com/keys/key',
         ]) {
-            const value = packet() as any;
+            const value = mutablePacket();
             value.desiredManifest.roleSlots[SLOTS[0]] = identity(bad);
             expect(() => validateEpochPacket(value)).toThrow(EpochError);
         }
     });
 
     it('issues an opaque capability bound to epoch, packet digest, role set, and namespace', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const capability = issueCoordinatorCapability(value, 'owner-digest');
         expect(() => validateEpochPacket(value, capability)).not.toThrow();
         expect(() => validateEpochPacket(value, { ...capability })).toThrow('CAPABILITY_INVALID');
@@ -717,7 +727,7 @@ describe('coordinated epoch protected packet', () => {
     });
 
     it('rejects a capability issued for another owner', () => {
-        const value = packet() as any;
+        const value = mutablePacket();
         const capability = issueCoordinatorCapability(value, 'owner-a');
         expect(() => validateEpochPacket(value, capability)).not.toThrow();
         expect(() => assertCoordinatorCapability(value, capability, 'owner-b')).toThrow('CAPABILITY_BINDING_MISMATCH');

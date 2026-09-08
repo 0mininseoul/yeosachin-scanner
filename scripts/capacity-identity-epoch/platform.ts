@@ -1,5 +1,6 @@
 import { GoogleAuth } from 'google-auth-library';
-import { EpochError, epochFail, isObject, type EpochErrorCode } from './contracts';
+import { EpochError, epochFail, isObject, canonicalDigest, type CapacityEpochPacket, type EpochErrorCode, type Role } from './contracts';
+import { assertLeaseBinding, type BoundLeaseCheck } from './lease-capability';
 
 export type ProtectedHttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
@@ -308,6 +309,204 @@ export class AuthenticatedProtectedTransport {
 
 export function getResponseHeader(headers: Readonly<Record<string, string>>, name: string): string | undefined {
     return responseHeader(headers, name);
+}
+
+export type ReviewedReceiverTarget = Readonly<{
+    url: string;
+    audience: string;
+    callerIdentity: string;
+}>;
+
+export type ReceiverTokenProvider = (input: Readonly<{
+    audience: string;
+    callerIdentity: string;
+}>) => Promise<string>;
+
+/**
+ * A receiver probe authority is deliberately opaque.  The packet-bound
+ * target, caller, malformed-body contract and live lease check are retained
+ * in a private registry rather than being reconstructed from a plain target
+ * object supplied by an adapter caller.
+ */
+export type ReceiverProbeAuthority = object;
+
+type ReceiverProbeBinding = Readonly<{
+    packetDigest: string;
+    role: Role;
+    ownerDigest: string;
+    serviceResource: string;
+    target: Readonly<{ url: string; audience: string; callerIdentity: string }>;
+    expectedStatus: 400;
+    expectedCode: 'INVALID_REQUEST';
+    body: '{';
+    leaseCheck: BoundLeaseCheck;
+}>;
+
+const receiverProbeAuthorities = new WeakMap<object, ReceiverProbeBinding>();
+const RECEIVER_PROBE_BODY = '{' as const;
+
+function receiverServiceResource(packet: CapacityEpochPacket, role: Role): string {
+    const runtime = packet.protectedInputs.desired.runtime[role];
+    return `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
+}
+
+/**
+ * Issue the only authority accepted by AuthenticatedReceiverProbe.  The
+ * caller must already hold a coordinator-issued lease check for the exact
+ * probe action and desired role service.  No URL, expected response, or
+ * caller identity is accepted from the probe adapter itself.
+ */
+export function issueReceiverProbeAuthority(input: Readonly<{
+    packet: CapacityEpochPacket;
+    role: Role;
+    ownerDigest: string;
+    lease: Readonly<{ lock: Readonly<{ lockFence: string }> }>;
+    leaseCheck: BoundLeaseCheck;
+}>): ReceiverProbeAuthority {
+    const runtime = input.packet.protectedInputs.desired.runtime[input.role];
+    const queue = input.packet.protectedInputs.desired.queues[input.role];
+    const resource = receiverServiceResource(input.packet, input.role);
+    assertLeaseBinding(input.leaseCheck, {
+        packet: input.packet,
+        ownerDigest: input.ownerDigest,
+        operation: 'probe.malformed',
+        resource,
+        lockFence: input.lease.lock.lockFence,
+    });
+    if (input.packet.probe.bodyDigest !== canonicalDigest(RECEIVER_PROBE_BODY)
+        || input.packet.probe.expectedStatuses[input.role] !== 400
+        || input.packet.probe.expectedCodes[input.role] !== 'INVALID_REQUEST') epochFail('PROBE_FAILED');
+    const authority = Object.freeze(Object.create(null)) as ReceiverProbeAuthority;
+    receiverProbeAuthorities.set(authority, {
+        packetDigest: canonicalDigest(input.packet),
+        role: input.role,
+        ownerDigest: input.ownerDigest,
+        serviceResource: resource,
+        target: Object.freeze({
+            url: runtime.target.url,
+            audience: runtime.target.audience,
+            callerIdentity: queue.target.callerIdentity.identity,
+        }),
+        expectedStatus: 400,
+        expectedCode: 'INVALID_REQUEST',
+        body: RECEIVER_PROBE_BODY,
+        leaseCheck: input.leaseCheck,
+    });
+    return authority;
+}
+
+function receiverProbeBinding(value: unknown): ReceiverProbeBinding {
+    if ((typeof value !== 'object' && typeof value !== 'function') || value === null) epochFail('CAPABILITY_INVALID');
+    const binding = receiverProbeAuthorities.get(value as object);
+    if (!binding) epochFail('CAPABILITY_INVALID');
+    return binding;
+}
+
+/**
+ * Narrow receiver-probe transport.  The general protected transport keeps a
+ * control-plane-only host allowlist; probes use this separate adapter because
+ * their reviewed destination is a worker URL rather than a Google API.  The
+ * destination is fixed at construction from the reviewed packet target and
+ * cannot be selected per request.  The token provider receives the exact
+ * reviewed caller/audience binding, keeping an ID-token implementation honest
+ * without exposing credentials or accepting a caller-selected host.
+ */
+export class AuthenticatedReceiverProbe {
+    private readonly transport: ProtectedTransport;
+    private readonly tokenProvider: ReceiverTokenProvider;
+    private readonly authority: ReceiverProbeAuthority;
+    private readonly binding: ReceiverProbeBinding;
+    private readonly target: ReviewedReceiverTarget;
+    private readonly url: URL;
+    private readonly timeoutMs: number;
+
+    constructor(options: Readonly<{
+        transport: ProtectedTransport;
+        tokenProvider: ReceiverTokenProvider;
+        authority: ReceiverProbeAuthority;
+        timeoutMs?: number;
+    }>) {
+        this.transport = options.transport;
+        this.tokenProvider = options.tokenProvider;
+        this.authority = options.authority;
+        this.binding = receiverProbeBinding(options.authority);
+        this.target = Object.freeze({ ...this.binding.target });
+        this.url = this.parseTarget(this.target);
+        this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > MAX_TIMEOUT_MS) fail('ADAPTER_REQUEST_INVALID');
+    }
+
+    async malformedBody(): Promise<Readonly<{ status: number; code: string }>> {
+        // The first check is useful for an early rejection before ID-token
+        // acquisition. The second check below is the final mutation barrier:
+        // a lost owner, fence, or durable ABORTED marker while token minting
+        // awaits must result in zero POSTs.
+        const binding = receiverProbeBinding(this.authority);
+        await binding.leaseCheck();
+        let token: string;
+        try {
+            token = await this.withTimeout(this.tokenProvider({ audience: this.target.audience, callerIdentity: this.target.callerIdentity }), 'ADAPTER_TIMEOUT');
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_REQUEST_INVALID');
+        }
+        assertBoundedString(token, 8192);
+        await binding.leaseCheck();
+        const request: ProtectedHttpRequest = {
+            method: 'POST',
+            url: this.url.toString(),
+            headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },
+            body: binding.body,
+        };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+        let response: ProtectedHttpResponse;
+        try {
+            response = await this.withTimeout(this.transport.request(request, controller.signal), 'ADAPTER_TIMEOUT');
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_TIMEOUT');
+        } finally {
+            clearTimeout(timer);
+        }
+        if (response.url !== undefined && response.url !== request.url) fail('ADAPTER_REDIRECT');
+        assertHttpStatus(response.status);
+        if (response.status !== binding.expectedStatus || typeof response.body !== 'string' || Buffer.byteLength(response.body, 'utf8') > DEFAULT_MAX_RESPONSE_BYTES) fail('PROBE_FAILED');
+        const body = parseProtectedObject(response.body);
+        if (Object.keys(body).sort().join(',') !== 'code' || body.code !== binding.expectedCode) fail('PROBE_FAILED');
+        return { status: response.status, code: binding.expectedCode };
+    }
+
+    private parseTarget(target: ReviewedReceiverTarget): URL {
+        if (typeof target.callerIdentity !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(target.callerIdentity)) fail('ADAPTER_REQUEST_INVALID');
+        let url: URL;
+        let audience: URL;
+        try {
+            url = new URL(target.url);
+            audience = new URL(target.audience);
+        } catch {
+            fail('ADAPTER_REQUEST_INVALID');
+        }
+        if (url.protocol !== 'https:' || url.username || url.password || url.port || url.search || url.hash
+            || audience.protocol !== 'https:' || audience.username || audience.password || audience.port || audience.pathname !== '/' || audience.search || audience.hash
+            || audience.origin !== url.origin) fail('ADAPTER_REQUEST_INVALID');
+        return url;
+    }
+
+    private async withTimeout<T>(promise: Promise<T>, code: EpochErrorCode): Promise<T> {
+        const marker = Symbol('receiver-probe-timeout');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            const result = await Promise.race([
+                promise,
+                new Promise<T | typeof marker>(resolve => { timer = setTimeout(() => resolve(marker), this.timeoutMs); }),
+            ]);
+            if (result === marker) fail(code);
+            return result as T;
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
+    }
 }
 
 export { EpochError };

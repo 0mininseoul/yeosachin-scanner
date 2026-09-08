@@ -9,6 +9,9 @@ import {
     type RuntimeSettings,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
+import { requireLeaseCheck, type LeaseCheck } from './lease-capability';
+
+export type { LeaseCheck } from './lease-capability';
 
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
@@ -258,18 +261,6 @@ export type CloudRunAdapterOptions = Readonly<{
     pollIntervalMs?: number;
 }>;
 
-/**
- * Immutable operation-local owner/fence capability.  Adapters never retain
- * this callback: a renewal must remain bound to the operation that supplied
- * it, so a later owner cannot accidentally authorize an older request.
- */
-export type LeaseCheck = () => Promise<void>;
-
-function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
-    if (typeof value !== 'function') fail('LOCK_LOST');
-    return value;
-}
-
 /** Cloud Run v1 regional adapter: GET/PUT Service and independent GET read-back. */
 export class CloudRunAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
@@ -323,12 +314,13 @@ export class CloudRunAdapter {
         resource: string;
         expectedGeneration: string;
         body: Readonly<Record<string, unknown>>;
+        operation: 'cloud-run.stage' | 'cloud-run.promote';
         /** Required operation-local owner/fence capability. */
         leaseCheck?: LeaseCheck;
         /** Retained for source compatibility; v1 uses PUT, not updateMask. */
         updateMask?: 'template' | 'template,traffic' | 'traffic';
     }>): Promise<CloudRunServiceObservation> {
-        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: options.operation, resource: options.resource });
         await leaseCheck();
         const before = await this.getService(options.resource);
         if (!DECIMAL.test(options.expectedGeneration)) fail('ADAPTER_REQUEST_INVALID');
@@ -378,7 +370,8 @@ export class CloudRunAdapter {
         serviceBody: Readonly<Record<string, unknown>>;
         leaseCheck?: LeaseCheck;
     }>): Promise<CloudRunServiceObservation> {
-        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        const resource = `projects/${options.runtime.project}/locations/${options.runtime.location}/services/${options.runtime.service}`;
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'cloud-run.stage', resource });
         await leaseCheck();
         if (options.runtime.project !== options.runtime.identity.project) fail('PROJECT_MISMATCH');
         if (!REVISION.test(options.revision) || options.revision === 'latest') fail('RESOURCE_INVALID');
@@ -387,10 +380,9 @@ export class CloudRunAdapter {
         const template = object(spec.template);
         const metadata = object(template.metadata);
         if (metadata.name !== options.revision) fail('RESOURCE_INVALID');
-        const resource = `projects/${options.runtime.project}/locations/${options.runtime.location}/services/${options.runtime.service}`;
         await leaseCheck();
         const before = await this.getService(resource);
-        const after = await this.applyService({ resource, expectedGeneration: options.expectedGeneration, body, leaseCheck });
+        const after = await this.applyService({ resource, expectedGeneration: options.expectedGeneration, body, operation: 'cloud-run.stage', leaseCheck });
         const beforeTraffic = new Map(before.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
         const afterTraffic = new Map(after.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
         for (const [key, percent] of beforeTraffic) if (afterTraffic.get(key) !== percent) fail('OBSERVATION_RACE');
@@ -412,7 +404,7 @@ export class CloudRunAdapter {
         expectedPercent: number;
         leaseCheck?: LeaseCheck;
     }>): Promise<CloudRunServiceObservation> {
-        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'cloud-run.promote', resource: options.resource });
         if (!REVISION.test(options.expectedRevision) || options.expectedRevision === 'latest'
             || !Number.isSafeInteger(options.expectedPercent) || options.expectedPercent < 0 || options.expectedPercent > 100) fail('RESOURCE_INVALID');
         await leaseCheck();
@@ -422,6 +414,7 @@ export class CloudRunAdapter {
         const after = await this.applyService({
             resource: options.resource, expectedGeneration: options.expectedGeneration,
             body: { ...body, spec: { ...spec, traffic: options.traffic.map(entry => ({ ...entry })) } },
+            operation: 'cloud-run.promote',
             leaseCheck,
         });
         const match = after.traffic.find(item => item.revisionName === options.expectedRevision);

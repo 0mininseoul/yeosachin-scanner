@@ -11,7 +11,7 @@ import {
     type ProtectedRetentionInput,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
-import type { LeaseCheck } from './cloud-run';
+import { requireLeaseCheck, type LeaseCheck } from './lease-capability';
 
 const TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
 const SCHEDULER_HOSTS = new Set(['cloudscheduler.googleapis.com']);
@@ -23,11 +23,6 @@ const SERVICE_ACCOUNT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z
 
 function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_TIMEOUT' | 'PAGINATION_INCOMPLETE' | 'QUEUE_NOT_EMPTY' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'LOCK_LOST'): never {
     epochFail(code);
-}
-
-function requireLeaseCheck(value: LeaseCheck | undefined): LeaseCheck {
-    if (typeof value !== 'function') fail('LOCK_LOST');
-    return value;
 }
 
 function parseQueueResource(resource: string, project: string): { location: string; name: string } {
@@ -131,8 +126,8 @@ export class WorkPlaneClient {
         return { resource: input.resource, project: input.project, location: input.location, state: config.state, target: config.target, httpTargetPresent: config.httpTarget !== null, configuration: config.configuration, configurationDigest: canonicalDigest(config.configuration), tasks, complete: true };
     }
 
-    async pauseQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'pause', leaseCheck); }
-    async resumeQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'resume', leaseCheck); }
+    async pauseQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'pause', leaseCheck, 'queue.pause'); }
+    async resumeQueue(input: ProtectedQueueInput, leaseCheck?: LeaseCheck): Promise<QueueObservation> { return this.changeQueueState(input, 'resume', leaseCheck, 'queue.resume'); }
 
     async observeScheduler(input: ProtectedSchedulerInput): Promise<SchedulerObservation> {
         const { location } = parseSchedulerResource(input.resource, input.project);
@@ -141,8 +136,8 @@ export class WorkPlaneClient {
         return this.schedulerObservation(input, job);
     }
 
-    async pauseScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause', leaseCheck); }
-    async resumeScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'resume', leaseCheck); }
+    async pauseScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause', leaseCheck, 'scheduler.pause'); }
+    async resumeScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'resume', leaseCheck, 'scheduler.resume'); }
 
     /**
      * Align a paused Scheduler OIDC target. Internal packet targets are not
@@ -155,7 +150,7 @@ export class WorkPlaneClient {
         desiredTarget: SchedulerTargetObservation;
         leaseCheck?: LeaseCheck;
     }>): Promise<SchedulerObservation> {
-        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'scheduler.target', resource: options.input.resource });
         await leaseCheck();
         const before = await this.getScheduler(options.input);
         const beforeObservation = await this.schedulerObservation(options.input, before, leaseCheck);
@@ -184,7 +179,7 @@ export class WorkPlaneClient {
         desiredTarget: Readonly<{ url: string; audience: string; callerIdentity: ProtectedIdentity }>;
         leaseCheck?: LeaseCheck;
     }>): Promise<QueueObservation> {
-        const leaseCheck = requireLeaseCheck(options.leaseCheck);
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'queue.target', resource: options.input.resource });
         await leaseCheck();
         const beforeRecord = await this.getQueue({ ...options.input, target: options.expectedOldTarget });
         await leaseCheck();
@@ -214,7 +209,10 @@ export class WorkPlaneClient {
         const job = await this.getSchedulerRecord(input.resource, input.project);
         const state = job.state;
         if (state !== 'ENABLED' && state !== 'PAUSED') fail('ADAPTER_RESPONSE_INVALID');
-        const configuration = this.schedulerConfiguration(job);
+        // Retention is a reviewed enablement contract, not a recovery
+        // scheduler projection. Keep the provider state and the exact
+        // packet-level enabled configuration distinct from scheduler fields.
+        const configuration = { enabled: state === 'ENABLED' };
         return { role: 'retention' as const, resource: input.resource, project: input.project, location: input.location, enabled: state === 'ENABLED', configuration, configurationDigest: canonicalDigest(configuration) };
     }
 
@@ -277,8 +275,8 @@ export class WorkPlaneClient {
         fail('PAGINATION_INCOMPLETE');
     }
 
-    private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume', leaseCheckInput?: LeaseCheck): Promise<QueueObservation> {
-        const leaseCheck = requireLeaseCheck(leaseCheckInput);
+    private async changeQueueState(input: ProtectedQueueInput, action: 'pause' | 'resume', leaseCheckInput: LeaseCheck | undefined, operation: 'queue.pause' | 'queue.resume'): Promise<QueueObservation> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput, { operation, resource: input.resource });
         const parsed = parseQueueResource(input.resource, input.project);
         if (parsed.location !== input.location) fail('RESOURCE_INVALID');
         const before = await this.observeQueueWithLease(input, leaseCheck);
@@ -311,8 +309,8 @@ export class WorkPlaneClient {
         return object(value);
     }
 
-    private async changeSchedulerState(input: ProtectedSchedulerInput, action: 'pause' | 'resume', leaseCheckInput?: LeaseCheck): Promise<SchedulerObservation> {
-        const leaseCheck = requireLeaseCheck(leaseCheckInput);
+    private async changeSchedulerState(input: ProtectedSchedulerInput, action: 'pause' | 'resume', leaseCheckInput: LeaseCheck | undefined, operation: 'scheduler.pause' | 'scheduler.resume'): Promise<SchedulerObservation> {
+        const leaseCheck = requireLeaseCheck(leaseCheckInput, { operation, resource: input.resource });
         const parsed = parseSchedulerResource(input.resource, input.project);
         if (parsed.location !== input.location) fail('RESOURCE_INVALID');
         await leaseCheck();

@@ -1,10 +1,76 @@
 import { describe, expect, it } from 'vitest';
 import { createFixturePacket } from './fixtures';
 import { LiveEpochControlPlane } from './coordinator';
+import { EpochJournal, type JournalStorage } from './journal';
+import { issueCoordinatorCapability } from './packet';
 import { VercelAdapter } from './vercel';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from './platform';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
-import { canonicalDigest, canonicalQueueConfiguration, canonicalRuntimeInputDigest, EpochError, type EpochLock, type Role } from './contracts';
+import { canonicalDigest, canonicalQueueConfiguration, canonicalRuntimeInputDigest, EpochError, type EpochLock, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedRetentionInput, type ProtectedSchedulerInput, type Role } from './contracts';
+import type { PublicReadinessExpected } from '../../lib/services/analysis/public-readiness-contract';
+
+class MemoryStorage implements JournalStorage {
+    private readonly values = new Map<string, { generation: string; value: unknown }>();
+    private nextGeneration = 1;
+
+    async get(key: string) { return this.values.get(key) ?? null; }
+    async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }) {
+        const existing = this.values.get(key);
+        if (options.ifGenerationMatch === '0' ? existing !== undefined : existing?.generation !== options.ifGenerationMatch) {
+            throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        }
+        const stored = { generation: String(this.nextGeneration++), value };
+        this.values.set(key, stored);
+        return stored;
+    }
+    async list(prefix: string) {
+        return [...this.values.entries()]
+            .filter(([key]) => key.startsWith(prefix))
+            .map(([key, value]) => ({ key, ...value }));
+    }
+
+    seed(key: string, generation: string, value: unknown): void {
+        this.values.set(key, { generation, value });
+    }
+}
+
+function liveAuthority(
+    packet: ReturnType<typeof createFixturePacket>,
+    ownerDigest = 'b'.repeat(64),
+    lockFence = '1',
+    assertLive?: (lease: { lock: EpochLock }) => Promise<void>,
+) {
+    const header = {
+        epochIdDigest: canonicalDigest(packet.epochId),
+        capabilityDigest: packet.capabilityDigest,
+        oldManifestDigest: packet.oldManifestDigest,
+        desiredManifestDigest: packet.desiredManifestDigest,
+        roleSetDigest: packet.roleSetDigest,
+        sourcePlanDigest: packet.sourcePlanDigest,
+        createdAt: '2026-09-08T00:00:00.000Z',
+    } as const;
+    const storage = new MemoryStorage();
+    const journal = new EpochJournal(storage, { header, now: () => 100_000 });
+    const lease = {
+        generation: '1',
+        lock: {
+            epochHeaderDigest: journal.epochHeaderDigest,
+            ownerDigest,
+            lockFence,
+            lockExpiresAt: '2099-01-01T00:00:00.000Z',
+        },
+    };
+    storage.seed(journal.headerKey, '1', header);
+    storage.seed(journal.lockKey, '1', lease.lock);
+    if (assertLive) {
+        journal.assertLive = assertLive as typeof journal.assertLive;
+        journal.readValidatedState = (async (currentLease?: { generation: string; lock: EpochLock }) => {
+            await journal.assertLive(currentLease!);
+            return { state: null, transitions: [], aborted: false, activeFence: currentLease!.lock.lockFence, requiresReconciliation: false };
+        }) as typeof journal.readValidatedState;
+    }
+    return { journal, capability: issueCoordinatorCapability(packet, ownerDigest), ownerDigest, lease };
+}
 
 class FakeTransport implements ProtectedTransport {
     constructor(private readonly responder: (request: ProtectedHttpRequest) => ProtectedHttpResponse) {}
@@ -85,6 +151,7 @@ describe('live coordinator producer wire ordering', () => {
                 return { status: 200, headers: {}, body: JSON.stringify(readiness(packet, url.startsWith('https://public.example.invalid') && publicReadinessReads === 1 ? 'old' : 'desired')), url };
             },
         });
+        const authority = liveAuthority(packet);
         const control = new LiveEpochControlPlane({
             cloudRun: {} as never,
             iam: {} as never,
@@ -92,10 +159,9 @@ describe('live coordinator producer wire ordering', () => {
             vercel: adapter,
             publicReadinessUrl: 'https://public.example.invalid/api/analysis/capacity/readiness',
             projectId: 'project-fixture', teamId: 'team-fixture', deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old',
-            producerAlias: 'desired.example.invalid', serviceBodies: { preflight: {}, paid: {} }, renewLease: async lease => lease,
+            producerAlias: 'desired.example.invalid', serviceBodies: { preflight: {}, paid: {} }, ...authority,
         });
-        const lock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
-        const result = await control.closeAndAlignProducers({ packet, lease: { generation: '1', lock } });
+        const result = await control.closeAndAlignProducers({ packet, lease: authority.lease });
         expect(result.proof).toMatchObject({ action: 'PRODUCERS_CLOSED_ALIGNED' });
         expect(events.slice(0, 4)).toEqual(['public-old-or-post', 'deployment', 'immutable-desired', 'deployment']);
         expect(events.indexOf('alias-post')).toBeGreaterThan(events.indexOf('immutable-desired'));
@@ -106,7 +172,7 @@ describe('live coordinator producer wire ordering', () => {
     it('prepares from complete coherent old observations and rejects one changed live field', async () => {
         const packet = createFixturePacket();
         const now = 100_000;
-        const lock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
+        const authority = liveAuthority(packet);
         let driftQueue = false;
         const readinessValue = (phase: 'old' | 'desired') => {
             const expected = phase === 'old' ? packet.oldManifest.readiness : packet.desiredManifest.readiness;
@@ -139,40 +205,41 @@ describe('live coordinator producer wire ordering', () => {
             };
         };
         const fakeWorkPlanes = {
-            observeQueue: async (input: any) => ({
+            observeQueue: async (input: ProtectedQueueInput) => ({
                 resource: input.resource, project: input.project, location: input.location, state: 'PAUSED',
                 target: { url: input.target.url, audience: input.target.audience, callerIdentity: input.target.callerIdentity, uriOverride: null, wireConfigurationDigest: canonicalDigest('wire') },
                 httpTargetPresent: true,
                 configuration: { rateLimits: driftQueue ? { ...input.configuration, maxConcurrentDispatches: 99 } : input.configuration },
                 configurationDigest: canonicalDigest({ rateLimits: driftQueue ? { ...input.configuration, maxConcurrentDispatches: 99 } : input.configuration }), tasks: [], complete: true,
             }),
-            observeScheduler: async (input: any) => ({ resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: input.target, configuration: input.configuration, configurationDigest: canonicalDigest(input.configuration) }),
-            observeRetention: async (input: any) => ({ role: 'retention', ...input, configurationDigest: canonicalDigest(input.configuration) }),
+            observeScheduler: async (input: ProtectedSchedulerInput) => ({ resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: input.target, configuration: input.configuration, configurationDigest: canonicalDigest(input.configuration) }),
+            observeRetention: async (input: ProtectedRetentionInput) => ({ role: 'retention', ...input, configurationDigest: canonicalDigest(input.configuration) }),
         };
-        const fakeIam = { getPolicy: async (input: any) => ({ resource: input.resource, project: input.project, etag: input.etag, bindings: input.bindings }) };
+        const fakeIam = { getPolicy: async (input: ProtectedIamInput) => ({ resource: input.resource, project: input.project, etag: input.etag, bindings: input.bindings }) };
         const control = new LiveEpochControlPlane({
             cloudRun: { getService: async (resource: string) => service(resource.includes('/paid-worker') ? 'paid' : 'preflight') } as never,
             iam: fakeIam as never,
             workPlanes: fakeWorkPlanes as never,
-            vercel: { readPublicReadiness: async ({ expected }: any) => readinessValue(expected.sourceSha === packet.oldManifest.readiness.sourceSha ? 'old' : 'desired') } as never,
+            vercel: { readPublicReadiness: async ({ expected }: { expected: PublicReadinessExpected }) => readinessValue(expected.sourceSha === packet.oldManifest.readiness.sourceSha ? 'old' : 'desired') } as never,
             publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness',
             projectId: 'fixture-project', teamId: 'fixture-team', deploymentId: 'fixture-deployment', expectedOldDeploymentId: 'fixture-old',
             producerAlias: 'fixture.example.invalid', serviceBodies: { preflight: {}, paid: {} }, now: () => now,
+            journal: authority.journal, capability: authority.capability, ownerDigest: authority.ownerDigest,
             sourceObservation: async ({ role, runtime, revision }) => ({ role, sourceSha: runtime.sourceSha, revision, metadataDigest: packet.protectedObservations.old.source[role].metadataDigest }),
             buildObservation: async ({ image }) => canonicalDigest({ image }),
         });
-        const prepared = await control.prepare({ packet, lease: { generation: '1', lock } });
+        const prepared = await control.prepare({ packet, lease: authority.lease });
         expect(prepared.proof).toMatchObject({ action: 'PREPARED' });
-        expect((prepared.postcondition as any).observedDigests.source).toMatch(/^[0-9a-f]{64}$/);
+        expect((prepared.postcondition as { observedDigests: { source: string } }).observedDigests.source).toMatch(/^[0-9a-f]{64}$/);
         driftQueue = true;
-        await expect(control.prepare({ packet, lease: { generation: '1', lock } })).rejects.toThrow('OBSERVATION_INVALID');
+        await expect(control.prepare({ packet, lease: authority.lease })).rejects.toThrow('OBSERVATION_INVALID');
     });
 
     it('reconciles QUEUES_ALIGNED against old paused auth contracts before rotation', async () => {
         const packet = createFixturePacket();
-        const lock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
+        const authority = liveAuthority(packet);
         const workPlanes = {
-            observeQueue: async (input: any) => {
+            observeQueue: async (input: ProtectedQueueInput) => {
                 expect(canonicalDigest(input.target)).toBe(canonicalDigest(packet.protectedInputs.old.queues[input.resource.endsWith('/preflight') ? 'preflight' : 'paid'].target));
                 return {
                     resource: input.resource, project: input.project, location: input.location, state: 'PAUSED',
@@ -180,7 +247,7 @@ describe('live coordinator producer wire ordering', () => {
                     httpTargetPresent: true, configuration: input.configuration, configurationDigest: canonicalDigest(canonicalQueueConfiguration(input.configuration)), tasks: [], complete: true,
                 };
             },
-            observeScheduler: async (input: any) => {
+            observeScheduler: async (input: ProtectedSchedulerInput) => {
                 expect(canonicalDigest(input.target)).toBe(canonicalDigest(packet.protectedInputs.old.schedulers[input.resource.endsWith('/preflight-recovery') ? 'preflight' : 'paid'].target));
                 return { resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: input.target, configuration: input.configuration, configurationDigest: canonicalDigest(input.configuration) };
             },
@@ -190,16 +257,17 @@ describe('live coordinator producer wire ordering', () => {
             publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
             deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
             serviceBodies: { preflight: {}, paid: {} }, now: () => 100_000,
+            journal: authority.journal, capability: authority.capability, ownerDigest: authority.ownerDigest,
         });
-        const result = await control.reconcile({ packet, lease: { generation: '1', lock }, state: 'QUEUES_ALIGNED' });
+        const result = await control.reconcile({ packet, lease: authority.lease, state: 'QUEUES_ALIGNED' });
         expect(result.proof).toMatchObject({ action: 'RECONCILE_QUEUES_ALIGNED' });
     });
 
     it('reconciles a single desired OIDC target left by a crash before INVOKERS_ROTATED append', async () => {
         const packet = createFixturePacket();
-        const lock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '2', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
+        const authority = liveAuthority(packet, 'b'.repeat(64), '2');
         const workPlanes = {
-            observeQueue: async (input: any) => {
+            observeQueue: async (input: ProtectedQueueInput) => {
                 const role: Role = input.resource.endsWith('/preflight') ? 'preflight' : 'paid';
                 const old = packet.protectedInputs.old.queues[role].target;
                 const desired = packet.protectedInputs.desired.queues[role].target;
@@ -212,7 +280,7 @@ describe('live coordinator producer wire ordering', () => {
                     configurationDigest: canonicalDigest(canonicalQueueConfiguration(input.configuration)), tasks: [], complete: true,
                 };
             },
-            observeScheduler: async (input: any) => {
+            observeScheduler: async (input: ProtectedSchedulerInput) => {
                 const role: Role = input.resource.endsWith('/preflight-recovery') ? 'preflight' : 'paid';
                 const old = packet.protectedInputs.old.schedulers[role].target;
                 const desired = packet.protectedInputs.desired.schedulers[role].target;
@@ -228,8 +296,9 @@ describe('live coordinator producer wire ordering', () => {
             publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
             deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
             serviceBodies: { preflight: {}, paid: {} }, now: () => 100_000,
+            journal: authority.journal, capability: authority.capability, ownerDigest: authority.ownerDigest,
         });
-        const result = await control.reconcile({ packet, lease: { generation: '1', lock }, state: 'QUEUES_ALIGNED' });
+        const result = await control.reconcile({ packet, lease: authority.lease, state: 'QUEUES_ALIGNED' });
         expect(result.proof).toMatchObject({ action: 'RECONCILE_QUEUES_ALIGNED' });
         expect(result.postcondition).toMatchObject({
             queues: [{ role: 'preflight', target: 'DESIRED' }, { role: 'paid', target: 'OLD' }],
@@ -239,37 +308,35 @@ describe('live coordinator producer wire ordering', () => {
 
     it('does not let an older align operation borrow a newer owner fence', async () => {
         const packet = createFixturePacket();
-        const firstLock: EpochLock = { epochHeaderDigest: 'a'.repeat(64), ownerDigest: 'b'.repeat(64), lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' };
-        const secondLock: EpochLock = { ...firstLock, lockFence: '2' };
         const checks: string[] = [];
         let releaseFirst!: () => void;
         const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
         let firstStarted!: () => void;
         const firstStartedSignal = new Promise<void>(resolve => { firstStarted = resolve; });
         let firstChecks = 0;
-        const journal = {
-            assertLive: async (lease: { lock: EpochLock }) => {
-                checks.push(lease.lock.lockFence);
-                if (lease.lock.lockFence === '1') {
-                    firstChecks += 1;
-                    if (firstChecks === 1) {
-                        firstStarted();
-                        await firstGate;
-                        return;
-                    }
-                    throw new EpochError('LOCK_LOST');
+        const authority = liveAuthority(packet, 'b'.repeat(64), '1', async (lease: { lock: EpochLock }) => {
+            checks.push(lease.lock.lockFence);
+            if (lease.lock.lockFence === '1') {
+                firstChecks += 1;
+                if (firstChecks === 1) {
+                    firstStarted();
+                    await firstGate;
+                    return;
                 }
-                throw new EpochError('OBSERVATION_RACE');
-            },
-        };
+                throw new EpochError('LOCK_LOST');
+            }
+            throw new EpochError('OBSERVATION_RACE');
+        });
+        const firstLock = authority.lease.lock;
+        const secondLock: EpochLock = { ...firstLock, lockFence: '2' };
         let pauseQueueCalls = 0;
         const workPlanes = {
-            observeScheduler: async (input: any) => {
+            observeScheduler: async (input: ProtectedSchedulerInput) => {
                 const role: Role = input.resource.endsWith('/preflight-recovery') ? 'preflight' : 'paid';
                 const old = packet.protectedInputs.old.schedulers[role];
                 return { resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: old.target, configuration: old.configuration, configurationDigest: canonicalDigest(old.configuration) };
             },
-            observeQueue: async (input: any) => {
+            observeQueue: async (input: ProtectedQueueInput) => {
                 const role: Role = input.resource.endsWith('/preflight') ? 'preflight' : 'paid';
                 const old = packet.protectedInputs.old.queues[role];
                 return { resource: input.resource, project: input.project, location: input.location, state: 'RUNNING', target: old.target, httpTargetPresent: true, configuration: old.configuration, configurationDigest: canonicalDigest(canonicalQueueConfiguration(old.configuration)), tasks: [], complete: true };
@@ -280,7 +347,8 @@ describe('live coordinator producer wire ordering', () => {
             cloudRun: {} as never, iam: {} as never, workPlanes: workPlanes as never, vercel: {} as never,
             publicReadinessUrl: 'https://fixture.example.invalid/api/analysis/capacity/readiness', projectId: 'vercel-project', teamId: 'fixture-team',
             deploymentId: 'dpl-desired', expectedOldDeploymentId: 'dpl-old', producerAlias: 'desired.example.invalid',
-            serviceBodies: { preflight: {}, paid: {} }, journal: journal as never,
+            serviceBodies: { preflight: {}, paid: {} }, journal: authority.journal,
+            capability: authority.capability, ownerDigest: authority.ownerDigest,
         });
         const oldOperation = control.alignQueues({ packet, lease: { generation: '1', lock: firstLock } });
         await firstStartedSignal;

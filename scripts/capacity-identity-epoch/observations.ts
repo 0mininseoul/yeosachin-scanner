@@ -239,7 +239,11 @@ export function validateIamObservation(value: unknown, expected: IamObservation)
     if (!isObject(value) || !hasExactKeys(value, ['role', 'resource', 'project', 'etag', 'bindings'])
         || value.role !== expected.role || value.resource !== expected.resource || value.project !== expected.project
         || !safe(value.etag, 512) || value.etag !== expected.etag || !Array.isArray(value.bindings)) epochFail('IAM_ETAG_REQUIRED');
-    if (canonicalDigest(value.bindings) !== canonicalDigest(expected.bindings)) epochFail('OBSERVATION_INVALID');
+    // IAM providers may reorder bindings while preserving the complete
+    // policy. Compare the normalized set, while retaining exact binding
+    // fields and conditions below.
+    const normalizeBindings = (bindings: readonly unknown[]) => [...bindings].sort((left, right) => canonicalDigest(left).localeCompare(canonicalDigest(right)));
+    if (canonicalDigest(normalizeBindings(value.bindings)) !== canonicalDigest(normalizeBindings(expected.bindings))) epochFail('OBSERVATION_INVALID');
     for (const binding of value.bindings) {
         if (!isObject(binding) || !hasExactKeys(binding, ['role', 'member', 'condition']) || !safe(binding.role, 128)
             || typeof binding.member !== 'string' || !safe(binding.member, 1024)

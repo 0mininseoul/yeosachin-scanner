@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     AuthenticatedProtectedTransport,
+    AuthenticatedReceiverProbe,
+    issueReceiverProbeAuthority,
     parseProtectedObject,
     type ProtectedHttpRequest,
     type ProtectedHttpResponse,
@@ -10,6 +12,10 @@ import { CloudRunAdapter } from './cloud-run';
 import { IamAdapter } from './iam';
 import { WorkPlaneClient } from './work-planes';
 import { VercelAdapter } from './vercel';
+import { issueLeaseCheck } from './lease-capability';
+import { createFixturePacket } from './fixtures';
+import { EpochJournal, type JournalStorage } from './journal';
+import { issueCoordinatorCapability } from './packet';
 import { canonicalDigest, canonicalRuntimeInputDigest, EpochError, type ProtectedIamInput, type ProtectedQueueInput, type ProtectedSchedulerInput } from './contracts';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
@@ -31,19 +37,70 @@ function response(request: ProtectedHttpRequest, status: number, value: unknown)
     return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(value), url: request.url };
 }
 
-const project = 'fixture-project';
+class MemoryStorage implements JournalStorage {
+    private readonly values = new Map<string, { generation: string; value: unknown }>();
+    async get(key: string) { return this.values.get(key) ?? null; }
+    async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }) {
+        const current = this.values.get(key);
+        if (options.ifGenerationMatch === '0' ? current !== undefined : current?.generation !== options.ifGenerationMatch) throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        const stored = { generation: '1', value };
+        this.values.set(key, stored);
+        return stored;
+    }
+    async list(prefix: string) { return [...this.values.entries()].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, ...value })); }
+    seed(key: string, value: unknown): void { this.values.set(key, { generation: '1', value }); }
+}
+
+const project = 'example-project';
 const serviceResource = `projects/${project}/locations/asia-northeast3/services/preflight-worker`;
 const queueResource = `projects/${project}/locations/asia-northeast3/queues/preflight`;
 const schedulerResource = `projects/${project}/locations/asia-northeast3/jobs/preflight-recovery`;
-const noLease = async (): Promise<void> => undefined;
+
+function authority(operation: string | readonly string[], resource: string | readonly string[], ownerDigest = 'b'.repeat(64)) {
+    const packet = createFixturePacket();
+    const header = {
+        epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+        oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+        roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+        createdAt: '2026-09-08T00:00:00.000Z',
+    } as const;
+    const storage = new MemoryStorage();
+    const journal = new EpochJournal(storage, { header, now: () => 100_000 });
+    const lease = {
+        generation: '1',
+        lock: { epochHeaderDigest: journal.epochHeaderDigest, ownerDigest, lockFence: '1', lockExpiresAt: '2099-01-01T00:00:00.000Z' },
+    };
+    storage.seed(journal.headerKey, header);
+    storage.seed(journal.lockKey, lease.lock);
+    const check = issueLeaseCheck({ packet, capability: issueCoordinatorCapability(packet, ownerDigest), ownerDigest, lease, operation, resource, journal });
+    return { packet, journal, lease, check };
+}
+
+const adapterAuthority = authority([
+    'cloud-run.stage', 'cloud-run.promote', 'iam.set', 'iam.add', 'iam.remove',
+    'queue.pause', 'queue.resume', 'queue.target', 'scheduler.pause', 'scheduler.resume', 'scheduler.target', 'alias.assign', 'probe.malformed',
+], [
+    'desired.example.invalid', serviceResource, queueResource, schedulerResource,
+    ...(['paid-worker', 'preflight-worker'] as const).flatMap(service => [`projects/${project}/locations/asia-northeast3/services/${service}`]),
+    ...(['paid', 'preflight'] as const).flatMap(role => [`projects/${project}/locations/asia-northeast3/queues/${role}`, `projects/${project}/locations/asia-northeast3/jobs/${role}-recovery`]),
+    ...(['preflight', 'paid'] as const).flatMap(role => [
+        `projects/${project}/locations/asia-northeast3/services/${role}-worker`,
+        `projects/${project}/locations/asia-northeast3/queues/${role}`,
+        `projects/${project}/locations/asia-northeast3/jobs/${role}-recovery`,
+        `projects/${project}/locations/asia-northeast3/services/${role}-worker`,
+        `projects/${project}/serviceAccounts/${role}-task-caller-old@${project}.iam.gserviceaccount.com`,
+        `projects/${project}/serviceAccounts/${role}-task-caller-desired@${project}.iam.gserviceaccount.com`,
+    ]),
+], 'b'.repeat(64));
+const noLease = adapterAuthority.check;
 
 function runService(generation = '2', traffic = [{ revisionName: 'preflight-revision', percent: 0 }]) {
     return {
         metadata: { generation: Number(generation), resourceVersion: `rv-${generation}` },
         spec: {
             template: { metadata: { name: 'preflight-revision', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
-                spec: { serviceAccountName: 'worker@fixture-project.iam.gserviceaccount.com', containerConcurrency: 1, timeoutSeconds: 600,
-                    containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }], }, },
+                spec: { serviceAccountName: `worker@${project}.iam.gserviceaccount.com`, containerConcurrency: 1, timeoutSeconds: 600,
+                    containers: [{ image: `asia-northeast3-docker.pkg.dev/${project}/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }], }, },
             traffic,
         },
         status: { url: 'https://worker.example.invalid/', observedGeneration: Number(generation), conditions: [{ type: 'Ready', status: 'True' }], latestCreatedRevisionName: 'preflight-revision', latestReadyRevisionName: 'preflight-revision', traffic },
@@ -83,13 +140,13 @@ describe('protected platform adapters', () => {
         const adapter = new CloudRunAdapter({ transport: authenticated(fake) });
         const before = await adapter.getService(serviceResource);
         expect(before.generation).toBe('2');
-        const after = await adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), updateMask: 'template', leaseCheck: noLease });
+        const after = await adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), operation: 'cloud-run.stage', updateMask: 'template', leaseCheck: noLease });
         expect(after.noTraffic).toBe(true);
         expect(fake.requests.map(request => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
-            'GET /apis/serving.knative.dev/v1/namespaces/fixture-project/services/preflight-worker',
-            'GET /apis/serving.knative.dev/v1/namespaces/fixture-project/services/preflight-worker',
-            'PUT /apis/serving.knative.dev/v1/namespaces/fixture-project/services/preflight-worker',
-            'GET /apis/serving.knative.dev/v1/namespaces/fixture-project/services/preflight-worker',
+            `GET /apis/serving.knative.dev/v1/namespaces/${project}/services/preflight-worker`,
+            `GET /apis/serving.knative.dev/v1/namespaces/${project}/services/preflight-worker`,
+            `PUT /apis/serving.knative.dev/v1/namespaces/${project}/services/preflight-worker`,
+            `GET /apis/serving.knative.dev/v1/namespaces/${project}/services/preflight-worker`,
         ]);
         expect(fake.requests[2]?.body).toContain('resourceVersion');
     });
@@ -101,10 +158,19 @@ describe('protected platform adapters', () => {
             return response(request, 200, service);
         });
         const observed = await new CloudRunAdapter({ transport: authenticated(fake) }).applyService({
-            resource: serviceResource, expectedGeneration: '2', body: service, leaseCheck: noLease,
+            resource: serviceResource, expectedGeneration: '2', body: service, operation: 'cloud-run.stage', leaseCheck: noLease,
         });
         expect(observed.generation).toBe('2');
         expect(observed.resourceVersion).toBe('rv-2');
+    });
+
+    it('rejects absent and forged Cloud Run lease authorities before provider access', async () => {
+        const fake = new FakeTransport(() => { throw new Error('provider must not run'); });
+        const adapter = new CloudRunAdapter({ transport: authenticated(fake) });
+        await expect(adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), operation: 'cloud-run.stage' })).rejects.toThrow('LOCK_LOST');
+        const forged = async (): Promise<void> => undefined;
+        await expect(adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), operation: 'cloud-run.stage', leaseCheck: forged })).rejects.toThrow('LOCK_LOST');
+        expect(fake.requests).toHaveLength(0);
     });
 
     it('binds a lost lease to the initiating Cloud Run operation, not a later owner', async () => {
@@ -119,16 +185,19 @@ describe('protected platform adapters', () => {
         const adapter = new CloudRunAdapter({ transport: authenticated(fake) });
         let releaseOld!: () => void;
         const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+        const oldAuthority = authority('cloud-run.stage', serviceResource, 'b'.repeat(64));
         let oldChecks = 0;
-        const oldLease = async (): Promise<void> => {
+        oldAuthority.journal.readValidatedState = (async () => {
             oldChecks += 1;
             if (oldChecks === 1) await oldGate;
             throw new EpochError('LOCK_LOST');
-        };
+        }) as typeof oldAuthority.journal.readValidatedState;
         let newChecks = 0;
-        const newLease = async (): Promise<void> => { newChecks += 1; };
-        const oldOperation = adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), leaseCheck: oldLease });
-        const newOperation = adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), leaseCheck: newLease });
+        const newAuthority = authority('cloud-run.stage', serviceResource, 'c'.repeat(64));
+        const newReadState = newAuthority.journal.readValidatedState.bind(newAuthority.journal);
+        newAuthority.journal.readValidatedState = (async (lease) => { newChecks += 1; return newReadState(lease); }) as typeof newAuthority.journal.readValidatedState;
+        const oldOperation = adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), operation: 'cloud-run.stage', leaseCheck: oldAuthority.check });
+        const newOperation = adapter.applyService({ resource: serviceResource, expectedGeneration: '2', body: runService('3'), operation: 'cloud-run.stage', leaseCheck: newAuthority.check });
         await expect(newOperation).resolves.toMatchObject({ generation: '3' });
         releaseOld();
         await expect(oldOperation).rejects.toThrow('LOCK_LOST');
@@ -175,15 +244,15 @@ describe('protected platform adapters', () => {
         let gets = 0;
         const runtime = {
             role: 'preflight' as const, service: 'preflight-worker', project, location: 'asia-northeast3',
-            identity: { identity: 'worker@fixture-project.iam.gserviceaccount.com', project }, sourceSha: 'a'.repeat(40),
+            identity: { identity: `worker@${project}.iam.gserviceaccount.com`, project }, sourceSha: 'a'.repeat(40),
             environment: { ROLE: 'preflight' }, secretReferences: {}, settings: { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: 2 },
             target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid' }, noTraffic: true, providerAdmissionEnabled: true,
         };
         const revision = {
             metadata: { name: 'preflight-revision', generation: 1, resourceVersion: 'revision-rv-1', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
             spec: { serviceAccountName: runtime.identity.identity, containerConcurrency: 1, timeoutSeconds: 600,
-                containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
-            status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
+                containers: [{ image: `asia-northeast3-docker.pkg.dev/${project}/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
+            status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/${project}/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
         };
         const fake = new FakeTransport(request => {
             if (request.url.includes('/revisions/')) return response(request, 200, revision);
@@ -205,21 +274,21 @@ describe('protected platform adapters', () => {
         let phase: 'old' | 'staged' | 'promoted' = 'old';
         const runtime = {
             role: 'preflight' as const, service: 'preflight-worker', project, location: 'asia-northeast3',
-            identity: { identity: 'worker@fixture-project.iam.gserviceaccount.com', project }, sourceSha: 'a'.repeat(40),
+            identity: { identity: `worker@${project}.iam.gserviceaccount.com`, project }, sourceSha: 'a'.repeat(40),
             environment: { ROLE: 'preflight' }, secretReferences: {}, settings: { cpu: '2', memory: '2Gi', concurrency: 1, timeoutSeconds: 600, maxInstances: 2 },
             target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid' }, noTraffic: true, providerAdmissionEnabled: true,
         };
         const revision = {
             metadata: { name: 'preflight-revision', generation: 1, resourceVersion: 'revision-rv-1', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
             spec: { serviceAccountName: runtime.identity.identity, containerConcurrency: 1, timeoutSeconds: 600,
-                containers: [{ image: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
-            status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/fixture-project/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
+                containers: [{ image: `asia-northeast3-docker.pkg.dev/${project}/workers/preflight@sha256:${'a'.repeat(64)}`, env: [{ name: 'ROLE', value: 'preflight' }], resources: { limits: { cpu: '2', memory: '2Gi' } } }] },
+            status: { observedGeneration: 1, imageDigest: `asia-northeast3-docker.pkg.dev/${project}/workers/preflight@sha256:${'a'.repeat(64)}`, conditions: [{ type: 'Ready', status: 'True' }] },
         };
         const fake = new FakeTransport(request => {
             if (request.url.includes('/revisions/')) return response(request, 200, revision);
             if (request.method === 'PUT') {
-                const body = JSON.parse(request.body!) as Record<string, any>;
-                const traffic = body.spec.traffic as Array<{ revisionName: string; percent: number }>;
+                const body = JSON.parse(request.body!) as { spec: { traffic: Array<{ revisionName: string; percent: number }> } };
+                const traffic = body.spec.traffic;
                 phase = traffic.some(entry => entry.revisionName === 'preflight-revision' && entry.percent === 100) ? 'promoted' : 'staged';
                 return response(request, 200, runService(phase === 'promoted' ? '4' : '3', phase === 'promoted' ? promotedTraffic : stagedTraffic));
             }
@@ -263,11 +332,61 @@ describe('protected platform adapters', () => {
         expect(fake.requests.filter(request => request.url.includes(':getIamPolicy'))[0]?.url).not.toContain('?');
     });
 
+    it('does not let an iam.add capability relabel public full-policy replacement', async () => {
+        const input: ProtectedIamInput = {
+            kind: 'queue', resource: queueResource, project,
+            etag: 'Bwfixture', bindings: [{ role: 'roles/cloudtasks.enqueuer', member: 'serviceAccount:worker@example-project.iam.gserviceaccount.com', condition: null }], previous: null,
+        };
+        const fake = new FakeTransport(() => { throw new Error('provider must not run'); });
+        const adapter = new IamAdapter({ transport: authenticated(fake) });
+        const addAuthority = authority('iam.add', queueResource, 'b'.repeat(64));
+        await expect(adapter.setPolicy(input, { resource: input.resource, project, etag: input.etag, bindings: [] }, addAuthority.check)).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        expect(fake.requests).toHaveLength(0);
+    });
+
+    it('keeps receiver probe credentials bound to the reviewed target and audience', async () => {
+        let tokens = 0;
+        const fake = new FakeTransport(request => response(request, 400, { code: 'INVALID_REQUEST' }));
+        const packet = adapterAuthority.packet;
+        const target = packet.protectedInputs.desired.runtime.paid.target;
+        const callerIdentity = packet.protectedInputs.desired.queues.paid.target.callerIdentity.identity;
+        const authority = issueReceiverProbeAuthority({ packet, role: 'paid', ownerDigest: 'b'.repeat(64), lease: adapterAuthority.lease, leaseCheck: adapterAuthority.check });
+        const probe = new AuthenticatedReceiverProbe({ transport: fake, authority, tokenProvider: async binding => { tokens += 1; expect(binding).toEqual({ audience: target.audience, callerIdentity }); return 'fixture-id-token'; } });
+        await expect(probe.malformedBody()).resolves.toEqual({ status: 400, code: 'INVALID_REQUEST' });
+        expect(tokens).toBe(1);
+        expect(fake.requests[0]?.body).toBe('{');
+        expect(() => new AuthenticatedReceiverProbe({ transport: fake, authority: Object.freeze({}), tokenProvider: async () => 'fixture-id-token' })).toThrow('CAPABILITY_INVALID');
+    });
+
+    it('rechecks the live probe lease after token minting and never POSTs a lost owner', async () => {
+        let posts = 0;
+        const fake = new FakeTransport(request => {
+            if (request.method === 'POST') posts += 1;
+            return response(request, 400, { code: 'INVALID_REQUEST' });
+        });
+        const packet = adapterAuthority.packet;
+        const authority = issueReceiverProbeAuthority({ packet, role: 'preflight', ownerDigest: 'b'.repeat(64), lease: adapterAuthority.lease, leaseCheck: adapterAuthority.check });
+        const journalRead = adapterAuthority.journal.readValidatedState.bind(adapterAuthority.journal);
+        let reads = 0;
+        adapterAuthority.journal.readValidatedState = (async lease => {
+            reads += 1;
+            if (reads === 2) throw new EpochError('ABORTED_EPOCH');
+            return journalRead(lease);
+        }) as typeof adapterAuthority.journal.readValidatedState;
+        const probe = new AuthenticatedReceiverProbe({
+            transport: fake,
+            authority,
+            tokenProvider: async () => 'fixture-id-token',
+        });
+        await expect(probe.malformedBody()).rejects.toThrow('ABORTED_EPOCH');
+        expect(posts).toBe(0);
+    });
+
     it('uses the Run GET IAM wire contract and accepts unconditioned v1/custom policies', async () => {
         let latest: Record<string, unknown> = {
             version: 1,
             etag: 'Bwrunfixture',
-            bindings: [{ role: 'projects/fixture-project/roles/reviewer', members: ['allUsers'] }],
+            bindings: [{ role: `projects/${project}/roles/reviewer`, members: ['allUsers'] }],
         };
         const fake = new FakeTransport(request => {
             if (request.url.includes(':getIamPolicy')) return response(request, 200, latest);
@@ -277,7 +396,7 @@ describe('protected platform adapters', () => {
         });
         const input: ProtectedIamInput = {
             kind: 'run', resource: serviceResource, project,
-            etag: 'Bwrunfixture', bindings: [{ role: 'projects/fixture-project/roles/reviewer', member: 'allUsers', condition: null }], previous: null,
+            etag: 'Bwrunfixture', bindings: [{ role: `projects/${project}/roles/reviewer`, member: 'allUsers', condition: null }], previous: null,
         };
         const result = await new IamAdapter({ transport: authenticated(fake) }).addBindings(input, [{
             role: 'organizations/123456789012/roles/conditionalReviewer', member: 'principalSet://iam.googleapis.com/locations/global/workforcePools/pool/attribute.department/engineering',
@@ -319,11 +438,11 @@ describe('protected platform adapters', () => {
                 if (calls === 1) return response(request, 200, { tasks: [{ name: `${queueResource}/tasks/a`, createTime: '2026-09-07T00:00:00.000Z', httpRequest: { body: 'YQ==' } }], nextPageToken: 'next' });
                 return response(request, 200, { tasks: [{ name: `${queueResource}/tasks/b`, createTime: '2026-09-07T00:00:01.000Z', httpRequest: { body: 'Yg==' } }] });
             }
-            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } });
+            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } } });
         });
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'asia-northeast3',
-            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
             configuration: { maxConcurrentDispatches: 2 },
         };
         const client = new WorkPlaneClient({ transport: authenticated(fake) });
@@ -332,13 +451,13 @@ describe('protected platform adapters', () => {
 
         const repeated = new FakeTransport(request => {
             if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [], nextPageToken: 'same' });
-            return response(request, 200, { state: 'PAUSED', rateLimits: {}, httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } });
+            return response(request, 200, { state: 'PAUSED', rateLimits: {}, httpTarget: { oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } } });
         });
         await expect(new WorkPlaneClient({ transport: authenticated(repeated) }).observeQueue(queue)).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
 
         const emptyTerminal = new FakeTransport(request => {
             if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [], nextPageToken: '' });
-            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } });
+            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } } });
         });
         await expect(new WorkPlaneClient({ transport: authenticated(emptyTerminal) }).observeQueue(queue)).resolves.toMatchObject({ tasks: [] });
     });
@@ -346,7 +465,7 @@ describe('protected platform adapters', () => {
     it('keeps absent Cloud Tasks httpTarget explicit and never creates a reviewed override', async () => {
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'asia-northeast3',
-            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
             configuration: { maxConcurrentDispatches: 2 },
         };
         const fake = new FakeTransport(request => {
@@ -357,14 +476,14 @@ describe('protected platform adapters', () => {
         const observed = await client.observeQueue(queue);
         expect(observed.httpTargetPresent).toBe(false);
         expect(observed.target).toBeNull();
-        await expect(client.updateQueueTarget({ input: queue, expectedOldTarget: queue.target, desiredTarget: { ...queue.target, callerIdentity: { identity: 'caller-new@fixture-project.iam.gserviceaccount.com', project } }, leaseCheck: noLease })).rejects.toThrow('OBSERVATION_RACE');
+        await expect(client.updateQueueTarget({ input: queue, expectedOldTarget: queue.target, desiredTarget: { ...queue.target, callerIdentity: { identity: `caller-new@${project}.iam.gserviceaccount.com`, project } }, leaseCheck: noLease })).rejects.toThrow('OBSERVATION_RACE');
         expect(fake.requests.some(request => request.method === 'PATCH')).toBe(false);
     });
 
     it('permits state mutation for a queue whose optional httpTarget is explicitly absent', async () => {
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'asia-northeast3',
-            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
             configuration: { maxConcurrentDispatches: 2 },
         };
         let state: 'PAUSED' | 'RUNNING' = 'PAUSED';
@@ -386,11 +505,11 @@ describe('protected platform adapters', () => {
         const override = { scheme: 'https', host: 'worker.example.invalid', enforceMode: 'IF_NOT_EXISTS' };
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'asia-northeast3',
-            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
             configuration: { httpTarget: { uriOverride: override } },
         };
         const fake = new FakeTransport(request => response(request, 200, {
-            state: 'PAUSED', httpTarget: { oidcToken: { serviceAccountEmail: 'caller@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' }, uriOverride: override },
+            state: 'PAUSED', httpTarget: { oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' }, uriOverride: override },
         }));
         await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
     });
@@ -398,13 +517,13 @@ describe('protected platform adapters', () => {
     it('pauses Scheduler through the real operation endpoint and reads state back', async () => {
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3',
-            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: `maintenance@${project}.iam.gserviceaccount.com`, project } },
             configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
         };
         let schedulerState: 'PAUSED' | 'ENABLED' = 'ENABLED';
         const fake = new FakeTransport(request => {
             if (request.method === 'POST') schedulerState = 'PAUSED';
-            const schedulerWire = { name: schedulerResource, state: schedulerState, lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: 'maintenance@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } };
+            const schedulerWire = { name: schedulerResource, state: schedulerState, lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: `maintenance@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } } };
             return response(request, 200, schedulerWire);
         });
         const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).pauseScheduler(scheduler, noLease);
@@ -415,19 +534,19 @@ describe('protected platform adapters', () => {
     it('rejects pause provenance whose evidence object is not resource-correlated', async () => {
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3',
-            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: `maintenance@${project}.iam.gserviceaccount.com`, project } },
             configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
         };
-        const schedulerWire = { name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: 'maintenance@fixture-project.iam.gserviceaccount.com', audience: 'https://worker.example.invalid' } } };
+        const schedulerWire = { name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: 'https://worker.example.invalid/recover', oidcToken: { serviceAccountEmail: `maintenance@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } } };
         const fake = new FakeTransport(request => response(request, 200, schedulerWire));
-        const evidence = { resource: 'projects/fixture-project/locations/asia-northeast3/jobs/other', operation: 'PAUSE', observedAtMs: 1 };
+        const evidence = { resource: `projects/${project}/locations/asia-northeast3/jobs/other`, operation: 'PAUSE', observedAtMs: 1 };
         await expect(new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => ({ resource, pauseEpochMs: 1, observedAtMs: 1, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true }), now: () => 2_000 }).observeScheduler(scheduler)).rejects.toThrow('EVIDENCE_UNAVAILABLE');
     });
 
     it('validates queue and scheduler resource scope before state mutation', async () => {
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'wrong-location',
-            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller@fixture-project.iam.gserviceaccount.com', project } },
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
             configuration: { maxConcurrentDispatches: 2 },
         };
         const queueFake = new FakeTransport(() => { throw new Error('queue mutation must not run'); });
@@ -436,7 +555,7 @@ describe('protected platform adapters', () => {
 
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'wrong-location',
-            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance@fixture-project.iam.gserviceaccount.com', project } },
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: `maintenance@${project}.iam.gserviceaccount.com`, project } },
             configuration: { schedule: '* * * * *' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
         };
         const schedulerFake = new FakeTransport(() => { throw new Error('scheduler mutation must not run'); });
@@ -445,8 +564,8 @@ describe('protected platform adapters', () => {
     });
 
     it('preserves Cloud Tasks uriOverride, method, headers, and auth while changing only reviewed OIDC', async () => {
-        const oldTarget = { url: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller-old@fixture-project.iam.gserviceaccount.com', project } };
-        const desiredTarget = { url: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', callerIdentity: { identity: 'caller-new@fixture-project.iam.gserviceaccount.com', project } };
+        const oldTarget = { url: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller-old@${project}.iam.gserviceaccount.com`, project } };
+        const desiredTarget = { url: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller-new@${project}.iam.gserviceaccount.com`, project } };
         const override = { scheme: 'https', host: 'worker.example.invalid', pathOverride: { path: '/override' }, uriOverrideEnforceMode: 'IF_NOT_EXISTS' };
         const input: ProtectedQueueInput = { resource: queueResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { maxConcurrentDispatches: 2, httpTarget: { uriOverride: override } } };
         const wire = (target: typeof oldTarget) => ({ state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { uriOverride: override, httpMethod: 'POST', headerOverrides: [{ header: 'X-Reviewed', value: 'yes' }], oidcToken: { serviceAccountEmail: target.callerIdentity.identity, audience: target.audience } } });
@@ -472,8 +591,8 @@ describe('protected platform adapters', () => {
     });
 
     it('preserves Scheduler HTTP method and headers while aligning OIDC target', async () => {
-        const oldTarget = { uri: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance-old@fixture-project.iam.gserviceaccount.com', project } };
-        const desiredTarget = { uri: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', identity: { identity: 'maintenance-new@fixture-project.iam.gserviceaccount.com', project } };
+        const oldTarget = { uri: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', identity: { identity: `maintenance-old@${project}.iam.gserviceaccount.com`, project } };
+        const desiredTarget = { uri: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', identity: { identity: `maintenance-new@${project}.iam.gserviceaccount.com`, project } };
         const input: ProtectedSchedulerInput = { resource: schedulerResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { schedule: '* * * * *', method: 'POST' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null };
         const wire = (target: typeof oldTarget) => ({ name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: target.uri, httpMethod: 'POST', headers: { 'X-Reviewed': 'yes' }, oidcToken: { serviceAccountEmail: target.identity.identity, audience: target.audience } } });
         let gets = 0;
@@ -495,11 +614,11 @@ describe('protected platform adapters', () => {
         const oldQueueTarget = {
             url: 'https://worker.example.invalid',
             audience: 'https://worker.example.invalid',
-            callerIdentity: { identity: 'caller-old@fixture-project.iam.gserviceaccount.com', project },
+            callerIdentity: { identity: `caller-old@${project}.iam.gserviceaccount.com`, project },
         };
         const desiredQueueTarget = {
             ...oldQueueTarget,
-            callerIdentity: { identity: 'caller-new@fixture-project.iam.gserviceaccount.com', project },
+            callerIdentity: { identity: `caller-new@${project}.iam.gserviceaccount.com`, project },
         };
         const queue: ProtectedQueueInput = {
             resource: queueResource, project, location: 'asia-northeast3', target: desiredQueueTarget,
@@ -508,11 +627,11 @@ describe('protected platform adapters', () => {
         const oldSchedulerTarget = {
             uri: 'https://worker.example.invalid/recover',
             audience: 'https://worker.example.invalid',
-            identity: { identity: 'maintenance-old@fixture-project.iam.gserviceaccount.com', project },
+            identity: { identity: `maintenance-old@${project}.iam.gserviceaccount.com`, project },
         };
         const desiredSchedulerTarget = {
             ...oldSchedulerTarget,
-            identity: { identity: 'maintenance-new@fixture-project.iam.gserviceaccount.com', project },
+            identity: { identity: `maintenance-new@${project}.iam.gserviceaccount.com`, project },
         };
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3', target: desiredSchedulerTarget,
