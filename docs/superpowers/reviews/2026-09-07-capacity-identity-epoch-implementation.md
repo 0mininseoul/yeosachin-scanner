@@ -22,6 +22,7 @@ values, provider payloads, or production observations.
 | --- | --- |
 | Journal sequence advancement after an awaited credential | `gcs.test.ts` drives `GcsJournalStorage` against an in-memory GCS transport, advances the same-owner sequence while the first token is blocked, expects `JOURNAL_INVALID`, and proves only the winning journal POST exists. |
 | Actual selector union | `exclusion-supervisor.test.ts` starts the actual supervisor adapter twice: parent-only role-deployer rejects the nested maintenance selector; the derived parent+nested resource union returns `ADOPTED`. |
+| Actual ordinary-adapter replay | `automatic-analysis-capacity-infra.test.ts` runs the mapped shell entry points against the real supervisor/IPC adapter, including the provider-free test-only storage switch; all 319 tests pass. Production selection remains authenticated GCS. |
 | Genuine child authority | `exclusion-ipc.test.ts` covers role/generic precedence, queue/task-caller identity, Cloud Run service/IAM, project/queue IAM, scheduler, maintenance, retention, queue-absent maintenance, shared-SA overlap, and disjoint selectors. |
 | Shared reservation lifecycle | `coordinator.test.ts` renews the journal and shared reservation across all seven operation intervals; resume and activation-precondition failures also prove the common reservation is released. |
 | Partial renewal cleanup | `exclusion.test.ts` injects a failure on a later member and proves every owned member is deleted while preserving generation fencing. |
@@ -36,10 +37,25 @@ Focused epoch verification passed:
 
 ```text
 npm run test:identity-epoch -- --reporter=dot
-20 test files, 209 tests passed
+20 test files, 210 tests passed
 npx tsc --noEmit
 passed
 ```
+
+The complete actual-adapter replay also passed independently:
+
+```text
+npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot
+1 test file, 319 tests passed, 1503.99s
+```
+
+The red-green correction behind this replay was bounded to the ordinary
+subprocess bridge: the shell wrapper now removes its two selector arguments
+before forwarding child argv, and the supervisor serializes only the adopted
+child resource members (and only its applicable legacy leases) instead of
+returning the parent union evidence. The provider-free storage switch is
+accepted only when both Vitest and its explicit test-storage marker are set;
+the production supervisor still constructs authenticated GCS storage.
 
 The focused selector, supervisor, launcher, GCS, exclusion, lease-capability,
 and coordinator runs were also repeated independently while implementing the
@@ -51,9 +67,14 @@ placeholders completed successfully and did not read `.env.local`.
 
 `npm audit --audit-level=high` exited with two moderate advisories and no high
 or critical advisory (`@humanfs/node` and `fflate`); no audit fix was applied.
-The repository-wide `npm test -- --reporter=dot` was attempted but did not
-reach a final Vitest summary and was terminated after the existing unrelated
-suite hang; it is not claimed as passing here.
+The repository-wide `npm test -- --reporter=dot` reached its final summary after
+3273.02s: 794 passed tests, 30 failed tests, and 2 skipped tests across 805
+files (9 failed suites). The failures were unrelated PGlite hook/test timeouts,
+two historical-terminalizer assertions, and automatic-infra subprocess
+timeouts under full-suite parallel resource contention; the same automatic
+infrastructure file passes 319/319 when run independently above. This full
+repository command is therefore not claimed as passing, while the focused
+identity-epoch and standalone actual-adapter gates are green.
 
 ## Remaining limitations
 

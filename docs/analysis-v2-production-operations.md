@@ -146,6 +146,17 @@ selector atoms are present in the role-deployer descriptor. These checks are
 provider-free local evidence and do not authorize production observation,
 mutation, activation, or deployment.
 
+The local acceptance replay for this bridge is
+`npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot`;
+the current candidate passes all 319 actual-adapter/subprocess tests. Its
+provider-free in-memory reservation/raw-lock storage is reachable only when
+Vitest and the explicit test-storage marker are both set by the test harness;
+ordinary launches continue to construct authenticated GCS storage. The full
+repository test command is not a bridge acceptance gate because parallel
+PGlite startup and subprocess contention can exceed unrelated test deadlines;
+record its final summary in the non-secret candidate review instead of treating
+those unrelated failures as production evidence.
+
 If a local run fails after a partial reservation renewal, the bridge removes
 only members still matching the owner, scope, epoch, and fence that it owns;
 foreign takeover generations are never deleted. The coordinator renews this
