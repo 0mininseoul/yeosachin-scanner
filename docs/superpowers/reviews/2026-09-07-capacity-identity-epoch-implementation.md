@@ -43,9 +43,17 @@ passed
 
 The focused selector, supervisor, launcher, GCS, exclusion, lease-capability,
 and coordinator runs were also repeated independently while implementing the
-red-green-refactor changes. Shell scripts pass `bash -n` checks. A full
-repository `npm run test`/`npm run lint` remains a coordinator-owned final
-verification item if required by the landing checklist.
+red-green-refactor changes. Shell scripts pass `bash -n` checks, `npm run lint`
+exited successfully with 26 existing warnings, and `git diff --check` passed.
+The default `npm run build` correctly failed closed because this worktree has no
+Supabase environment; a second build with synthetic process-only Supabase
+placeholders completed successfully and did not read `.env.local`.
+
+`npm audit --audit-level=high` exited with two moderate advisories and no high
+or critical advisory (`@humanfs/node` and `fflate`); no audit fix was applied.
+The repository-wide `npm test -- --reporter=dot` was attempted but did not
+reach a final Vitest summary and was terminated after the existing unrelated
+suite hang; it is not claimed as passing here.
 
 ## Remaining limitations
 
