@@ -59,6 +59,10 @@ class FixtureControlPlane implements EpochControlPlane {
     async activate(): Promise<OperationEvidence> { return this.run('ACTIVATED'); }
 }
 
+class ResumeFailControlPlane extends FixtureControlPlane {
+    async resume(): Promise<void> { throw new EpochError('PROBE_FAILED'); }
+}
+
 class RenewalControlPlane implements EpochControlPlane {
     readonly calls: string[] = [];
     private leaseUpdated?: (lease: JournalLease) => Promise<void> | void;
@@ -105,6 +109,29 @@ function setup(now = 1_000) {
 }
 
 describe('ordered coordinator', () => {
+    it('releases the shared reservation when resume fails after acquisition', async () => {
+        const { packet, storage, journal } = setup();
+        const coordinator = new EpochCoordinator({
+            packet,
+            journal,
+            controlPlane: new ResumeFailControlPlane(),
+            ownerDigest: canonicalDigest('resume-failure-owner'),
+            now: () => 1_000,
+        });
+        await expect(coordinator.runThroughVerified()).rejects.toThrow('PROBE_FAILED');
+        expect(await storage.list('epoch-reservation/')).toHaveLength(0);
+    });
+
+    it('releases the shared reservation when activation preconditions fail', async () => {
+        const { storage, coordinator, controlPlane } = setup();
+        await coordinator.runThroughVerified();
+        const authorization = coordinator.issueActivationAuthorization();
+        const optionalActivation = controlPlane as unknown as { activate?: unknown };
+        optionalActivation.activate = undefined;
+        await expect(coordinator.activate(authorization)).rejects.toThrow('ACTIVATION_AUTH_REQUIRED');
+        expect(await storage.list('epoch-reservation/')).toHaveLength(0);
+    });
+
     it('renews the shared reservation on every renewed journal lease across the whole interval', async () => {
         const now = { value: 1_000 };
         const packet = createFixturePacket();

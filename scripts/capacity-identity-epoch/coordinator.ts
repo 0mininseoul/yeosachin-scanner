@@ -229,90 +229,90 @@ export class EpochCoordinator {
 
     /** Runs the closed rollout through VERIFIED. It never invokes activation. */
     async runThroughVerified(): Promise<Readonly<{ state: 'VERIFIED'; lease: JournalLease; proofDigest: string }>> {
-        this.assertCapabilityBinding();
         try {
-        // A proof is scoped to this invocation's fresh observations. Do not
-        // let a prior run on the same coordinator instance suppress a new
-        // owner/current-fence proof on a later resume.
-        this.verifiedProofDigest = undefined;
-        this.durableVerifiedProofDigest = undefined;
-        if (!(await this.journal.hasHeader())) {
-            await this.controlPlane.admit?.({ packet: this.packet });
-        }
-        await this.ensureSharedReservation();
-        await this.journal.ensureHeader();
-        this.lease = await this.journal.acquire(this.ownerDigest);
-        let state = await this.journal.readValidatedState(this.lease);
-        if (state.aborted) fail('ABORTED_EPOCH');
-        await this.controlPlane.resume?.({ packet: this.packet, lease: this.lease, state: state.state });
-        state = await this.reconcileUntilStable(state);
+            this.assertCapabilityBinding();
+            // A proof is scoped to this invocation's fresh observations. Do not
+            // let a prior run on the same coordinator instance suppress a new
+            // owner/current-fence proof on a later resume.
+            this.verifiedProofDigest = undefined;
+            this.durableVerifiedProofDigest = undefined;
+            if (!(await this.journal.hasHeader())) {
+                await this.controlPlane.admit?.({ packet: this.packet });
+            }
+            await this.ensureSharedReservation();
+            await this.journal.ensureHeader();
+            this.lease = await this.journal.acquire(this.ownerDigest);
+            let state = await this.journal.readValidatedState(this.lease);
+            if (state.aborted) fail('ABORTED_EPOCH');
+            await this.controlPlane.resume?.({ packet: this.packet, lease: this.lease, state: state.state });
+            state = await this.reconcileUntilStable(state);
 
-        const verifiedIndex = STATES.indexOf('VERIFIED');
-        let nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
-        if (nextIndex > verifiedIndex) {
-            if (state.state !== 'VERIFIED') fail('JOURNAL_INVALID');
-            // A VERIFIED journal transition is not a cached authorization. A
-            // new owner gets exactly one fresh read-only proof during
-            // reconciliation; do not execute the probe-bearing verification a
-            // second time merely because the historical fence is older.
-            if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) {
+            const verifiedIndex = STATES.indexOf('VERIFIED');
+            let nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
+            if (nextIndex > verifiedIndex) {
+                if (state.state !== 'VERIFIED') fail('JOURNAL_INVALID');
+                // A VERIFIED journal transition is not a cached authorization. A
+                // new owner gets exactly one fresh read-only proof during
+                // reconciliation; do not execute the probe-bearing verification a
+                // second time merely because the historical fence is older.
+                if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) {
+                    this.assertCapabilityBinding();
+                    await this.journal.assertLive(this.lease);
+                    const before = await this.journal.readValidatedState(this.lease);
+                    const evidence = await this.controlPlane.verify({ packet: this.packet, lease: this.lease });
+                    validateEvidence(evidence);
+                    const after = await this.journal.readValidatedState(this.lease);
+                    if (after.state !== 'VERIFIED' || after.activeFence !== before.activeFence || after.transitions.length !== before.transitions.length) fail('OBSERVATION_RACE');
+                    this.durableVerifiedProofDigest = before.transitions[before.transitions.length - 1]?.proofDigest;
+                    if (!this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
+                    this.verifiedProofDigest = evidenceDigest(evidence.proof);
+                }
+                const result = { state: 'VERIFIED' as const, lease: this.lease, proofDigest: this.verifiedProofDigest };
+                await this.releaseSharedReservation();
+                return result;
+            }
+
+            while (nextIndex <= verifiedIndex) {
                 this.assertCapabilityBinding();
                 await this.journal.assertLive(this.lease);
-                const before = await this.journal.readValidatedState(this.lease);
-                const evidence = await this.controlPlane.verify({ packet: this.packet, lease: this.lease });
-                validateEvidence(evidence);
-                const after = await this.journal.readValidatedState(this.lease);
-                if (after.state !== 'VERIFIED' || after.activeFence !== before.activeFence || after.transitions.length !== before.transitions.length) fail('OBSERVATION_RACE');
-                this.durableVerifiedProofDigest = before.transitions[before.transitions.length - 1]?.proofDigest;
-                if (!this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
-                this.verifiedProofDigest = evidenceDigest(evidence.proof);
+                state = await this.reconcileUntilStable(await this.journal.readValidatedState(this.lease));
+                if (state.aborted) fail('ABORTED_EPOCH');
+                nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
+                if (nextIndex > verifiedIndex) break;
+                const target = STATE_OPERATIONS[nextIndex];
+                if (!target) fail('JOURNAL_INVALID');
+                const evidence = await this.runOperation(target, this.lease);
+                const current = await this.journal.readValidatedState(this.lease);
+                if (current.aborted) fail('ABORTED_EPOCH');
+                if (current.state !== (nextIndex === 0 ? null : STATES[nextIndex - 1])) {
+                    // A late append can arrive after the operation's observation
+                    // but before our journal read. Reconcile that exact new phase
+                    // before considering another mutation.
+                    state = await this.reconcileUntilStable(current);
+                    continue;
+                }
+                const transition = transitionForEvidence(
+                    current.transitions.length + 1,
+                    this.journal.epochIdDigest,
+                    current.state,
+                    target,
+                    this.lease.lock.lockFence,
+                    evidence,
+                    this.now(),
+                );
+                await this.assertSharedReservation();
+                await this.journal.append(this.lease, transition);
+                state = await this.journal.readValidatedState(this.lease);
+                state = await this.reconcileUntilStable(state);
+                nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
             }
+            const final = await this.journal.readValidatedState(this.lease);
+            if (final.state !== 'VERIFIED' || final.aborted) fail('NOT_VERIFIED');
+            this.verifiedProofDigest = final.transitions[final.transitions.length - 1]?.proofDigest;
+            this.durableVerifiedProofDigest = this.verifiedProofDigest;
+            if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
             const result = { state: 'VERIFIED' as const, lease: this.lease, proofDigest: this.verifiedProofDigest };
             await this.releaseSharedReservation();
-            return result;
-        }
-
-        while (nextIndex <= verifiedIndex) {
-            this.assertCapabilityBinding();
-            await this.journal.assertLive(this.lease);
-            state = await this.reconcileUntilStable(await this.journal.readValidatedState(this.lease));
-            if (state.aborted) fail('ABORTED_EPOCH');
-            nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
-            if (nextIndex > verifiedIndex) break;
-            const target = STATE_OPERATIONS[nextIndex];
-            if (!target) fail('JOURNAL_INVALID');
-            const evidence = await this.runOperation(target, this.lease);
-            const current = await this.journal.readValidatedState(this.lease);
-            if (current.aborted) fail('ABORTED_EPOCH');
-            if (current.state !== (nextIndex === 0 ? null : STATES[nextIndex - 1])) {
-                // A late append can arrive after the operation's observation
-                // but before our journal read. Reconcile that exact new phase
-                // before considering another mutation.
-                state = await this.reconcileUntilStable(current);
-                continue;
-            }
-            const transition = transitionForEvidence(
-                current.transitions.length + 1,
-                this.journal.epochIdDigest,
-                current.state,
-                target,
-                this.lease.lock.lockFence,
-                evidence,
-                this.now(),
-            );
-            await this.assertSharedReservation();
-            await this.journal.append(this.lease, transition);
-            state = await this.journal.readValidatedState(this.lease);
-            state = await this.reconcileUntilStable(state);
-            nextIndex = state.state === null ? 0 : STATES.indexOf(state.state) + 1;
-        }
-        const final = await this.journal.readValidatedState(this.lease);
-        if (final.state !== 'VERIFIED' || final.aborted) fail('NOT_VERIFIED');
-        this.verifiedProofDigest = final.transitions[final.transitions.length - 1]?.proofDigest;
-        this.durableVerifiedProofDigest = this.verifiedProofDigest;
-        if (!this.verifiedProofDigest || !this.durableVerifiedProofDigest) fail('NOT_VERIFIED');
-        const result = { state: 'VERIFIED' as const, lease: this.lease, proofDigest: this.verifiedProofDigest };
-        await this.releaseSharedReservation();
             return result;
         } catch (error) {
             try { await this.releaseSharedReservation(); } catch { /* retain the original fail-closed error */ }
@@ -347,54 +347,65 @@ export class EpochCoordinator {
             || binding.gates.earlybirdWebhookAutoAdmissionEnabled !== this.packet.activation.earlybirdWebhookAutoAdmissionEnabled) fail('ACTIVATION_AUTH_REQUIRED');
         if (!this.lease) fail('ACTIVATION_AUTH_REQUIRED');
         await this.ensureSharedReservation();
-        const state = await this.journal.readValidatedState(this.lease);
-        if (state.state !== 'VERIFIED' || state.aborted || state.transitions[state.transitions.length - 1]?.proofDigest !== binding.durableVerifiedProofDigest) fail('NOT_VERIFIED');
-        await this.journal.assertLive(this.lease);
-        if (!this.controlPlane.activate) fail('ACTIVATION_AUTH_REQUIRED');
+        let activationStarted = false;
+        let activationCommitted = false;
         try {
+            const state = await this.journal.readValidatedState(this.lease);
+            if (state.state !== 'VERIFIED' || state.aborted || state.transitions[state.transitions.length - 1]?.proofDigest !== binding.durableVerifiedProofDigest) fail('NOT_VERIFIED');
+            await this.journal.assertLive(this.lease);
+            if (!this.controlPlane.activate) fail('ACTIVATION_AUTH_REQUIRED');
+            activationStarted = true;
             const evidence = await this.controlPlane.activate({ packet: this.packet, lease: this.lease });
             const current = await this.journal.readValidatedState(this.lease);
             const transition = transitionForEvidence(current.transitions.length + 1, this.journal.epochIdDigest, 'VERIFIED', 'ACTIVATED', this.lease.lock.lockFence, evidence, this.now());
             await this.journal.append(this.lease, transition);
+            activationCommitted = true;
             const result = { state: 'ACTIVATED' as const, lease: this.lease };
             await this.releaseSharedReservation();
             return result;
         } catch (error) {
-            try { await this.controlPlane.compensateActivation({ packet: this.packet, lease: this.lease }); } catch { /* closure remains unknown and is never claimed successful */ }
+            if (activationStarted && !activationCommitted) {
+                try { await this.controlPlane.compensateActivation({ packet: this.packet, lease: this.lease }); } catch { /* closure remains unknown and is never claimed successful */ }
+            }
             try { await this.releaseSharedReservation(); } catch { /* preserve the activation failure */ }
             throw error instanceof EpochError ? error : new EpochError('PROBE_FAILED');
         }
     }
 
     async abort(reasonCode: 'OPERATOR_ABORT' | 'CONTROL_PLANE_FAILURE'): Promise<Readonly<{ state: State | null; aborted: true }>> {
-        this.assertCapabilityBinding();
-        if (!this.lease) {
-            await this.ensureSharedReservation();
-            await this.journal.ensureHeader();
-            this.lease = await this.journal.acquire(this.ownerDigest);
-        } else {
-            await this.ensureSharedReservation();
+        try {
+            this.assertCapabilityBinding();
+            if (!this.lease) {
+                await this.ensureSharedReservation();
+                await this.journal.ensureHeader();
+                this.lease = await this.journal.acquire(this.ownerDigest);
+            } else {
+                await this.ensureSharedReservation();
+            }
+            const state = await this.journal.readValidatedState(this.lease);
+            if (state.aborted) fail('ABORTED_EPOCH');
+            const evidence: OperationEvidence = {
+                precondition: { state: state.state, fence: this.lease.lock.lockFence },
+                mutation: { action: 'ABORTED', reasonCode },
+                // An abort marker is durable journal state only; closure of each
+                // producer/work plane must be independently observed and is never
+                // claimed by this marker.
+                postcondition: { status: 'ABORTED_MARKER_ONLY' },
+                proof: { reasonCode },
+                nativeConcurrencyToken: null,
+                resourceObservation: { state: state.state },
+            };
+            await this.journal.append(this.lease, {
+                ...transitionForEvidence(state.transitions.length + 1, this.journal.epochIdDigest, state.state, state.state ?? 'PREPARED', this.lease.lock.lockFence, evidence, this.now()),
+                toState: state.state,
+                resultCode: 'ABORTED',
+            });
+            await this.releaseSharedReservation();
+            return { state: state.state, aborted: true };
+        } catch (error) {
+            try { await this.releaseSharedReservation(); } catch { /* retain the original fail-closed error */ }
+            throw error;
         }
-        const state = await this.journal.readValidatedState(this.lease);
-        if (state.aborted) fail('ABORTED_EPOCH');
-        const evidence: OperationEvidence = {
-            precondition: { state: state.state, fence: this.lease.lock.lockFence },
-            mutation: { action: 'ABORTED', reasonCode },
-            // An abort marker is durable journal state only; closure of each
-            // producer/work plane must be independently observed and is never
-            // claimed by this marker.
-            postcondition: { status: 'ABORTED_MARKER_ONLY' },
-            proof: { reasonCode },
-            nativeConcurrencyToken: null,
-            resourceObservation: { state: state.state },
-        };
-        await this.journal.append(this.lease, {
-            ...transitionForEvidence(state.transitions.length + 1, this.journal.epochIdDigest, state.state, state.state ?? 'PREPARED', this.lease.lock.lockFence, evidence, this.now()),
-            toState: state.state,
-            resultCode: 'ABORTED',
-        });
-        await this.releaseSharedReservation();
-        return { state: state.state, aborted: true };
     }
 
     private async ensureSharedReservation(): Promise<void> {
