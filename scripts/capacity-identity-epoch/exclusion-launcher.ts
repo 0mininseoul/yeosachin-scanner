@@ -471,8 +471,7 @@ export async function terminateProcessGroupBounded(
     await waitForProcessGroup(child, killGraceMs);
 }
 
-async function run(options: LauncherOptions): Promise<void> {
-    const supervisorPath = resolve(dirname(fileURLToPath(import.meta.url)), 'exclusion-supervisor.ts');
+async function run(options: LauncherOptions, supervisorPath = resolve(dirname(fileURLToPath(import.meta.url)), 'exclusion-supervisor.ts')): Promise<void> {
     const descriptor = buildDescriptor(options);
     const operationDeadline = Date.now() + MAPPED_OPERATION_TIMEOUT_MS;
     const supervisor = spawn(process.execPath, [
@@ -575,6 +574,21 @@ async function run(options: LauncherOptions): Promise<void> {
         if (childTerminationError !== undefined) throw childTerminationError;
     }
     process.exitCode = childStatus;
+}
+
+/**
+ * Test-only dependency injection for the ordinary shell contract suite.
+ *
+ * The production CLI below always calls `run` with the authenticated GCS
+ * supervisor path.  Provider-free tests may invoke this exported entry point
+ * directly (or through their fixture wrapper) with an in-memory supervisor;
+ * no environment marker or production CLI argument can select that path.
+ */
+export async function runExclusionLauncherWithSupervisor(
+    argv: readonly string[],
+    supervisorPath: string,
+): Promise<void> {
+    await run(parseArguments(argv), resolve(supervisorPath));
 }
 
 const invokedScript = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';

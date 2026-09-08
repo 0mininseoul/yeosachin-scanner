@@ -46,7 +46,7 @@ capacity_exclusion_validate_selector_atoms() {
   local service
   local region
   local queue
-  local maintenance_location
+  local maintenance_location_value
   local recovery_job
   local retention_job
   local service_account
@@ -83,16 +83,16 @@ capacity_exclusion_validate_selector_atoms() {
   [[ "$iam_scope" == 'project' || "$iam_scope" == 'queue' ]] || capacity_exclusion_die
   if [[ "$entry_point" == 'preflight-maintenance' || "$entry_point" == 'paid-maintenance' ]]; then
     if [[ "$selector_source" == 'generic' ]]; then
-      maintenance_location="$region"
+      maintenance_location_value="$region"
       recovery_job=''
     elif [[ "$role" == 'preflight' ]]; then
-      maintenance_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
+      maintenance_location_value="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
       recovery_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
     else
-      maintenance_location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$region}"
+      maintenance_location_value="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$region}"
       recovery_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
     fi
-    [[ "$maintenance_location" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
+    [[ "$maintenance_location_value" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
     [[ "$recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
       && ${#recovery_job} -le 500 ]] || capacity_exclusion_die
     if [[ "$entry_point" == 'paid-maintenance' ]]; then

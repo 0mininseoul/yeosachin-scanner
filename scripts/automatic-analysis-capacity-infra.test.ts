@@ -551,6 +551,8 @@ function fakeRun(options: FakeRunOptions = {}) {
     const logPath = join(fixtureDir, 'calls.log');
     const fakeGcloud = join(binDir, 'gcloud');
     const fakeCurl = join(binDir, 'curl');
+    const fakeNode = join(binDir, 'node');
+    const fixtureLauncher = join(root, 'scripts/capacity-identity-epoch/exclusion-launcher.fixture.ts');
     // This fake has no network access and mutates only fixture files when a
     // set-iam-policy command is explicitly exercised by --apply.
     writeFileSync(servicePath, JSON.stringify(serviceJson));
@@ -920,7 +922,7 @@ printf 'UNHANDLED_FAKE_GCLOUD_INVOCATION %s\n' "$*" >&2
 exit 91
 `;
     writeFileSync(fakeGcloud, fakeScript);
-writeFileSync(fakeCurl, `#!/usr/bin/env bash
+    writeFileSync(fakeCurl, `#!/usr/bin/env bash
 set -euo pipefail
 printf 'curl %s\\n' "$*" >> "$FAKE_GCLOUD_CALL_LOG"
 url=''
@@ -987,8 +989,20 @@ else
   cat "$FAKE_GCLOUD_READINESS_JSON"
 fi
 `);
+    // Ordinary exclusion launches are still exercised as real shell
+    // subprocesses, but the supervisor dependency is injected through this
+    // test-only executable wrapper.  Production `node` and the production
+    // launcher always retain the authenticated GCS supervisor default.
+    writeFileSync(fakeNode, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${3:-}" == */exclusion-launcher.ts ]]; then
+  exec "$FAKE_NODE_REAL" --import tsx "$FAKE_NODE_FIXTURE_LAUNCHER" "\${@:4}"
+fi
+exec "$FAKE_NODE_REAL" "$@"
+`);
     chmodSync(fakeGcloud, 0o755);
     chmodSync(fakeCurl, 0o755);
+    chmodSync(fakeNode, 0o755);
     try {
         const result = spawnSync('bash', [
             'scripts/deploy-analysis-capacity-workers.sh',
@@ -999,8 +1013,6 @@ fi
             env: {
                 ...process.env,
                 ...env,
-                VITEST: 'true',
-                ANALYSIS_CAPACITY_IDENTITY_EPOCH_TEST_STORAGE: 'memory',
                 PATH: `${binDir}:${process.env.PATH ?? ''}`,
                 ANALYSIS_CAPACITY_SOURCE_DIR: sourceDir,
                 ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: stage === 'bootstrap' ? 'false' : 'true',
@@ -1012,6 +1024,8 @@ fi
                     ? 'PREFLIGHT_TASKS_RECOVERY_ENABLED'
                     : 'ANALYSIS_V2_RECOVERY_ENABLED']: active ? 'true' : 'false',
                 FAKE_GCLOUD_CALL_LOG: logPath,
+                FAKE_NODE_REAL: process.execPath,
+                FAKE_NODE_FIXTURE_LAUNCHER: fixtureLauncher,
                 FAKE_GCLOUD_SERVICE_JSON: servicePath,
                 FAKE_GCLOUD_IAM_JSON: iamPath,
                 FAKE_GCLOUD_SCHEDULER_JSON: schedulerPath,
