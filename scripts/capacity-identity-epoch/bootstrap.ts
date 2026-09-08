@@ -2,7 +2,7 @@ import { createAuthenticatedGcsJournalStorage } from './gcs';
 import { EpochJournal, type JournalStorage, validateEpochHeader } from './journal';
 import { CloudRunAdapter } from './cloud-run';
 import { IamAdapter } from './iam';
-import { WorkPlaneClient } from './work-planes';
+import { WorkPlaneClient, type PauseProvenance } from './work-planes';
 import {
     createGoogleProtectedTransport,
     createGoogleReceiverTokenProvider,
@@ -29,6 +29,7 @@ const IMAGE_DIGEST = /^[^\s\u0000-\u001f\u007f]{1,2048}@sha256:[0-9a-f]{64}$/;
 const BODY_SOURCE_SHA = 'capacity.identity-epoch/source-sha';
 const BODY_BUILD_DIGEST = 'capacity.identity-epoch/build-digest';
 const BODY_IMAGE_DIGEST = 'capacity.identity-epoch/image-digest';
+type GcsJournalStorageLike = JournalStorage & { preflight?: () => Promise<void> };
 
 /**
  * Protected, operator-supplied live bootstrap material.  It is read only
@@ -204,6 +205,8 @@ export type LiveBootstrapOptions = Readonly<{
     vercelTransport?: AuthenticatedProtectedTransport;
     vercelPublicTransport?: ProtectedTransport;
     evidenceTransport?: AuthenticatedProtectedTransport;
+    /** Independently correlated Scheduler pause evidence; absent is fail-closed. */
+    pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
     receiverTransport?: ProtectedTransport;
     receiverTokenProvider?: ReceiverTokenProvider;
     supabaseTransport?: AuthenticatedProtectedTransport;
@@ -217,6 +220,13 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): 
 
 function runtimeEnvironmentDigest(runtime: ProtectedRuntimeInput): string {
     return canonicalDigest({ environment: runtime.environment, secretReferences: runtime.secretReferences });
+}
+
+function desiredRevisionCandidate(packet: CapacityEpochPacket, role: Role): string {
+    const plan = packet.desiredManifest.source[role].revisionPlan;
+    const suffix = packet.desiredManifest.source[role].desiredRevisionId
+        ?? `${packet.desiredManifest.source[role].desiredSha.slice(0, 12)}${plan.suffix}`;
+    return `${plan.prefix}${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
 }
 
 /**
@@ -238,6 +248,18 @@ export function validateServiceBodies(
         const spec = body.spec;
         if (!isObject(metadata) || !exactKeys(metadata, ['name', 'generation', 'resourceVersion', 'labels', 'annotations'])
             || !isObject(spec) || !hasExactKeys(spec, ['template', 'traffic'])) fail('PROTECTED_INPUT_UNAVAILABLE');
+        if (metadata.name !== runtime.service
+            || !Number.isSafeInteger(metadata.generation) || (metadata.generation as number) <= 0
+            || typeof metadata.resourceVersion !== 'string' || metadata.resourceVersion.length === 0
+            || metadata.resourceVersion.length > 512 || /[\u0000-\u001f\u007f]/.test(metadata.resourceVersion)
+            || !isObject(metadata.labels) || Object.keys(metadata.labels).length !== 0
+            || !isObject(metadata.annotations) || Object.keys(metadata.annotations).length !== 0) fail('CAPABILITY_BINDING_MISMATCH');
+        const oldRuntime = packet.protectedObservations.old.runtime[role];
+        const oldGeneration = Number(oldRuntime.generation);
+        if (!Number.isSafeInteger(oldGeneration) || oldGeneration <= 0
+            || metadata.generation !== oldGeneration || metadata.resourceVersion !== oldRuntime.resourceVersion) {
+            fail('CAPABILITY_BINDING_MISMATCH');
+        }
         const template = spec.template;
         if (!isObject(template) || !hasExactKeys(template, ['metadata', 'spec'])) fail('PROTECTED_INPUT_UNAVAILABLE');
         const templateMetadata = template.metadata;
@@ -246,6 +268,7 @@ export function validateServiceBodies(
             || !isObject(templateSpec) || !hasExactKeys(templateSpec, ['serviceAccountName', 'containerConcurrency', 'timeoutSeconds', 'containers'])) {
             fail('PROTECTED_INPUT_UNAVAILABLE');
         }
+        if (templateMetadata.name !== desiredRevisionCandidate(packet, role)) fail('CAPABILITY_BINDING_MISMATCH');
         if (templateSpec.serviceAccountName !== runtime.identity.identity
             || templateSpec.containerConcurrency !== runtime.settings.concurrency
             || templateSpec.timeoutSeconds !== runtime.settings.timeoutSeconds
@@ -282,6 +305,7 @@ export function validateServiceBodies(
             || annotations[BODY_SOURCE_SHA] !== runtime.sourceSha
             || annotations[BODY_BUILD_DIGEST] !== packet.desiredManifest.source[role].desiredBuildDigest
             || annotations[BODY_IMAGE_DIGEST] !== canonicalDigest({ image: container.image })) fail('CAPABILITY_BINDING_MISMATCH');
+        if (!isObject(templateMetadata.labels) || Object.keys(templateMetadata.labels).length !== 0) fail('CAPABILITY_BINDING_MISMATCH');
         if (!Array.isArray(spec.traffic) || spec.traffic.length === 0) fail('CAPABILITY_BINDING_MISMATCH');
         const trafficRevisions = new Set<string>();
         for (const traffic of spec.traffic) {
@@ -292,6 +316,11 @@ export function validateServiceBodies(
                 || trafficRevisions.has(traffic.revisionName)) fail('CAPABILITY_BINDING_MISMATCH');
             trafficRevisions.add(traffic.revisionName);
         }
+        const expectedTraffic = [
+            { revisionName: packet.oldManifest.source[role].oldRevision, percent: 100, tag: null },
+            { revisionName: desiredRevisionCandidate(packet, role), percent: 0, tag: null },
+        ];
+        if (canonicalDigest(spec.traffic) !== canonicalDigest(expectedTraffic)) fail('CAPABILITY_BINDING_MISMATCH');
     }
 }
 
@@ -373,7 +402,7 @@ export async function buildLiveBootstrap(
         ?? createVercelProtectedTransport({ tokenProvider: async () => descriptor.vercelToken });
     const cloudRun = new CloudRunAdapter({ transport: google });
     const iam = new IamAdapter({ transport: google });
-    const workPlanes = new WorkPlaneClient({ transport: google, defaultPauseProvenance: true, now: bootstrapOptions.now });
+    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance: bootstrapOptions.pauseProvenance, now: bootstrapOptions.now });
     const vercel = new VercelAdapter({
         transport: vercelTransport,
         publicTransport: bootstrapOptions.vercelPublicTransport,
@@ -382,11 +411,12 @@ export async function buildLiveBootstrap(
     const cloudBuild = new CloudBuildAdapter({
         transport: google,
         builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build },
-        runtimes: packet.protectedInputs.desired.runtime,
+        runtimes: { old: packet.protectedInputs.old.runtime, desired: packet.protectedInputs.desired.runtime },
     });
+    const evidenceTransport = bootstrapOptions.evidenceTransport ?? google;
     const evidence = new LiveEvidenceCollector({
         cloudBuild,
-        loggingTransport: bootstrapOptions.googleTransport ?? google,
+        loggingTransport: evidenceTransport,
         tasksTransport: google,
         supabaseTransport,
         supabaseApiKey,
@@ -395,8 +425,18 @@ export async function buildLiveBootstrap(
         receiverTokenProvider: bootstrapOptions.receiverTokenProvider ?? createGoogleReceiverTokenProvider(),
         now,
     });
-    const candidate = candidateHeader(packet, now);
     const storage = bootstrapOptions.storage ?? createAuthenticatedGcsJournalStorage({ bucket: descriptor.bucket });
+    const storagePreflight = typeof (storage as Partial<GcsJournalStorageLike>).preflight === 'function'
+        ? (storage as GcsJournalStorageLike).preflight!()
+        : Promise.resolve();
+    await Promise.all([
+        google.preflight(),
+        vercelTransport.preflight(),
+        evidenceTransport === google ? Promise.resolve() : evidenceTransport.preflight(),
+        supabaseTransport?.preflight() ?? Promise.resolve(),
+        storagePreflight,
+    ]);
+    const candidate = candidateHeader(packet, now);
     const header = bootstrapOptions.resolveRetainedHeader === false
         ? candidate
         : await resolveHeader(storage, candidate, now);

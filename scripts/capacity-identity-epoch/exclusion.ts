@@ -229,6 +229,14 @@ export class CapacityReservation {
                     },
                 );
                 ensureGeneration(replaced.generation);
+                // The guarded request may have committed after the old
+                // reservation expiry.  Do not return a lease whose renewed
+                // record is already stale; the failure cleanup below removes
+                // only this reservation's owner/fence generations.
+                if (expired(record, this.now())) epochFail('LOCK_LOST');
+                const live = await this.storage.get(member.key);
+                if (!live || live.generation !== replaced.generation
+                    || canonicalDigest(live.value) !== canonicalDigest(record)) epochFail('LOCK_LOST');
                 renewed.push({ key: member.key, generation: replaced.generation, record });
             }
         } catch (error) {

@@ -34,6 +34,24 @@ class MemoryStorage implements ReservationStorage {
     }
 }
 
+class RenewalCommitAfterExpiryStorage extends MemoryStorage {
+    targetKey: string | undefined;
+    private expiredAfterCommit = false;
+
+    constructor(private readonly now: { value: number }) {
+        super();
+    }
+
+    override async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }) {
+        const stored = await super.put(key, value, options);
+        if (!this.expiredAfterCommit && key === this.targetKey && options.ifGenerationMatch !== '0') {
+            this.expiredAfterCommit = true;
+            this.now.value = 1_101;
+        }
+        return stored;
+    }
+}
+
 const digest = (value: string) => canonicalDigest(value);
 
 describe('common epoch/ordinary capacity reservation', () => {
@@ -60,6 +78,17 @@ describe('common epoch/ordinary capacity reservation', () => {
         await expect(reservation.assert(first)).rejects.toThrow('LOCK_LOST');
         await expect(reservation.release(first)).rejects.toThrow('LOCK_LOST');
         await reservation.release(second);
+    });
+
+    it('does not revive a shared reservation when renewal commits after expiry', async () => {
+        const now = { value: 1_000 };
+        const storage = new RenewalCommitAfterExpiryStorage(now);
+        const reservation = new CapacityReservation(storage, { namespace: 'renew-race', now: () => now.value, leaseMs: 100 });
+        const lease = await reservation.acquire(digest('epoch-renew-race'), digest('owner-renew-race'));
+        storage.targetKey = reservation.key;
+
+        await expect(reservation.renew(lease)).rejects.toThrow('LOCK_LOST');
+        expect(await storage.get(reservation.key)).toBeNull();
     });
 
     it('rejects malformed owner/epoch/namespace values before storage access', async () => {

@@ -86,6 +86,24 @@ class TakeoverDuringBaselineStorage extends MemoryStorage {
     }
 }
 
+class RenewalCommitAfterExpiryStorage extends MemoryStorage {
+    lockKey: string | undefined;
+    private expiredAfterCommit = false;
+
+    constructor(private readonly now: { value: number }) {
+        super();
+    }
+
+    override async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        const stored = await super.put(key, value, options);
+        if (!this.expiredAfterCommit && this.lockKey === key && options.ifGenerationMatch !== '0') {
+            this.expiredAfterCommit = true;
+            this.now.value = 1_101;
+        }
+        return stored;
+    }
+}
+
 class PauseBaselineGetStorage extends MemoryStorage {
     baselineKey: string | undefined;
     private paused = true;
@@ -255,6 +273,18 @@ describe('generation-fenced epoch journal', () => {
         await expect(journal.renew(first)).rejects.toThrow('LOCK_LOST');
     });
 
+    it('does not revive a journal lock when renewal commits after its expiry', async () => {
+        const now = { value: 1_000 };
+        const storage = new RenewalCommitAfterExpiryStorage(now);
+        const journal = new EpochJournal(storage, { header: { ...header, epochIdDigest: digest('epoch-renew-race') }, now: () => now.value, leaseMs: 100 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-renew-race'));
+        storage.lockKey = journal.lockKey;
+
+        await expect(journal.renew(lease)).rejects.toThrow('LOCK_LOST');
+        expect(await storage.get(journal.lockKey)).toBeNull();
+    });
+
     it('rejects malformed headers, stale fence transitions, and generation races', async () => {
         const storage = new MemoryStorage();
         const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
@@ -311,7 +341,7 @@ describe('generation-fenced epoch journal', () => {
         await expect(journal.readValidatedState()).rejects.toThrow('LOCK_LOST');
     });
 
-    it('retains a late stale append but forces resumed-owner reconciliation', async () => {
+    it('removes a late stale append before resumed-owner reconciliation', async () => {
         const storage = new TakeoverDuringAppendStorage();
         const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
         await journal.ensureHeader();
@@ -323,8 +353,20 @@ describe('generation-fenced epoch journal', () => {
 
         const ownerB = await journal.acquire(digest('owner-late-b'));
         const resumed = await journal.readValidatedState(ownerB);
-        expect(resumed).toMatchObject({ state: 'PREPARED', activeFence: '2', requiresReconciliation: true });
-        expect(resumed.transitions[0]?.lockFence).toBe('1');
+        expect(resumed).toMatchObject({ state: null, activeFence: '2', requiresReconciliation: false });
+        expect(resumed.transitions).toHaveLength(0);
+    });
+
+    it('removes a journal object committed after the owner loses its fence', async () => {
+        const storage = new TakeoverDuringAppendStorage();
+        const journal = new EpochJournal(storage, { header: { ...header, epochIdDigest: digest('epoch-final-fence') }, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const owner = await journal.acquire(digest('owner-final-fence-old'));
+        storage.lockKey = journal.lockKey;
+        storage.journalPrefix = journal.journalPrefix;
+        storage.takeoverOwner = digest('owner-final-fence-new');
+        await expect(journal.append(owner, { ...transition(1, null, 'PREPARED', owner.lock.lockFence), epochIdDigest: journal.epochIdDigest })).rejects.toThrow('LOCK_LOST');
+        expect(await storage.list(journal.journalPrefix)).toHaveLength(0);
     });
 
     it('binds the durable zero-work baseline to the header and PREPARED commitment', async () => {

@@ -14,7 +14,7 @@ const HOSTS = new Set(['iam.googleapis.com', 'run.googleapis.com', 'cloudtasks.g
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const SERVICE_RESOURCE = /^[a-z][a-z0-9-]{0,62}$/;
-const QUEUE_RESOURCE = /^[A-Za-z0-9_-]{1,100}$/;
+const QUEUE_RESOURCE = /^[A-Za-z0-9-]{1,100}$/;
 const ETAG = /^[A-Za-z0-9+/_=-]{1,256}$/;
 const ROLE = /^(?:roles\/[A-Za-z0-9._-]{1,256}|projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/roles\/[A-Za-z0-9._-]{1,256}|organizations\/[0-9]+\/roles\/[A-Za-z0-9._-]{1,256})$/;
 const MEMBER = /^(?:allUsers|allAuthenticatedUsers|serviceAccount|group|user|domain|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$|^deleted:(?:user|group|domain|serviceAccount|principal|principalSet):[^\s\u0000-\u001f\u007f]{1,1023}$|^(?:allUsers|allAuthenticatedUsers)$/;

@@ -92,6 +92,10 @@ function reviewedServiceBodies(packet: ReturnType<typeof createFixturePacket>): 
     return Object.fromEntries((['preflight', 'paid'] as const).map(role => {
         const runtime = packet.protectedInputs.desired.runtime[role];
         const image = `asia-northeast3-docker.pkg.dev/${runtime.project}/workers/${role}@sha256:${'b'.repeat(64)}`;
+        const plan = packet.desiredManifest.source[role].revisionPlan;
+        const suffix = packet.desiredManifest.source[role].desiredRevisionId
+            ?? `${packet.desiredManifest.source[role].desiredSha.slice(0, 12)}${plan.suffix}`;
+        const desiredRevision = `${plan.prefix}${suffix}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
         const env = [
             ...Object.entries(runtime.environment).map(([name, value]) => ({ name, value })),
             ...Object.entries(runtime.secretReferences).map(([name, value]) => {
@@ -100,10 +104,12 @@ function reviewedServiceBodies(packet: ReturnType<typeof createFixturePacket>): 
             }),
         ];
         return [role, {
-            metadata: { generation: 1 },
+            metadata: { name: runtime.service, generation: 1, resourceVersion: packet.protectedObservations.old.runtime[role].resourceVersion, labels: {}, annotations: {} },
             spec: {
                 template: {
                     metadata: {
+                        name: desiredRevision,
+                        labels: {},
                         annotations: {
                             'autoscaling.knative.dev/maxScale': String(runtime.settings.maxInstances),
                             'capacity.identity-epoch/source-sha': runtime.sourceSha,
@@ -120,7 +126,7 @@ function reviewedServiceBodies(packet: ReturnType<typeof createFixturePacket>): 
                 },
                 traffic: [
                     { revisionName: packet.oldManifest.source[role].oldRevision, percent: 100, tag: null },
-                    { revisionName: `${role}-epoch-fixture`, percent: 0, tag: null },
+                    { revisionName: desiredRevision, percent: 0, tag: null },
                 ],
             },
         }];

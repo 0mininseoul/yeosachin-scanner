@@ -302,8 +302,9 @@ function validateReadiness(value: unknown): void {
 
 export function validateManifest(value: unknown): asserts value is CapacityManifest {
     assertKeys(value, MANIFEST_KEYS);
-    if (!isObject(value.roleSlots) || !hasExactKeys(value.roleSlots, SLOTS)) epochFail('INVALID_SCHEMA');
-    for (const slot of SLOTS) validateProtectedIdentity(value.roleSlots[slot]);
+    const roleSlots = value.roleSlots;
+    if (!isObject(roleSlots) || !hasExactKeys(roleSlots, SLOTS)) epochFail('INVALID_SCHEMA');
+    for (const slot of SLOTS) validateProtectedIdentity(roleSlots[slot]);
     validateProtectedIdentity(value.build);
     if (!isObject(value.source) || !hasExactKeys(value.source, ROLES)) epochFail('SOURCE_INVALID');
     if (!isObject(value.producer) || !hasExactKeys(value.producer, ROLES)) epochFail('SOURCE_INVALID');
@@ -329,10 +330,9 @@ export function validateManifest(value: unknown): asserts value is CapacityManif
         }
     }
     const buildIdentity = value.build as unknown as ProtectedIdentity;
-    const firstSlotIdentity = value.roleSlots[SLOTS[0]] as unknown as ProtectedIdentity;
-    if (buildIdentity.identity === firstSlotIdentity.identity) {
-        // The complete comparison below reports the same safe code, but this
-        // early check avoids treating build identity as a workload principal.
+    if (SLOTS.some(slot => (roleSlots[slot] as ProtectedIdentity).identity === buildIdentity.identity)) {
+        // Build principals are never workload principals, including when the
+        // alias occurs in a later slot than the first one.
         epochFail('IDENTITY_CONFLICT');
     }
 }

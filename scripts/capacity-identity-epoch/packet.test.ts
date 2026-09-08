@@ -472,6 +472,14 @@ describe('coordinated epoch protected packet', () => {
         expect(() => validateManifestComparison(oldBuildMoved.oldManifest, oldBuildMoved.desiredManifest)).toThrow('IDENTITY_CONFLICT');
     });
 
+    it('rejects an old build identity aliased by every old workload slot', () => {
+        for (const slot of SLOTS) {
+            const value = mutablePacket();
+            value.oldManifest.build = value.oldManifest.roleSlots[slot];
+            expect(() => validateManifestComparison(value.oldManifest, value.desiredManifest)).toThrow('IDENTITY_CONFLICT');
+        }
+    });
+
     it('binds protected execution/observation contracts and probe status to the packet digests', () => {
         const runtimeMutation = mutablePacket();
         runtimeMutation.protectedInputs.desired.runtime.preflight.environment.NODE_ENV = 'test';

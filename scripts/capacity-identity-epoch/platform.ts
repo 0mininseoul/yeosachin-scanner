@@ -192,6 +192,18 @@ export class AuthenticatedProtectedTransport {
         this.maxResponseBytes = maxResponseBytes;
     }
 
+    /** Validate the private credential boundary without touching a provider. */
+    async preflight(): Promise<void> {
+        let token: string;
+        try {
+            token = await this.withTimeout(this.tokenProvider(), 'ADAPTER_TIMEOUT');
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_REQUEST_INVALID');
+        }
+        assertBoundedString(token, 8192);
+    }
+
     async request(options: Readonly<{
         method: ProtectedHttpMethod;
         url: string;

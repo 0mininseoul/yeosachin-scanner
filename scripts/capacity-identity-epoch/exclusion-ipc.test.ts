@@ -195,4 +195,61 @@ describe('exclusion IPC authority framing', () => {
             }
         }
     });
+
+    it('rejects selector atoms outside the provider resource grammar', () => {
+        const names = ['PREFLIGHT_TASKS_PROJECT', 'PREFLIGHT_TASKS_LOCATION', 'PREFLIGHT_TASKS_QUEUE', 'PREFLIGHT_TASKS_CLOUD_RUN_SERVICE', 'PREFLIGHT_TASKS_CLOUD_RUN_REGION'] as const;
+        const previous = new Map(names.map(name => [name, process.env[name]]));
+        try {
+            Object.assign(process.env, {
+                PREFLIGHT_TASKS_PROJECT: 'fixture-project', PREFLIGHT_TASKS_LOCATION: 'fixture-location', PREFLIGHT_TASKS_QUEUE: 'fixture-queue',
+                PREFLIGHT_TASKS_CLOUD_RUN_SERVICE: 'fixture-service', PREFLIGHT_TASKS_CLOUD_RUN_REGION: 'fixture-region',
+            });
+            process.env.PREFLIGHT_TASKS_QUEUE = 'queue/name';
+            expect(() => deriveResources('capacity-queue', 'preflight')).toThrow('ADAPTER_REQUEST_INVALID');
+            process.env.PREFLIGHT_TASKS_QUEUE = 'fixture-queue';
+            process.env.PREFLIGHT_TASKS_PROJECT = 'fixture-project" OR true';
+            expect(() => deriveResources('capacity-queue', 'preflight')).toThrow('ADAPTER_REQUEST_INVALID');
+        } finally {
+            for (const [name, value] of previous) {
+                if (value === undefined) delete process.env[name];
+                else process.env[name] = value;
+            }
+        }
+    });
+
+    it('matches the distinct Cloud Tasks queue and Cloud Scheduler job grammars and limits', () => {
+        const names = [
+            'PREFLIGHT_TASKS_PROJECT', 'PREFLIGHT_TASKS_LOCATION', 'PREFLIGHT_TASKS_QUEUE',
+            'PREFLIGHT_TASKS_CLOUD_RUN_SERVICE', 'PREFLIGHT_TASKS_CLOUD_RUN_REGION',
+            'PREFLIGHT_TASKS_MAINTENANCE_LOCATION', 'PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB',
+        ] as const;
+        const previous = new Map(names.map(name => [name, process.env[name]]));
+        try {
+            Object.assign(process.env, {
+                PREFLIGHT_TASKS_PROJECT: 'fixture-project',
+                PREFLIGHT_TASKS_LOCATION: 'fixture-location',
+                PREFLIGHT_TASKS_QUEUE: 'Queue-1',
+                PREFLIGHT_TASKS_CLOUD_RUN_SERVICE: 'fixture-service',
+                PREFLIGHT_TASKS_CLOUD_RUN_REGION: 'fixture-region',
+                PREFLIGHT_TASKS_MAINTENANCE_LOCATION: 'fixture-maintenance',
+                PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB: 'Job_Name-1',
+            });
+            expect(deriveResources('capacity-queue', 'preflight').some(resource => resource.resource.endsWith('/queues/Queue-1'))).toBe(true);
+            expect(deriveResources('preflight-maintenance', 'preflight').some(resource => resource.resource.endsWith('/jobs/Job_Name-1'))).toBe(true);
+
+            process.env.PREFLIGHT_TASKS_QUEUE = 'Q'.repeat(101);
+            expect(() => deriveResources('capacity-queue', 'preflight')).toThrow('ADAPTER_REQUEST_INVALID');
+            process.env.PREFLIGHT_TASKS_QUEUE = 'Queue_Name';
+            expect(() => deriveResources('capacity-queue', 'preflight')).toThrow('ADAPTER_REQUEST_INVALID');
+            process.env.PREFLIGHT_TASKS_QUEUE = 'Queue-1';
+
+            process.env.PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB = 'J'.repeat(501);
+            expect(() => deriveResources('preflight-maintenance', 'preflight')).toThrow('ADAPTER_REQUEST_INVALID');
+        } finally {
+            for (const [name, value] of previous) {
+                if (value === undefined) delete process.env[name];
+                else process.env[name] = value;
+            }
+        }
+    });
 });

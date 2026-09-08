@@ -15,6 +15,16 @@ export type Role = typeof ROLES[number];
 export type Slot = typeof SLOTS[number];
 export type State = typeof STATES[number];
 
+/** Provider resource atoms shared by adapters and the exclusion bridge. */
+export const PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+export const LOCATION_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
+export const SERVICE_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
+/** Cloud Tasks QUEUE_ID: uppercase is valid, underscore is not. */
+export const QUEUE_ID_PATTERN = /^[A-Za-z0-9-]{1,100}$/;
+/** Cloud Scheduler JOB_ID: uppercase and underscore are both valid. */
+export const SCHEDULER_ID_PATTERN = /^[A-Za-z0-9_-]{1,500}$/;
+export const SERVICE_ACCOUNT_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}(?:\.[a-z0-9-]{2,63})+$/;
+
 export type EpochErrorCode =
     | 'INVALID_PACKET'
     | 'INVALID_SCHEMA'

@@ -28,10 +28,9 @@ function buildFor(packet: ReturnType<typeof createFixturePacket>, phase: 'old' |
     };
 }
 
-function adapter(transport: BuildTransport): CloudBuildAdapter {
-    const packet = createFixturePacket();
+function adapter(transport: BuildTransport, packet = createFixturePacket()): CloudBuildAdapter {
     const authenticated = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token', timeoutMs: 1_000 });
-    return new CloudBuildAdapter({ transport: authenticated, builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build }, runtimes: packet.protectedInputs.desired.runtime });
+    return new CloudBuildAdapter({ transport: authenticated, builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build }, runtimes: { old: packet.protectedInputs.old.runtime, desired: packet.protectedInputs.desired.runtime } });
 }
 
 describe('Cloud Build provenance adapter contracts', () => {
@@ -63,5 +62,29 @@ describe('Cloud Build provenance adapter contracts', () => {
         expect(digest).toBe(canonicalDigest(packet.protectedInputs.desired.build));
         const wrong = new BuildTransport([{ builds: [desired] }]);
         await expect(adapter(wrong).buildObservation({ role: 'paid', phase: 'desired', revision: 'paid-epochfixture', image: IMAGE('paid', 'c'.repeat(64)) })).rejects.toMatchObject({ code: 'EVIDENCE_UNAVAILABLE' });
+    });
+
+    it('looks up an old build in the old observation runtime location', async () => {
+        const packet = createFixturePacket();
+        const packetForTest = {
+            ...packet,
+            protectedInputs: {
+                ...packet.protectedInputs,
+                old: {
+                    ...packet.protectedInputs.old,
+                    runtime: {
+                        ...packet.protectedInputs.old.runtime,
+                        preflight: { ...packet.protectedInputs.old.runtime.preflight, location: 'us-central1' },
+                    },
+                },
+            },
+        } as typeof packet;
+        const old = buildFor(packetForTest, 'old');
+        const transport = new BuildTransport([{ builds: [old] }]);
+        await adapter(transport, packetForTest).sourceObservation({
+            role: 'preflight', phase: 'old', revision: packetForTest.oldManifest.source.preflight.oldRevision,
+            runtime: packetForTest.protectedInputs.old.runtime.preflight,
+        });
+        expect(new URL(transport.requests[0]!.url).pathname).toBe('/v1/projects/example-project/locations/us-central1/builds');
     });
 });

@@ -654,6 +654,37 @@ describe('protected platform adapters', () => {
         await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
     });
 
+    it('rejects Cloud Tasks HTTP wire drift against the reviewed target contract', async () => {
+        const override = { scheme: 'https', host: 'worker.example.invalid', pathOverride: { path: '/reviewed' }, uriOverrideEnforceMode: 'IF_NOT_EXISTS' };
+        const expectedWire = { uriOverride: override, httpMethod: 'POST', headerOverrides: [{ header: 'X-Reviewed', value: 'yes' }] };
+        const queue: ProtectedQueueInput = {
+            resource: queueResource, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { maxConcurrentDispatches: 2, httpTarget: expectedWire },
+        };
+        const fake = new FakeTransport(request => {
+            if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [] });
+            return response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: {
+                ...expectedWire, headerOverrides: [{ header: 'X-Reviewed', value: 'drifted' }],
+                oidcToken: { serviceAccountEmail: `caller@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' },
+            } });
+        });
+        await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
+    });
+
+    it('rejects a Cloud Tasks queue selector containing an underscore before transport', async () => {
+        const queue: ProtectedQueueInput = {
+            resource: `projects/${project}/locations/asia-northeast3/queues/queue_name`, project, location: 'asia-northeast3',
+            target: { url: 'https://worker.example.invalid', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { maxConcurrentDispatches: 2 },
+        };
+        const fake = new FakeTransport(request => request.url.includes('/tasks?')
+            ? response(request, 200, { tasks: [] })
+            : response(request, 200, { state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 } }));
+        await expect(new WorkPlaneClient({ transport: authenticated(fake) }).observeQueue(queue)).rejects.toThrow('RESOURCE_INVALID');
+        expect(fake.requests).toHaveLength(0);
+    });
+
     it('pauses Scheduler through the real operation endpoint and reads state back', async () => {
         const scheduler: ProtectedSchedulerInput = {
             resource: schedulerResource, project, location: 'asia-northeast3',
@@ -669,6 +700,19 @@ describe('protected platform adapters', () => {
         const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).pauseScheduler(scheduler, noLease);
         expect(observed.state).toBe('PAUSED');
         expect(fake.requests.find(request => request.method === 'POST')?.url).toContain(':pause');
+    });
+
+    it('does not treat the current Scheduler updateTime as independent pause provenance', async () => {
+        const scheduler: ProtectedSchedulerInput = {
+            resource: schedulerResource, project, location: 'asia-northeast3',
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: `maintenance@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { schedule: '* * * * *', method: 'POST' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
+        };
+        const fake = new FakeTransport(request => response(request, 200, {
+            name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, updateTime: '1970-01-01T00:00:01.000Z',
+            schedule: '* * * * *', httpTarget: { uri: scheduler.target.uri, oidcToken: { serviceAccountEmail: `maintenance@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } },
+        }));
+        await expect(new WorkPlaneClient({ transport: authenticated(fake), defaultPauseProvenance: true, now: () => 2_000 }).observeScheduler(scheduler)).rejects.toThrow('EVIDENCE_UNAVAILABLE');
     });
 
     it('rejects pause provenance whose evidence object is not resource-correlated', async () => {
@@ -707,8 +751,9 @@ describe('protected platform adapters', () => {
         const oldTarget = { url: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller-old@${project}.iam.gserviceaccount.com`, project } };
         const desiredTarget = { url: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', callerIdentity: { identity: `caller-new@${project}.iam.gserviceaccount.com`, project } };
         const override = { scheme: 'https', host: 'worker.example.invalid', pathOverride: { path: '/override' }, uriOverrideEnforceMode: 'IF_NOT_EXISTS' };
-        const input: ProtectedQueueInput = { resource: queueResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { maxConcurrentDispatches: 2, httpTarget: { uriOverride: override } } };
-        const wire = (target: typeof oldTarget) => ({ state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { uriOverride: override, httpMethod: 'POST', headerOverrides: [{ header: 'X-Reviewed', value: 'yes' }], oidcToken: { serviceAccountEmail: target.callerIdentity.identity, audience: target.audience } } });
+        const expectedWire = { uriOverride: override, httpMethod: 'POST', headerOverrides: [{ header: 'X-Reviewed', value: 'yes' }] };
+        const input: ProtectedQueueInput = { resource: queueResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { maxConcurrentDispatches: 2, httpTarget: expectedWire } };
+        const wire = (target: typeof oldTarget) => ({ state: 'PAUSED', rateLimits: { maxConcurrentDispatches: 2 }, httpTarget: { ...expectedWire, oidcToken: { serviceAccountEmail: target.callerIdentity.identity, audience: target.audience } } });
         let patchSeen = false;
         const fake = new FakeTransport(request => {
             if (request.url.includes('/tasks?')) return response(request, 200, { tasks: [] });
@@ -733,7 +778,7 @@ describe('protected platform adapters', () => {
     it('preserves Scheduler HTTP method and headers while aligning OIDC target', async () => {
         const oldTarget = { uri: 'https://worker.example.invalid/old', audience: 'https://worker.example.invalid', identity: { identity: `maintenance-old@${project}.iam.gserviceaccount.com`, project } };
         const desiredTarget = { uri: 'https://worker.example.invalid/new', audience: 'https://worker.example.invalid', identity: { identity: `maintenance-new@${project}.iam.gserviceaccount.com`, project } };
-        const input: ProtectedSchedulerInput = { resource: schedulerResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { schedule: '* * * * *', method: 'POST' }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null };
+        const input: ProtectedSchedulerInput = { resource: schedulerResource, project, location: 'asia-northeast3', target: desiredTarget, configuration: { schedule: '* * * * *', method: 'POST', httpTarget: { httpMethod: 'POST', headers: { 'X-Reviewed': 'yes' } } }, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null };
         const wire = (target: typeof oldTarget) => ({ name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: '* * * * *', httpTarget: { uri: target.uri, httpMethod: 'POST', headers: { 'X-Reviewed': 'yes' }, oidcToken: { serviceAccountEmail: target.identity.identity, audience: target.audience } } });
         let gets = 0;
         const fake = new FakeTransport(request => {
@@ -748,6 +793,20 @@ describe('protected platform adapters', () => {
         });
         const observed = await new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).updateSchedulerTarget({ input, expectedOldTarget: oldTarget, desiredTarget, leaseCheck: noLease });
         expect(observed.target).toEqual(desiredTarget);
+    });
+
+    it('rejects Scheduler HTTP wire drift against the reviewed job contract', async () => {
+        const scheduler: ProtectedSchedulerInput = {
+            resource: schedulerResource, project, location: 'asia-northeast3',
+            target: { uri: 'https://worker.example.invalid/recover', audience: 'https://worker.example.invalid', identity: { identity: `maintenance@${project}.iam.gserviceaccount.com`, project } },
+            configuration: { schedule: '* * * * *', method: 'POST', httpTarget: { httpMethod: 'POST', headers: { 'X-Reviewed': 'yes' } } },
+            state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null,
+        };
+        const fake = new FakeTransport(request => response(request, 200, {
+            name: schedulerResource, state: 'PAUSED', lastAttemptTime: null, schedule: '* * * * *',
+            httpTarget: { uri: scheduler.target.uri, httpMethod: 'POST', headers: { 'X-Reviewed': 'drifted' }, oidcToken: { serviceAccountEmail: `maintenance@${project}.iam.gserviceaccount.com`, audience: 'https://worker.example.invalid' } },
+        }));
+        await expect(new WorkPlaneClient({ transport: authenticated(fake), pauseProvenance: async ({ resource }) => pauseProvenance(resource), now: () => 2_000 }).observeScheduler(scheduler)).rejects.toThrow('RESOURCE_INVALID');
     });
 
     it('does not emit duplicate queue or scheduler mutations when the reviewed target is already exact', async () => {

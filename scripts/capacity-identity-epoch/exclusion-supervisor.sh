@@ -12,6 +12,12 @@ readonly CAPACITY_EXCLUSION_READ_FD=4
 readonly CAPACITY_EXCLUSION_WRITE_FD=5
 readonly CAPACITY_EXCLUSION_ENTRY_POINT_PATTERN='^(role-deployer|capacity-queue|preflight-maintenance|paid-maintenance)$'
 readonly CAPACITY_EXCLUSION_ROLE_PATTERN='^(preflight|paid)$'
+readonly CAPACITY_EXCLUSION_PROJECT_PATTERN='^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
+readonly CAPACITY_EXCLUSION_LOCATION_PATTERN='^[a-z][a-z0-9-]{0,62}$'
+readonly CAPACITY_EXCLUSION_SERVICE_PATTERN='^[a-z][a-z0-9-]{0,62}$'
+readonly CAPACITY_EXCLUSION_QUEUE_PATTERN='^[A-Za-z0-9-]{1,100}$'
+readonly CAPACITY_EXCLUSION_SCHEDULER_PATTERN='^[A-Za-z0-9_-]{1,500}$'
+readonly CAPACITY_EXCLUSION_ACCOUNT_PATTERN='^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}(\.[a-z0-9-]{2,63})+$'
 
 CAPACITY_EXCLUSION_ACTIVE="false"
 CAPACITY_EXCLUSION_STARTED_HERE="false"
@@ -28,6 +34,71 @@ capacity_exclusion_validate_tokens() {
   local role="$2"
   [[ "$entry_point" =~ $CAPACITY_EXCLUSION_ENTRY_POINT_PATTERN ]] || capacity_exclusion_die
   [[ "$role" =~ $CAPACITY_EXCLUSION_ROLE_PATTERN ]] || capacity_exclusion_die
+}
+
+capacity_exclusion_validate_selector_atoms() {
+  local entry_point="$1"
+  local role="$2"
+  local selector_source="role"
+  local prefix
+  local project
+  local location
+  local service
+  local region
+  local queue
+  local maintenance_location
+  local recovery_job
+  local retention_job
+  local service_account
+  local iam_scope
+  local project_var
+  local location_var
+  local service_var
+  local region_var
+  local queue_var
+  local service_account_var
+  if [[ "$(basename "${BASH_SOURCE[2]:-${BASH_SOURCE[1]}}")" == "configure-analysis-tasks-queue.sh" ]]; then
+    selector_source="generic"
+  fi
+  if [[ "$selector_source" == "generic" ]]; then
+    prefix='ANALYSIS_TASKS'
+  elif [[ "$role" == "preflight" ]]; then
+    prefix='PREFLIGHT_TASKS'
+  else
+    prefix='ANALYSIS_V2_TASKS'
+  fi
+  project_var="${prefix}_PROJECT"; project="${!project_var:-}"
+  location_var="${prefix}_LOCATION"; location="${!location_var:-}"
+  service_var="${prefix}_CLOUD_RUN_SERVICE"; service="${!service_var:-}"
+  region_var="${prefix}_CLOUD_RUN_REGION"; region="${!region_var:-}"
+  queue_var="${prefix}_QUEUE"; queue="${!queue_var:-}"
+  service_account_var="${prefix}_SERVICE_ACCOUNT_EMAIL"; service_account="${!service_account_var:-}"
+  [[ "$project" =~ $CAPACITY_EXCLUSION_PROJECT_PATTERN ]] || capacity_exclusion_die
+  [[ -z "$service" || "$service" =~ $CAPACITY_EXCLUSION_SERVICE_PATTERN ]] || capacity_exclusion_die
+  [[ -z "$region" || "$region" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
+  [[ -z "$location" || "$location" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
+  [[ -z "$queue" || "$queue" =~ $CAPACITY_EXCLUSION_QUEUE_PATTERN ]] || capacity_exclusion_die
+  [[ -z "$service_account" || "$service_account" =~ $CAPACITY_EXCLUSION_ACCOUNT_PATTERN ]] || capacity_exclusion_die
+  iam_scope="${ANALYSIS_TASKS_IAM_SCOPE:-project}"
+  [[ "$iam_scope" == 'project' || "$iam_scope" == 'queue' ]] || capacity_exclusion_die
+  if [[ "$entry_point" == 'preflight-maintenance' || "$entry_point" == 'paid-maintenance' ]]; then
+    if [[ "$selector_source" == 'generic' ]]; then
+      maintenance_location="$region"
+      recovery_job=''
+    elif [[ "$role" == 'preflight' ]]; then
+      maintenance_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
+      recovery_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
+    else
+      maintenance_location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$region}"
+      recovery_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+    fi
+    [[ "$maintenance_location" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
+    [[ "$recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN ]] || capacity_exclusion_die
+    if [[ "$entry_point" == 'paid-maintenance' ]]; then
+      retention_job="${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"
+      [[ "$retention_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN ]] || capacity_exclusion_die
+    fi
+  fi
 }
 
 capacity_exclusion_fd_open() {
@@ -82,6 +153,7 @@ capacity_exclusion_start() {
   local launcher_args
   shift 2
   capacity_exclusion_validate_tokens "$entry_point" "$role"
+  capacity_exclusion_validate_selector_atoms "$entry_point" "$role"
   [[ "$CAPACITY_EXCLUSION_ACTIVE" == "false" ]] || capacity_exclusion_die
 
   # A nested approved entry point inherits the already-held supervisor.  It

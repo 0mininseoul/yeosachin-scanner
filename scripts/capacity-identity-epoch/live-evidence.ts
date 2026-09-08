@@ -21,6 +21,7 @@ const TASK_ACTIVITY_LOG_TYPE = 'type.googleapis.com/google.cloud.tasks.logging.v
 const GOOGLE_PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const GOOGLE_LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const GOOGLE_RESOURCE_ATOM = /^[A-Za-z0-9_-]{1,128}$/;
+const GOOGLE_QUEUE_ID = /^[A-Za-z0-9-]{1,100}$/;
 const GOOGLE_LOG_ID = /^[A-Za-z0-9_.-]{1,512}$/;
 const FILTER_ATOM = /^[A-Za-z0-9_.:-]{1,256}$/;
 
@@ -183,7 +184,7 @@ function validQueueResource(value: unknown, expectedProject?: string): value is 
     if (typeof value !== 'string') return false;
     const match = /^projects\/([^/]+)\/locations\/([^/]+)\/queues\/([^/]+)$/.exec(value);
     return match !== null && GOOGLE_PROJECT.test(match[1]!) && (expectedProject === undefined || match[1] === expectedProject)
-        && GOOGLE_LOCATION.test(match[2]!) && GOOGLE_RESOURCE_ATOM.test(match[3]!);
+        && GOOGLE_LOCATION.test(match[2]!) && GOOGLE_QUEUE_ID.test(match[3]!);
 }
 
 function validBucketResource(value: unknown, expectedProject?: string): value is string {

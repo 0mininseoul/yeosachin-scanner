@@ -423,6 +423,19 @@ export class EpochJournal {
                 async () => { await this.assertWritableLease(lease); },
             );
             assertGeneration(stored.generation);
+            // A guarded dispatch can still commit after the old expiry while
+            // its request is in flight.  Never return a lease that was
+            // already expired at commit time: remove only our exact write so
+            // a concurrent takeover cannot be damaged, then fail closed.
+            if (isExpired(renewed, this.now())) {
+                try { await this.deleteOwnedJournalObject(this.lockKey, stored.generation); } catch { /* preserve expiry result */ }
+                epochFail('LOCK_LOST');
+            }
+            const live = await this.storage.get(this.lockKey);
+            if (!live || live.generation !== stored.generation
+                || canonicalDigest(live.value) !== canonicalDigest(renewed)) {
+                epochFail('LOCK_LOST');
+            }
             return { generation: stored.generation, lock: renewed };
         } catch (error) {
             if (error instanceof EpochError) throw error;
@@ -458,8 +471,9 @@ export class EpochJournal {
             || (isAbort
                 ? transition.toState !== current.state
                 : STATES.indexOf(transition.toState as State) !== expectedNextIndex)) epochFail('JOURNAL_INVALID');
+        let stored: StoredObject;
         try {
-            const stored = await this.putWithLeaseGuard(
+            stored = await this.putWithLeaseGuard(
                 key,
                 transition,
                 { ifGenerationMatch: '0' },
@@ -486,9 +500,15 @@ export class EpochJournal {
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
         // A takeover can race between the append PUT and its read-back.  The
-        // stale owner must fail closed before reporting a successful append.
-        await this.readLiveLock(lease);
-        await this.deriveState(lease);
+        // stale owner must fail closed before reporting a successful append,
+        // and must not leave a late object that a resumed owner could adopt.
+        try {
+            await this.readLiveLock(lease);
+            await this.deriveState(lease);
+        } catch (error) {
+            try { await this.deleteOwnedJournalObject(key, stored.generation); } catch { /* preserve the fence-loss result */ }
+            throw error;
+        }
     }
 
     async assertLive(lease: JournalLease): Promise<void> {
@@ -615,6 +635,13 @@ export class EpochJournal {
             || current.aborted) epochFail(current.aborted ? 'ABORTED_EPOCH' : 'JOURNAL_INVALID');
         const existing = await this.storage.get(key);
         if (existing) epochFail('GENERATION_PRECONDITION_FAILED');
+    }
+
+    private async deleteOwnedJournalObject(key: string, generation: string): Promise<void> {
+        if (!this.storage.delete) return;
+        const existing = await this.storage.get(key);
+        if (existing?.generation !== generation) return;
+        await this.storage.delete(key, { ifGenerationMatch: generation });
     }
 
     private async readCurrentLock(): Promise<JournalLease> {

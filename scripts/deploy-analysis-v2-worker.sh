@@ -245,7 +245,7 @@ validate_service() {
 }
 
 validate_queue() {
-  [[ "$1" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] \
+  [[ "$1" =~ ^[A-Za-z0-9-]{1,100}$ ]] \
     || die "PREFLIGHT_TASKS_QUEUE is invalid"
 }
 

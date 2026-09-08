@@ -9,7 +9,16 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { createAuthenticatedGcsJournalStorage } from './capacity-identity-epoch/gcs';
 import { readProtectedDescriptor, rejectDuplicateJsonKeys } from './capacity-identity-epoch/packet';
-import { epochFail, EpochError, hasExactKeys, isObject, type Role } from './capacity-identity-epoch/contracts';
+import {
+    epochFail,
+    EpochError,
+    hasExactKeys,
+    isObject,
+    LOCATION_ID_PATTERN,
+    PROJECT_ID_PATTERN,
+    SERVICE_ID_PATTERN,
+    type Role,
+} from './capacity-identity-epoch/contracts';
 import {
     acquireExclusion,
     assertExclusion,
@@ -36,7 +45,7 @@ import {
 const DIGEST = /^[0-9a-f]{64}$/;
 const FD = /^\d{1,9}$/;
 const BUCKET = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
-const SAFE_RESOURCE = /^[^\u0000-\u001f\u007f]{1,1024}$/;
+const SAFE_RESOURCE = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,1023}$/;
 const ENTRY_POINTS = ['epoch', 'role-deployer', 'capacity-queue', 'preflight-maintenance', 'paid-maintenance'] as const;
 const ROLES = ['preflight', 'paid'] as const;
 const RESOURCE_KINDS = ['service', 'queue', 'scheduler', 'iam', 'retention', 'vercel'] as const;
@@ -110,9 +119,9 @@ export function validateDescriptor(value: unknown): BridgeDescriptor {
     for (const selector of value.legacyServices) {
         if (!isObject(selector) || !hasExactKeys(selector, ['bucket', 'project', 'region', 'service'])
             || typeof selector.bucket !== 'string' || selector.bucket !== value.bucket
-            || typeof selector.project !== 'string' || !SAFE_RESOURCE.test(selector.project)
-            || typeof selector.region !== 'string' || !SAFE_RESOURCE.test(selector.region)
-            || typeof selector.service !== 'string' || !SAFE_RESOURCE.test(selector.service)) fail('PROTECTED_INPUT_UNAVAILABLE');
+            || typeof selector.project !== 'string' || !PROJECT_ID_PATTERN.test(selector.project)
+            || typeof selector.region !== 'string' || !LOCATION_ID_PATTERN.test(selector.region)
+            || typeof selector.service !== 'string' || !SERVICE_ID_PATTERN.test(selector.service)) fail('PROTECTED_INPUT_UNAVAILABLE');
         const typed = selector as LegacyServiceSelector;
         const key = legacyServiceLockKey(typed);
         if (lockKeys.has(key)) fail('PROTECTED_INPUT_UNAVAILABLE');

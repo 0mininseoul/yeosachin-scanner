@@ -336,7 +336,7 @@ worker_memory="${ANALYSIS_CAPACITY_WORKER_MEMORY:-2Gi}"
 [[ "$project" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || die "invalid project"
 [[ "$location" == "$DEFAULT_LOCATION" ]] || die "location must be $DEFAULT_LOCATION"
 [[ "$region" == "$DEFAULT_LOCATION" ]] || die "Cloud Run region must be $DEFAULT_LOCATION"
-[[ "$queue" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] || die "invalid queue"
+[[ "$queue" =~ ^[A-Za-z0-9-]{1,100}$ ]] || die "invalid queue"
 [[ "$service" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] || die "invalid Cloud Run service"
 [[ "$service" == *"$role"* ]] || die "Cloud Run service must contain its workload role"
 service_account_pattern='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
@@ -387,7 +387,7 @@ if [[ "$stage" != "bootstrap" ]]; then
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE_PROJECT is invalid"
   [[ "$legacy_queue_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE_LOCATION is invalid"
-  [[ "$legacy_queue" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] \
+  [[ "$legacy_queue" =~ ^[A-Za-z0-9-]{1,100}$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE is invalid"
   [[ "$legacy_target_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/analysis/(start|step|run)$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_TARGET_URL must be one exact public V1 route"
@@ -595,8 +595,7 @@ if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
   recovery_scheduler_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
   # Bounded repetition above 255 is not portable in this regex engine, so the
   # documented 500-character Scheduler job-id limit is checked separately.
-  [[ "$recovery_scheduler_job" =~ ^[A-Za-z][A-Za-z0-9_-]*$ \
-     && ${#recovery_scheduler_job} -le 500 ]] \
+  [[ "$recovery_scheduler_job" =~ ^[A-Za-z0-9_-]{1,500}$ ]] \
     || die "initial identity roll-forward recovery scheduler job name is invalid"
   [[ "$recovery_scheduler_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
     || die "initial identity roll-forward recovery scheduler location is invalid"

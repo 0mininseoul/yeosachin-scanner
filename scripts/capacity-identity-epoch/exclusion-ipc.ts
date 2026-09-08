@@ -9,7 +9,16 @@ import { randomBytes } from 'node:crypto';
 import { readSync, writeSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { epochFail, type Role } from './contracts';
+import {
+    epochFail,
+    LOCATION_ID_PATTERN,
+    PROJECT_ID_PATTERN,
+    QUEUE_ID_PATTERN,
+    SCHEDULER_ID_PATTERN,
+    SERVICE_ACCOUNT_ID_PATTERN,
+    SERVICE_ID_PATTERN,
+    type Role,
+} from './contracts';
 import type { ExclusionEntryPoint, ExclusionResource } from './exclusion-bridge';
 import {
     validateDescriptor,
@@ -105,22 +114,23 @@ export function deriveResources(
             : 'ANALYSIS_V2_RECOVERY_SCHEDULER_JOB']
             ?? (role === 'preflight' ? 'analysis-preflight-recovery' : 'analysis-v2-recovery');
     const retentionJob = process.env.ANALYSIS_V2_RETENTION_SCHEDULER_JOB ?? 'analysis-v2-preflight-retention';
-    if (typeof project !== 'string' || !SAFE_VALUE.test(project)) fail();
-    const serviceResource = typeof service === 'string' && SAFE_VALUE.test(service)
-        && typeof region === 'string' && SAFE_VALUE.test(region)
+    if (typeof project !== 'string' || !PROJECT_ID_PATTERN.test(project)) fail();
+    const serviceResource = typeof service === 'string' && SERVICE_ID_PATTERN.test(service)
+        && typeof region === 'string' && LOCATION_ID_PATTERN.test(region)
         ? 'projects/' + project + '/locations/' + region + '/services/' + service
         : undefined;
     if (entryPoint !== 'capacity-queue' && serviceResource === undefined) fail();
     const needsQueue = entryPoint === 'epoch' || entryPoint === 'capacity-queue';
-    if (needsQueue && (typeof location !== 'string' || !SAFE_VALUE.test(location)
-        || typeof queue !== 'string' || !SAFE_VALUE.test(queue))) fail();
+    if (needsQueue && (typeof location !== 'string' || !LOCATION_ID_PATTERN.test(location)
+        || typeof queue !== 'string' || !QUEUE_ID_PATTERN.test(queue))) fail();
     const resources: ExclusionResource[] = [];
     if (serviceResource !== undefined) {
         resources.push({ kind: 'service', resource: serviceResource });
         resources.push({ kind: 'iam', resource: serviceResource });
     }
     const taskServiceAccount = process.env[prefix + '_SERVICE_ACCOUNT_EMAIL'];
-    if (typeof taskServiceAccount === 'string' && SAFE_VALUE.test(taskServiceAccount)) {
+    if (taskServiceAccount !== undefined && (typeof taskServiceAccount !== 'string' || !SERVICE_ACCOUNT_ID_PATTERN.test(taskServiceAccount))) fail();
+    if (typeof taskServiceAccount === 'string') {
         resources.push({ kind: 'iam', resource: 'projects/' + project + '/serviceAccounts/' + taskServiceAccount });
     }
     const iamScope = process.env.ANALYSIS_TASKS_IAM_SCOPE ?? 'project';
@@ -134,12 +144,12 @@ export function deriveResources(
         });
         return resources;
     }
-    if (typeof maintenanceLocation !== 'string' || !SAFE_VALUE.test(maintenanceLocation)
-        || typeof recoveryJob !== 'string' || !SAFE_VALUE.test(recoveryJob)) fail();
+    if (typeof maintenanceLocation !== 'string' || !LOCATION_ID_PATTERN.test(maintenanceLocation)
+        || typeof recoveryJob !== 'string' || !SCHEDULER_ID_PATTERN.test(recoveryJob)) fail();
     const schedulerResource = 'projects/' + project + '/locations/' + maintenanceLocation + '/jobs/' + recoveryJob;
     resources.push({ kind: 'scheduler', resource: schedulerResource });
     if (entryPoint === 'paid-maintenance') {
-        if (!SAFE_VALUE.test(retentionJob)) fail();
+        if (!SCHEDULER_ID_PATTERN.test(retentionJob)) fail();
         resources.push({
             kind: 'retention',
             resource: 'projects/' + project + '/locations/' + maintenanceLocation + '/jobs/' + retentionJob,
@@ -165,9 +175,10 @@ export function deriveLegacyServices(entryPoint: ExclusionEntryPoint, role: Role
     const project = process.env[prefix + '_PROJECT'];
     const region = process.env[prefix + '_CLOUD_RUN_REGION'];
     const service = process.env[prefix + '_CLOUD_RUN_SERVICE'];
-    for (const value of [bucket, project, region, service]) {
-        if (typeof value !== 'string' || !SAFE_VALUE.test(value)) fail();
-    }
+    if (typeof bucket !== 'string' || !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(bucket)
+        || typeof project !== 'string' || !PROJECT_ID_PATTERN.test(project)
+        || typeof region !== 'string' || !LOCATION_ID_PATTERN.test(region)
+        || typeof service !== 'string' || !SERVICE_ID_PATTERN.test(service)) fail();
     return [{ bucket: bucket!, project: project!, region: region!, service: service! }];
 }
 

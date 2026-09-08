@@ -41,4 +41,25 @@ describe('ordinary identity-epoch shell mappings', () => {
         const source = readFileSync(resolve(root, 'capacity-identity-epoch/exclusion-supervisor.sh'), 'utf8');
         expect(source).toMatch(/capacity_exclusion_start\(\)[\s\S]*?local role="\$2"[\s\S]*?shift 2[\s\S]*?for argument in "\$@"/);
     });
+
+    it('keeps Cloud Tasks queue and Cloud Scheduler job validators at provider grammar limits', () => {
+        const queueScripts = [
+            'configure-analysis-capacity-queues.sh',
+            'configure-analysis-tasks-queue.sh',
+            'deploy-analysis-capacity-workers.sh',
+            'deploy-analysis-v2-worker.sh',
+        ];
+        for (const file of queueScripts) {
+            expect(readFileSync(resolve(root, file), 'utf8'), file).toContain('^[A-Za-z0-9-]{1,100}$');
+        }
+        const schedulerScripts = [
+            'capacity-identity-epoch/exclusion-supervisor.sh',
+            'configure-analysis-preflight-maintenance.sh',
+            'configure-analysis-v2-maintenance.sh',
+            'deploy-analysis-capacity-workers.sh',
+        ];
+        for (const file of schedulerScripts) {
+            expect(readFileSync(resolve(root, file), 'utf8'), file).toContain('^[A-Za-z0-9_-]{1,500}$');
+        }
+    });
 });

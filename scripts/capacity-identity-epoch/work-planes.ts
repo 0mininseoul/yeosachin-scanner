@@ -17,7 +17,7 @@ const TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
 const SCHEDULER_HOSTS = new Set(['cloudscheduler.googleapis.com']);
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
-const QUEUE_RESOURCE = /^[A-Za-z0-9_-]{1,100}$/;
+const QUEUE_RESOURCE = /^[A-Za-z0-9-]{1,100}$/;
 const SCHEDULER_RESOURCE = /^[A-Za-z0-9_-]{1,500}$/;
 const SERVICE_ACCOUNT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
 
@@ -99,7 +99,7 @@ export type WorkPlaneClientOptions = Readonly<{
     transport: AuthenticatedProtectedTransport;
     /** Independent correlated evidence of the last PAUSE, never a success bit. */
     pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
-    /** Enable the live Cloud Scheduler update-time collector when no external log collector is injected. */
+    /** Legacy compatibility flag; without an injected collector, provenance fails closed. */
     defaultPauseProvenance?: boolean;
     pauseProvenanceTimeoutMs?: number;
     now?: () => number;
@@ -139,23 +139,13 @@ export class WorkPlaneClient {
         return this.schedulerObservation(input, job);
     }
 
-    /** Collect pause provenance from the authenticated Scheduler object itself. */
-    async collectPauseProvenance(input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>): Promise<PauseProvenance> {
-        const job = await this.getSchedulerRecord(input.resource, input.project);
-        if (job.state !== 'PAUSED') fail('EVIDENCE_UNAVAILABLE');
-        const updateTime = timestamp(job.updateTime);
-        if (updateTime === null || updateTime <= 0) fail('EVIDENCE_UNAVAILABLE');
-        const observedAtMs = this.now();
-        const evidence = { resource: input.resource, operation: 'PAUSE', updateTime: new Date(updateTime).toISOString() };
-        return {
-            resource: input.resource,
-            pauseEpochMs: updateTime,
-            observedAtMs,
-            source: 'cloud-scheduler-update-time',
-            evidence,
-            evidenceDigest: canonicalDigest(evidence),
-            complete: true,
-        };
+    /**
+     * Scheduler GET updateTime is mutable object state, not independent pause
+     * provenance.  A live bootstrap must inject a correlated audit collector;
+     * this legacy fallback therefore fails closed.
+     */
+    async collectPauseProvenance(): Promise<PauseProvenance> {
+        fail('EVIDENCE_UNAVAILABLE');
     }
 
     async pauseScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause', leaseCheck, 'scheduler.pause'); }
@@ -394,7 +384,7 @@ export class WorkPlaneClient {
                 || provenance.observedAtMs > this.now()) fail('EVIDENCE_UNAVAILABLE');
             pauseEpochMs = provenance.pauseEpochMs;
         }
-        const configuration = this.schedulerConfiguration(job);
+        const configuration = this.schedulerConfiguration(job, input);
         return { resource: input.resource, project: input.project, location: input.location, state, pauseEpochMs, lastAttemptMs, target, configuration, configurationDigest: canonicalDigest(configuration) };
     }
 
@@ -407,11 +397,24 @@ export class WorkPlaneClient {
         return { uri: httpTarget.uri, audience: oidcToken.audience, identity: { identity: oidcToken.serviceAccountEmail, project } };
     }
 
-    private schedulerConfiguration(job: Record<string, unknown>): Record<string, unknown> {
+    private schedulerConfiguration(job: Record<string, unknown>, input: ProtectedSchedulerInput): Record<string, unknown> {
         const configuration: Record<string, unknown> = {};
         for (const key of ['schedule', 'timeZone', 'retryConfig', 'attemptDeadline', 'pubsubTarget', 'appEngineHttpTarget']) if (job[key] !== undefined) configuration[key] = job[key];
         const httpTarget = isObject(job.httpTarget) ? job.httpTarget : undefined;
         if (httpTarget && typeof httpTarget.httpMethod === 'string') configuration.method = httpTarget.httpMethod;
+        if (httpTarget) {
+            const stableTarget = { ...httpTarget };
+            delete stableTarget.uri;
+            delete stableTarget.oidcToken;
+            const expectedWire = input.configuration.httpTarget;
+            if (expectedWire !== undefined) {
+                if (!isObject(expectedWire) || canonicalDigest(expectedWire) !== canonicalDigest(stableTarget)) fail('RESOURCE_INVALID');
+                configuration.httpTarget = stableTarget;
+            } else {
+                delete stableTarget.httpMethod;
+                if (Object.keys(stableTarget).length !== 0) fail('RESOURCE_INVALID');
+            }
+        }
         return configuration;
     }
 
@@ -450,6 +453,10 @@ export class WorkPlaneClient {
         // reviewed URL as an observed provider URL.
         const stableTarget = { ...httpTarget };
         delete stableTarget.oidcToken;
+        const expectedWire = input.configuration.httpTarget;
+        if (expectedWire !== undefined
+            ? (!isObject(expectedWire) || canonicalDigest(expectedWire) !== canonicalDigest(stableTarget))
+            : Object.keys(stableTarget).length !== 0) fail('RESOURCE_INVALID');
         return {
             url: null,
             audience: oidcToken.audience,

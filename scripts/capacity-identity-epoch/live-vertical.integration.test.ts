@@ -10,7 +10,7 @@ import { WorkPlaneClient, type PauseProvenance } from './work-planes';
 import { VercelAdapter } from './vercel';
 import { EpochCoordinator, LiveEpochControlPlane } from './coordinator';
 import { issueCoordinatorCapability } from './packet';
-import { buildLiveBootstrap } from './bootstrap';
+import { buildLiveBootstrap, validateServiceBodies } from './bootstrap';
 import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './live-evidence';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
@@ -785,6 +785,33 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe('provider-free live adapter vertical', () => {
+    it('rejects reviewed Cloud Run body metadata drift before any mutation graph is built', () => {
+        const packet = createFixturePacket();
+        const bodies = reviewedBodies(packet);
+        (bodies.preflight.metadata as Record<string, unknown>).name = 'wrong-service';
+        expect(() => validateServiceBodies(packet, bodies)).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
+    it('rejects reviewed Cloud Run traffic drift before any mutation graph is built', () => {
+        const packet = createFixturePacket();
+        const bodies = reviewedBodies(packet);
+        const traffic = (bodies.paid.spec as Record<string, unknown>).traffic as Array<Record<string, unknown>>;
+        traffic[0] = { ...traffic[0], percent: 99 };
+        expect(() => validateServiceBodies(packet, bodies)).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
+    it('rejects protected Cloud Run body metadata or revision drift before a PUT', () => {
+        const packet = createFixturePacket();
+        const metadataDrift = reviewedBodies(packet);
+        (metadataDrift.preflight.metadata as Record<string, unknown>).resourceVersion = 'rv-other';
+        expect(() => validateServiceBodies(packet, metadataDrift)).toThrow('CAPABILITY_BINDING_MISMATCH');
+
+        const revisionDrift = reviewedBodies(packet);
+        const template = (revisionDrift.paid.spec as Record<string, unknown>).template as Record<string, unknown>;
+        (template.metadata as Record<string, unknown>).name = 'unreviewed-revision';
+        expect(() => validateServiceBodies(packet, revisionDrift)).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
     it('builds the default production graph with concrete collectors and reaches VERIFIED through fake transports', async () => {
         const packet = createFixturePacket();
         const provider = new FakeProvider(packet);
@@ -825,6 +852,12 @@ describe('provider-free live adapter vertical', () => {
                 now, resolveRetainedHeader: false, googleTransport, vercelTransport,
                 vercelPublicTransport: provider, receiverTransport: provider,
                 receiverTokenProvider: async () => 'fixture-receiver-token',
+                pauseProvenance: async ({ resource }) => {
+                    const scheduler = provider.schedulers.get(resource);
+                    if (!scheduler) throw new EpochError('EVIDENCE_UNAVAILABLE');
+                    const evidence = { resource, operation: 'PAUSE', observedAtMs: now(), pauseEpochMs: scheduler.input.pauseEpochMs };
+                    return { resource, pauseEpochMs: scheduler.input.pauseEpochMs, observedAtMs: evidence.observedAtMs, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true };
+                },
             });
             expect(live.missingEvidence).toEqual([]);
             const result = await live.coordinator.runThroughVerified();
@@ -852,6 +885,28 @@ describe('provider-free live adapter vertical', () => {
         })).rejects.toThrow('EVIDENCE_UNAVAILABLE');
         expect(gcs.requests).toHaveLength(0);
         expect(provider.requests).toHaveLength(0);
+    });
+
+    it('preflights authenticated control-plane tokens before a live graph can acquire reservation', async () => {
+        const packet = createFixturePacket();
+        const gcs = new FakeGcsTransport();
+        let tokenCalls = 0;
+        const googleTransport = new AuthenticatedProtectedTransport({
+            transport: new FakeProvider(packet),
+            tokenProvider: async () => { tokenCalls += 1; throw new EpochError('ADAPTER_REQUEST_INVALID'); },
+            timeoutMs: 2_000,
+        });
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('preflight-auth-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: null,
+        } as const;
+        await expect(buildLiveBootstrap(packet, descriptor, {
+            storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+            resolveRetainedHeader: false, googleTransport,
+        })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
+        expect(tokenCalls).toBe(1);
+        expect(gcs.writes).toHaveLength(0);
     });
 
     it('constructs the host-bound Supabase transport from the inherited descriptor credentials', async () => {
@@ -891,6 +946,12 @@ describe('provider-free live adapter vertical', () => {
                 storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
                 now, resolveRetainedHeader: false, googleTransport, vercelTransport,
                 vercelPublicTransport: provider, receiverTransport: provider, receiverTokenProvider: async () => 'fixture-receiver-token',
+                pauseProvenance: async ({ resource }) => {
+                    const scheduler = provider.schedulers.get(resource);
+                    if (!scheduler) throw new EpochError('EVIDENCE_UNAVAILABLE');
+                    const evidence = { resource, operation: 'PAUSE', observedAtMs: now(), pauseEpochMs: scheduler.input.pauseEpochMs };
+                    return { resource, pauseEpochMs: scheduler.input.pauseEpochMs, observedAtMs: evidence.observedAtMs, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true };
+                },
             });
             const result = await live.coordinator.runThroughVerified();
             expect(result.state).toBe('VERIFIED');
@@ -927,6 +988,12 @@ describe('provider-free live adapter vertical', () => {
             storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
             now, resolveRetainedHeader: false, googleTransport, supabaseTransport, supabaseApiKey: 'fixture-supabase-api-key', vercelTransport,
             vercelPublicTransport: provider, receiverTransport: provider, receiverTokenProvider: async () => 'fixture-receiver-token',
+            pauseProvenance: async ({ resource }) => {
+                const scheduler = provider.schedulers.get(resource);
+                if (!scheduler) throw new EpochError('EVIDENCE_UNAVAILABLE');
+                const evidence = { resource, operation: 'PAUSE', observedAtMs: now(), pauseEpochMs: scheduler.input.pauseEpochMs };
+                return { resource, pauseEpochMs: scheduler.input.pauseEpochMs, observedAtMs: evidence.observedAtMs, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true };
+            },
         });
         await expect(live.coordinator.runThroughVerified()).rejects.toThrow('ZERO_WORK_INCOMPLETE');
         expect(provider.receiverRequestLogs).toHaveLength(2);

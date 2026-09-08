@@ -76,12 +76,12 @@ function buildIdentityMatches(build: Record<string, unknown>, expected: Protecte
 export class CloudBuildAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
     private readonly builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
-    private readonly runtimes: Readonly<Record<Role, ProtectedRuntimeInput>>;
+    private readonly runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
 
     constructor(options: Readonly<{
         transport: AuthenticatedProtectedTransport;
         builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
-        runtimes: Readonly<Record<Role, ProtectedRuntimeInput>>;
+        runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
     }>) {
         this.transport = options.transport;
         this.builds = options.builds;
@@ -109,7 +109,7 @@ export class CloudBuildAdapter {
     }
 
     private async findExactBuild(role: Role, phase: 'old' | 'desired', image: string | undefined): Promise<Record<string, unknown>> {
-        const runtime = this.runtimes[role];
+        const runtime = this.runtimes[phase][role];
         const expected = this.builds[phase];
         if (!PROJECT.test(runtime.project) || !LOCATION.test(runtime.location)
             || !safe(expected.sourceSha, 128) || !safe(expected.sourceContext, 4096)) fail('ADAPTER_REQUEST_INVALID');

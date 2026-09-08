@@ -38,7 +38,7 @@ import type { ReservationStorage } from './exclusion';
 const ENTRY_POINTS = ['epoch', 'role-deployer', 'capacity-queue', 'preflight-maintenance', 'paid-maintenance'] as const;
 const ROLES = ['preflight', 'paid'] as const;
 const FD = /^\d{1,9}$/;
-const SAFE_RESOURCE = /^[^\u0000-\u001f\u007f]{1,1024}$/;
+const SAFE_RESOURCE = /^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,1023}$/;
 const REQUEST_ID = /^[0-9a-f]{32}$/;
 const CHANNEL_NONCE = /^[0-9a-f]{64}$/;
 const MAX_CONTROL_LINE = 64 * 1024;

@@ -137,7 +137,7 @@ for pair in \
 done
 [[ "$project" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || die "invalid project"
 [[ "$location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] || die "invalid location"
-[[ "$queue" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] || die "invalid queue"
+[[ "$queue" =~ ^[A-Za-z0-9-]{1,100}$ ]] || die "invalid queue"
 [[ "$service" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] || die "invalid Cloud Run service"
 [[ "$service" == *"$role"* ]] || die "Cloud Run service must contain its workload role"
 [[ "$task_sa" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$ ]] \

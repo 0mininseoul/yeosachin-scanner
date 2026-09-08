@@ -187,6 +187,18 @@ export class GcsJournalStorage implements JournalStorage, GcsRawStorage {
         this.timeoutMs = options.timeoutMs ?? 30_000;
     }
 
+    /** Validate the private GCS credential boundary without a read/write. */
+    async preflight(): Promise<void> {
+        let token: string;
+        try {
+            token = await this.withTimeout(this.tokenProvider(), this.timeoutMs, 'ADAPTER_TIMEOUT');
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_REQUEST_INVALID');
+        }
+        if (typeof token !== 'string' || token.length === 0 || token.length > 8192 || /[\u0000-\u001f\u007f]/.test(token)) fail('ADAPTER_REQUEST_INVALID');
+    }
+
     async get(key: string): Promise<StoredObject | null> {
         this.assertKey(key);
         const encoded = this.objectUrl(key);
