@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { z } from 'zod';
 import type {
     GenderAuditRow,
@@ -148,6 +148,15 @@ function countPairLabel(declared: number | null, collected: number | null): stri
     return `${countLabel(collected)} / ${countLabel(declared)}`;
 }
 
+function pageScrollTop(): number {
+    return window.scrollY || document.scrollingElement?.scrollTop || document.documentElement.scrollTop || 0;
+}
+
+function scrollPageTo(top: number): void {
+    const scrollingElement = document.scrollingElement ?? document.documentElement;
+    scrollingElement.scrollTop = top;
+}
+
 function stageTone(declared: number | null, collected: number | null): StageTone {
     if (declared === null || collected === null) return 'unknown';
     if (declared === 0 && collected === 0) return 'unknown';
@@ -272,7 +281,7 @@ function CostStatus({ status }: { status: OrderAuditListRow['cost']['status'] })
     return <StatusChip tone={tone}>{COST_LABEL[status]}</StatusChip>;
 }
 
-function AttentionList({ accounts, orders, onOpenOrder }: { accounts: readonly (ApifyAccountCreditInventoryRow | undefined)[]; orders: readonly OrderAuditListRow[]; onOpenOrder: (requestId: string) => void }) {
+function AttentionList({ accounts, orders, onOpenOrder }: { accounts: readonly (ApifyAccountCreditInventoryRow | undefined)[]; orders: readonly OrderAuditListRow[]; onOpenOrder: (requestId: string, focusKey: string) => void }) {
     const items = useMemo(() => {
         const accountItems = accounts.filter(row => row && accountStatus(row) !== 'healthy').map(row => ({ key: `account:${row!.credentialSlot}`, tone: accountStatus(row!) === 'blocked' ? 'blocked' as const : 'warning' as const, label: `${row!.credentialSlot} 계정`, detail: accountReason(row), requestId: null }));
         const orderItems = orders.filter(row => row.completenessStatus !== 'complete' || row.cost.status !== 'complete').map(row => ({ key: `order:${row.requestId}`, tone: row.completenessStatus === 'inconsistent' || row.completenessStatus === 'failed' ? 'blocked' as const : 'warning' as const, label: `주문 @${row.targetInstagramId ?? '대상 미상'}`, detail: row.gapCodes.length > 0 ? row.gapCodes.join(', ') : `원가 ${COST_LABEL[row.cost.status]}`, requestId: row.requestId }));
@@ -280,18 +289,18 @@ function AttentionList({ accounts, orders, onOpenOrder }: { accounts: readonly (
     }, [accounts, orders]);
     return <section className={`oc-attention${items.length === 0 ? ' oc-attention--clear' : ''}`} aria-labelledby="attention-title">
         <div className="oc-section-heading"><div><h2 id="attention-title">확인 필요</h2><p>현재 화면에 로드된 데이터에서만 표시합니다. 전체 건수로 해석하지 않습니다.</p></div><span className="oc-section-meta">{items.length}건</span></div>
-        {items.length === 0 ? <p className="oc-empty">현재 페이지에서 확인이 필요한 항목이 없습니다.</p> : <ul className="oc-attention-list">{items.map(item => <li key={item.key}><StatusChip tone={item.tone}>{item.tone === 'blocked' ? '차단' : '주의'}</StatusChip><span className="oc-attention-label">{item.label}</span><span className="oc-muted">{item.detail}</span>{item.requestId ? <button type="button" className="oc-link" onClick={() => onOpenOrder(item.requestId!)}>주문 열기</button> : null}</li>)}</ul>}
+        {items.length === 0 ? <p className="oc-empty">현재 페이지에서 확인이 필요한 항목이 없습니다.</p> : <ul className="oc-attention-list">{items.map(item => <li key={item.key}><StatusChip tone={item.tone}>{item.tone === 'blocked' ? '차단' : '주의'}</StatusChip><span className="oc-attention-label">{item.label}</span><span className="oc-muted">{item.detail}</span>{item.requestId ? <button type="button" className="oc-link" data-order-focus-key={`attention:${item.requestId}`} onClick={() => onOpenOrder(item.requestId!, `attention:${item.requestId}`)}>주문 열기</button> : null}</li>)}</ul>}
     </section>;
 }
 
-function OrdersTable({ rows, loading, nextCursor, error, onOpen, onNext }: { rows: readonly OrderAuditListRow[]; loading: boolean; nextCursor: OrderAuditListCursor | null; error: string | null; onOpen: (requestId: string) => void; onNext: () => void }) {
+function OrdersTable({ rows, loading, nextCursor, error, onOpen, onNext }: { rows: readonly OrderAuditListRow[]; loading: boolean; nextCursor: OrderAuditListCursor | null; error: string | null; onOpen: (requestId: string, focusKey: string) => void; onNext: () => void }) {
     return <section className="oc-section" aria-labelledby="orders-title">
         <div className="oc-section-heading"><div><h2 id="orders-title">주문</h2><p>영구 감사 번들의 최신 버전 · 키셋 페이지</p></div><span className="oc-section-meta">{rows.length}건 표시</span></div>
         <PageError message={error} />
         <div className="oc-table-scroll"><table className="oc-table oc-order-table"><caption className="oc-sr-only">주문 감사 번들 목록</caption><thead><tr>
             <th scope="col">요청</th><th scope="col">대상</th><th scope="col">요금제</th><th scope="col">실측 원가</th><th scope="col">보수 추정</th><th scope="col">원가 귀속</th><th scope="col">증거 완전성</th><th scope="col">결함</th><th scope="col">영구 보관</th><th scope="col">조립 시각</th>
         </tr></thead><tbody>{rows.length === 0 && !loading ? <tr><td colSpan={10} className="oc-empty">표시할 영구 감사 번들이 없습니다.</td></tr> : null}{rows.map(row => <tr key={row.requestId} className={row.completenessStatus !== 'complete' ? 'oc-row--flagged' : undefined}>
-            <th scope="row"><button type="button" className="oc-link oc-mono" onClick={() => onOpen(row.requestId)}>{shortHash(row.requestId)}</button></th><td className="oc-target">@{row.targetInstagramId ?? '미상'}</td><td>{row.planId}</td><td className="oc-number">{displayCostKnownUsd(row.cost.knownUsd, row.cost.status)}</td><td className="oc-number oc-muted">{displayUsd(row.cost.conservativeUsd)}</td><td><CostStatus status={row.cost.status} /></td><td><OrderStatus status={row.completenessStatus} /></td><td><span className="oc-gap-list">{row.gapCodes.length > 0 ? row.gapCodes.map(code => <span key={code} className="oc-gap oc-mono">{code}</span>) : <span className="oc-muted">없음</span>}</span></td><td><RetentionChip state={row.retention.state} /></td><td>{timestampLabel(row.assembledAt)}</td>
+            <th scope="row"><button type="button" className="oc-link oc-mono" data-order-focus-key={`orders:${row.requestId}`} onClick={() => onOpen(row.requestId, `orders:${row.requestId}`)}>{shortHash(row.requestId)}</button></th><td className="oc-target">@{row.targetInstagramId ?? '미상'}</td><td>{row.planId}</td><td className="oc-number">{displayCostKnownUsd(row.cost.knownUsd, row.cost.status)}</td><td className="oc-number oc-muted">{displayUsd(row.cost.conservativeUsd)}</td><td><CostStatus status={row.cost.status} /></td><td><OrderStatus status={row.completenessStatus} /></td><td><span className="oc-gap-list">{row.gapCodes.length > 0 ? row.gapCodes.map(code => <span key={code} className="oc-gap oc-mono">{code}</span>) : <span className="oc-muted">없음</span>}</span></td><td><RetentionChip state={row.retention.state} /></td><td>{timestampLabel(row.assembledAt)}</td>
         </tr>)}</tbody></table></div>
         <div className="oc-pager" aria-live="polite"><span>{rows.length}건을 로드했습니다{nextCursor ? ' · 다음 페이지 있음' : ''}</span><button type="button" className="oc-button oc-button--small" disabled={loading || nextCursor === null} onClick={onNext}>{loading ? '불러오는 중…' : '다음 25건'}</button></div>
     </section>;
@@ -413,7 +422,7 @@ function EvidenceStage({ requestId, spec, firstDivergence }: { requestId: string
     </article>;
 }
 
-function OrderDetail({ requestId, onBack }: { requestId: string; onBack: () => void }) {
+function OrderDetail({ requestId, onBack, backButtonRef }: { requestId: string; onBack: () => void; backButtonRef: RefObject<HTMLButtonElement | null> }) {
     const [summary, setSummary] = useState<OrderAuditSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -423,13 +432,16 @@ function OrderDetail({ requestId, onBack }: { requestId: string; onBack: () => v
         void requestJson(`/api/admin/order-audit/${encodeURIComponent(requestId)}?${params.toString()}`, orderAuditLoadPayloadSchema, { signal: controller.signal }).then(payload => { if (!controller.signal.aborted) setSummary(payload.summary); }).catch(caught => { if (!controller.signal.aborted) { setSummary(null); setError(caught instanceof Error ? caught.message : '운영 데이터를 불러오지 못했습니다.'); } }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
     }, [requestId]);
-    if (loading) return <section className="oc-detail"><button type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><p className="oc-loading" role="status">주문 번들을 불러오는 중…</p></section>;
-    if (error || !summary) return <section className="oc-detail"><button type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><PageError message={error ?? '주문 번들을 찾지 못했습니다.'} /></section>;
+    useEffect(() => {
+        backButtonRef.current?.focus();
+    }, [backButtonRef, error, loading, summary]);
+    if (loading) return <section className="oc-detail"><h1 className="oc-sr-only">주문 감사 번들</h1><button ref={backButtonRef} type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><p className="oc-loading" role="status">주문 번들을 불러오는 중…</p></section>;
+    if (error || !summary) return <section className="oc-detail"><h1 className="oc-sr-only">주문 감사 번들</h1><button ref={backButtonRef} type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><PageError message={error ?? '주문 번들을 찾지 못했습니다.'} /></section>;
     const specs = stageSpecs(summary);
     const countPairs: ConsoleCountPair[] = specs.map(spec => ({ key: spec.key, declared: spec.declared, collected: spec.collected }));
     const firstDivergence = deriveFirstDivergence(countPairs);
     const attributedSlots = summary.providerRuns.filter(run => run.credentialSlot).map(run => `${run.stage}: ${run.credentialSlot}`);
-    return <section className="oc-detail" aria-labelledby="detail-title"><div className="oc-breadcrumb"><button type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><span className="oc-mono">{requestId} · v{summary.version}</span></div><div className="oc-detail-head"><div><p className="oc-kicker">주문 감사 번들</p><h2 id="detail-title">@{summary.targetInstagramId ?? '대상 미상'}</h2><p className="oc-muted">조립 {timestampLabel(summary.assembledAt)} · 번들 해시 <span className="oc-mono">{shortHash(summary.bundleHash)}</span></p></div><div className="oc-detail-status"><OrderStatus status={summary.completeness} /><span className="oc-muted">{summary.planId} · {summary.accessMode}</span></div></div><div className="oc-facts" aria-label="주문 요약"><div><span>실측 원가</span><strong>{displayCostKnownUsd(summary.cost.knownUsd, summary.cost.status)}</strong><small>{summary.cost.knownUsd === null ? summary.cost.status === 'not_available' ? '원가 원장 없음' : '사용량 미상으로 미확정' : '직접 귀속된 알려진 USD'}</small></div><div><span>보수 추정 상한</span><strong>{displayUsd(summary.cost.conservativeUsd)}</strong><small>확정 원가와 별도로 표시</small></div><div><span>원가 귀속</span><strong>{COST_LABEL[summary.cost.status]}</strong><small>{summary.cost.missingSourceCodes?.join(', ') || '누락 소스 없음'}</small></div><div><span>과금 계정</span><strong>{attributedSlots.length > 0 ? attributedSlots[0]!.split(': ')[1] : '미상'}</strong><small>{attributedSlots.length > 0 ? attributedSlots.join(' · ') : 'Apify 슬롯 귀속 없음'}</small></div></div><div className="oc-retention-banner"><RetentionChip state={summary.retention.state} /><span>{summary.retention.state === 'retained' ? '실행 테이블이 정리되어도 이 영구 감사 사본은 남습니다.' : summary.retention.state === 'fenced' ? '퍼지 펜스가 걸려 보관 상태를 확인해야 합니다.' : summary.retention.state === 'pending' ? '조립 큐가 처리 중이며 영구 보관 완료를 기다립니다.' : '큐 상태를 읽을 수 없어 영구 보관을 확정할 수 없습니다.'}</span>{summary.retention.purgeFenceReason ? <span className="oc-muted">펜스 이유: {summary.retention.purgeFenceReason}</span> : null}<span className="oc-mono oc-retention-meta">source_set {shortHash(summary.sourceSetHash)}{summary.retention.purgeFencedAt ? ` · 펜스 ${timestampLabel(summary.retention.purgeFencedAt)}` : ''}</span></div><section className="oc-section oc-evidence" aria-labelledby="evidence-title"><div className="oc-section-heading"><div><h3 id="evidence-title">증거 단계</h3><p>파이프라인 순서 · 모든 단계에서 선언 / 수집을 함께 비교합니다.</p></div><span className="oc-section-meta">최초 이탈 {firstDivergence ? firstDivergence.kind === 'unknown' ? '확인 불가' : firstDivergence.key : '없음'}</span></div><div className="oc-stage-rail">{specs.map(spec => <EvidenceStage key={spec.key} requestId={requestId} spec={spec} firstDivergence={firstDivergence} />)}</div></section></section>;
+    return <section className="oc-detail" aria-labelledby="detail-title"><div className="oc-breadcrumb"><button ref={backButtonRef} type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><span className="oc-mono">{requestId} · v{summary.version}</span></div><div className="oc-detail-head"><div><p className="oc-kicker">주문 감사 번들</p><h1 id="detail-title">@{summary.targetInstagramId ?? '대상 미상'}</h1><p className="oc-muted">조립 {timestampLabel(summary.assembledAt)} · 번들 해시 <span className="oc-mono">{shortHash(summary.bundleHash)}</span></p></div><div className="oc-detail-status"><OrderStatus status={summary.completeness} /><span className="oc-muted">{summary.planId} · {summary.accessMode}</span></div></div><div className="oc-facts" aria-label="주문 요약"><div><span>실측 원가</span><strong>{displayCostKnownUsd(summary.cost.knownUsd, summary.cost.status)}</strong><small>{summary.cost.knownUsd === null ? summary.cost.status === 'not_available' ? '원가 원장 없음' : '사용량 미상으로 미확정' : '직접 귀속된 알려진 USD'}</small></div><div><span>보수 추정 상한</span><strong>{displayUsd(summary.cost.conservativeUsd)}</strong><small>확정 원가와 별도로 표시</small></div><div><span>원가 귀속</span><strong>{COST_LABEL[summary.cost.status]}</strong><small>{summary.cost.missingSourceCodes?.join(', ') || '누락 소스 없음'}</small></div><div><span>과금 계정</span><strong>{attributedSlots.length > 0 ? attributedSlots[0]!.split(': ')[1] : '미상'}</strong><small>{attributedSlots.length > 0 ? attributedSlots.join(' · ') : 'Apify 슬롯 귀속 없음'}</small></div></div><div className="oc-retention-banner"><RetentionChip state={summary.retention.state} /><span>{summary.retention.state === 'retained' ? '실행 테이블이 정리되어도 이 영구 감사 사본은 남습니다.' : summary.retention.state === 'fenced' ? '퍼지 펜스가 걸려 보관 상태를 확인해야 합니다.' : summary.retention.state === 'pending' ? '조립 큐가 처리 중이며 영구 보관 완료를 기다립니다.' : '큐 상태를 읽을 수 없어 영구 보관을 확정할 수 없습니다.'}</span>{summary.retention.purgeFenceReason ? <span className="oc-muted">펜스 이유: {summary.retention.purgeFenceReason}</span> : null}<span className="oc-mono oc-retention-meta">source_set {shortHash(summary.sourceSetHash)}{summary.retention.purgeFencedAt ? ` · 펜스 ${timestampLabel(summary.retention.purgeFencedAt)}` : ''}</span></div><section className="oc-section oc-evidence" aria-labelledby="evidence-title"><div className="oc-section-heading"><div><h3 id="evidence-title">증거 단계</h3><p>파이프라인 순서 · 모든 단계에서 선언 / 수집을 함께 비교합니다.</p></div><span className="oc-section-meta">최초 이탈 {firstDivergence ? firstDivergence.kind === 'unknown' ? '확인 불가' : firstDivergence.key : '없음'}</span></div><div className="oc-stage-rail">{specs.map(spec => <EvidenceStage key={spec.key} requestId={requestId} spec={spec} firstDivergence={firstDivergence} />)}</div></section></section>;
 }
 
 export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId: string }) {
@@ -444,6 +456,9 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
     const [paidBusy, setPaidBusy] = useState(false);
     const [busySlot, setBusySlot] = useState<ApifyCredentialSlot | null>(null);
     const activeRequest = useRef<RequestTracker | null>(null);
+    const detailBackRef = useRef<HTMLButtonElement>(null);
+    const returnPoint = useRef<{ focusKey: string; scrollY: number } | null>(null);
+    const restoreOverview = useRef(false);
 
     const loadInventory = useCallback(async () => {
         setInventoryLoading(true); setInventoryError(null);
@@ -472,6 +487,22 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
 
     useEffect(() => { void loadInventory(); void loadOrdersPage(null, false); }, [loadInventory, loadOrdersPage]);
 
+    useEffect(() => {
+        if (selectedRequestId) {
+            scrollPageTo(0);
+            detailBackRef.current?.focus();
+            return;
+        }
+        if (!restoreOverview.current) return;
+        restoreOverview.current = false;
+        const point = returnPoint.current;
+        if (!point) return;
+        scrollPageTo(point.scrollY);
+        const target = [...document.querySelectorAll<HTMLButtonElement>('[data-order-focus-key]')]
+            .find(button => button.dataset.orderFocusKey === point.focusKey);
+        target?.focus();
+    }, [selectedRequestId]);
+
     const orderedInventory = useMemo(() => APIFY_CREDENTIAL_SLOTS.map(slot => inventory?.find(row => row.credentialSlot === slot)), [inventory]);
     const paid = orderedInventory[1];
     const free = APIFY_FREE_CREDENTIAL_SLOTS.map(slot => inventory?.find(row => row.credentialSlot === slot));
@@ -486,7 +517,16 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
         try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'refresh-paid-secondary' }) }); setInventory(body.inventory); } catch (caught) { setInventoryError(caught instanceof Error ? caught.message : '유료 계정 잔액을 새로고침하지 못했습니다.'); } finally { setPaidBusy(false); }
     }, []);
 
-    if (selectedRequestId) return <OrderDetail requestId={selectedRequestId} onBack={() => setSelectedRequestId(null)} />;
+    const openOrder = (requestId: string, focusKey: string) => {
+        returnPoint.current = { focusKey, scrollY: pageScrollTop() };
+        setSelectedRequestId(requestId);
+    };
+    const closeOrder = () => {
+        restoreOverview.current = returnPoint.current !== null;
+        setSelectedRequestId(null);
+    };
 
-    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryError} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} onOpenOrder={setSelectedRequestId} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={setSelectedRequestId} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
+    if (selectedRequestId) return <OrderDetail requestId={selectedRequestId} onBack={closeOrder} backButtonRef={detailBackRef} />;
+
+    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryError} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
 }
