@@ -2,19 +2,21 @@
 
 - Date: 2026-09-08 (Asia/Seoul)
 - Branch: `admin-console-verification-20260908`
-- Required base: `02e89f496c2dabaf4ef6a9c2251928006a5b17bc`
+- Original verification base: `02e89f496c2dabaf4ef6a9c2251928006a5b17bc`
+- Refreshed PR base: `ca28b43f7894080b19336efd8b927115b0162415`
 - Implementation reviewed: existing PR #546 console, not a replacement dashboard
 
 ## Outcome
 
 The existing operations console was exercised with local synthetic responses across overview, detail, loading, empty, partial, stale, failure, and recovery states. Eight scoped QA defects were reproduced, fixed with red-to-green regression tests, and verified in the rendered UI. A final independent specification review then found two additional frontend gaps; both were reproduced, fixed with red-to-green tests, and reverified. No API, RPC, schema, identity-epoch, or marketing-copy change was needed.
 
-Scoped disposition: **pass**. All console/API audit tests, lint/type checks, the synthetic production build, authorization denial, cache controls, responsive checks, interaction checks, and rendered axe scans pass. One unrelated repository-wide time-sensitive PGlite test remains red on the unchanged base; details are recorded below.
+Scoped disposition: **pass**. All console/API audit tests, lint/type checks, the synthetic production build, authorization denial, cache controls, responsive checks, interaction checks, and rendered axe scans pass. The previously time-sensitive PGlite fixture failure was fixed on main and now passes after the normal main merge; details are recorded below.
 
 ## Baseline and scope proof
 
 - Startup `npm install` had removed only `devOptional` from the Rollup 4.62.2 lockfile entry. That exact incidental diff was inspected and restored with `apply_patch` before baseline. `package-lock.json` has no branch diff.
 - A fresh fetch established `HEAD == origin/main == merge-base` at `02e89f496c2dabaf4ef6a9c2251928006a5b17bc`; initial ahead/behind was `0 / 0`.
+- After PR #554 merged, this branch normally merged `origin/main` at `ca28b43f7894080b19336efd8b927115b0162415`. The merge had no conflicts and changed only the clock-relative terminalizer fixture inherited from main; the PR diff against refreshed main remains confined to the admin console and this report.
 - PR #546 checks inspected at baseline were green: Vercel, production-payment-recovery-postgres, quality, revenue-settlement-postgres, and score-audit-postgres.
 - Baseline targeted suite: 9 files, 93 tests passed.
 - Baseline console lint and `tsc --noEmit` passed. A first production build failed only because the isolated worktree intentionally had no Supabase environment; the build passed with synthetic public Supabase values.
@@ -186,20 +188,20 @@ Passing gates:
 - Synthetic production build: passed; only the existing multiple-lockfile workspace-root warning was emitted.
 - `git diff --check origin/main...HEAD`: passed.
 - Rendered axe: zero violations on overview, loaded detail, expanded risk ledger, error, recovered, and unavailable-inventory states.
+- Refreshed-main terminalizer fixture: **1 file / 30 tests passed**.
 
-Repository-wide baseline anomaly:
+Repository-wide baseline anomaly and resolution:
 
-- `npm test` consistently fails 2 of 30 cases in `lib/services/analysis/v2-historical-legacy-dispatch-terminalizer-pglite.test.ts`.
-- The fixture calls `2026-09-01T00:00:00.000Z` “young”, while the unchanged SQL uses a seven-day cutoff and the current date is 2026-09-08. The supposed young row is therefore now eligible, producing 6 instead of 5 candidates.
-- The same two failures reproduce when the file is run alone. Neither that test nor its migration differs from `origin/main`; this frontend lane did not edit them.
+- On the original `02e89f49` base, `lib/services/analysis/v2-historical-legacy-dispatch-terminalizer-pglite.test.ts` reproduced 2 failures / 28 passes because a fixed `2026-09-01T00:00:00.000Z` “young” fixture crossed the unchanged seven-day cutoff on 2026-09-08.
 - A second fresh repository-wide run was started with an emitted command timestamp of `2026-09-08T18:06:25+09:00`. It continued producing test progress but never emitted a completion summary. The supervisor TUI reported approximately 56 minutes elapsed, beyond the agreed 25-minute bound, so only that test process was interrupted. A separate control timestamp immediately after interruption was `2026-09-08T18:16:27+09:00`; because the shell and supervisor elapsed indicators disagreed, no synthetic duration is inferred from them. The preserved outcome is **bounded timeout / non-conclusive**, not a product regression, and the run was not repeated.
-- The bounded full-suite result does not affect the scoped console gate. The independently reproduced time-relative fixture failure should be repaired by its owning lane.
+- PR #554 changed that test fixture to derive old/young timestamps from the database clock. After merging `ca28b43f`, the formerly failing file passes all **30 / 30** cases without any console-lane modification to the test or migration.
+- The historical bounded full-suite result remains non-conclusive evidence for that earlier base; it is not carried forward as a merged-state failure.
 
 ## Interface requests and residuals
 
 - API/RPC/schema/shared-contract interface requests: **none**.
 - Frontend-owned known defects after this pass: **none reproduced**.
-- Out-of-scope repository test request: replace the historical-terminalizer test's fixed “young” timestamp with a clock-relative value or freeze its database clock. This is a test-only ownership request, not an admin-console contract request.
+- The prior out-of-scope request for a clock-relative historical-terminalizer fixture was resolved upstream by PR #554 and inherited unchanged through the normal main merge.
 
 ## Commit trail
 
@@ -211,6 +213,9 @@ Repository-wide baseline anomaly:
 - `678c050a` `fix(qa): ISSUE-006 fence unavailable inventory state`
 - `f71e888c` `fix(qa): close independent review edge cases`
 - `c9298e26` `docs(qa): add admin console verification evidence`
-- Final branch commit: independent specification-review hardening and verification closeout.
+- `dbd61949` `fix(qa): close final admin console review gaps`
+- `4139cf84` normal merge of refreshed `origin/main` fixture fix.
 
 Independent review: the first code-quality pass found ISSUE-007 and ISSUE-008 as Important. Both were reproduced and fixed with new tests and rendered evidence. A later fresh specification review found the two hardening gaps above; both were also reproduced and fixed. Its one non-blocking Minor note was that the transient browser harness is not part of HEAD, so this report now distinguishes fresh manual browser observations from committed evidence. The final independent code-quality review of the complete frontend diff and both hardening fixes returned **Critical 0 / Important 0 / Minor 0** and **Ready for commit/PR: Yes**.
+
+Post-merge independent review: the complete PR diff against refreshed `origin/main` at `ca28b43f` returned **Critical 0 / Important 0 / Minor 0** and **Ready to push/PR-update: Yes**. It independently re-ran the console suite (**11 files / 32 tests**), final-review regressions (**4 / 4**), and refreshed terminalizer fixture (**30 / 30**), and confirmed the protected-scope diff remains clean.
