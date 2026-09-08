@@ -133,13 +133,13 @@
 
 .oc-section-heading p {
     margin: 3px 0 0;
-    color: #647281;
+    color: #526170;
     font-size: 12px;
 }
 
 .oc-section-meta {
     flex: 0 0 auto;
-    color: #6b7885;
+    color: #526170;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11px;
 }
@@ -238,7 +238,7 @@
 
 .oc-chip--unknown {
     border-color: #cbd3dc;
-    color: #657381;
+    color: #526170;
     background: #f3f5f7;
 }
 
@@ -265,7 +265,7 @@
 }
 
 .oc-table thead th {
-    color: #73808d;
+    color: #526170;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.04em;
@@ -306,7 +306,7 @@
 }
 
 .oc-muted {
-    color: #697887;
+    color: #526170;
 }
 
 .oc-button,
@@ -361,7 +361,7 @@
 .oc-button:focus-visible,
 .oc-link:focus-visible,
 .oc-stage-header:focus-visible {
-    outline: 3px solid rgb(29 102 143 / 28%);
+    outline: 3px solid #1b4fd8;
     outline-offset: 2px;
 }
 
@@ -408,7 +408,7 @@
 }
 
 .oc-role {
-    color: #667685;
+    color: #526170;
     font-size: 11px;
 }
 
@@ -527,7 +527,7 @@
 
 .oc-breadcrumb {
     justify-content: space-between;
-    color: #667583;
+    color: #526170;
 }
 
 .oc-detail-head {
@@ -577,7 +577,7 @@
 
 .oc-facts span,
 .oc-facts small {
-    color: #6b7885;
+    color: #526170;
     font-size: 11px;
 }
 
@@ -600,7 +600,7 @@
 
 .oc-retention-meta {
     margin-left: auto;
-    color: #778591;
+    color: #526170;
 }
 
 .oc-evidence {
@@ -673,7 +673,7 @@
 
 .oc-stage-name small {
     overflow: hidden;
-    color: #758390;
+    color: #526170;
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -729,7 +729,7 @@
 
 .oc-stage-tools .oc-stage-contract {
     margin-left: auto;
-    color: #85909b;
+    color: #526170;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10px;
 }
@@ -810,7 +810,7 @@
 
 .oc-footer {
     padding: 4px 2px;
-    color: #71808c;
+    color: #526170;
     font-size: 11px;
     text-align: right;
 }
