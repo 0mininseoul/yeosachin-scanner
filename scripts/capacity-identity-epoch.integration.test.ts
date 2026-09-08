@@ -8,6 +8,7 @@ import { EpochJournal, type JournalStorage, type StoredObject } from './capacity
 import { canonicalDigest, EpochError, type EpochHeader, type State } from './capacity-identity-epoch/contracts';
 import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
 import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './capacity-identity-epoch/live-evidence';
+import { AuthenticatedProtectedTransport, type ProtectedHttpResponse, type ProtectedTransport } from './capacity-identity-epoch/platform';
 import { chmodSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -42,6 +43,26 @@ class MemoryStorage implements JournalStorage {
         }
         this.objects.delete(key);
     }
+}
+
+/**
+ * The bootstrap graph performs authenticated transport preflight even when
+ * evidence is intentionally absent.  Keep this provider-free integration
+ * test independent of a runner's ambient ADC or metadata service while still
+ * constructing the production AuthenticatedProtectedTransport adapters.
+ */
+class FixtureProtectedTransport implements ProtectedTransport {
+    async request(): Promise<ProtectedHttpResponse> {
+        throw new EpochError('ADAPTER_REQUEST_INVALID');
+    }
+}
+
+function fixtureAuthenticatedTransport(token: string): AuthenticatedProtectedTransport {
+    return new AuthenticatedProtectedTransport({
+        transport: new FixtureProtectedTransport(),
+        tokenProvider: async () => token,
+        timeoutMs: 1_000,
+    });
 }
 
 function evidence(state: string, sequence: number): OperationEvidence {
@@ -201,13 +222,15 @@ describe('provider-free coordinated identity epoch integration', () => {
         const descriptorPath = join(directory, 'bootstrap.json');
         writeFileSync(descriptorPath, JSON.stringify(descriptor), { mode: 0o600 });
         const fd = openSync(descriptorPath, 'r');
+        const googleTransport = fixtureAuthenticatedTransport('fixture-google-token');
+        const vercelTransport = fixtureAuthenticatedTransport('fixture-vercel-token');
         try {
             chmodSync(descriptorPath, 0o600);
             const loaded = await loadProtectedLiveBootstrap(fd);
             const storage = new MemoryStorage();
-            const live = await buildLiveBootstrap(packet, loaded, { storage, now: () => 1_000 });
+            const live = await buildLiveBootstrap(packet, loaded, { storage, now: () => 1_000, googleTransport, vercelTransport });
             await live.journal.ensureHeader();
-            const resumed = await buildLiveBootstrap(packet, loaded, { storage, now: () => 2_000 });
+            const resumed = await buildLiveBootstrap(packet, loaded, { storage, now: () => 2_000, googleTransport, vercelTransport });
             expect(live.missingEvidence).toEqual(['zeroWorkEvidence']);
             expect(live.journal.headerKey).toContain('epoch-header');
             expect(resumed.journal.headerKey).toBe(live.journal.headerKey);
@@ -293,6 +316,8 @@ describe('provider-free coordinated identity epoch integration', () => {
         await expect(buildLiveBootstrap(packet, descriptor, {
             storage: malformedStorage,
             now: () => 2_000,
+            googleTransport,
+            vercelTransport,
         })).rejects.toThrow('JOURNAL_INVALID');
 
         const mismatchedStorage = new MemoryStorage();
@@ -300,6 +325,8 @@ describe('provider-free coordinated identity epoch integration', () => {
         await expect(buildLiveBootstrap(packet, descriptor, {
             storage: mismatchedStorage,
             now: () => 2_000,
+            googleTransport,
+            vercelTransport,
         })).rejects.toThrow('JOURNAL_INVALID');
     });
 
