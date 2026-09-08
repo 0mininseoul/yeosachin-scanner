@@ -18,6 +18,7 @@ import { canonicalDigest, epochFail, hasExactKeys, isObject, type CapacityEpochP
 import { LiveEvidenceCollector } from './live-evidence';
 import { evidenceSelectorDigest, validateLiveZeroWorkSources, type LiveZeroWorkSources } from './live-evidence';
 import { CloudBuildAdapter } from './cloud-build';
+import { createLiveProductionVerifier, type LiveProductionVerifier } from './verifier';
 
 const DIGEST = /^[0-9a-f]{64}$/;
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -66,6 +67,8 @@ export type LiveBootstrap = Readonly<{
     coordinator: EpochCoordinator;
     controlPlane: LiveEpochControlPlane;
     journal: EpochJournal;
+    /** Independent read-only post-VERIFIED verifier; never activates. */
+    verifier: LiveProductionVerifier;
     missingEvidence: readonly string[];
 }>;
 
@@ -469,10 +472,24 @@ export async function buildLiveBootstrap(
     };
     const controlPlane = new LiveEpochControlPlane(options);
     const coordinator = new EpochCoordinator({ packet, journal, controlPlane, ownerDigest: descriptor.ownerDigest, capability, now });
+    const verifier = createLiveProductionVerifier({
+        packet,
+        journal,
+        cloudBuild,
+        cloudRun,
+        iam,
+        workPlanes,
+        vercel,
+        evidence,
+        publicReadinessUrl: descriptor.publicReadinessUrl,
+        now,
+        pauseProvenance: bootstrapOptions.pauseProvenance,
+    });
     return {
         coordinator,
         controlPlane,
         journal,
+        verifier,
         missingEvidence: descriptor.zeroWorkEvidence === null ? ['zeroWorkEvidence'] : [],
     };
 }

@@ -32,6 +32,14 @@ export type ReservationLease = Readonly<{
     members?: readonly ReservationLeaseMember[];
 }>;
 
+export type ReservationInspection = Readonly<{
+    /** Whether any member of this exact resource set is currently present. */
+    present: boolean;
+    /** Whether every member is present; partial sets are invalid authority. */
+    complete: boolean;
+    memberCount: number;
+}>;
+
 export type ReservationLeaseMember = Readonly<{
     key: string;
     generation: string;
@@ -209,6 +217,29 @@ export class CapacityReservation {
             const current = await this.currentMember(member);
             if (expired(current.record, this.now())) epochFail('LOCK_LOST');
         }
+    }
+
+    /**
+     * Read the exact reservation family without acquiring or renewing it.
+     * Post-VERIFIED callers use this to prove coordinator cleanup removed all
+     * members; a partial or stale family is never treated as absent.
+     */
+    async inspect(): Promise<ReservationInspection> {
+        let memberCount = 0;
+        for (const member of this.members) {
+            const existing = await this.storage.get(member.key);
+            if (!existing) continue;
+            ensureGeneration(existing.generation);
+            ensureRecord(existing.value);
+            const record = existing.value as ReservationRecord;
+            if (record.scopeDigest !== member.scopeDigest) epochFail('JOURNAL_INVALID');
+            memberCount += 1;
+        }
+        return Object.freeze({
+            present: memberCount > 0,
+            complete: memberCount === 0 || memberCount === this.members.length,
+            memberCount,
+        });
     }
 
     async renew(lease: ReservationLease): Promise<ReservationLease> {

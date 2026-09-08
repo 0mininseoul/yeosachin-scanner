@@ -13,6 +13,10 @@ import { issueCoordinatorCapability } from './packet';
 import { buildLiveBootstrap, validateServiceBodies } from './bootstrap';
 import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './live-evidence';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
+import { runCapacityIdentityEpoch } from '../run-capacity-identity-epoch';
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export class FakeGcsTransport implements GcsTransport {
     readonly requests: GcsHttpRequest[] = [];
@@ -879,8 +883,83 @@ describe('provider-free live adapter vertical', () => {
             expect(provider.requests.some(request => new URL(request.url).hostname === 'cloudbuild.googleapis.com')).toBe(true);
             expect(provider.requests.some(request => new URL(request.url).hostname === 'logging.googleapis.com')).toBe(true);
             expect(provider.receiverRequestLogs).toHaveLength(2);
+            const independent = await live.verifier.verify(result.lease);
+            expect(independent).toEqual({ status: 'VERIFIED', activated: false, packetDigest: canonicalDigest(packet) });
         } finally {
             globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('runs the supported FD launcher check and apply through the default bootstrap builder with fake transports', async () => {
+        const packet = createFixturePacket();
+        const provider = new FakeProvider(packet);
+        const gcs = new FakeGcsTransport();
+        let nowMs = 200_000;
+        const now = () => {
+            nowMs += 100;
+            nowMs = Math.max(nowMs, provider.lastSupabaseDateMs);
+            provider.watermarkMs = nowMs;
+            return nowMs;
+        };
+        const googleTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-google-token', timeoutMs: 2_000 });
+        const vercelTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-vercel-token', timeoutMs: 2_000 });
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('fd-launcher-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            supabaseServiceRoleBearer: 'fixture-supabase-service-role', supabaseApiKey: 'fixture-supabase-api-key',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: reviewedSources(packet),
+        } as const;
+        const directory = mkdtempSync(join(tmpdir(), 'identity-epoch-fd-launcher-'));
+        const packetPath = join(directory, 'packet.json');
+        const bootstrapPath = join(directory, 'bootstrap.json');
+        writeFileSync(packetPath, JSON.stringify(packet), { mode: 0o600 });
+        writeFileSync(bootstrapPath, JSON.stringify(descriptor), { mode: 0o600 });
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => {
+            const request: ProtectedHttpRequest = {
+                method: (init?.method ?? 'GET') as ProtectedHttpRequest['method'],
+                url: String(input),
+                headers: Object.fromEntries(new Headers(init?.headers).entries()),
+                ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+            };
+            const response = await provider.request(request);
+            const fetched = new Response(response.body, { status: response.status, headers: response.headers });
+            Object.defineProperty(fetched, 'url', { value: request.url });
+            return fetched;
+        };
+        const options = {
+            bootstrapOptions: {
+                storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+                now, googleTransport, vercelTransport, vercelPublicTransport: provider, receiverTransport: provider,
+                receiverTokenProvider: async () => 'fixture-receiver-token',
+                pauseProvenance: async ({ resource }: { resource: string }) => {
+                    const scheduler = provider.schedulers.get(resource);
+                    if (!scheduler) throw new EpochError('EVIDENCE_UNAVAILABLE');
+                    const evidence = { resource, operation: 'PAUSE', observedAtMs: now(), pauseEpochMs: scheduler.input.pauseEpochMs };
+                    return { resource, pauseEpochMs: scheduler.input.pauseEpochMs, observedAtMs: evidence.observedAtMs, source: 'fixture-pause-log', evidence, evidenceDigest: canonicalDigest(evidence), complete: true } as PauseProvenance;
+                },
+            },
+        } as const;
+        try {
+            const run = async (command: 'check' | 'apply') => {
+                const packetFd = openSync(packetPath, 'r');
+                const bootstrapFd = openSync(bootstrapPath, 'r');
+                try {
+                    await runCapacityIdentityEpoch([command, '--packet-fd', String(packetFd), '--bootstrap-fd', String(bootstrapFd), ...(command === 'apply' ? ['--through', 'VERIFIED'] : [])], options);
+                } finally {
+                    // The protected-input loaders own and close inherited FDs;
+                    // tolerate their ownership rather than masking the result
+                    // with a duplicate-close EBADF.
+                    try { closeSync(packetFd); } catch { /* loader already closed it */ }
+                    try { closeSync(bootstrapFd); } catch { /* loader already closed it */ }
+                }
+            };
+            await run('apply');
+            expect(provider.receiverRequestLogs).toHaveLength(2);
+            expect(provider.tasksCreated).toHaveLength(0);
+        } finally {
+            globalThis.fetch = originalFetch;
+            rmSync(directory, { recursive: true, force: true });
         }
     });
 

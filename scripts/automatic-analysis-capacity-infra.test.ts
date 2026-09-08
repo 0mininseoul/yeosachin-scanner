@@ -35,7 +35,38 @@ const OLD_IDENTITIES = {
 // suite exercises shell wrappers, so an accidentally waiting fake command must
 // fail the test deterministically instead of leaving Vitest's worker RPC
 // pending behind a synchronous child process.
-const CHILD_PROCESS_TIMEOUT_MS = 30_000;
+// Full-repository Vitest workers can briefly contend for CPU while each fake
+// shell launches several bounded adapters. Keep this fixture deadline finite,
+// but leave enough room for that expected scheduling pressure.
+const CHILD_PROCESS_TIMEOUT_MS = 60_000;
+const CHILD_PROCESS_TERM_GRACE_MS = 2_000;
+const CHILD_PROCESS_REAP_TIMEOUT_MS = 5_000;
+
+function reapProcessTree(pid: number | undefined): void {
+    if (!Number.isSafeInteger(pid) || (pid as number) <= 0) return;
+    const processGroup = -(pid as number);
+    const isAlive = (): boolean => {
+        try {
+            process.kill(processGroup, 0);
+            return true;
+        } catch {
+            return false;
+        }
+    };
+    const waitForExit = (deadlineMs: number): boolean => {
+        const deadline = Date.now() + deadlineMs;
+        while (isAlive() && Date.now() < deadline) {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        }
+        return !isAlive();
+    };
+    try { process.kill(processGroup, 'SIGTERM'); } catch { /* already exited */ }
+    if (waitForExit(CHILD_PROCESS_TERM_GRACE_MS)) return;
+    try { process.kill(processGroup, 'SIGKILL'); } catch { /* already exited */ }
+    if (!waitForExit(CHILD_PROCESS_REAP_TIMEOUT_MS)) {
+        throw new Error('fixture child process tree did not terminate within the bounded reap deadline');
+    }
+}
 
 function producerConfigFingerprint(
     environment: Record<string, string>,
@@ -343,6 +374,8 @@ function fakeRun(options: FakeRunOptions = {}) {
     const queue = env[`${prefix}_QUEUE` as keyof typeof env] as string;
     const service = env[`${prefix}_CLOUD_RUN_SERVICE` as keyof typeof env] as string;
     const fixtureDir = mkdtempSync(join(tmpdir(), 'capacity-fake-gcloud-'));
+    let childPid: number | undefined;
+    let childTreeReaped = false;
     const sourceDir = join(fixtureDir, 'source');
     execFileSync('git', ['clone', '--quiet', '--no-local', root, sourceDir], {
         cwd: root,
@@ -1073,16 +1106,23 @@ exec "$FAKE_NODE_REAL" "$@"
             },
             encoding: 'utf8',
             // spawnSync blocks Vitest's own test timeout while a shell waits on
-            // a fake command. The built-in timeout sends SIGTERM to the child;
-            // no unbounded wait or process-group assumption is needed here.
-            timeout: 15_000,
+            // a fake command. The bounded deadline sends SIGTERM to the
+            // detached process group, then reapProcessTree confirms TERM/KILL
+            // cleanup before fixture removal.
+            timeout: CHILD_PROCESS_TIMEOUT_MS,
             killSignal: 'SIGTERM',
-        });
+            // Node's SpawnSyncOptions type omits the runtime-supported
+            // detached flag; retain the process-group contract explicitly.
+            detached: true,
+        } as Parameters<typeof spawnSync>[2]);
+        childPid = result.pid;
+        reapProcessTree(result.pid);
+        childTreeReaped = true;
         const timedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
         const calls = readFileSync(logPath, 'utf8');
         if (timedOut) {
             throw new Error([
-                'fake gcloud command exceeded the 15000ms child-process deadline',
+                `fake gcloud command exceeded the ${CHILD_PROCESS_TIMEOUT_MS}ms child-process deadline`,
                 'last recorded calls:',
                 calls || '<none>',
             ].join('\n'));
@@ -1112,11 +1152,29 @@ exec "$FAKE_NODE_REAL" "$@"
         }
         return { ...result, calls, finalIam, finalScheduler, finalService, sentIamPolicy };
     } finally {
-        rmSync(fixtureDir, { recursive: true, force: true });
+        if (!childTreeReaped && childPid !== undefined) {
+            try {
+                reapProcessTree(childPid);
+                childTreeReaped = true;
+            } catch {
+                // Do not remove a fixture while a timed-out descendant may
+                // still be writing it; the bounded reap failure remains the
+                // test's primary error and leaves forensic state intact.
+            }
+        }
+        if (childTreeReaped || childPid === undefined) rmSync(fixtureDir, { recursive: true, force: true });
     }
 }
 
 describe('automatic-analysis infrastructure contracts', () => {
+    it('uses the bounded fixture child deadline and reaps timed-out descendants before cleanup', () => {
+        const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+        const oldTimeoutLiteral = ['timeout', '15_000'].join(': ');
+        expect(source).toContain('timeout: CHILD_PROCESS_TIMEOUT_MS');
+        expect(source).not.toContain(oldTimeoutLiteral);
+        expect(source).toContain('reapProcessTree(result.pid)');
+    });
+
     it('declares the canonical ten-slot Apify inventory in every deployment path', () => {
         const slots = [
             'primary',

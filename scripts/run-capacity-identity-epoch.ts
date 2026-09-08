@@ -10,6 +10,7 @@
 import { canonicalDigest, EpochError, epochFail } from './capacity-identity-epoch/contracts';
 import { loadProtectedPacketAsync } from './capacity-identity-epoch/packet';
 import { buildLiveBootstrap, loadProtectedLiveBootstrap, type LiveBootstrap, type LiveBootstrapOptions, type ProtectedLiveBootstrapDescriptor } from './capacity-identity-epoch/bootstrap';
+import { prepareProductionEpoch, runPreparedThroughVerified } from './capacity-identity-epoch/operator';
 import { pathToFileURL } from 'node:url';
 
 type Command = 'check' | 'apply';
@@ -92,16 +93,15 @@ export async function runCapacityIdentityEpoch(
         // written by this command. Explicit provider-free collectors still
         // execute the real read-only admission path, so CHECK_OK is not a
         // packet-only assertion.
-        if (live.missingEvidence.length > 0) fail('EVIDENCE_UNAVAILABLE');
-        await live.controlPlane.admit?.({ packet });
+        await prepareProductionEpoch({ packet, live });
         process.stdout.write(`CHECK_OK packetDigest=${canonicalDigest(packet)}\n`);
         return;
     }
-    if (live.missingEvidence.length > 0) fail('EVIDENCE_UNAVAILABLE');
+    const prepared = await prepareProductionEpoch({ packet, live });
     // This path is deliberately closed until the reviewed evidence channels
     // are supplied to the bootstrap descriptor. When supplied, the concrete
     // coordinator runs through VERIFIED; it never calls activation.
-    await live.coordinator.runThroughVerified();
+    await runPreparedThroughVerified({ prepared, live });
 }
 
 const invokedScript = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';

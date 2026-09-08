@@ -12,7 +12,7 @@ import {
     type EpochTransition,
     type State,
 } from './contracts';
-import { CapacityReservation } from './exclusion';
+import { CapacityReservation, type ReservationInspection } from './exclusion';
 import type { GuardedJournalStorage } from './gcs';
 
 export type StoredObject = Readonly<{
@@ -224,6 +224,27 @@ export class EpochJournal {
      */
     createSharedReservation(resources: readonly string[], leaseMs = this.leaseMs): CapacityReservation {
         return new CapacityReservation(this.storage, { resources, now: this.now, leaseMs });
+    }
+
+    /** Read the shared reservation family without acquiring authority. */
+    async inspectSharedReservation(resources: readonly string[]): Promise<ReservationInspection> {
+        return this.createSharedReservation(resources).inspect();
+    }
+
+    /** Read the current epoch lock after a post-VERIFIED provider pass. */
+    async readCurrentLockState(): Promise<Readonly<{
+        generation: string;
+        ownerDigest: string;
+        lockFence: string;
+        lockExpiresAt: string;
+    }>> {
+        const lease = await this.readCurrentLock();
+        return Object.freeze({
+            generation: lease.generation,
+            ownerDigest: lease.lock.ownerDigest,
+            lockFence: lease.lock.lockFence,
+            lockExpiresAt: lease.lock.lockExpiresAt,
+        });
     }
 
     private async putWithLeaseGuard(

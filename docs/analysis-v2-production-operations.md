@@ -125,6 +125,64 @@ to test coverage. It records only a bounded digest and safe evidence status;
 the coordinator combines this source with provider, billing/work-ledger, and
 receiver-log evidence before `VERIFIED`.
 
+### Protected operator path: check, apply through VERIFIED, and independent read-back
+
+The supported operator path uses two owner-only inherited descriptors: one
+contains the complete reviewed packet and the other contains the private live
+bootstrap descriptor. They are passed as inherited file descriptors only; the
+operator must not put their contents in argv, dotenv, stdout/stderr, a journal,
+an ordinary temporary file, or git. The descriptor must carry the complete old
+observations and separately reviewed desired identities, source/build context,
+digest-pinned image/runtime environment, pinned secret references, exact queue
+and scheduler targets, IAM/provider scope, zero-work selectors, and the private
+authenticated observation boundary. Missing or stale evidence is a stop, not a
+value to fill from process defaults.
+
+The live graph performs authenticated read-only transport preflight, validates
+the packet-bound selectors and Cloud Run bodies, then re-observes the complete
+old graph before deriving only deterministic packet/revision digests. The
+supported `apply` invocation below is a single process: it consumes each
+inherited descriptor exactly once, keeps the exact packet/bootstrap objects in
+memory, performs that read-only admission, and then applies through `VERIFIED`
+without reconstruction or a second descriptor read. An optional standalone
+check is read-only:
+
+```text
+node --import tsx scripts/run-capacity-identity-epoch.ts check --packet-fd FD --bootstrap-fd FD
+```
+
+The bounded apply path runs that read-only preparation on the same in-memory
+packet and then runs the coordinator only through `VERIFIED`; `--through
+VERIFIED` is mandatory and there is no activation mode:
+
+```text
+node --import tsx scripts/run-capacity-identity-epoch.ts apply --packet-fd FD --bootstrap-fd FD --through VERIFIED
+```
+
+After the apply process has stopped, the independent verifier re-reads the
+journal, current lock, exact desired source/build/runtime/revision and IAM
+facts, both closed readiness gates, both PAUSED empty queues, both PAUSED aged
+schedulers with correlated pause provenance, enabled retention, and the
+zero-work ledgers. It proves the epoch fence stayed unchanged throughout the
+read pass and that the exact shared-reservation family is fully released after
+the coordinator's `VERIFIED` cleanup; a held or partial reservation fails
+closed. It rejects any `ACTIVATED`/resume/gate-open marker or mutable resource
+drift and emits only `VERIFIED_OK` (or one fixed error code):
+
+```text
+node --import tsx scripts/verify-capacity-identity-epoch.ts --packet-fd FD --bootstrap-fd FD
+```
+
+The verifier is read-only and does not create tasks, call paid providers, send
+work, rotate credentials/secrets, resume queues or schedulers, mutate Cloud
+Run/Vercel/IAM, or run the real canary. Before an operator can use this path,
+the coordinator must receive approved protected descriptors and permissions for
+the authenticated source/build, Cloud Tasks TaskActivityLog and Cloud Logging
+proof, Supabase PostgREST Date/count/pagination proof where reviewed, exact
+malformed receiver routes, GCS journal, Cloud Run, IAM, Scheduler, retention,
+and readiness resources; this repository intentionally does not discover or
+invent any of those protected values.
+
 ### Ordinary mutation identity-epoch bridge (local candidate)
 
 The seven reviewed ordinary mutation entry points use the same generation-fenced
