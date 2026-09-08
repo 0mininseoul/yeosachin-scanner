@@ -7,7 +7,7 @@
 
 ## Outcome
 
-The existing operations console was exercised with local synthetic responses across overview, detail, loading, empty, partial, stale, failure, and recovery states. Eight frontend-owned defects were reproduced, fixed with red-to-green regression tests, and verified in the rendered UI. No API, RPC, schema, identity-epoch, or marketing-copy change was needed.
+The existing operations console was exercised with local synthetic responses across overview, detail, loading, empty, partial, stale, failure, and recovery states. Eight scoped QA defects were reproduced, fixed with red-to-green regression tests, and verified in the rendered UI. A final independent specification review then found two additional frontend gaps; both were reproduced, fixed with red-to-green tests, and reverified. No API, RPC, schema, identity-epoch, or marketing-copy change was needed.
 
 Scoped disposition: **pass**. All console/API audit tests, lint/type checks, the synthetic production build, authorization denial, cache controls, responsive checks, interaction checks, and rendered axe scans pass. One unrelated repository-wide time-sensitive PGlite test remains red on the unchanged base; details are recorded below.
 
@@ -23,7 +23,7 @@ Scoped disposition: **pass**. All console/API audit tests, lint/type checks, the
 
 ## Synthetic test surface
 
-A temporary Vite harness outside the repository imported the real `AnalysisAuditWorkbench` and `console.css` and supplied strict, schema-shaped synthetic API responses. Synthetic identifiers, balances, hashes, and timestamps were visibly artificial. The harness supported loading, empty, partial/stale, error-then-recover, overview, and direct-detail scenarios.
+A temporary Vite harness outside the repository imported the real `AnalysisAuditWorkbench` and `console.css` and supplied strict, schema-shaped synthetic API responses. Synthetic identifiers, balances, hashes, and timestamps were visibly artificial. The harness supported loading, empty, partial/stale, error-then-recover, overview, and direct-detail scenarios. Browser measurements, focus observations, console inspection, and axe results below are fresh manual synthetic observations; the transient harness itself is intentionally not committed. Committed component regressions and screenshots retain the reproducible source and visual evidence.
 
 Rendered checks used 1440x1000, 1024x900, 768x900, and 375x812 viewports. Representative final renders:
 
@@ -138,6 +138,13 @@ Fix: make the overview `h1` programmatically focusable and use it only as the fa
 
 Rendered result: Back returns to `판독 운영 콘솔`, whose `tabindex=-1` heading owns focus; axe reports zero violations.
 
+## Final independent-review hardening
+
+The fresh specification review found two Important frontend gaps after ISSUE-001 through ISSUE-008. Both were reproduced before the fix and then added to `operator-console-review-regressions-7.test.ts(x)`:
+
+- If one overview source failed, the attention panel replaced actionable items already known from the successful source with a blanket unavailable message. Account mutation errors also reused the source-load error state and incorrectly invalidated already loaded attention data. The final implementation preserves known attention items with a partial-coverage warning and separates inventory load failures from action failures.
+- Returning from a detail opened by the `requestId` query focused the overview correctly but left the query in the address bar, so refresh reopened detail. Direct-entry Back now removes only `requestId`, preserves other query/hash state, and returns focus to the overview heading. List-origin detail return continues to restore its exact trigger and scroll position.
+
 ## Authorization and caching
 
 No frontend-owned authorization or caching defect was found.
@@ -154,7 +161,7 @@ Verified with synthetic data:
 
 - Loading: explicit live status; no zero or clear claim.
 - Empty: verified empty only after both sources return successfully.
-- Partial/stale: unknown amounts remain “미상”; stale balances are not promoted to current values; attention items match visible data.
+- Partial/stale: unknown amounts remain “미상”; stale balances are not promoted to current values; attention items from a successful source remain visible when the other source is unavailable.
 - Error/recovery: source-specific alerts and retries; unavailable inventory is fenced; successful retries rehydrate the UI.
 - Account control: octonary exclusion/re-entry updated the row and attention list.
 - Order pagination: next-page cursor appended `@synthetic.complete` without replacing the first page.
@@ -172,8 +179,8 @@ The final rendering remains faithful to the latest light operations-console desi
 
 Passing gates:
 
-- Final scoped suite: **16 files / 111 tests passed**.
-- Console-only suite: **11 files / 30 tests passed**.
+- Final scoped suite: **16 files / 113 tests passed**.
+- Console-only suite: **11 files / 32 tests passed**.
 - `npm run lint`: **0 errors**; 17 pre-existing warnings outside the console-owned files.
 - `npx tsc --noEmit`: passed.
 - Synthetic production build: passed; only the existing multiple-lockfile workspace-root warning was emitted.
@@ -185,7 +192,8 @@ Repository-wide baseline anomaly:
 - `npm test` consistently fails 2 of 30 cases in `lib/services/analysis/v2-historical-legacy-dispatch-terminalizer-pglite.test.ts`.
 - The fixture calls `2026-09-01T00:00:00.000Z` “young”, while the unchanged SQL uses a seven-day cutoff and the current date is 2026-09-08. The supposed young row is therefore now eligible, producing 6 instead of 5 candidates.
 - The same two failures reproduce when the file is run alone. Neither that test nor its migration differs from `origin/main`; this frontend lane did not edit them.
-- The full run later lingered after the test body and was stopped. This does not affect the scoped console gate, but the time-relative fixture should be repaired by its owning lane.
+- A second fresh repository-wide run was started with an emitted command timestamp of `2026-09-08T18:06:25+09:00`. It continued producing test progress but never emitted a completion summary. The supervisor TUI reported approximately 56 minutes elapsed, beyond the agreed 25-minute bound, so only that test process was interrupted. A separate control timestamp immediately after interruption was `2026-09-08T18:16:27+09:00`; because the shell and supervisor elapsed indicators disagreed, no synthetic duration is inferred from them. The preserved outcome is **bounded timeout / non-conclusive**, not a product regression, and the run was not repeated.
+- The bounded full-suite result does not affect the scoped console gate. The independently reproduced time-relative fixture failure should be repaired by its owning lane.
 
 ## Interface requests and residuals
 
@@ -202,5 +210,7 @@ Repository-wide baseline anomaly:
 - `9925fb13` `fix(qa): ISSUE-005 repair expanded ledger headings`
 - `678c050a` `fix(qa): ISSUE-006 fence unavailable inventory state`
 - `f71e888c` `fix(qa): close independent review edge cases`
+- `c9298e26` `docs(qa): add admin console verification evidence`
+- Final branch commit: independent specification-review hardening and verification closeout.
 
-Independent review: the first pass found ISSUE-007 and ISSUE-008 as Important. Both were reproduced and fixed with new tests and rendered evidence. The follow-up review found no Critical or Important issues and returned **Ready to merge: Yes**. Its one non-blocking Minor note was that the responsive regression is a source contract; the four rendered width assertions above provide the complementary runtime evidence.
+Independent review: the first code-quality pass found ISSUE-007 and ISSUE-008 as Important. Both were reproduced and fixed with new tests and rendered evidence. A later fresh specification review found the two hardening gaps above; both were also reproduced and fixed. Its one non-blocking Minor note was that the transient browser harness is not part of HEAD, so this report now distinguishes fresh manual browser observations from committed evidence. The final independent code-quality review of the complete frontend diff and both hardening fixes returned **Critical 0 / Important 0 / Minor 0** and **Ready for commit/PR: Yes**.

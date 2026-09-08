@@ -134,6 +134,7 @@ afterEach(() => {
     container?.remove();
     container = undefined;
     document.body.innerHTML = '';
+    window.history.replaceState(null, '', '/');
 });
 
 function renderWorkbench(initialRequestId = ''): void {
@@ -144,6 +145,60 @@ function renderWorkbench(initialRequestId = ''): void {
 }
 
 describe('independent-review regressions', () => {
+    it('keeps known order attention items visible when inventory is unavailable', async () => {
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') {
+                return jsonResponse({ error: 'synthetic inventory failure' }, 503);
+            }
+            if (url.pathname === '/api/admin/order-audit') {
+                return jsonResponse({
+                    rows: [{
+                        ...listRow,
+                        completenessStatus: 'partial',
+                        gapCodes: ['TARGET_LIKES_ROWS_GAP'],
+                    }],
+                    nextCursor: null,
+                });
+            }
+            return jsonResponse({ error: 'not found' }, 404);
+        }));
+
+        renderWorkbench();
+        await settle();
+
+        const attention = container!.querySelector('[aria-labelledby="attention-title"]')!;
+        expect(attention.textContent).toContain('주문 @synthetic.target');
+        expect(attention.textContent).toContain('TARGET_LIKES_ROWS_GAP');
+        expect(attention.textContent).toContain('일부 데이터를 불러오지 못했습니다');
+    });
+
+    it('does not mark loaded attention data unavailable after an account action fails', async () => {
+        vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') {
+                return init?.method === 'PATCH'
+                    ? jsonResponse({ error: 'synthetic action failure' }, 503)
+                    : jsonResponse({ inventory });
+            }
+            if (url.pathname === '/api/admin/order-audit') {
+                return jsonResponse({ rows: [], nextCursor: null });
+            }
+            return jsonResponse({ error: 'not found' }, 404);
+        }));
+
+        renderWorkbench();
+        await settle();
+        const primaryToggle = container!.querySelector('button[aria-label="primary 배차 제외"]') as HTMLButtonElement;
+        await act(async () => primaryToggle.click());
+        await settle();
+
+        const attention = container!.querySelector('[aria-labelledby="attention-title"]')!;
+        expect(container!.querySelector('[role="alert"]')?.textContent).toContain('운영 데이터를 불러오지 못했습니다');
+        expect(attention.textContent).toContain('0건');
+        expect(attention.textContent).not.toContain('확인 불가');
+    });
+
     // Regression: ISSUE-007 — two failed first-page reloads retained a stale page-2 cursor.
     it('disables order pagination after an append failure and failed first-page retry', async () => {
         let orderRequests = 0;
@@ -190,6 +245,7 @@ describe('independent-review regressions', () => {
             return jsonResponse({ error: 'not found' }, 404);
         }));
 
+        window.history.replaceState(null, '', `/?requestId=${requestId}`);
         renderWorkbench(requestId);
         await settle();
         const back = [...container!.querySelectorAll('button')].find(button => button.textContent === '← 주문 목록')!;
@@ -200,5 +256,6 @@ describe('independent-review regressions', () => {
         expect(overviewHeading?.textContent).toBe('판독 운영 콘솔');
         expect(overviewHeading?.getAttribute('tabindex')).toBe('-1');
         expect(document.activeElement).toBe(overviewHeading);
+        expect(new URL(window.location.href).searchParams.has('requestId')).toBe(false);
     });
 });

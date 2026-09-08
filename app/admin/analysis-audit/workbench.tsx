@@ -157,6 +157,13 @@ function scrollPageTo(top: number): void {
     scrollingElement.scrollTop = top;
 }
 
+function clearRequestIdFromLocation(): void {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('requestId')) return;
+    url.searchParams.delete('requestId');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
 function stageTone(declared: number | null, collected: number | null): StageTone {
     if (declared === null || collected === null) return 'unknown';
     if (declared === 0 && collected === 0) return 'unknown';
@@ -292,11 +299,11 @@ function AttentionList({ accounts, orders, loading, unavailable, onOpenOrder }: 
     }, [accounts, orders]);
     const verifiedEmpty = !loading && !unavailable && items.length === 0;
     return <div className={`oc-attention${verifiedEmpty ? ' oc-attention--clear' : ''}`}>
-        <div className="oc-section-heading"><div><h2 id="attention-title">확인 필요</h2><p>현재 화면에 로드된 데이터에서만 표시합니다. 전체 건수로 해석하지 않습니다.</p></div><span className="oc-section-meta">{loading ? '확인 중' : unavailable ? '확인 불가' : `${items.length}건`}</span></div>
-        {loading ? <p className="oc-loading" role="status">확인 필요 항목을 계산하는 중…</p>
-            : unavailable ? <p className="oc-alert oc-alert--error" role="alert">계정 또는 주문 데이터를 불러오지 못해 확인 필요 여부를 계산할 수 없습니다.</p>
-                : verifiedEmpty ? <p className="oc-empty">현재 페이지에서 확인이 필요한 항목이 없습니다.</p>
-                    : <ul className="oc-attention-list">{items.map(item => <li key={item.key}><StatusChip tone={item.tone}>{item.tone === 'blocked' ? '차단' : '주의'}</StatusChip><span className="oc-attention-label">{item.label}</span><span className="oc-muted">{item.detail}</span>{item.requestId ? <button type="button" className="oc-link" data-order-focus-key={`attention:${item.requestId}`} onClick={() => onOpenOrder(item.requestId!, `attention:${item.requestId}`)}>주문 열기</button> : null}</li>)}</ul>}
+        <div className="oc-section-heading"><div><h2 id="attention-title">확인 필요</h2><p>현재 화면에 로드된 데이터에서만 표시합니다. 전체 건수로 해석하지 않습니다.</p></div><span className="oc-section-meta">{loading ? '확인 중' : unavailable ? items.length > 0 ? `${items.length}건 · 부분` : '확인 불가' : `${items.length}건`}</span></div>
+        {unavailable ? <p className="oc-alert oc-alert--error" role="alert">일부 데이터를 불러오지 못했습니다. 확인 필요 여부를 계산할 수 없습니다. 이미 확인된 항목은 계속 표시합니다.</p> : null}
+        {loading ? <p className="oc-loading" role="status">확인 필요 항목을 계산하는 중…</p> : null}
+        {items.length > 0 ? <ul className="oc-attention-list">{items.map(item => <li key={item.key}><StatusChip tone={item.tone}>{item.tone === 'blocked' ? '차단' : '주의'}</StatusChip><span className="oc-attention-label">{item.label}</span><span className="oc-muted">{item.detail}</span>{item.requestId ? <button type="button" className="oc-link" data-order-focus-key={`attention:${item.requestId}`} onClick={() => onOpenOrder(item.requestId!, `attention:${item.requestId}`)}>주문 열기</button> : null}</li>)}</ul>
+            : verifiedEmpty ? <p className="oc-empty">현재 페이지에서 확인이 필요한 항목이 없습니다.</p> : null}
     </div>;
 }
 
@@ -457,7 +464,8 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
     const [nextCursor, setNextCursor] = useState<OrderAuditListCursor | null>(null);
     const [inventoryLoading, setInventoryLoading] = useState(true);
     const [ordersLoading, setOrdersLoading] = useState(true);
-    const [inventoryError, setInventoryError] = useState<string | null>(null);
+    const [inventoryLoadError, setInventoryLoadError] = useState<string | null>(null);
+    const [inventoryActionError, setInventoryActionError] = useState<string | null>(null);
     const [ordersError, setOrdersError] = useState<string | null>(null);
     const [selectedRequestId, setSelectedRequestId] = useState<string | null>(UUID.test(initialRequestId) ? initialRequestId : null);
     const [paidBusy, setPaidBusy] = useState(false);
@@ -469,8 +477,8 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
     const restoreOverview = useRef(false);
 
     const loadInventory = useCallback(async () => {
-        setInventoryLoading(true); setInventoryError(null);
-        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema); setInventory(body.inventory); } catch (caught) { setInventory(null); setInventoryError(caught instanceof Error ? caught.message : '계정 상태를 불러오지 못했습니다.'); } finally { setInventoryLoading(false); }
+        setInventoryLoading(true); setInventoryLoadError(null);
+        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema); setInventory(body.inventory); } catch (caught) { setInventory(null); setInventoryLoadError(caught instanceof Error ? caught.message : '계정 상태를 불러오지 못했습니다.'); } finally { setInventoryLoading(false); }
     }, []);
 
     const loadOrdersPage = useCallback(async (cursor: OrderAuditListCursor | null, append: boolean) => {
@@ -521,13 +529,13 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
     const free = APIFY_FREE_CREDENTIAL_SLOTS.map(slot => inventory?.find(row => row.credentialSlot === slot));
 
     const toggleExclusion = useCallback(async (row: ApifyAccountCreditInventoryRow) => {
-        setBusySlot(row.credentialSlot); setInventoryError(null);
-        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialSlot: row.credentialSlot, excluded: !row.manuallyExcluded }) }); setInventory(body.inventory); } catch (caught) { setInventoryError(caught instanceof Error ? caught.message : '배차 상태를 저장하지 못했습니다.'); } finally { setBusySlot(null); }
+        setBusySlot(row.credentialSlot); setInventoryActionError(null);
+        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ credentialSlot: row.credentialSlot, excluded: !row.manuallyExcluded }) }); setInventory(body.inventory); } catch (caught) { setInventoryActionError(caught instanceof Error ? caught.message : '배차 상태를 저장하지 못했습니다.'); } finally { setBusySlot(null); }
     }, []);
 
     const refreshPaid = useCallback(async () => {
-        setPaidBusy(true); setInventoryError(null);
-        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'refresh-paid-secondary' }) }); setInventory(body.inventory); } catch (caught) { setInventoryError(caught instanceof Error ? caught.message : '유료 계정 잔액을 새로고침하지 못했습니다.'); } finally { setPaidBusy(false); }
+        setPaidBusy(true); setInventoryActionError(null);
+        try { const body = await requestJson('/api/admin/apify-accounts', inventoryEnvelopeSchema, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'refresh-paid-secondary' }) }); setInventory(body.inventory); } catch (caught) { setInventoryActionError(caught instanceof Error ? caught.message : '유료 계정 잔액을 새로고침하지 못했습니다.'); } finally { setPaidBusy(false); }
     }, []);
 
     const openOrder = (requestId: string, focusKey: string) => {
@@ -535,11 +543,12 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
         setSelectedRequestId(requestId);
     };
     const closeOrder = () => {
+        if (!returnPoint.current) clearRequestIdFromLocation();
         restoreOverview.current = true;
         setSelectedRequestId(null);
     };
 
     if (selectedRequestId) return <OrderDetail requestId={selectedRequestId} onBack={closeOrder} backButtonRef={detailBackRef} />;
 
-    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1 ref={overviewHeadingRef} tabIndex={-1}>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
+    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1 ref={overviewHeadingRef} tabIndex={-1}>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryLoadError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><PageError message={inventoryActionError} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryLoadError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
 }
