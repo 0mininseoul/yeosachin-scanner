@@ -32,6 +32,9 @@ const SCRIPT_TOKENS = [
 ] as const;
 const CONTROL_READ_FD = 4;
 const CONTROL_WRITE_FD = 5;
+const MAPPED_OPERATION_TIMEOUT_MS = 120_000;
+const MAPPED_TERM_GRACE_MS = 1_000;
+const MAPPED_KILL_GRACE_MS = 1_000;
 const MAX_LINE = 4096;
 const CHANNEL_NONCE = /^[0-9a-f]{64}$/;
 
@@ -134,10 +137,11 @@ function scriptPath(token: ScriptToken): string {
 }
 
 const RESPONSE_CODES = new Set([
-    'ASSERT_OK', 'ADOPTED', 'RENEWED', 'RELEASED',
+    'ASSERT_OK', 'ADOPTED', 'BOUND', 'RENEWED', 'RELEASED',
     'ADAPTER_REQUEST_INVALID', 'ADAPTER_RESPONSE_INVALID', 'ABORTED_EPOCH',
     'CAPABILITY_BINDING_MISMATCH', 'CAPABILITY_INVALID', 'GENERATION_PRECONDITION_FAILED',
     'JOURNAL_INVALID', 'LOCK_LOST', 'PROTECTED_INPUT_UNAVAILABLE', 'RESOURCE_INVALID',
+    'ADAPTER_TIMEOUT',
 ]);
 
 function requestId(): string {
@@ -149,16 +153,17 @@ type DispatcherFailureHandler = (error: unknown) => void;
 
 function parseSupervisorResponse(line: string, nonce: string): SupervisorResponse {
     if (line.length > MAX_LINE) fail();
-    const match = /^([0-9a-f]{32}) ([0-9a-f]{64}) (ASSERT_OK|ADOPTED|RENEWED|RELEASED|ERR [A-Z_]+)(?: [A-Za-z0-9_-]{1,32768})?$/.exec(line);
+    const match = /^([0-9a-f]{32}) ([0-9a-f]{64}) (ASSERT_OK|ADOPTED|BOUND|RENEWED|RELEASED|ERR [A-Z_]+)(?: [A-Za-z0-9_-]{1,32768})?$/.exec(line);
     if (!match || match[2] !== nonce) fail();
     const code = match[3]!;
     if (code.startsWith('ERR ') && !RESPONSE_CODES.has(code.slice(4))) fail();
     if (!code.startsWith('ERR ') && !RESPONSE_CODES.has(code)) fail();
-    if (code === 'RELEASED' && line.split(' ').length !== 3) fail();
+    if ((code === 'RELEASED' && line.split(' ').length !== 3)
+        || (!code.startsWith('ERR ') && code !== 'RELEASED' && line.split(' ').length !== 4)) fail();
     return { id: match[1]!, code };
 }
 
-function parseChildRequest(line: string, nonce: string): string {
+export function parseChildRequest(line: string, nonce: string): string {
     if (line.length === 0 || line.length > MAX_LINE) fail();
     let value: unknown;
     try {
@@ -168,7 +173,7 @@ function parseChildRequest(line: string, nonce: string): string {
         fail();
     }
     if (!isObject(value) || typeof value.id !== 'string' || !/^[0-9a-f]{32}$/.test(value.id)
-        || value.nonce !== nonce || !['assert', 'adopt', 'release'].includes(String(value.op))) fail();
+        || value.nonce !== nonce || !['assert', 'adopt'].includes(String(value.op))) fail();
     return value.id as string;
 }
 
@@ -219,11 +224,13 @@ export class ControlChannelDispatcher {
         return await this.withTimeout(this.readyPromise, timeoutMs);
     }
 
-    async sendSupervisorRequest(op: 'release' | 'renew' | 'assert'): Promise<string> {
+    async sendSupervisorRequest(op: 'release' | 'renew' | 'assert' | 'bind', childPid?: number): Promise<string> {
         if (this.nonce === undefined) throw new EpochError('LOCK_LOST');
+        if (op === 'bind' && (!Number.isSafeInteger(childPid) || childPid! <= 0)) throw new EpochError('ADAPTER_REQUEST_INVALID');
         const id = requestId();
-        const response = this.register(id, 'RELEASED');
-        this.writeSupervisor(JSON.stringify({ id, nonce: this.nonce, op }) + '\n');
+        const expected = op === 'release' ? 'RELEASED' : op === 'renew' ? 'RENEWED' : op === 'assert' ? 'ASSERT_OK' : 'BOUND';
+        const response = this.register(id, expected);
+        this.writeSupervisor(JSON.stringify({ id, nonce: this.nonce, op, ...(op === 'bind' ? { childPid } : {}) }) + '\n');
         return await response;
     }
 
@@ -280,7 +287,7 @@ export class ControlChannelDispatcher {
             if (fatal) {
                 const fatalCode = fatal[2]!;
                 if (fatal[1] !== this.nonce || !RESPONSE_CODES.has(fatalCode) || fatalCode === 'ASSERT_OK'
-                    || fatalCode === 'ADOPTED' || fatalCode === 'RENEWED' || fatalCode === 'RELEASED') {
+                    || fatalCode === 'ADOPTED' || fatalCode === 'BOUND' || fatalCode === 'RENEWED' || fatalCode === 'RELEASED') {
                     throw new EpochError('ADAPTER_RESPONSE_INVALID');
                 }
                 throw new EpochError(fatalCode as EpochErrorCode);
@@ -340,6 +347,84 @@ async function waitForExit(child: ChildProcess): Promise<number> {
     });
 }
 
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return true;
+    return await new Promise<boolean>(resolvePromise => {
+        const timer = setTimeout(() => done(false), timeoutMs);
+        const done = (exited: boolean): void => {
+            clearTimeout(timer);
+            resolvePromise(exited);
+        };
+        child.once('exit', () => done(true));
+        child.once('error', () => done(true));
+    });
+}
+
+async function withDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new EpochError('ADAPTER_TIMEOUT');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise<T>((_, reject) => {
+                timer = setTimeout(() => reject(new EpochError('ADAPTER_TIMEOUT')), remainingMs);
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
+
+export async function waitForMappedChild(
+    child: ChildProcess,
+    options: Readonly<{ operationTimeoutMs?: number; termGraceMs?: number; killGraceMs?: number }> = {},
+): Promise<number> {
+    const operationTimeoutMs = options.operationTimeoutMs ?? MAPPED_OPERATION_TIMEOUT_MS;
+    const termGraceMs = options.termGraceMs ?? MAPPED_TERM_GRACE_MS;
+    const killGraceMs = options.killGraceMs ?? MAPPED_KILL_GRACE_MS;
+    if (!Number.isSafeInteger(operationTimeoutMs) || operationTimeoutMs <= 0
+        || !Number.isSafeInteger(termGraceMs) || termGraceMs < 0
+        || !Number.isSafeInteger(killGraceMs) || killGraceMs < 0) {
+        throw new EpochError('ADAPTER_REQUEST_INVALID');
+    }
+    const deadline = Date.now() + operationTimeoutMs;
+    const remaining = (): number => Math.max(0, deadline - Date.now());
+    const waitForExitBeforeDeadline = async (): Promise<number> => {
+        const timeoutMs = remaining();
+        if (timeoutMs <= 0) throw new EpochError('ADAPTER_TIMEOUT');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return await Promise.race([
+                waitForExit(child),
+                new Promise<number>((_, reject) => {
+                    timer = setTimeout(() => reject(new EpochError('ADAPTER_TIMEOUT')), timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+        }
+    };
+    try {
+        const status = await waitForExitBeforeDeadline();
+        const joinTimeoutMs = remaining();
+        if (joinTimeoutMs <= 0) throw new EpochError('ADAPTER_TIMEOUT');
+        try {
+            await waitForProcessGroup(child, joinTimeoutMs);
+        } catch (error) {
+            if (!(error instanceof EpochError) || error.code !== 'ADAPTER_TIMEOUT') throw error;
+            throw error;
+        }
+        return status;
+    } catch (error) {
+        if (!(error instanceof EpochError) || error.code !== 'ADAPTER_TIMEOUT') throw error;
+        // A timeout is authority loss.  Escalate the complete detached group
+        // before reporting it so callers can never release a live lease.
+        await terminateProcessGroupBounded(child, { termGraceMs, killGraceMs });
+        throw error;
+    }
+}
+
 export async function waitForProcessGroup(child: ChildProcess, timeoutMs = 5_000): Promise<void> {
     if (process.platform === 'win32' || child.pid === undefined) return;
     const deadline = Date.now() + timeoutMs;
@@ -362,9 +447,34 @@ export function terminateProcessGroup(child: ChildProcess, signal: NodeJS.Signal
     if (child.exitCode === null) child.kill(signal);
 }
 
+/**
+ * Stop a detached mapped child within a bounded interval. Cooperative
+ * SIGTERM gets a short grace period; stubborn descendants are escalated to
+ * SIGKILL before the caller can release the shared reservation.
+ */
+export async function terminateProcessGroupBounded(
+    child: ChildProcess,
+    options: Readonly<{ termGraceMs?: number; killGraceMs?: number }> = {},
+): Promise<void> {
+    const termGraceMs = options.termGraceMs ?? 1_000;
+    const killGraceMs = options.killGraceMs ?? 1_000;
+    if (!Number.isSafeInteger(termGraceMs) || termGraceMs < 0
+        || !Number.isSafeInteger(killGraceMs) || killGraceMs < 0) throw new EpochError('ADAPTER_REQUEST_INVALID');
+    terminateProcessGroup(child, 'SIGTERM');
+    try {
+        await waitForProcessGroup(child, termGraceMs);
+        return;
+    } catch (error) {
+        if (!(error instanceof EpochError) || error.code !== 'ADAPTER_TIMEOUT') throw error;
+    }
+    terminateProcessGroup(child, 'SIGKILL');
+    await waitForProcessGroup(child, killGraceMs);
+}
+
 async function run(options: LauncherOptions): Promise<void> {
     const supervisorPath = resolve(dirname(fileURLToPath(import.meta.url)), 'exclusion-supervisor.ts');
     const descriptor = buildDescriptor(options);
+    const operationDeadline = Date.now() + MAPPED_OPERATION_TIMEOUT_MS;
     const supervisor = spawn(process.execPath, [
         '--import', 'tsx', supervisorPath,
         '--entry-point', options.entryPoint,
@@ -378,6 +488,12 @@ async function run(options: LauncherOptions): Promise<void> {
     let dispatcher: ControlChannelDispatcher | undefined;
     let childInput: ReturnType<typeof createInterface> | undefined;
     let authorityLost = false;
+    let childTermination: Promise<void> | undefined;
+    let childTerminationError: unknown;
+    const stopChild = (target: ChildProcess): Promise<void> => {
+        childTermination ??= terminateProcessGroupBounded(target);
+        return childTermination;
+    };
     try {
         const descriptorPipe = supervisor.stdio[3];
         if (!descriptorPipe || typeof descriptorPipe === 'string' || !('write' in descriptorPipe)) fail();
@@ -391,18 +507,22 @@ async function run(options: LauncherOptions): Promise<void> {
             // rest of the mutation interval. Kill the whole detached group
             // before the launcher can attempt final release.
             authorityLost = true;
-            if (child) terminateProcessGroup(child, 'SIGTERM');
+            if (child) void stopChild(child).catch(() => undefined);
         });
-        const nonce = await dispatcher.waitForReady();
+        const nonce = await withDeadline(dispatcher.waitForReady(), operationDeadline);
         if (authorityLost) throw new EpochError('LOCK_LOST');
-        const childStdio = ['inherit', 'inherit', 'inherit', 'ignore', 'pipe', 'pipe'] as unknown as StdioOptions;
+        const childStdio = ['inherit', 'inherit', 'inherit', 'ignore', 'pipe', 'pipe', 'pipe'] as unknown as StdioOptions;
         const environment = {
             ...process.env,
             ANALYSIS_CAPACITY_EXCLUSION_CONTROL_READ_FD: String(CONTROL_READ_FD),
             ANALYSIS_CAPACITY_EXCLUSION_CONTROL_WRITE_FD: String(CONTROL_WRITE_FD),
             ANALYSIS_CAPACITY_EXCLUSION_CONTROL_NONCE: nonce,
         };
-        const mappedChild = spawn('/bin/bash', [scriptPath(options.scriptToken), ...options.scriptArgs], {
+        // Keep the mapped command inert until the supervisor has bound its
+        // PID.  If the launcher dies in this window, FD6 reaches EOF and the
+        // gate exits without ever exec'ing the mutation script.
+        const gateScript = 'IFS= read -r gate <&6 || exit 2; [ "$gate" = BOUND ] || exit 2; exec /bin/bash "$@"';
+        const mappedChild = spawn('/bin/bash', ['-c', gateScript, 'capacity-identity-epoch-child', scriptPath(options.scriptToken), ...options.scriptArgs], {
             env: environment,
             stdio: childStdio,
             detached: process.platform !== 'win32',
@@ -411,36 +531,48 @@ async function run(options: LauncherOptions): Promise<void> {
         const mappedStdio = mappedChild.stdio as unknown as Array<NodeJS.ReadableStream | Writable | null | undefined>;
         const childRequestPipe = mappedStdio[CONTROL_WRITE_FD];
         const childResponsePipe = mappedStdio[CONTROL_READ_FD];
+        const gatePipe = mappedStdio[6];
         if (!childRequestPipe || typeof childRequestPipe === 'string'
             || !childResponsePipe || typeof childResponsePipe === 'string'
-            || !('write' in childResponsePipe)) fail();
+            || !('write' in childResponsePipe)
+            || !gatePipe || typeof gatePipe === 'string' || !('write' in gatePipe)) fail();
         childInput = createInterface({ input: childRequestPipe as NodeJS.ReadableStream, crlfDelay: Infinity });
         childInput.on('line', line => {
             void dispatcher!.forwardChildRequest(line, childResponsePipe as Writable).catch(() => {
-                terminateProcessGroup(mappedChild, 'SIGTERM');
+                void stopChild(mappedChild).catch(() => undefined);
             });
         });
-        childStatus = await waitForExit(mappedChild);
+        // Bind the detached process group before forwarding any child
+        // request. If this launcher dies, supervisor stdin EOF can terminate
+        // this exact authority rather than merely releasing the lease.
+        await withDeadline(dispatcher.sendSupervisorRequest('bind', mappedChild.pid), operationDeadline);
+        if (authorityLost) throw new EpochError('LOCK_LOST');
+        (gatePipe as Writable).write('BOUND\n');
+        const remainingOperationMs = operationDeadline - Date.now();
+        if (remainingOperationMs <= 0) throw new EpochError('ADAPTER_TIMEOUT');
+        childStatus = await waitForMappedChild(mappedChild, { operationTimeoutMs: remainingOperationMs });
         childInput.close();
-        await waitForProcessGroup(mappedChild);
-        await dispatcher.sendSupervisorRequest('release');
+        await withDeadline(dispatcher.sendSupervisorRequest('release'), operationDeadline);
     } finally {
         childInput?.close();
-        if (child) terminateProcessGroup(child, 'SIGTERM');
+        if (child) {
+            try { await stopChild(child); }
+            catch (error) { childTerminationError = childTerminationError ?? error; }
+        }
         dispatcher?.close();
         if (supervisor.stdin && !supervisor.stdin.destroyed) supervisor.stdin.end();
         if (supervisor.exitCode === null) {
-            await new Promise<void>(resolvePromise => {
-                const timer = setTimeout(() => {
-                    supervisor.kill('SIGTERM');
-                    resolvePromise();
-                }, 5_000);
-                supervisor.once('exit', () => {
-                    clearTimeout(timer);
-                    resolvePromise();
-                });
-            });
+            const exitedAfterTerm = await waitForChildExit(supervisor, 5_000);
+            if (!exitedAfterTerm && supervisor.exitCode === null) {
+                supervisor.kill('SIGTERM');
+                const exitedAfterGrace = await waitForChildExit(supervisor, 1_000);
+                if (!exitedAfterGrace && supervisor.exitCode === null) {
+                    supervisor.kill('SIGKILL');
+                    if (!(await waitForChildExit(supervisor, 1_000))) throw new EpochError('ADAPTER_TIMEOUT');
+                }
+            }
         }
+        if (childTerminationError !== undefined) throw childTerminationError;
     }
     process.exitCode = childStatus;
 }

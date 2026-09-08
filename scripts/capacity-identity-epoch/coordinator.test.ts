@@ -63,6 +63,18 @@ class ResumeFailControlPlane extends FixtureControlPlane {
     async resume(): Promise<void> { throw new EpochError('PROBE_FAILED'); }
 }
 
+class AdmissionOrderControlPlane extends FixtureControlPlane {
+    reservationSeen = false;
+
+    constructor(private readonly storage: MemoryStorage) {
+        super();
+    }
+
+    async admit(): Promise<void> {
+        this.reservationSeen = (await this.storage.list('epoch-reservation/')).length > 0;
+    }
+}
+
 class RenewalControlPlane implements EpochControlPlane {
     readonly calls: string[] = [];
     private leaseUpdated?: (lease: JournalLease) => Promise<void> | void;
@@ -109,6 +121,29 @@ function setup(now = 1_000) {
 }
 
 describe('ordered coordinator', () => {
+    it('acquires the common reservation before admission captures any baseline', async () => {
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        const controlPlane = new AdmissionOrderControlPlane(storage);
+        const coordinator = new EpochCoordinator({
+            packet,
+            journal,
+            controlPlane,
+            ownerDigest: canonicalDigest('admission-order-owner'),
+            now: () => 1_000,
+        });
+
+        await coordinator.runThroughVerified();
+        expect(controlPlane.reservationSeen).toBe(true);
+    });
+
     it('releases the shared reservation when resume fails after acquisition', async () => {
         const { packet, storage, journal } = setup();
         const coordinator = new EpochCoordinator({

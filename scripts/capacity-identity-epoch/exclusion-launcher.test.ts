@@ -1,11 +1,16 @@
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { ControlChannelDispatcher, terminateProcessGroup, waitForProcessGroup } from './exclusion-launcher';
+import { ControlChannelDispatcher, parseChildRequest, terminateProcessGroup, terminateProcessGroupBounded, waitForMappedChild, waitForProcessGroup } from './exclusion-launcher';
 
 const nonce = 'd'.repeat(64);
 
 describe('mapped exclusion launcher control channel', () => {
+    it('refuses a forged child release request so the reservation remains launcher-owned', () => {
+        const forged = JSON.stringify({ id: 'e'.repeat(32), nonce, op: 'release' });
+        expect(() => parseChildRequest(forged, nonce)).toThrowError(expect.objectContaining({ code: 'ADAPTER_REQUEST_INVALID' }));
+    });
+
     it('uses one supervisor reader for child proxy traffic and release', async () => {
         const supervisor = spawn(process.execPath, ['-e', [
             `const nonce=${JSON.stringify(nonce)};`,
@@ -24,6 +29,29 @@ describe('mapped exclusion launcher control channel', () => {
             await new Promise(resolve => setImmediate(resolve));
             expect(forwarded).toMatch(/^1{32} d{64} ASSERT_OK /);
             await expect(dispatcher.sendSupervisorRequest('release')).resolves.toBe('RELEASED');
+        } finally {
+            dispatcher.close();
+            if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
+        }
+    });
+
+    it('does not forward an actual child release line, leaving only launcher release authority', async () => {
+        const supervisor = spawn(process.execPath, ['-e', [
+            `const nonce=${JSON.stringify(nonce)};`,
+            `process.stdout.write('READY '+nonce+'\\n');`,
+            `process.stdin.setEncoding('utf8');`,
+            `process.stdin.on('data', chunk => { for (const line of chunk.split('\\n')) { if (!line) continue; const value=JSON.parse(line); if (value.op==='release') process.stdout.write(value.id+' '+nonce+' RELEASED\\n'); } });`,
+        ].join('')], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const dispatcher = new ControlChannelDispatcher(supervisor, nonce);
+        const sink = new PassThrough();
+        let forwarded = '';
+        sink.on('data', chunk => { forwarded += String(chunk); });
+        try {
+            await dispatcher.waitForReady();
+            const forged = JSON.stringify({ id: 'f'.repeat(32), nonce, op: 'release' });
+            await expect(dispatcher.forwardChildRequest(forged, sink)).rejects.toMatchObject({ code: 'ADAPTER_REQUEST_INVALID' });
+            await expect(dispatcher.sendSupervisorRequest('release')).resolves.toBe('RELEASED');
+            expect(forwarded).toBe('');
         } finally {
             dispatcher.close();
             if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
@@ -75,4 +103,31 @@ describe('mapped exclusion launcher control channel', () => {
             terminateProcessGroup(child, 'SIGTERM');
         }
     });
+
+    it('escalates stubborn detached descendants from SIGTERM to SIGKILL', async () => {
+        const child = spawn('/bin/bash', ['-c', 'trap "" TERM; sleep 30'], {
+            detached: true,
+            stdio: 'ignore',
+        });
+        try {
+            await expect(terminateProcessGroupBounded(child, { termGraceMs: 75, killGraceMs: 1_000 })).resolves.toBeUndefined();
+            await expect(waitForProcessGroup(child, 250)).resolves.toBeUndefined();
+        } finally {
+            terminateProcessGroup(child, 'SIGKILL');
+        }
+    });
+
+    it('bounds a mapped command whose child never exits and joins descendants before failing', async () => {
+        const child = spawn('/bin/bash', ['-c', 'trap "" TERM; sleep 30'], {
+            detached: true,
+            stdio: 'ignore',
+        });
+        try {
+            await expect(waitForMappedChild(child, { operationTimeoutMs: 75, termGraceMs: 50, killGraceMs: 1_000 }))
+                .rejects.toMatchObject({ code: 'ADAPTER_TIMEOUT' });
+            await expect(waitForProcessGroup(child, 250)).resolves.toBeUndefined();
+        } finally {
+            terminateProcessGroup(child, 'SIGKILL');
+        }
+    }, 2_000);
 });

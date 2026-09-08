@@ -9,7 +9,8 @@
  */
 import { canonicalDigest, EpochError, epochFail } from './capacity-identity-epoch/contracts';
 import { loadProtectedPacketAsync } from './capacity-identity-epoch/packet';
-import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
+import { buildLiveBootstrap, loadProtectedLiveBootstrap, type LiveBootstrap, type LiveBootstrapOptions, type ProtectedLiveBootstrapDescriptor } from './capacity-identity-epoch/bootstrap';
+import { pathToFileURL } from 'node:url';
 
 type Command = 'check' | 'apply';
 
@@ -60,8 +61,17 @@ function parseArguments(argv: readonly string[]): Readonly<{ command: Command; p
     return { command, packetFd, bootstrapFd, through, help: false };
 }
 
-async function run(): Promise<void> {
-    const options = parseArguments(process.argv.slice(2));
+export type CapacityIdentityEpochRunnerOptions = Readonly<{
+    /** Explicit dependency injection for provider-free tests; production leaves this unset. */
+    bootstrapOptions?: LiveBootstrapOptions;
+    buildBootstrap?: (packet: Awaited<ReturnType<typeof loadProtectedPacketAsync>>, descriptor: ProtectedLiveBootstrapDescriptor, options: LiveBootstrapOptions) => Promise<LiveBootstrap>;
+}>;
+
+export async function runCapacityIdentityEpoch(
+    argv: readonly string[] = process.argv.slice(2),
+    runnerOptions: CapacityIdentityEpochRunnerOptions = {},
+): Promise<void> {
+    const options = parseArguments(argv);
     if (options.help) {
         usage();
         return;
@@ -71,13 +81,19 @@ async function run(): Promise<void> {
     if (options.command === 'apply' && options.through !== 'VERIFIED') fail('ADAPTER_REQUEST_INVALID');
     const packet = await loadProtectedPacketAsync({ fd: options.packetFd });
     const bootstrapDescriptor = await loadProtectedLiveBootstrap(options.bootstrapFd);
-    const live = await buildLiveBootstrap(packet, bootstrapDescriptor, { resolveRetainedHeader: options.command !== 'check' });
+    const buildBootstrap = runnerOptions.buildBootstrap ?? buildLiveBootstrap;
+    const live = await buildBootstrap(packet, bootstrapDescriptor, {
+        ...runnerOptions.bootstrapOptions,
+        resolveRetainedHeader: options.command !== 'check',
+    });
     if (options.command === 'check') {
         // Adapter construction and packet/resource binding are part of the
         // read-only preflight. No journal header/lock or provider request is
-        // written by this command. Missing independent source/ledger/probe
-        // channels are a fixed, non-success outcome.
+        // written by this command. Explicit provider-free collectors still
+        // execute the real read-only admission path, so CHECK_OK is not a
+        // packet-only assertion.
         if (live.missingEvidence.length > 0) fail('EVIDENCE_UNAVAILABLE');
+        await live.controlPlane.admit?.({ packet });
         process.stdout.write(`CHECK_OK packetDigest=${canonicalDigest(packet)}\n`);
         return;
     }
@@ -88,12 +104,15 @@ async function run(): Promise<void> {
     await live.coordinator.runThroughVerified();
 }
 
-void run().catch((error: unknown) => {
-    if (error instanceof EpochError) {
-        process.stderr.write(`${error.code}\n`);
-        process.exitCode = 2;
-    } else {
-        process.stderr.write('ADAPTER_REQUEST_INVALID\n');
-        process.exitCode = 2;
-    }
-});
+const invokedScript = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
+if (import.meta.url === invokedScript) {
+    void runCapacityIdentityEpoch().catch((error: unknown) => {
+        if (error instanceof EpochError) {
+            process.stderr.write(`${error.code}\n`);
+            process.exitCode = 2;
+        } else {
+            process.stderr.write('ADAPTER_REQUEST_INVALID\n');
+            process.exitCode = 2;
+        }
+    });
+}

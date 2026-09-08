@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { describe, expect, it } from 'vitest';
 import { resolve } from 'node:path';
 import { deriveResources } from './exclusion-ipc';
+import { waitForProcessGroup } from './exclusion-launcher';
 
 const fixture = resolve('scripts/capacity-identity-epoch/exclusion-supervisor.fixture.ts');
 const ipc = resolve('scripts/capacity-identity-epoch/exclusion-ipc.ts');
@@ -160,6 +161,33 @@ describe('mapped exclusion supervisor boundary', () => {
                 if (value === undefined) delete process.env[name];
                 else process.env[name] = value;
             }
+        }
+    });
+
+    it('fences a bound detached child before releasing when launcher stdin reaches EOF', async () => {
+        const supervisor = spawnSupervisor();
+        const child = spawn('/bin/bash', ['-c', 'sleep 30'], { detached: true, stdio: 'ignore' });
+        try {
+            const descriptorPipe = supervisor.stdio[3];
+            if (!descriptorPipe || typeof descriptorPipe === 'string' || !('end' in descriptorPipe)) {
+                throw new Error('missing descriptor pipe');
+            }
+            descriptorPipe.end(JSON.stringify(descriptor()));
+            const nextLine = lineReader(supervisor);
+            const ready = await nextLine();
+            const nonce = /^READY ([0-9a-f]{64})$/.exec(ready)?.[1];
+            expect(nonce).toMatch(/^[0-9a-f]{64}$/);
+            supervisor.stdin.write(request('6'.repeat(32), nonce!, { op: 'bind', childPid: child.pid }));
+            await expect(nextLine()).resolves.toMatch(new RegExp('^' + '6'.repeat(32) + ' ' + nonce + ' BOUND '));
+            supervisor.stdin.end();
+            await new Promise<void>((resolveExit, reject) => {
+                supervisor.once('error', reject);
+                supervisor.once('exit', code => code === 0 ? resolveExit() : reject(new Error('supervisor exit')));
+            });
+            await expect(waitForProcessGroup(child, 2_000)).resolves.toBeUndefined();
+        } finally {
+            if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
+            if (child.exitCode === null) child.kill('SIGKILL');
         }
     });
 });

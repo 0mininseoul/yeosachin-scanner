@@ -99,6 +99,8 @@ export type WorkPlaneClientOptions = Readonly<{
     transport: AuthenticatedProtectedTransport;
     /** Independent correlated evidence of the last PAUSE, never a success bit. */
     pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
+    /** Enable the live Cloud Scheduler update-time collector when no external log collector is injected. */
+    defaultPauseProvenance?: boolean;
     pauseProvenanceTimeoutMs?: number;
     now?: () => number;
 }>;
@@ -112,7 +114,8 @@ export class WorkPlaneClient {
 
     constructor(options: WorkPlaneClientOptions) {
         this.transport = options.transport;
-        this.pauseProvenance = options.pauseProvenance;
+        this.pauseProvenance = options.pauseProvenance
+            ?? (options.defaultPauseProvenance ? this.collectPauseProvenance.bind(this) : undefined);
         this.pauseProvenanceTimeoutMs = options.pauseProvenanceTimeoutMs ?? 15_000;
         if (!Number.isSafeInteger(this.pauseProvenanceTimeoutMs) || this.pauseProvenanceTimeoutMs <= 0 || this.pauseProvenanceTimeoutMs > 120_000) fail('ADAPTER_REQUEST_INVALID');
         this.now = options.now ?? (() => Date.now());
@@ -134,6 +137,25 @@ export class WorkPlaneClient {
         if (location !== input.location) fail('RESOURCE_INVALID');
         const job = await this.getScheduler(input);
         return this.schedulerObservation(input, job);
+    }
+
+    /** Collect pause provenance from the authenticated Scheduler object itself. */
+    async collectPauseProvenance(input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>): Promise<PauseProvenance> {
+        const job = await this.getSchedulerRecord(input.resource, input.project);
+        if (job.state !== 'PAUSED') fail('EVIDENCE_UNAVAILABLE');
+        const updateTime = timestamp(job.updateTime);
+        if (updateTime === null || updateTime <= 0) fail('EVIDENCE_UNAVAILABLE');
+        const observedAtMs = this.now();
+        const evidence = { resource: input.resource, operation: 'PAUSE', updateTime: new Date(updateTime).toISOString() };
+        return {
+            resource: input.resource,
+            pauseEpochMs: updateTime,
+            observedAtMs,
+            source: 'cloud-scheduler-update-time',
+            evidence,
+            evidenceDigest: canonicalDigest(evidence),
+            complete: true,
+        };
     }
 
     async pauseScheduler(input: ProtectedSchedulerInput, leaseCheck?: LeaseCheck): Promise<SchedulerObservation> { return this.changeSchedulerState(input, 'pause', leaseCheck, 'scheduler.pause'); }
@@ -395,6 +417,10 @@ export class WorkPlaneClient {
 
     private queueConfiguration(queue: Record<string, unknown>): Record<string, unknown> {
         const configuration: Record<string, unknown> = {};
+        // Preserve the complete provider configuration in the canonical queue
+        // observation.  The evidence collector independently checks
+        // samplingRatio=1, while this projection ensures drift cannot be
+        // hidden from the packet's queue/configuration digest.
         for (const key of ['rateLimits', 'retryConfig', 'stackdriverLoggingConfig']) if (queue[key] !== undefined) configuration[key] = queue[key];
         return configuration;
     }

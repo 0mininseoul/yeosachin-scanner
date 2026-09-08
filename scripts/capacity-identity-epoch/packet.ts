@@ -131,7 +131,7 @@ const TASK_OBSERVATION_KEYS = ['name', 'payloadDigest', 'createTime'] as const;
 const SCHEDULER_OBSERVATION_KEYS = ['resource', 'project', 'location', 'state', 'pauseEpochMs', 'lastAttemptMs', 'configuration'] as const;
 const ZERO_WORK_KEYS = ['windowStartMs', 'windowEndMs', 'complete', 'providerLedgerDigest', 'billingLedgerDigest', 'taskAuditDigest', 'receiverLogDigest'] as const;
 const SOURCE_TARGET_KEYS = ['sourceSha', 'revisionPlan', 'desiredBuildDigest', 'desiredRuntimeDigest'] as const;
-const EVIDENCE_SOURCE_KEYS = ['source', 'lookbackMs'] as const;
+const EVIDENCE_SOURCE_KEYS = ['source', 'lookbackMs', 'selectorDigest'] as const;
 const PACKET_INPUT_KEYS = [
     'epochId', 'lockNamespace', 'roleSet', 'oldManifest', 'desiredManifest', 'protectedInputs', 'oldManifestDigest',
     'providerScope', 'desiredManifestDigest', 'capabilityDigest', 'roleSetDigest', 'sourcePlanDigest', 'activation',
@@ -980,7 +980,8 @@ function validateObservationTargets(
         assertKeys(sources[sourceName], EVIDENCE_SOURCE_KEYS, 'EVIDENCE_UNAVAILABLE');
         if (!safeString(sources[sourceName].source, 2048)
             || !Number.isSafeInteger(sources[sourceName].lookbackMs)
-            || (sources[sourceName].lookbackMs as number) <= 0) epochFail('EVIDENCE_UNAVAILABLE');
+            || (sources[sourceName].lookbackMs as number) <= 0
+            || !validDigest(sources[sourceName].selectorDigest)) epochFail('EVIDENCE_UNAVAILABLE');
     }
 }
 

@@ -122,6 +122,27 @@ class PauseBaselineGetStorage extends MemoryStorage {
     }
 }
 
+class ConcurrentAppendStorage extends MemoryStorage {
+    private appendPuts = 0;
+    private readonly appendGate = new Promise<void>(resolve => {
+        this.releaseAppendGate = resolve;
+    });
+    private releaseAppendGate!: () => void;
+
+    constructor(private readonly prefix: string) {
+        super();
+    }
+
+    override async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        if (key.startsWith(this.prefix) && options.ifGenerationMatch === '0') {
+            this.appendPuts += 1;
+            if (this.appendPuts >= 2) this.releaseAppendGate();
+            await this.appendGate;
+        }
+        return super.put(key, value, options);
+    }
+}
+
 const digest = (value: string) => canonicalDigest(value);
 const header: EpochHeader = {
     epochIdDigest: digest('epoch'), capabilityDigest: digest('capability'), oldManifestDigest: digest('old'),
@@ -196,9 +217,28 @@ describe('generation-fenced epoch journal', () => {
 
         const entries = await storage.list(journal.journalPrefix);
         const duplicate = transition(1, null, 'PREPARED', lease.lock.lockFence);
-        await storage.put(`${journal.journalPrefix}00000001/${digest('other')}.json`, duplicate, { ifGenerationMatch: '0' });
-        await expect(journal.deriveState()).rejects.toThrow('JOURNAL_INVALID');
+        await expect(storage.put(`${journal.journalPrefix}00000001.json`, duplicate, { ifGenerationMatch: '0' }))
+            .rejects.toThrow('GENERATION_PRECONDITION_FAILED');
         expect(entries.length).toBe(1);
+    });
+
+    it('atomically fences concurrent same-owner appends at one sequence slot', async () => {
+        const storage = new ConcurrentAppendStorage(`epoch/epoch-journal/${header.epochIdDigest}/`);
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-concurrent'));
+        const left = transition(1, null, 'PREPARED', lease.lock.lockFence);
+        const right = { ...left, mutationDigest: digest('mutation-concurrent') };
+        const results = await Promise.allSettled([
+            journal.append(lease, left),
+            journal.append(lease, right),
+        ]);
+        expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+        expect(results.filter(result => result.status === 'rejected')).toHaveLength(1);
+        expect((await storage.list(journal.journalPrefix)).map(entry => entry.key)).toEqual([
+            `${journal.journalPrefix}00000001.json`,
+        ]);
+        await expect(journal.deriveState(lease)).resolves.toMatchObject({ state: 'PREPARED' });
     });
 
     it('fences an expired owner and permits takeover only with a new fence', async () => {
@@ -233,7 +273,7 @@ describe('generation-fenced epoch journal', () => {
         const lease = await journal.acquire(digest('owner-future'));
         await journal.append(lease, transition(1, null, 'PREPARED', lease.lock.lockFence));
         const future = transition(2, 'PREPARED', 'STAGED', '999');
-        await storage.put(`${journal.journalPrefix}00000002/${canonicalDigest(future)}.json`, future, { ifGenerationMatch: '0' });
+        await storage.put(`${journal.journalPrefix}00000002.json`, future, { ifGenerationMatch: '0' });
         await expect(journal.deriveState(lease)).rejects.toThrow('JOURNAL_INVALID');
 
         const lock = await storage.get(journal.lockKey);

@@ -374,6 +374,8 @@ export type ProtectedObservationTargets = Readonly<{
     zeroWorkSources: Readonly<Record<'providerLedger' | 'billingLedger' | 'taskAudit' | 'receiverLog', Readonly<{
         source: string;
         lookbackMs: number;
+        /** Digest of the exact reviewed primary-source selector (table/log/queue/route). */
+        selectorDigest: string;
     }>>>;
 }>;
 

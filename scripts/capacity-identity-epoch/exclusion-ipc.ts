@@ -25,9 +25,7 @@ const SAFE_VALUE = /^[^\u0000-\u001f\u007f]{1,1024}$/;
 const REQUEST_ID = /^[0-9a-f]{32}$/;
 const CHANNEL_NONCE = /^[0-9a-f]{64}$/;
 const EVIDENCE = /^[A-Za-z0-9_-]{1,32768}$/;
-const RESPONSE_CODE = /^(ASSERT_OK|ADOPTED|RELEASED|ERR (ADAPTER_REQUEST_INVALID|ADAPTER_RESPONSE_INVALID|ABORTED_EPOCH|CAPABILITY_BINDING_MISMATCH|CAPABILITY_INVALID|GENERATION_PRECONDITION_FAILED|JOURNAL_INVALID|LOCK_LOST|PROTECTED_INPUT_UNAVAILABLE|RESOURCE_INVALID))$/;
-
-type Command = 'assert' | 'adopt' | 'release';
+type Command = 'assert' | 'adopt';
 type SelectorSource = 'role' | 'generic';
 
 function fail(): never {
@@ -44,13 +42,13 @@ function parseFd(value: string | undefined): number {
 function parseArguments(argv: readonly string[]): Readonly<{
     command: Command;
     entryPoint: ExclusionEntryPoint;
-    role?: Role;
+    role: Role;
     selectorSource: SelectorSource;
     writeFd: number;
     readFd: number;
 }> {
     const command = argv[0];
-    if (command !== 'assert' && command !== 'adopt' && command !== 'release') fail();
+    if (command !== 'assert' && command !== 'adopt') fail();
     let entryPoint: ExclusionEntryPoint = 'epoch';
     let role: Role | undefined;
     let selectorSource: SelectorSource = 'role';
@@ -78,10 +76,8 @@ function parseArguments(argv: readonly string[]): Readonly<{
             fail();
         }
     }
-    if (writeFd === undefined || readFd === undefined
-        || (command === 'assert' && (entryPoint === 'epoch' || role === undefined))
-        || (command === 'adopt' && (entryPoint === 'epoch' || role === undefined))) fail();
-    return { command, entryPoint, role, selectorSource, writeFd, readFd };
+    if (writeFd === undefined || readFd === undefined || entryPoint === 'epoch' || role === undefined) fail();
+    return { command, entryPoint, role: role!, selectorSource, writeFd, readFd };
 }
 
 export function deriveResources(
@@ -250,11 +246,10 @@ function parseResponse(line: string, id: string, options: Readonly<{
 }>): ParsedResponse {
     const nonce = process.env.ANALYSIS_CAPACITY_EXCLUSION_CONTROL_NONCE;
     if (typeof nonce !== 'string' || !CHANNEL_NONCE.test(nonce)) fail();
-    const match = /^([0-9a-f]{32}) ([0-9a-f]{64}) (ASSERT_OK|ADOPTED|RELEASED|ERR (?:ADAPTER_REQUEST_INVALID|ADAPTER_RESPONSE_INVALID|ABORTED_EPOCH|CAPABILITY_BINDING_MISMATCH|CAPABILITY_INVALID|GENERATION_PRECONDITION_FAILED|JOURNAL_INVALID|LOCK_LOST|PROTECTED_INPUT_UNAVAILABLE|RESOURCE_INVALID))(?: ([A-Za-z0-9_-]{1,32768}))?$/.exec(line);
+    const match = /^([0-9a-f]{32}) ([0-9a-f]{64}) (ASSERT_OK|ADOPTED|ERR (?:ADAPTER_REQUEST_INVALID|ADAPTER_RESPONSE_INVALID|ABORTED_EPOCH|CAPABILITY_BINDING_MISMATCH|CAPABILITY_INVALID|GENERATION_PRECONDITION_FAILED|JOURNAL_INVALID|LOCK_LOST|PROTECTED_INPUT_UNAVAILABLE|RESOURCE_INVALID|ADAPTER_TIMEOUT))(?: ([A-Za-z0-9_-]{1,32768}))?$/.exec(line);
     if (!match || match[1] !== id || match[2] !== nonce) fail();
     const code = match[3]!;
     if ((code === 'ASSERT_OK' || code === 'ADOPTED') && match[4] === undefined) fail();
-    if (code === 'RELEASED' && match[4] !== undefined) fail();
     return {
         code,
         ...(match[4] === undefined ? {} : { evidence: decodeEvidence(match[4], options) }),
@@ -265,9 +260,7 @@ async function run(argv: readonly string[]): Promise<void> {
     const options = parseArguments(argv);
     const nonce = process.env.ANALYSIS_CAPACITY_EXCLUSION_CONTROL_NONCE;
     if (typeof nonce !== 'string' || !CHANNEL_NONCE.test(nonce)) fail();
-    const resources = options.command === 'release'
-        ? undefined
-        : deriveResources(options.entryPoint, options.role ?? 'preflight', options.selectorSource);
+    const resources = deriveResources(options.entryPoint, options.role, options.selectorSource);
     const request = options.command === 'assert'
         ? { op: 'assert', resources: resources!.map(resource => resource.kind + ':' + resource.resource) }
         : options.command === 'adopt'
@@ -277,15 +270,15 @@ async function run(argv: readonly string[]): Promise<void> {
                 role: options.role,
                 resources: resources!,
             }
-            : { op: 'release' };
+            : { op: 'adopt', entryPoint: options.entryPoint, role: options.role, resources };
     const id = randomBytes(16).toString('hex');
     writeSync(options.writeFd, Buffer.from(JSON.stringify({ id, nonce, ...request }) + '\n'));
     const response = readLine(options.readFd);
-    const expected = options.command === 'assert' ? 'ASSERT_OK' : options.command === 'adopt' ? 'ADOPTED' : 'RELEASED';
+    const expected = options.command === 'assert' ? 'ASSERT_OK' : 'ADOPTED';
     const parsed = parseResponse(response, id, {
         entryPoint: options.entryPoint,
         role: options.role,
-        resources: resources ?? [],
+        resources,
     });
     const code = parsed.code;
     if (code === expected) return;

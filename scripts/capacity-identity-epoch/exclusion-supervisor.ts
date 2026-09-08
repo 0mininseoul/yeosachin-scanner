@@ -43,6 +43,7 @@ const REQUEST_ID = /^[0-9a-f]{32}$/;
 const CHANNEL_NONCE = /^[0-9a-f]{64}$/;
 const MAX_CONTROL_LINE = 64 * 1024;
 const MAX_EVIDENCE_BYTES = 32 * 1024;
+const PID = /^[1-9][0-9]{0,8}$/;
 
 type SupervisorOptions = Readonly<{
     entryPoint: ExclusionEntryPoint;
@@ -53,6 +54,7 @@ type ControlRequest =
     | Readonly<{ id: string; nonce: string; op: 'assert'; resources?: readonly string[] }>
     | Readonly<{ id: string; nonce: string; op: 'renew' }>
     | Readonly<{ id: string; nonce: string; op: 'release' }>
+    | Readonly<{ id: string; nonce: string; op: 'bind'; childPid: number }>
     | Readonly<{
         id: string;
         nonce: string;
@@ -65,58 +67,7 @@ type ControlRequest =
 type SupervisorStorage = ReservationStorage & LegacyLockStorage;
 type SupervisorStorageFactory = (bucket: string) => SupervisorStorage;
 
-/**
- * Provider-free child-process storage used only by Vitest's shell contract
- * harness. Production supervisor launches always use authenticated GCS.
- */
-class InMemorySupervisorStorage implements SupervisorStorage {
-    private readonly values = new Map<string, { generation: string; value: unknown }>();
-    private generation = 0;
-
-    async get(key: string): Promise<{ generation: string; value: unknown } | null> {
-        const value = this.values.get(key);
-        return value ? { ...value } : null;
-    }
-
-    async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<{ generation: string; value: unknown }> {
-        const current = this.values.get(key);
-        if (options.ifGenerationMatch === '0' ? current !== undefined : current?.generation !== options.ifGenerationMatch) {
-            throw new EpochError('GENERATION_PRECONDITION_FAILED');
-        }
-        const stored = { generation: String(++this.generation), value };
-        this.values.set(key, stored);
-        return { ...stored };
-    }
-
-    async delete(key: string, options: { ifGenerationMatch: string }): Promise<void> {
-        const current = this.values.get(key);
-        if (!current || current.generation !== options.ifGenerationMatch) {
-            throw new EpochError('GENERATION_PRECONDITION_FAILED');
-        }
-        this.values.delete(key);
-    }
-
-    async getRaw(key: string): Promise<{ generation: string; body: string } | null> {
-        const value = await this.get(key);
-        if (!value) return null;
-        if (typeof value.value !== 'string') epochFail('ADAPTER_RESPONSE_INVALID');
-        return { generation: value.generation, body: value.value };
-    }
-
-    async putRaw(key: string, body: string, options: { ifGenerationMatch: '0' | string }): Promise<{ generation: string; body: string }> {
-        const value = await this.put(key, body, options);
-        return { generation: value.generation, body };
-    }
-
-    async deleteRaw(key: string, options: { ifGenerationMatch: string }): Promise<void> {
-        await this.delete(key, options);
-    }
-}
-
 function supervisorStorageFactory(): SupervisorStorageFactory {
-    if (process.env.VITEST === 'true' && process.env.ANALYSIS_CAPACITY_IDENTITY_EPOCH_TEST_STORAGE === 'memory') {
-        return () => new InMemorySupervisorStorage();
-    }
     return bucket => createAuthenticatedGcsJournalStorage({ bucket });
 }
 
@@ -190,6 +141,12 @@ function parseRequest(line: string, channelNonce: string): ControlRequest {
         case 'release':
             if (!hasExactKeys(value, ['id', 'nonce', 'op'])) fail('ADAPTER_REQUEST_INVALID');
             return { id: value.id, nonce: value.nonce, op: 'release' };
+        case 'bind':
+            if (!hasExactKeys(value, ['childPid', 'id', 'nonce', 'op'])
+                || (typeof value.childPid !== 'number' && typeof value.childPid !== 'string')) fail('ADAPTER_REQUEST_INVALID');
+            const childPid = typeof value.childPid === 'number' ? value.childPid : Number(value.childPid);
+            if (!Number.isSafeInteger(childPid) || !PID.test(String(childPid))) fail('ADAPTER_REQUEST_INVALID');
+            return { id: value.id, nonce: value.nonce, op: 'bind', childPid };
         case 'adopt':
             if (!hasExactKeys(value, ['entryPoint', 'id', 'nonce', 'op', 'resources', 'role'])
                 || typeof value.entryPoint !== 'string'
@@ -207,6 +164,44 @@ function parseRequest(line: string, channelNonce: string): ControlRequest {
         default:
             fail('ADAPTER_REQUEST_INVALID');
     }
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+    if (process.platform === 'win32') {
+        try { process.kill(pid, signal); } catch { /* already gone */ }
+        return;
+    }
+    try { process.kill(-pid, signal); } catch { /* already gone */ }
+    try { process.kill(pid, signal); } catch { /* already gone */ }
+}
+
+function processGroupAlive(pid: number): boolean {
+    if (process.platform === 'win32') {
+        try { process.kill(pid, 0); return true; } catch { return false; }
+    }
+    try { process.kill(-pid, 0); return true; }
+    catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EPERM') return true;
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        try { process.kill(pid, 0); return true; }
+        catch { return false; }
+    }
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (!processGroupAlive(pid)) return true;
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
+    }
+    return !processGroupAlive(pid);
+}
+
+async function terminateBoundProcessGroup(pid: number, termGraceMs = 1_000, killGraceMs = 1_000): Promise<void> {
+    signalProcessGroup(pid, 'SIGTERM');
+    if (await waitForProcessGroupExit(pid, termGraceMs)) return;
+    signalProcessGroup(pid, 'SIGKILL');
+    if (!(await waitForProcessGroupExit(pid, killGraceMs))) fail('ADAPTER_TIMEOUT');
 }
 
 function equalResources(left: readonly string[], right: readonly string[]): boolean {
@@ -263,6 +258,7 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
     let released = false;
     let fatalError: EpochError | undefined;
     let fatalReported = false;
+    let boundChildPid: number | undefined;
     const channelNonce = randomBytes(32).toString('hex');
     const operationState = { tail: Promise.resolve() as Promise<unknown> };
     const reportFatal = (error: EpochError): void => {
@@ -307,6 +303,14 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
                         session = await renewExclusion(session);
                         return;
                     }
+                    if (currentRequest.op === 'bind') {
+                        if (boundChildPid !== undefined && boundChildPid !== currentRequest.childPid) {
+                            fail('CAPABILITY_BINDING_MISMATCH');
+                        }
+                        try { process.kill(currentRequest.childPid, 0); } catch { fail('LOCK_LOST'); }
+                        boundChildPid = currentRequest.childPid;
+                        return;
+                    }
                     if (currentRequest.op === 'adopt') {
                         const nested = deriveEntryPointResources({
                             entryPoint: currentRequest.entryPoint,
@@ -326,6 +330,8 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
                 });
                 const response = currentRequest.op === 'release'
                     ? 'RELEASED'
+                    : currentRequest.op === 'bind'
+                        ? 'BOUND'
                     : request.op === 'renew'
                         ? 'RENEWED'
                             : currentRequest.op === 'adopt'
@@ -356,7 +362,16 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
         clearInterval(heartbeat);
         try {
             await operationState.tail;
-            if (!released) await releaseExclusion(session);
+            // stdin is the launcher's authority pipe.  If it closes without
+            // an explicit release, the mapped detached child must be fenced
+            // before this supervisor releases the reservation; otherwise the
+            // child can continue mutating after the lease is gone.
+            let authorityTerminated = true;
+            if (!released && boundChildPid !== undefined) {
+                try { await terminateBoundProcessGroup(boundChildPid); }
+                catch { authorityTerminated = false; process.exitCode = 2; }
+            }
+            if (!released && authorityTerminated) await releaseExclusion(session);
         } catch {
             if (!released) process.exitCode = 2;
         }

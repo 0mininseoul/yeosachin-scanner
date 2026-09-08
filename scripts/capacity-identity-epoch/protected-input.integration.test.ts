@@ -50,7 +50,7 @@ async function runHeldOpenPipeCase(packet: string, endPacket: boolean, bootstrap
 }
 
 describe('inherited protected descriptor deadlines', () => {
-    it('accepts complete packet and bootstrap values over both inherited IPC channels', async () => {
+    it('rejects structurally incomplete service bodies over both inherited IPC channels', async () => {
         const packet = createFixturePacket();
         const scope = packet.providerScope;
         const bootstrap = {
@@ -60,15 +60,15 @@ describe('inherited protected descriptor deadlines', () => {
             ...scope,
             scopeDigest: canonicalDigest(scope),
             vercelToken: 'fixture-vercel-token',
-            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } },
+            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } }, zeroWorkEvidence: null,
         } as const;
         const result = await runHeldOpenPipeCase(JSON.stringify(packet), true, JSON.stringify(bootstrap), true);
         expect(result.code).toBe(2);
         expect(result.signal).toBeNull();
-        // Both descriptors were valid and fully delivered. The process got
-        // through protected admission and stopped only because the real
-        // post-bootstrap evidence collectors are intentionally absent.
-        expect(result.stderr).toBe('EVIDENCE_UNAVAILABLE\n');
+        // The inherited streams are complete, but service bodies are not a
+        // reviewed Cloud Run packet. Reject before any bootstrap/evidence
+        // construction rather than treating non-empty JSON as sufficient.
+        expect(result.stderr).toBe('PROTECTED_INPUT_UNAVAILABLE\n');
         expect(result.stdout).toBe('');
         expect(result.elapsedMs).toBeLessThan(PROTECTED_DEADLINE_MS);
     }, 8_000);
@@ -129,7 +129,7 @@ describe('inherited protected descriptor deadlines', () => {
             ...scope,
             scopeDigest: canonicalDigest(scope),
             vercelToken: 'fixture-vercel-token',
-            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } },
+            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } }, zeroWorkEvidence: null,
         } as const;
         const result = await runHeldOpenPipeCase(JSON.stringify(packet), true, JSON.stringify(bootstrap), true, 'apply');
         expect(result.code).toBe(2);

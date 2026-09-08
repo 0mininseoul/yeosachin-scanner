@@ -63,12 +63,14 @@ export type VercelAdapterOptions = Readonly<{
 export function createVercelProtectedTransport(options: Readonly<{
     tokenProvider: ProtectedTokenProvider;
     transport?: ProtectedTransport;
+    additionalAllowedHosts?: ReadonlySet<string>;
     maxResponseBytes?: number;
     timeoutMs?: number;
 }>): AuthenticatedProtectedTransport {
     return new AuthenticatedProtectedTransport({
         transport: options.transport ?? new FetchProtectedTransport(options.maxResponseBytes),
         tokenProvider: options.tokenProvider,
+        additionalAllowedHosts: options.additionalAllowedHosts,
         timeoutMs: options.timeoutMs,
         maxResponseBytes: options.maxResponseBytes,
     });

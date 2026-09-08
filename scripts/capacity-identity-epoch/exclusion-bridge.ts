@@ -102,7 +102,12 @@ export function deriveEntryPointResources(input: EntryPointResourcePlan): readon
     switch (input.entryPoint) {
         case 'epoch': requireKinds(input.resources, ['service', 'queue', 'scheduler', 'iam']); break;
         case 'role-deployer': requireKinds(input.resources, ['service']); break;
-        case 'capacity-queue': requireKinds(input.resources, ['service', 'queue']); break;
+        // The capacity-owned generic queue command may intentionally mutate
+        // only its reviewed queue target.  Role binding remains mandatory;
+        // requiring a service here would make the documented queue-only mode
+        // diverge from the IPC selector and tempt callers to add an unrelated
+        // service merely to satisfy the bridge.
+        case 'capacity-queue': requireKinds(input.resources, ['queue']); break;
         case 'preflight-maintenance': requireKinds(input.resources, ['service', 'scheduler', 'iam']); break;
         case 'paid-maintenance': requireKinds(input.resources, ['service', 'scheduler', 'iam', 'retention']); break;
     }

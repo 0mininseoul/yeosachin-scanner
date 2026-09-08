@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createFixturePacket } from './fixtures';
+import { createFixturePacket, FIXTURE_ZERO_WORK_SELECTOR_DIGESTS } from './fixtures';
 import { canonicalDigest, EpochError, type CapacityEpochPacket, type EpochHeader, type ProtectedIamBinding, type ProtectedQueueInput, type ProtectedRuntimeInput, type ProtectedSchedulerInput, type Role } from './contracts';
 import { EpochJournal } from './journal';
 import { GcsJournalStorage, type GcsHttpRequest, type GcsHttpResponse, type GcsTransport } from './gcs';
@@ -10,9 +10,11 @@ import { WorkPlaneClient, type PauseProvenance } from './work-planes';
 import { VercelAdapter } from './vercel';
 import { EpochCoordinator, LiveEpochControlPlane } from './coordinator';
 import { issueCoordinatorCapability } from './packet';
+import { buildLiveBootstrap } from './bootstrap';
+import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './live-evidence';
 import { PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION, PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
-class FakeGcsTransport implements GcsTransport {
+export class FakeGcsTransport implements GcsTransport {
     readonly requests: GcsHttpRequest[] = [];
     readonly writes: GcsHttpRequest[] = [];
     private readonly objects = new Map<string, { generation: string; value: unknown }>();
@@ -28,7 +30,7 @@ class FakeGcsTransport implements GcsTransport {
             const key = query.get('name');
             const precondition = query.get('ifGenerationMatch');
             if (!key || !precondition || request.body === undefined) return this.response(request, 400, {});
-            if (this.failJournalSequence !== undefined && key.includes(`/epoch-journal/`) && key.includes(`/${String(this.failJournalSequence).padStart(8, '0')}/`)) {
+            if (this.failJournalSequence !== undefined && key.includes(`/epoch-journal/`) && key.includes(`/${String(this.failJournalSequence).padStart(8, '0')}.json`)) {
                 this.failJournalSequence = undefined;
                 throw new EpochError('ADAPTER_TIMEOUT');
             }
@@ -149,6 +151,52 @@ function runtimeSpec(runtime: ProtectedRuntimeInput, image: string, revision: st
     };
 }
 
+function reviewedBodies(packet: CapacityEpochPacket): Record<Role, Readonly<Record<string, unknown>>> {
+    return Object.fromEntries((['preflight', 'paid'] as const).map(role => {
+        const runtime = packet.protectedInputs.desired.runtime[role];
+        const revision = revisionName(packet, role);
+        const image = `asia-northeast3-docker.pkg.dev/${runtime.project}/workers/${role}@sha256:${'b'.repeat(64)}`;
+        const template = runtimeSpec(runtime, image, revision).template as Record<string, unknown>;
+        const templateSpec = template.spec as Record<string, unknown>;
+        return [role, {
+            metadata: { name: runtime.service, generation: 1, resourceVersion: 'rv-1', labels: {}, annotations: {} },
+            spec: {
+                template: {
+                    metadata: {
+                        name: revision, labels: {},
+                        annotations: {
+                            'autoscaling.knative.dev/maxScale': String(runtime.settings.maxInstances),
+                            'capacity.identity-epoch/source-sha': runtime.sourceSha,
+                            'capacity.identity-epoch/build-digest': packet.desiredManifest.source[role].desiredBuildDigest,
+                            'capacity.identity-epoch/image-digest': canonicalDigest({ image }),
+                        },
+                    },
+                    spec: templateSpec,
+                },
+                traffic: [{ revisionName: packet.oldManifest.source[role].oldRevision, percent: 100, tag: null }, { revisionName: revision, percent: 0, tag: null }],
+            },
+        }];
+    })) as unknown as Record<Role, Readonly<Record<string, unknown>>>;
+}
+
+function reviewedSources(packet: CapacityEpochPacket): LiveZeroWorkSources {
+    const project = packet.protectedInputs.desired.runtime.preflight.project;
+    const queues = [packet.protectedInputs.desired.queues.preflight.resource, packet.protectedInputs.desired.queues.paid.resource] as const;
+    const base = {
+        kind: 'supabase' as const, origin: 'https://supabase.example.invalid/', lookbackMs: 60_000,
+    };
+    const supabase = (selector: Omit<SupabaseLedgerSource, 'lookbackMs' | 'selectorDigest' | 'kind' | 'origin'>): SupabaseLedgerSource => {
+        const selected = { ...base, ...selector };
+        return { ...selected, selectorDigest: evidenceSelectorDigest({ ...selected, selectorDigest: '0'.repeat(64) } as never) };
+    };
+    return {
+        providerLedger: supabase({ source: 'supabase:public.analysis_provider_cost_ledger', table: 'analysis_provider_cost_ledger', columns: ['run_id', 'request_id', 'operation_key', 'status', 'created_at'], eventTimeColumn: 'created_at' }),
+        billingLedger: supabase({ source: 'supabase:public.analysis_revenue_cost_operations', table: 'analysis_revenue_cost_operations', columns: ['request_id', 'owner_kind', 'owner_key_hash', 'operation_kind', 'status', 'created_at'], eventTimeColumn: 'created_at' }),
+        taskAudit: { kind: 'cloud-logging' as const, source: 'fixture-task-audit', project, logName: `projects/${project}/logs/fixture-task-audit`, resourceType: 'cloud_tasks_queue' as const, correlation: 'fixture-task-audit', queueResources: queues, sinkName: 'fixture-task-audit-sink', bucketResource: `projects/${project}/locations/global/buckets/fixture-task-audit`, lookbackMs: 60_000, selectorDigest: FIXTURE_ZERO_WORK_SELECTOR_DIGESTS.taskAudit },
+        receiverLog: supabase({ source: 'supabase:public.analysis_step_events', table: 'analysis_step_events', columns: ['id', 'request_id', 'step', 'event_type', 'created_at'], eventTimeColumn: 'created_at' }),
+    };
+}
+
 function serviceWire(runtime: ProtectedRuntimeInput, revision: string, image: string, generation: number, traffic: readonly { revisionName: string; percent: number }[]): Record<string, unknown> {
     const spec = runtimeSpec(runtime, image, revision);
     const wireTraffic = traffic.map(entry => ({ revisionName: entry.revisionName, percent: entry.percent, tag: null }));
@@ -175,13 +223,19 @@ function queueWire(state: QueueState): Record<string, unknown> {
     return {
         name: state.input.resource, state: state.state,
         rateLimits: { maxDispatchesPerSecond: state.input.configuration.maxDispatchesPerSecond, maxConcurrentDispatches: state.input.configuration.maxConcurrentDispatches },
+        stackdriverLoggingConfig: { samplingRatio: 1 },
         ...(state.httpTarget === null ? {} : { httpTarget: state.httpTarget }),
     };
 }
 
 function schedulerWire(state: SchedulerState): Record<string, unknown> {
+    // Keep the fixture's provider clock and scheduler update-time on the
+    // same timeline.  Live WorkPlaneClient treats pause provenance as source
+    // evidence and must reject an observation whose trusted clock predates
+    // the provider update event.
+    const updateTime = new Date(state.input.pauseEpochMs).toISOString();
     return {
-        name: state.input.resource, state: state.state, lastAttemptTime: null, userUpdateTime: '2026-09-07T00:00:01.000Z', schedule: state.input.configuration.schedule,
+        name: state.input.resource, state: state.state, lastAttemptTime: null, updateTime, userUpdateTime: updateTime, schedule: state.input.configuration.schedule,
         httpTarget: { uri: state.input.target.uri, httpMethod: state.input.configuration.method, oidcToken: { serviceAccountEmail: state.identity, audience: state.input.target.audience } },
     };
 }
@@ -225,10 +279,13 @@ function flattenPolicy(value: Record<string, unknown>): ProtectedIamBinding[] {
     return result;
 }
 
-class FakeProvider implements ProtectedTransport {
+export class FakeProvider implements ProtectedTransport {
     readonly requests: ProtectedHttpRequest[] = [];
     readonly tasksCreated: string[] = [];
     readonly receiverProbes: ProtectedHttpRequest[] = [];
+    /** The fake receiver exposes request-log visibility without treating it as forbidden work evidence. */
+    readonly receiverRequestLogs: readonly Readonly<{ method: string; requestUrl: string }>[] = [];
+    readonly supabaseRows = new Map<string, readonly Record<string, unknown>[]>();
     readonly services = new Map<string, ServiceState>();
     readonly revisions = new Map<string, Record<string, unknown>>();
     readonly queues = new Map<string, QueueState>();
@@ -243,6 +300,9 @@ class FakeProvider implements ProtectedTransport {
     interruptAfter: 'iam' | 'scheduler' | 'queue' | undefined;
     receiverStatus = 400;
     receiverCode = 'INVALID_REQUEST';
+    injectForbiddenStructuredEventOnProbe = false;
+    watermarkMs = 1_000_000;
+    lastSupabaseDateMs = 0;
     readonly packet: CapacityEpochPacket;
 
     constructor(packet: CapacityEpochPacket) {
@@ -344,6 +404,10 @@ class FakeProvider implements ProtectedTransport {
         this.requests.push(request);
         const url = new URL(request.url);
         if (url.hostname === 'api.vercel.com') return this.vercel(request, url);
+        if (url.hostname === 'cloudbuild.googleapis.com') return this.cloudBuild(request, url);
+        if (url.hostname === 'logging.googleapis.com') return this.logging(request, url);
+        if (url.hostname === 'supabase.example.invalid') return this.supabase(request, url);
+        if (url.hostname === 'public.example.invalid' || url.hostname === 'desired-fixture.vercel.app') return this.readinessEndpoint(request, url);
         if (url.hostname === 'preflight.example.com' || url.hostname === 'paid.example.com') return this.receiver(request, url);
         if (url.hostname === 'cloudtasks.googleapis.com') return this.tasks(request, url);
         if (url.hostname === 'cloudscheduler.googleapis.com') return this.scheduler(request, url);
@@ -353,6 +417,10 @@ class FakeProvider implements ProtectedTransport {
 
     private receiver(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
         this.receiverProbes.push(request);
+        (this.receiverRequestLogs as Array<Readonly<{ method: string; requestUrl: string }>>).push({ method: request.method, requestUrl: url.toString() });
+        if (this.injectForbiddenStructuredEventOnProbe) {
+            this.supabaseRows.set('analysis_step_events', [{ id: 'fixture-event', request_id: 'fixture-request', step: 'started', event_type: 'started', created_at: new Date(this.watermarkMs).toISOString() }]);
+        }
         if (!/^\/api\/analysis\/(?:preflight\/worker|v2\/worker)$/.test(url.pathname)) return this.json(request, 404, {});
         if (request.method !== 'POST' || request.body !== '{') return this.json(request, this.receiverStatus, { code: this.receiverCode });
         return this.json(request, this.receiverStatus, { code: this.receiverCode });
@@ -493,8 +561,98 @@ class FakeProvider implements ProtectedTransport {
         throw new Error('unexpected fake vercel request');
     }
 
-    private json(request: ProtectedHttpRequest, status: number, value: unknown): ProtectedHttpResponse {
-        return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(value), url: request.url };
+    private readinessEndpoint(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
+        if (url.pathname !== '/api/analysis/capacity/readiness') return this.json(request, 404, {});
+        const phase = url.hostname === 'desired-fixture.vercel.app' || this.aliasDeployment === 'dpl-desired' ? 'desired' : 'old';
+        return this.json(request, 200, readiness(this.packet, phase));
+    }
+
+    private cloudBuild(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
+        if (request.method !== 'GET' || !url.pathname.endsWith('/builds')) return this.json(request, 404, {});
+        const project = this.packet.protectedInputs.desired.runtime.preflight.project;
+        const image = (role: Role) => `asia-northeast3-docker.pkg.dev/${project}/workers/${role}`;
+        const build = (phase: 'old' | 'desired') => {
+            const input = this.packet.protectedInputs[phase].build;
+            const digest = phase === 'old' ? 'a'.repeat(64) : 'b'.repeat(64);
+            return {
+                id: `fixture-${phase}`, status: 'SUCCESS', serviceAccount: input.identity.identity,
+                sourceProvenance: { resolvedRepoSource: { repoName: input.sourceContext, commitSha: input.sourceSha } },
+                substitutions: { _NODE_ENV: 'production' },
+                results: { images: (['preflight', 'paid'] as const).map(role => ({ name: image(role), digest: `sha256:${digest}` })) },
+            };
+        };
+        return this.json(request, 200, { builds: [build('old'), build('desired')] });
+    }
+
+    private loggingSources(): Array<Record<string, unknown>> {
+        const project = this.packet.protectedInputs.desired.runtime.preflight.project;
+        const queues = [this.packet.protectedInputs.desired.queues.preflight.resource, this.packet.protectedInputs.desired.queues.paid.resource];
+        return [
+            { source: 'fixture-task-audit', project, logName: `projects/${project}/logs/fixture-task-audit`, resourceType: 'cloud_tasks_queue', correlation: 'fixture-task-audit', queueResources: queues, sinkName: 'fixture-task-audit-sink', bucketResource: `projects/${project}/locations/global/buckets/fixture-task-audit` },
+        ];
+    }
+
+    private loggingFilter(source: Record<string, unknown>): string {
+        if (source.resourceType === 'cloud_tasks_queue') {
+            const selectors = (source.queueResources as string[]).map(resource => {
+                const match = /^projects\/([^/]+)\/locations\/([^/]+)\/queues\/([^/]+)$/.exec(resource)!;
+                return `(resource.labels.project_id="${match[1]}" AND resource.labels.location="${match[2]}" AND resource.labels.queue_id="${match[3]}")`;
+            });
+            return `logName="${source.logName}" AND resource.type="cloud_tasks_queue" AND jsonPayload."@type"="type.googleapis.com/google.cloud.tasks.logging.v1.TaskActivityLog" AND (${selectors.sort().join(' OR ')})`;
+        }
+        return `logName="${source.logName}" AND resource.type="cloud_run_revision" AND httpRequest.requestUrl=(${(source.receiverRoutes as string[]).map(route => `"${route}"`).join(' OR ')})`;
+    }
+
+    private loggingSinkDestination(source: Record<string, unknown>): string {
+        return `logging.googleapis.com/${source.bucketResource as string}`;
+    }
+
+    private logging(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
+        const sources = this.loggingSources();
+        if (request.method === 'GET' && url.pathname.endsWith('/sinks')) {
+            return this.json(request, 200, { sinks: sources.map(source => ({ name: source.sinkName, destination: this.loggingSinkDestination(source), filter: this.loggingFilter(source) })) });
+        }
+        if (request.method === 'GET' && url.pathname.endsWith('/exclusions')) return this.json(request, 200, { exclusions: [] });
+        if (request.method === 'GET' && url.pathname.includes('/buckets/')) return this.json(request, 200, { retentionDays: 30 });
+        if (request.method === 'POST' && url.pathname === '/v2/entries:list') {
+            const body = JSON.parse(request.body ?? '{}') as { filter?: string };
+            const source = sources.find(candidate => body.filter?.includes(`logName="${candidate.logName}"`));
+            if (!source) return this.json(request, 200, { entries: [] });
+            if (body.filter?.includes('receiveTimestamp >=')) {
+                const stamp = new Date(this.watermarkMs).toISOString();
+                return this.json(request, 200, { entries: [{ timestamp: stamp, receiveTimestamp: stamp, jsonPayload: { '@type': 'type.googleapis.com/google.cloud.tasks.logging.v1.TaskActivityLog', taskCreationLog: { status: 'OK' } } }] });
+            }
+            return this.json(request, 200, { entries: [] });
+        }
+        return this.json(request, 404, {});
+    }
+
+    private supabase(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
+        if (request.method !== 'GET' || !url.pathname.startsWith('/rest/v1/')) return this.json(request, 404, {});
+        if (request.headers.apikey !== 'fixture-supabase-api-key') return this.json(request, 401, {});
+        const table = url.pathname.slice('/rest/v1/'.length);
+        if (!['analysis_provider_cost_ledger', 'analysis_revenue_cost_operations', 'analysis_step_events'].includes(table)) return this.json(request, 404, {});
+        // HTTP Date is second precision. Round upward so the source boundary
+        // is never older than the frozen coordinator window while the
+        // injected clock advances in deterministic 100ms ticks.
+        this.lastSupabaseDateMs = Math.ceil(this.watermarkMs / 1_000) * 1_000;
+        const date = new Date(this.lastSupabaseDateMs).toUTCString();
+        const bounds = url.searchParams.getAll('created_at');
+        const lower = bounds.find(value => value.startsWith('gte.'))?.slice(4);
+        const upper = bounds.find(value => value.startsWith('lte.'))?.slice(4);
+        const lowerMs = lower === undefined ? Number.NEGATIVE_INFINITY : Date.parse(lower);
+        const upperMs = upper === undefined ? Number.POSITIVE_INFINITY : Date.parse(upper);
+        const rawRows = this.supabaseRows.get(table) ?? [];
+        const rows = rawRows.filter(row => {
+            const timestamp = Date.parse(String(row.created_at));
+            return Number.isFinite(timestamp) && timestamp >= lowerMs && timestamp <= upperMs;
+        });
+        const range = rows.length === 0 ? `*/0` : `0-${rows.length - 1}/${rows.length}`;
+        return this.json(request, 200, rows, { 'content-range': range, date });
+    }
+
+    private json(request: ProtectedHttpRequest, status: number, value: unknown, headers: Record<string, string> = {}): ProtectedHttpResponse {
+        return { status, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value), url: request.url };
     }
 
     private serviceResource(runtime: ProtectedRuntimeInput): string {
@@ -627,6 +785,153 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe('provider-free live adapter vertical', () => {
+    it('builds the default production graph with concrete collectors and reaches VERIFIED through fake transports', async () => {
+        const packet = createFixturePacket();
+        const provider = new FakeProvider(packet);
+        const gcs = new FakeGcsTransport();
+        // The scheduler quiescence contract requires the trusted clock to be
+        // at least timeout+grace after the provider's pause update event.
+        let nowMs = 200_000;
+        const now = () => {
+            nowMs += 100;
+            nowMs = Math.max(nowMs, provider.lastSupabaseDateMs);
+            provider.watermarkMs = nowMs;
+            return nowMs;
+        };
+        const googleTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-google-token', timeoutMs: 2_000 });
+        const vercelTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-vercel-token', timeoutMs: 2_000 });
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('default-live-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            supabaseServiceRoleBearer: 'fixture-supabase-service-role', supabaseApiKey: 'fixture-supabase-api-key',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: reviewedSources(packet),
+        } as const;
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => {
+            const request: ProtectedHttpRequest = {
+                method: (init?.method ?? 'GET') as ProtectedHttpRequest['method'],
+                url: String(input),
+                headers: Object.fromEntries(new Headers(init?.headers).entries()),
+                ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+            };
+            const response = await provider.request(request);
+            const fetched = new Response(response.body, { status: response.status, headers: response.headers });
+            Object.defineProperty(fetched, 'url', { value: request.url });
+            return fetched;
+        };
+        try {
+            const live = await buildLiveBootstrap(packet, descriptor, {
+                storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+                now, resolveRetainedHeader: false, googleTransport, vercelTransport,
+                vercelPublicTransport: provider, receiverTransport: provider,
+                receiverTokenProvider: async () => 'fixture-receiver-token',
+            });
+            expect(live.missingEvidence).toEqual([]);
+            const result = await live.coordinator.runThroughVerified();
+            expect(result.state).toBe('VERIFIED');
+            expect(provider.requests.some(request => new URL(request.url).hostname === 'cloudbuild.googleapis.com')).toBe(true);
+            expect(provider.requests.some(request => new URL(request.url).hostname === 'logging.googleapis.com')).toBe(true);
+            expect(provider.receiverRequestLogs).toHaveLength(2);
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('fails protected bootstrap before reservation or provider access when the private Supabase auth path is absent', async () => {
+        const packet = createFixturePacket();
+        const provider = new FakeProvider(packet);
+        const gcs = new FakeGcsTransport();
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('missing-supabase-auth-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: reviewedSources(packet),
+        } as const;
+        await expect(buildLiveBootstrap(packet, descriptor, {
+            storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+            googleTransport: new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-google-token', timeoutMs: 2_000 }),
+        })).rejects.toThrow('EVIDENCE_UNAVAILABLE');
+        expect(gcs.requests).toHaveLength(0);
+        expect(provider.requests).toHaveLength(0);
+    });
+
+    it('constructs the host-bound Supabase transport from the inherited descriptor credentials', async () => {
+        const packet = createFixturePacket();
+        const provider = new FakeProvider(packet);
+        const gcs = new FakeGcsTransport();
+        let nowMs = 200_000;
+        const now = () => {
+            nowMs += 100;
+            nowMs = Math.max(nowMs, provider.lastSupabaseDateMs);
+            provider.watermarkMs = nowMs;
+            return nowMs;
+        };
+        const googleTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-google-token', timeoutMs: 2_000 });
+        const vercelTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-vercel-token', timeoutMs: 2_000 });
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('descriptor-supabase-auth-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            supabaseServiceRoleBearer: 'fixture-supabase-service-role', supabaseApiKey: 'fixture-supabase-api-key',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: reviewedSources(packet),
+        } as const;
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (input, init) => {
+            const request: ProtectedHttpRequest = {
+                method: (init?.method ?? 'GET') as ProtectedHttpRequest['method'],
+                url: String(input),
+                headers: Object.fromEntries(new Headers(init?.headers).entries()),
+                ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+            };
+            const response = await provider.request(request);
+            const fetched = new Response(response.body, { status: response.status, headers: response.headers });
+            Object.defineProperty(fetched, 'url', { value: request.url });
+            return fetched;
+        };
+        try {
+            const live = await buildLiveBootstrap(packet, descriptor, {
+                storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+                now, resolveRetainedHeader: false, googleTransport, vercelTransport,
+                vercelPublicTransport: provider, receiverTransport: provider, receiverTokenProvider: async () => 'fixture-receiver-token',
+            });
+            const result = await live.coordinator.runThroughVerified();
+            expect(result.state).toBe('VERIFIED');
+            const supabaseRequests = provider.requests.filter(request => new URL(request.url).hostname === 'supabase.example.invalid');
+            expect(supabaseRequests.length).toBeGreaterThan(0);
+            expect(supabaseRequests.every(request => request.headers.authorization === 'Bearer fixture-supabase-service-role')) .toBe(true);
+            expect(supabaseRequests.every(request => request.headers.apikey === 'fixture-supabase-api-key')).toBe(true);
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('rejects a structured receiver-work event while ignoring the two expected malformed-probe request logs', async () => {
+        const packet = createFixturePacket();
+        const provider = new FakeProvider(packet);
+        provider.injectForbiddenStructuredEventOnProbe = true;
+        const gcs = new FakeGcsTransport();
+        let nowMs = 200_000;
+        const now = () => {
+            nowMs += 100;
+            nowMs = Math.max(nowMs, provider.lastSupabaseDateMs);
+            provider.watermarkMs = nowMs;
+            return nowMs;
+        };
+        const googleTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-google-token', timeoutMs: 2_000 });
+        const supabaseTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-supabase-token', timeoutMs: 2_000, additionalAllowedHosts: new Set(['supabase.example.invalid']) });
+        const vercelTransport = new AuthenticatedProtectedTransport({ transport: provider, tokenProvider: async () => 'fixture-vercel-token', timeoutMs: 2_000 });
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('structured-event-owner'), lockNamespace: packet.lockNamespace,
+            ...packet.providerScope, scopeDigest: canonicalDigest(packet.providerScope), vercelToken: 'fixture-vercel-token',
+            serviceBodies: reviewedBodies(packet), zeroWorkEvidence: reviewedSources(packet),
+        } as const;
+        const live = await buildLiveBootstrap(packet, descriptor, {
+            storage: new GcsJournalStorage({ bucket: packet.providerScope.bucket, transport: gcs, tokenProvider: async () => 'fixture-gcs-token', timeoutMs: 2_000 }),
+            now, resolveRetainedHeader: false, googleTransport, supabaseTransport, supabaseApiKey: 'fixture-supabase-api-key', vercelTransport,
+            vercelPublicTransport: provider, receiverTransport: provider, receiverTokenProvider: async () => 'fixture-receiver-token',
+        });
+        await expect(live.coordinator.runThroughVerified()).rejects.toThrow('ZERO_WORK_INCOMPLETE');
+        expect(provider.receiverRequestLogs).toHaveLength(2);
+    });
+
     it('runs real adapters through VERIFIED with renewed GCS generations and zero-work evidence', async () => {
         const harness = createHarness();
         const result = await harness.coordinator.runThroughVerified();
@@ -645,8 +950,11 @@ describe('provider-free live adapter vertical', () => {
             role: 'preflight', revision: 'preflight-old-revision', sourceSha: 'c'.repeat(40), metadataDigest: harness.packet.protectedObservations.old.source.preflight.metadataDigest,
         });
         await expect(harness.coordinator.runThroughVerified()).rejects.toThrow('SOURCE_INVALID');
-        expect(harness.gcs.writes).toHaveLength(0);
-        expect(harness.gcs.requests.some(request => request.method === 'POST')).toBe(false);
+        // The common reservation is intentionally acquired before admission,
+        // so a rejected cold admission may write reservation objects; it must
+        // not initialize the epoch journal/header or capture a baseline.
+        expect(harness.gcs.writes.some(request => new URL(request.url).searchParams.get('name')?.includes('/epoch-journal/'))).toBe(false);
+        expect(harness.gcs.requests.some(request => request.method === 'POST' && new URL(request.url).searchParams.get('name')?.includes('/epoch-journal/'))).toBe(false);
     });
 
     it('rejects independent evidence perturbations instead of accepting packet constants', async () => {
@@ -655,7 +963,7 @@ describe('provider-free live adapter vertical', () => {
         const oldBuild = sourceHarness.provider.buildRecords.get(oldImage)!;
         sourceHarness.provider.buildRecords.set(oldImage, { ...oldBuild, buildDigest: 'd'.repeat(64) });
         await expect(sourceHarness.coordinator.runThroughVerified()).rejects.toThrow('RUNTIME_MISMATCH');
-        expect(sourceHarness.gcs.writes).toHaveLength(0);
+        expect(sourceHarness.gcs.writes.some(request => new URL(request.url).searchParams.get('name')?.includes('/epoch-journal/'))).toBe(false);
 
         const evidenceHarness = createHarness();
         const providerLedger = evidenceHarness.packet.protectedObservations.desired.zeroWorkSources.providerLedger.source;
@@ -666,6 +974,15 @@ describe('provider-free live adapter vertical', () => {
         const probeHarness = createHarness();
         probeHarness.provider.receiverStatus = 422;
         await expect(probeHarness.coordinator.runThroughVerified()).rejects.toThrow('PROBE_FAILED');
+    });
+
+    it('proves the reviewed body image against Cloud Build before the first Cloud Run stage write', async () => {
+        const harness = createHarness();
+        const desiredImage = [...harness.provider.buildRecords.values()].find(record => record.revision.includes('epoch'))!.image;
+        const desiredBuild = harness.provider.buildRecords.get(desiredImage)!;
+        harness.provider.buildRecords.set(desiredImage, { ...desiredBuild, buildDigest: 'd'.repeat(64) });
+        await expect(harness.coordinator.runThroughVerified()).rejects.toThrow('SOURCE_INVALID');
+        expect(harness.provider.requests.some(request => request.method === 'PUT' && new URL(request.url).hostname.endsWith('-run.googleapis.com'))).toBe(false);
     });
 
     it('recovers a real IAM submutation with a fresh coordinator and owner', async () => {
@@ -690,7 +1007,8 @@ describe('provider-free live adapter vertical', () => {
 
     it('recovers retained target mutations after the INVOKERS_ROTATED append fails', async () => {
         const harness = createHarness({ failAppendSequence: 5 });
-        await expect(harness.coordinator.runThroughVerified()).rejects.toThrow('ADAPTER_TIMEOUT');
+        const run = harness.coordinator.runThroughVerified();
+        await expect(run).rejects.toThrow('ADAPTER_TIMEOUT');
         const afterCrash = await harness.journal.readValidatedState(await harness.journal.acquire(canonicalDigest('live-vertical-owner')));
         expect(afterCrash.state).toBe('QUEUES_ALIGNED');
         expect([...harness.provider.schedulers.values()].some(item => item.identity.includes('-desired@'))).toBe(true);

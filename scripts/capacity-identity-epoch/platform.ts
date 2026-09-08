@@ -34,6 +34,7 @@ const CONTROL_PLANE_HOSTS = new Set([
     'cloudscheduler.googleapis.com',
     'cloudtasks.googleapis.com',
     'iam.googleapis.com',
+    'logging.googleapis.com',
     'run.googleapis.com',
 ]);
 
@@ -163,6 +164,8 @@ export function createGoogleProtectedTransport(options: Readonly<{
 export type AuthenticatedProtectedTransportOptions = Readonly<{
     transport: ProtectedTransport;
     tokenProvider: ProtectedTokenProvider;
+    /** Exact non-control-plane hosts for a reviewed primary-source adapter. */
+    additionalAllowedHosts?: ReadonlySet<string>;
     timeoutMs?: number;
     maxResponseBytes?: number;
 }>;
@@ -172,6 +175,7 @@ export class AuthenticatedProtectedTransport {
     private readonly transport: ProtectedTransport;
     private readonly tokenProvider: ProtectedTokenProvider;
     private readonly timeoutMs: number;
+    private readonly additionalAllowedHosts: ReadonlySet<string>;
     readonly maxResponseBytes: number;
 
     constructor(options: AuthenticatedProtectedTransportOptions) {
@@ -183,6 +187,7 @@ export class AuthenticatedProtectedTransport {
         }
         this.transport = options.transport;
         this.tokenProvider = options.tokenProvider;
+        this.additionalAllowedHosts = options.additionalAllowedHosts ?? new Set();
         this.timeoutMs = timeoutMs;
         this.maxResponseBytes = maxResponseBytes;
     }
@@ -193,8 +198,10 @@ export class AuthenticatedProtectedTransport {
         allowedHosts: ReadonlySet<string>;
         allowedPath: (path: string) => boolean;
         allowedMethods?: readonly ProtectedHttpMethod[];
-        allowedQueryKeys?: readonly string[];
-        body?: string;
+    allowedQueryKeys?: readonly string[];
+    /** Additional bounded request headers required by an exact primary-source API. */
+    additionalHeaders?: Readonly<Record<string, string>>;
+    body?: string;
         acceptedStatuses?: readonly number[];
         /** Runs after token acquisition and immediately before dispatch. */
         beforeDispatch?: () => Promise<void>;
@@ -203,6 +210,13 @@ export class AuthenticatedProtectedTransport {
         if (options.allowedMethods === undefined || !options.allowedMethods.includes(options.method)) fail('ADAPTER_NOT_ALLOWED');
         if (options.body !== undefined) {
             if (typeof options.body !== 'string' || Buffer.byteLength(options.body, 'utf8') > this.maxResponseBytes) {
+                fail('ADAPTER_REQUEST_INVALID');
+            }
+        }
+        const additionalHeaders = options.additionalHeaders ?? {};
+        for (const [name, value] of Object.entries(additionalHeaders)) {
+            if (!/^[A-Za-z0-9-]{1,64}$/.test(name) || typeof value !== 'string' || value.length > 4096
+                || /[\u0000-\u001f\u007f]/.test(value) || name.toLowerCase() === 'authorization') {
                 fail('ADAPTER_REQUEST_INVALID');
             }
         }
@@ -220,6 +234,7 @@ export class AuthenticatedProtectedTransport {
             headers: {
                 authorization: `Bearer ${token}`,
                 accept: 'application/json',
+                ...additionalHeaders,
                 ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
             },
             ...(options.body === undefined ? {} : { body: options.body }),
@@ -257,6 +272,7 @@ export class AuthenticatedProtectedTransport {
         allowedPath: (path: string) => boolean;
         allowedMethods?: readonly ProtectedHttpMethod[];
         allowedQueryKeys?: readonly string[];
+        additionalHeaders?: Readonly<Record<string, string>>;
         body?: unknown;
         acceptedStatuses?: readonly number[];
         beforeDispatch?: () => Promise<void>;
@@ -269,6 +285,7 @@ export class AuthenticatedProtectedTransport {
             allowedPath: options.allowedPath,
             ...(options.allowedMethods === undefined ? {} : { allowedMethods: options.allowedMethods }),
             ...(options.allowedQueryKeys === undefined ? {} : { allowedQueryKeys: options.allowedQueryKeys }),
+            ...(options.additionalHeaders === undefined ? {} : { additionalHeaders: options.additionalHeaders }),
             ...(body === undefined ? {} : { body }),
             ...(options.acceptedStatuses === undefined ? {} : { acceptedStatuses: options.acceptedStatuses }),
             ...(options.beforeDispatch === undefined ? {} : { beforeDispatch: options.beforeDispatch }),
@@ -285,7 +302,7 @@ export class AuthenticatedProtectedTransport {
         }
         if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash
             || !allowedHosts.has(url.hostname)
-            || (!CONTROL_PLANE_HOSTS.has(url.hostname) && !/^[a-z0-9-]+-run\.googleapis\.com$/.test(url.hostname))
+            || (!CONTROL_PLANE_HOSTS.has(url.hostname) && !this.additionalAllowedHosts.has(url.hostname) && !/^[a-z0-9-]+-run\.googleapis\.com$/.test(url.hostname))
             || !allowedPath(url.pathname)) fail('ADAPTER_NOT_ALLOWED');
         if (allowedQueryKeys === undefined) fail('ADAPTER_NOT_ALLOWED');
         const actual = [...url.searchParams.keys()].sort();
@@ -326,6 +343,25 @@ export type ReceiverTokenProvider = (input: Readonly<{
     audience: string;
     callerIdentity: string;
 }>) => Promise<string>;
+
+/** Mint a real Google ID token for the reviewed receiver audience. */
+export function createGoogleReceiverTokenProvider(options: Readonly<{ auth?: GoogleAuth }> = {}): ReceiverTokenProvider {
+    const auth = options.auth ?? new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+    return async ({ audience }) => {
+        let parsed: URL;
+        try { parsed = new URL(audience); } catch { fail('ADAPTER_REQUEST_INVALID'); }
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.pathname !== '/' || parsed.search || parsed.hash) fail('ADAPTER_REQUEST_INVALID');
+        try {
+            const client = await auth.getIdTokenClient(parsed.origin);
+            const token = await client.idTokenProvider.fetchIdToken(parsed.origin);
+            assertBoundedString(token, 8192);
+            return token;
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('ADAPTER_REQUEST_INVALID');
+        }
+    };
+}
 
 /**
  * A receiver probe authority is deliberately opaque.  The packet-bound

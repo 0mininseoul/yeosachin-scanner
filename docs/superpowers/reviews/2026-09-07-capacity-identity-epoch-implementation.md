@@ -37,7 +37,7 @@ Focused epoch verification passed:
 
 ```text
 npm run test:identity-epoch -- --reporter=dot
-20 test files, 211 tests passed
+22 test files, 247 tests passed
 npx tsc --noEmit
 passed
 ```
@@ -48,6 +48,11 @@ The complete actual-adapter replay also passed independently:
 npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot
 1 test file, 319 tests passed, 1150.12s
 ```
+
+That long replay is retained from the earlier acceptance run and was not
+rerun during this correction pass; any future rerun must use an explicit
+wall-clock watchdog with process-group TERM/KILL cleanup and record its exit
+code, elapsed time, and descendant-cleanup result.
 
 The red-green correction behind this replay was bounded to the ordinary
 subprocess bridge: the shell wrapper now removes its two selector arguments
@@ -60,7 +65,7 @@ the production supervisor still constructs authenticated GCS storage.
 The focused selector, supervisor, launcher, GCS, exclusion, lease-capability,
 and coordinator runs were also repeated independently while implementing the
 red-green-refactor changes. Shell scripts pass `bash -n` checks, `npm run lint`
-exited successfully with 26 existing warnings, and `git diff --check` passed.
+exited successfully with 25 warnings and no errors, and `git diff --check` passed.
 The default `npm run build` correctly failed closed because this worktree has no
 Supabase environment; a second build with synthetic process-only Supabase
 placeholders completed successfully and did not read `.env.local`.
@@ -76,9 +81,85 @@ infrastructure file passes 319/319 when run independently above. This full
 repository command is therefore not claimed as passing, while the focused
 identity-epoch and standalone actual-adapter gates are green.
 
+## Live evidence and protected bootstrap correction
+
+The live graph now uses the reviewed primary-source contract: Cloud Build
+provenance for source/build, exact durable Supabase forbidden-event ledgers for
+provider/billing/receiver evidence, Cloud Tasks queue logging for task audit, and
+authenticated malformed receiver probes. Provider/billing/receiver evidence is
+not derived from Cloud Run request URLs, so the two expected 400 probes do not
+create false forbidden work; the fixture transport records a structured ledger
+event when one is explicitly injected, and the exact verification result is
+`ZERO_WORK_INCOMPLETE`.
+
+PostgREST reads use the fixed packet-bound table/column selectors, exact-count
+pagination, bounded time predicates, and the authenticated origin `Date`
+header as the source observation time. No synthetic watermark table or
+`ledger_watermarks` path exists; an empty page without a trustworthy current
+server `Date`, a stale `Date`, an incomplete page, or a server-capped count
+fails closed. Cloud Logging task-audit coverage remains gated on independently
+observed queue logging configuration, full sinks/exclusions pagination, bucket
+retention, and a real TaskActivityLog `receiveTimestamp` observed after the
+frozen window; the implementation does not query or accept a custom watermark
+marker. If the reviewed production source cannot provide that bounded-lag
+receive timestamp without manufacturing work, the result is
+`EVIDENCE_UNAVAILABLE` rather than `VERIFIED`.
+
+The real CLI path now constructs a host-bound authenticated PostgREST transport
+from the private inherited bootstrap descriptor's service-role Bearer and
+required `apikey` (credentials stay in memory and are never put in journal
+objects or output). A descriptor with reviewed live evidence but absent or
+invalid private auth still fails during protected bootstrap construction before
+GCS reservation, journal, or provider access; the focused regression asserts
+zero requests/writes. Provider-free tests may inject an authenticated transport,
+but the default descriptor path is exercised through a fake underlying fetch
+transport and reaches `VERIFIED`.
+
+The following focused red-green transcripts are retained with fixed, non-secret
+failure descriptions:
+
+```text
+RED  npx vitest run scripts/capacity-identity-epoch/live-evidence.test.ts -t 'binds provider' --reporter=verbose
+     1 failed: the legacy receiver-log selector was accepted (expected false, received true)
+GREEN npx vitest run scripts/capacity-identity-epoch/live-evidence.test.ts -t 'binds provider' --reporter=verbose
+      1 passed
+
+RED  npx vitest run scripts/capacity-identity-epoch/live-evidence.test.ts -t 'zero-row|without a trustworthy|predates the requested|follows exact-count' --reporter=verbose
+     4 focused contracts failed before the PostgREST Date/exact-count correction
+GREEN npx vitest run scripts/capacity-identity-epoch/live-evidence.test.ts -t 'zero-row|without a trustworthy|predates the requested|follows exact-count' --reporter=dot
+      focused contracts passed
+
+RED  npx vitest run scripts/capacity-identity-epoch/cloud-build.test.ts --reporter=verbose
+     3 focused contracts failed before the regional request, pagination, ambiguity, and provenance checks were implemented
+GREEN npx vitest run scripts/capacity-identity-epoch/cloud-build.test.ts --reporter=dot
+      3 passed
+
+RED  npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'private Supabase auth path' --reporter=dot
+     1 failed: bootstrap resolved instead of rejecting without private Supabase auth
+GREEN npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'private Supabase auth path|host-bound Supabase' --reporter=dot
+      focused auth/no-mutation and descriptor-auth paths passed
+
+GREEN npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'default production graph|structured receiver-work' --reporter=dot
+      default graph reached VERIFIED; structured forbidden event rejected with ZERO_WORK_INCOMPLETE
+
+RED  npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'default production graph' --reporter=verbose
+     1 failed before the default collector graph and host-bound evidence transport were wired
+GREEN npx vitest run scripts/capacity-identity-epoch/live-vertical.integration.test.ts -t 'default production graph' --reporter=dot
+      1 passed with missingEvidence=[] and VERIFIED
+
+CHECK rg -n -e 'DEBUG_ZERO_WORK' -e 'DEBUG_(WINDOW|SNAPSHOT|EVENT)' -e 'console\\.(log|error|debug)' scripts/capacity-identity-epoch scripts/run-capacity-identity-epoch.ts
+      no matches
+CHECK rg -n 'ledger_watermarks|watermarkTable|readSupabaseWatermark' scripts/capacity-identity-epoch scripts/run-capacity-identity-epoch.ts
+      no matches
+```
+
 ## Remaining limitations
 
 - No provider-backed or production evidence was collected in this worktree.
+- Production execution remains fail-closed unless the private inherited
+  bootstrap descriptor supplies the reviewed Supabase service-role Bearer and
+  `apikey`; no environment discovery, credential rotation, or alternate
+  credential system is used.
 - The local supervisor fixture uses in-memory reservation/raw-lock storage;
   production GCS authentication and provider IAM remain outside this acceptance.
 - External review, merge, deploy, activation, and any real canary remain

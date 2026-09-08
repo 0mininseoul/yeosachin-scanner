@@ -299,11 +299,6 @@ export function validateZeroWorkObservation(value: unknown, nowMs: number, expec
             || (proof.coveredEndMs as number) > (proof.observedAtMs as number)
             || !Number.isSafeInteger(proof.coverageLagMs) || proof.coverageLagMs !== (proof.observedAtMs as number) - (proof.coveredEndMs as number)
             || proof.coverageLagMs < 0 || proof.coverageLagMs > maxCoverageLagMs
-            // `observedAtMs` is source evidence, while `nowMs` is the trusted
-            // coordinator validation boundary.  The collector may complete
-            // asynchronously, so it cannot predict the caller's later clock
-            // value exactly.  Bound both the derived age and the reported
-            // source lag without requiring millisecond equality.
             || !Number.isSafeInteger(proof.freshnessLagMs)
             || (proof.freshnessLagMs as number) < 0 || (proof.freshnessLagMs as number) > maxLagMs
             || nowMs - (proof.observedAtMs as number) < 0 || nowMs - (proof.observedAtMs as number) > maxLagMs

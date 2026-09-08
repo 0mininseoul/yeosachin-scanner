@@ -434,10 +434,21 @@ export class EpochJournal {
         const currentLock = await this.readLiveLock(lease);
         if (isExpired(currentLock.lock, this.now())) epochFail('LOCK_LOST');
         validateTransition(transition, this.header, currentLock.lock.lockFence);
-        const transitionDigest = canonicalDigest(transition);
-        const key = `${this.journalPrefix}${String(transition.sequence).padStart(8, '0')}/${transitionDigest}.json`;
+        // A sequence is a single compare-and-swap slot.  Deriving the key
+        // from transition content would let two same-owner writers that read
+        // the same state upload different objects for one sequence before
+        // either read-back notices the duplicate.  The deterministic slot is
+        // fenced atomically by the storage generation precondition instead.
+        const key = `${this.journalPrefix}${String(transition.sequence).padStart(8, '0')}.json`;
         const existing = await this.storage.get(key);
-        if (existing) epochFail('GENERATION_PRECONDITION_FAILED');
+        if (existing) {
+            // Replaying the exact object is an idempotent storage collision;
+            // a different object for an occupied sequence is poisoned
+            // history and must be rejected as a stale transition.
+            epochFail(canonicalDigest(existing.value) === canonicalDigest(transition)
+                ? 'GENERATION_PRECONDITION_FAILED'
+                : 'JOURNAL_INVALID');
+        }
         const current = await this.deriveState(lease);
         if (current.aborted) epochFail('ABORTED_EPOCH');
         const expectedSequence = current.transitions.length + 1;
@@ -464,6 +475,13 @@ export class EpochJournal {
             );
             assertGeneration(stored.generation);
         } catch (error) {
+            if (error instanceof EpochError && error.code === 'GENERATION_PRECONDITION_FAILED') {
+                // A remote CAS can report the deterministic slot collision
+                // before a read-back observes the committed transition.
+                // The append is therefore stale regardless of which side
+                // of the guarded dispatch surfaced the collision.
+                epochFail('JOURNAL_INVALID');
+            }
             if (error instanceof EpochError) throw error;
             epochFail('GENERATION_PRECONDITION_FAILED');
         }
@@ -507,8 +525,8 @@ export class EpochJournal {
             assertGeneration(entry.generation);
             validateTransition(entry.value, this.header);
             const transition = entry.value as EpochTransition;
-            const suffix = entry.key.slice(this.journalPrefix.length).match(/^([0-9]{8})\/([0-9a-f]{64})\.json$/);
-            if (!suffix || Number(suffix[1]) !== transition.sequence || suffix[2] !== canonicalDigest(transition)
+            const suffix = entry.key.slice(this.journalPrefix.length).match(/^([0-9]{8})\.json$/);
+            if (!suffix || Number(suffix[1]) !== transition.sequence
                 || sequences.has(transition.sequence)) epochFail('JOURNAL_INVALID');
             const fence = transition.lockFence;
             if (compareDecimal(fence, previousFence) < 0) epochFail('JOURNAL_INVALID');

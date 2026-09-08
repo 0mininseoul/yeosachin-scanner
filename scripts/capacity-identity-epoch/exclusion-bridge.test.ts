@@ -81,6 +81,14 @@ describe('ordinary mutation exclusion bridge', () => {
         expect(() => deriveEntryPointResources({ entryPoint: 'capacity-queue', role: 'preflight', resources })).not.toThrow();
     });
 
+    it('allows the reviewed capacity-owned generic queue-only mode without a service bypass', () => {
+        expect(deriveEntryPointResources({
+            entryPoint: 'capacity-queue',
+            role: 'preflight',
+            resources: [{ kind: 'queue', resource: resources[1]!.resource }],
+        })).toEqual([`queue:${resources[1]!.resource}`]);
+    });
+
     it('makes epoch and overlapping standalone selectors contend while unrelated sets proceed', async () => {
         const storage = new MemoryStorage();
         const epochResources = deriveEntryPointResources({ entryPoint: 'epoch', resources });

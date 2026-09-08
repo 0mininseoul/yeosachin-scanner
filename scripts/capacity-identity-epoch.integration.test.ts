@@ -2,11 +2,12 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { createFixturePacket } from './capacity-identity-epoch/fixtures';
+import { createFixturePacket, FIXTURE_ZERO_WORK_SELECTOR_DIGESTS } from './capacity-identity-epoch/fixtures';
 import { EpochCoordinator, type EpochControlPlane, type OperationEvidence } from './capacity-identity-epoch/coordinator';
 import { EpochJournal, type JournalStorage, type StoredObject } from './capacity-identity-epoch/journal';
 import { canonicalDigest, EpochError, type EpochHeader, type State } from './capacity-identity-epoch/contracts';
 import { buildLiveBootstrap, loadProtectedLiveBootstrap } from './capacity-identity-epoch/bootstrap';
+import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './capacity-identity-epoch/live-evidence';
 import { chmodSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
@@ -87,6 +88,69 @@ function setup() {
     return { coordinator, controlPlane, journal };
 }
 
+function reviewedServiceBodies(packet: ReturnType<typeof createFixturePacket>): Record<'preflight' | 'paid', Record<string, unknown>> {
+    return Object.fromEntries((['preflight', 'paid'] as const).map(role => {
+        const runtime = packet.protectedInputs.desired.runtime[role];
+        const image = `asia-northeast3-docker.pkg.dev/${runtime.project}/workers/${role}@sha256:${'b'.repeat(64)}`;
+        const env = [
+            ...Object.entries(runtime.environment).map(([name, value]) => ({ name, value })),
+            ...Object.entries(runtime.secretReferences).map(([name, value]) => {
+                const [secretName, key] = value.split(':');
+                return { name, valueFrom: { secretKeyRef: { name: secretName, key } } };
+            }),
+        ];
+        return [role, {
+            metadata: { generation: 1 },
+            spec: {
+                template: {
+                    metadata: {
+                        annotations: {
+                            'autoscaling.knative.dev/maxScale': String(runtime.settings.maxInstances),
+                            'capacity.identity-epoch/source-sha': runtime.sourceSha,
+                            'capacity.identity-epoch/build-digest': packet.desiredManifest.source[role].desiredBuildDigest,
+                            'capacity.identity-epoch/image-digest': canonicalDigest({ image }),
+                        },
+                    },
+                    spec: {
+                        serviceAccountName: runtime.identity.identity,
+                        containerConcurrency: runtime.settings.concurrency,
+                        timeoutSeconds: runtime.settings.timeoutSeconds,
+                        containers: [{ image, env, resources: { limits: { cpu: runtime.settings.cpu, memory: runtime.settings.memory } } }],
+                    },
+                },
+                traffic: [
+                    { revisionName: packet.oldManifest.source[role].oldRevision, percent: 100, tag: null },
+                    { revisionName: `${role}-epoch-fixture`, percent: 0, tag: null },
+                ],
+            },
+        }];
+    })) as unknown as Record<'preflight' | 'paid', Record<string, unknown>>;
+}
+
+function reviewedZeroWorkSources(packet: ReturnType<typeof createFixturePacket>): LiveZeroWorkSources {
+    const project = packet.protectedInputs.desired.runtime.preflight.project;
+    const queueUnion = [
+        packet.protectedInputs.desired.queues.preflight.resource,
+        packet.protectedInputs.desired.queues.paid.resource,
+    ] as const;
+    const origin = 'https://supabase.example.invalid/';
+    const supabase = (base: Omit<SupabaseLedgerSource, 'lookbackMs' | 'selectorDigest' | 'kind' | 'origin'>): SupabaseLedgerSource => {
+        const withWindow = { kind: 'supabase' as const, origin, ...base, lookbackMs: 60_000 };
+        return { ...withWindow, selectorDigest: evidenceSelectorDigest({ ...withWindow, selectorDigest: '0'.repeat(64) }) };
+    };
+    const taskBase = {
+        kind: 'cloud-logging' as const, source: 'fixture-task-audit', project, logName: `projects/${project}/logs/fixture-task-audit`,
+        resourceType: 'cloud_tasks_queue' as const, correlation: 'fixture-task-audit', queueResources: queueUnion,
+        sinkName: 'fixture-task-audit-sink', bucketResource: `projects/${project}/locations/global/buckets/fixture-task-audit`, lookbackMs: 60_000,
+    };
+    return {
+        providerLedger: supabase({ source: 'supabase:public.analysis_provider_cost_ledger', table: 'analysis_provider_cost_ledger', columns: ['run_id', 'request_id', 'operation_key', 'status', 'created_at'], eventTimeColumn: 'created_at' }),
+        billingLedger: supabase({ source: 'supabase:public.analysis_revenue_cost_operations', table: 'analysis_revenue_cost_operations', columns: ['request_id', 'owner_kind', 'owner_key_hash', 'operation_kind', 'status', 'created_at'], eventTimeColumn: 'created_at' }),
+        taskAudit: { ...taskBase, selectorDigest: FIXTURE_ZERO_WORK_SELECTOR_DIGESTS.taskAudit },
+        receiverLog: supabase({ source: 'supabase:public.analysis_step_events', table: 'analysis_step_events', columns: ['id', 'request_id', 'step', 'event_type', 'created_at'], eventTimeColumn: 'created_at' }),
+    };
+}
+
 describe('provider-free coordinated identity epoch integration', () => {
     it('runs through VERIFIED without provider, billing, task, or user-work effects', async () => {
         const { coordinator, controlPlane, journal } = setup();
@@ -125,7 +189,7 @@ describe('provider-free coordinated identity epoch integration', () => {
         const descriptor = {
             packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('provider-free-bootstrap-owner'), lockNamespace: packet.lockNamespace,
             ...scope, scopeDigest: canonicalDigest(scope), vercelToken: 'fixture-vercel-token',
-            serviceBodies: { preflight: { spec: {} }, paid: { spec: {} } },
+            serviceBodies: reviewedServiceBodies(packet), zeroWorkEvidence: null,
         } as const;
         const directory = mkdtempSync(join(tmpdir(), 'identity-epoch-bootstrap-'));
         const descriptorPath = join(directory, 'bootstrap.json');
@@ -138,10 +202,7 @@ describe('provider-free coordinated identity epoch integration', () => {
             const live = await buildLiveBootstrap(packet, loaded, { storage, now: () => 1_000 });
             await live.journal.ensureHeader();
             const resumed = await buildLiveBootstrap(packet, loaded, { storage, now: () => 2_000 });
-            expect(live.missingEvidence).toEqual([
-                'sourceObservation', 'buildObservation', 'pauseProvenance',
-                'zeroWorkBaseline', 'zeroWorkObservation', 'probe',
-            ]);
+            expect(live.missingEvidence).toEqual(['zeroWorkEvidence']);
             expect(live.journal.headerKey).toContain('epoch-header');
             expect(resumed.journal.headerKey).toBe(live.journal.headerKey);
             expect(resumed.journal.epochHeaderDigest).toBe(live.journal.epochHeaderDigest);
@@ -150,6 +211,51 @@ describe('provider-free coordinated identity epoch integration', () => {
             rmSync(directory, { recursive: true, force: true });
         }
         await expect(buildLiveBootstrap(packet, { ...descriptor, packetDigest: 'f'.repeat(64) }, { resolveRetainedHeader: false })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        const wrongImage = {
+            ...descriptor,
+            serviceBodies: {
+                ...descriptor.serviceBodies,
+                preflight: {
+                    ...descriptor.serviceBodies.preflight,
+                    spec: {
+                        ...(descriptor.serviceBodies.preflight.spec as Record<string, unknown>),
+                        template: {
+                            ...((descriptor.serviceBodies.preflight.spec as Record<string, unknown>).template as Record<string, unknown>),
+                            spec: {
+                                ...(((descriptor.serviceBodies.preflight.spec as Record<string, unknown>).template as Record<string, unknown>).spec as Record<string, unknown>),
+                                containers: [{
+                                    ...((((descriptor.serviceBodies.preflight.spec as Record<string, unknown>).template as Record<string, unknown>).spec as Record<string, unknown>).containers as unknown[])[0] as Record<string, unknown>,
+                                    image: 'asia-northeast3-docker.pkg.dev/example-project/workers/preflight@sha256:' + 'c'.repeat(64),
+                                }],
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        await expect(buildLiveBootstrap(packet, wrongImage, { resolveRetainedHeader: false, storage: new MemoryStorage() })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        const bodyMutationCases = [
+            ['wrong environment', (body: Record<string, unknown>) => {
+                const container = (((body.spec as Record<string, unknown>).template as Record<string, unknown>).spec as Record<string, unknown>).containers as Array<Record<string, unknown>>;
+                container[0]!.env = [...container[0]!.env as Array<Record<string, unknown>>, { name: 'UNREVIEWED', value: 'true' }];
+            }],
+            ['wrong secret', (body: Record<string, unknown>) => {
+                const container = (((body.spec as Record<string, unknown>).template as Record<string, unknown>).spec as Record<string, unknown>).containers as Array<Record<string, unknown>>;
+                const env = container[0]!.env as Array<Record<string, unknown>>;
+                const secret = env.find(item => item.valueFrom !== undefined)!;
+                secret.valueFrom = { secretKeyRef: { name: 'other-secret', key: '7' } };
+            }],
+            ['extra field', (body: Record<string, unknown>) => {
+                const container = (((body.spec as Record<string, unknown>).template as Record<string, unknown>).spec as Record<string, unknown>).containers as Array<Record<string, unknown>>;
+                container[0]!.command = ['unreviewed'];
+            }],
+        ] as const;
+        for (const [label, mutate] of bodyMutationCases) {
+            const serviceBodies = JSON.parse(JSON.stringify(descriptor.serviceBodies)) as Record<'preflight' | 'paid', Record<string, unknown>>;
+            mutate(serviceBodies.preflight);
+            await expect(buildLiveBootstrap(packet, { ...descriptor, serviceBodies }, { resolveRetainedHeader: false, storage: new MemoryStorage() }), label)
+                .rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        }
         const replacements: { [K in keyof typeof packet.providerScope]: string } = {
             bucket: 'other-epoch-bucket',
             publicReadinessUrl: 'https://other.example.invalid/api/analysis/capacity/readiness',
@@ -190,4 +296,42 @@ describe('provider-free coordinated identity epoch integration', () => {
             now: () => 2_000,
         })).rejects.toThrow('JOURNAL_INVALID');
     });
+
+    it('rejects selector retargeting before constructing authenticated clients or touching journal storage', async () => {
+        const packet = createFixturePacket();
+        const scope = packet.providerScope;
+        const evidence = reviewedZeroWorkSources(packet);
+        expect(evidenceSelectorDigest(evidence.taskAudit)).toBe(evidence.taskAudit.selectorDigest);
+        const descriptor = {
+            packetDigest: canonicalDigest(packet), ownerDigest: canonicalDigest('selector-binding-owner'), lockNamespace: packet.lockNamespace,
+            ...scope, scopeDigest: canonicalDigest(scope), vercelToken: 'fixture-vercel-token', serviceBodies: reviewedServiceBodies(packet), zeroWorkEvidence: evidence,
+        } as const;
+        const cases = [
+            ['source', { ...evidence, providerLedger: { ...evidence.providerLedger, source: 'retargeted-provider' } }],
+            ['lookback', { ...evidence, providerLedger: { ...evidence.providerLedger, lookbackMs: 120_000 } }],
+            ['table selector', (() => {
+                const providerLedger = { ...evidence.providerLedger, table: 'analysis_provider_cost_ledger_other' };
+                return { ...evidence, providerLedger: { ...providerLedger, selectorDigest: evidenceSelectorDigest(providerLedger) } };
+            })()],
+            ['queue selector', (() => {
+                const taskAudit = { ...evidence.taskAudit, queueResources: [...(evidence.taskAudit.queueResources ?? [])].map((resource, index) => index === 0 ? resource.replace('/locations/asia-northeast3/', '/locations/other-region/') : resource) };
+                return { ...evidence, taskAudit: { ...taskAudit, selectorDigest: evidenceSelectorDigest(taskAudit) } };
+            })()],
+            ['queue role substitution', (() => {
+                const queueResources = [...(evidence.taskAudit.queueResources ?? [])];
+                queueResources[1] = queueResources[1]!.replace('/queues/paid', '/queues/another-role');
+                const taskAudit = { ...evidence.taskAudit, queueResources };
+                return { ...evidence, taskAudit: { ...taskAudit, selectorDigest: evidenceSelectorDigest(taskAudit) } };
+            })()],
+            ['receiver table selector', (() => {
+                const receiverLog = { ...evidence.receiverLog, table: 'analysis_step_events_other' };
+                return { ...evidence, receiverLog: { ...receiverLog, selectorDigest: evidenceSelectorDigest(receiverLog) } };
+            })()],
+        ] as const;
+        for (const [label, changed] of cases) {
+            await expect(buildLiveBootstrap(packet, { ...descriptor, zeroWorkEvidence: changed }, { resolveRetainedHeader: false, storage: new MemoryStorage() }), label)
+                .rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        }
+    });
+
 });

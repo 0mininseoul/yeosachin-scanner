@@ -131,7 +131,7 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
     const queue = (role: 'preflight' | 'paid') => ({
         resource: `projects/${PROJECT}/locations/asia-northeast3/queues/${role}`, project: PROJECT, location: 'asia-northeast3',
         targetDigest: canonicalDigest(queueTarget(role)),
-        configDigest: canonicalDigest({ rateLimits: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 } }), state: 'PAUSED', empty: true, tasksDigest: canonicalDigest([]),
+        configDigest: canonicalDigest({ rateLimits: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 }, stackdriverLoggingConfig: { samplingRatio: 1 } }), state: 'PAUSED', empty: true, tasksDigest: canonicalDigest([]),
     });
     const scheduler = (role: 'preflight' | 'paid') => ({
         resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`, project: PROJECT, location: 'asia-northeast3',
@@ -198,7 +198,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
             audience: `https://${role}.example.com`,
             callerIdentity: identity(`${role}.task-caller-${suffix}`.replace('.', '-') + '@example-project.iam.gserviceaccount.com'),
         },
-        configuration: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2 },
+        configuration: { maxDispatchesPerSecond: 2, maxConcurrentDispatches: 2, stackdriverLoggingConfig: { samplingRatio: 1 } },
     });
     const schedulerInput = (role: 'preflight' | 'paid') => ({
         resource: `projects/${PROJECT}/locations/asia-northeast3/jobs/${role}-recovery`,
@@ -349,10 +349,10 @@ function observationTargets(): ProtectedObservationTargets {
         retention: platform.retention,
         readiness: manifest('desired').readiness,
         zeroWorkSources: {
-            providerLedger: { source: 'fixture-provider-ledger', lookbackMs: 60_000 },
-            billingLedger: { source: 'fixture-billing-ledger', lookbackMs: 60_000 },
-            taskAudit: { source: 'fixture-task-audit', lookbackMs: 60_000 },
-            receiverLog: { source: 'fixture-receiver-log', lookbackMs: 60_000 },
+            providerLedger: { source: 'fixture-provider-ledger', lookbackMs: 60_000, selectorDigest: canonicalDigest({ source: 'fixture-provider-ledger' }) },
+            billingLedger: { source: 'fixture-billing-ledger', lookbackMs: 60_000, selectorDigest: canonicalDigest({ source: 'fixture-billing-ledger' }) },
+            taskAudit: { source: 'fixture-task-audit', lookbackMs: 60_000, selectorDigest: canonicalDigest({ source: 'fixture-task-audit' }) },
+            receiverLog: { source: 'fixture-receiver-log', lookbackMs: 60_000, selectorDigest: canonicalDigest({ source: 'fixture-receiver-log' }) },
         },
     } as ProtectedObservationTargets;
 }

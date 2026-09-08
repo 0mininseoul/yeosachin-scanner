@@ -236,10 +236,14 @@ export class EpochCoordinator {
             // owner/current-fence proof on a later resume.
             this.verifiedProofDigest = undefined;
             this.durableVerifiedProofDigest = undefined;
+            // Admission may capture read-only observations, including the
+            // zero-work baseline.  It must never cross an unreserved window:
+            // acquire the common reservation before invoking the admission
+            // hook, then acquire the epoch lease before any baseline capture.
+            await this.ensureSharedReservation();
             if (!(await this.journal.hasHeader())) {
                 await this.controlPlane.admit?.({ packet: this.packet });
             }
-            await this.ensureSharedReservation();
             await this.journal.ensureHeader();
             this.lease = await this.journal.acquire(this.ownerDigest);
             let state = await this.journal.readValidatedState(this.lease);
@@ -623,7 +627,10 @@ export class LiveEpochControlPlane implements EpochControlPlane {
     async prepare(input: Readonly<{ packet: CapacityEpochPacket; lease?: JournalLease }>): Promise<OperationEvidence> {
         const packet = input.packet;
         const initialState = input.lease ? await this.options.journal.readValidatedState(input.lease) : undefined;
-        await this.captureZeroWorkBaseline();
+        // A cold admission has no journal lease and cannot own a durable
+        // baseline.  Capture it only from the leased PREPARED operation so
+        // the observation window is entirely inside the common reservation.
+        if (input.lease) await this.captureZeroWorkBaseline();
         const readiness = await this.readReadiness(packet, 'old');
         const services: unknown[] = [];
         const queues: unknown[] = [];
@@ -665,8 +672,9 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 || canonicalDigest(queueObservation.tasks) !== canonicalDigest(expectedQueue.tasks)) fail('OBSERVATION_RACE');
             queueFacts.push(queueObservation);
             const scheduler = await this.options.workPlanes.observeScheduler(packet.protectedInputs.old.schedulers[role]);
-            const schedulerObservation = { role, ...scheduler, nowMs: this.now() };
-            validateSchedulerObservation(schedulerObservation, packet.protectedInputs.old.schedulers[role], this.now(), packet.quiescence.timeoutMs, packet.quiescence.graceMs, role);
+            const schedulerNowMs = this.now();
+            const schedulerObservation = { role, ...scheduler, nowMs: schedulerNowMs };
+            validateSchedulerObservation(schedulerObservation, packet.protectedInputs.old.schedulers[role], schedulerNowMs, packet.quiescence.timeoutMs, packet.quiescence.graceMs, role);
             if (scheduler.pauseEpochMs !== packet.protectedObservations.old.schedulers[role].pauseEpochMs
                 || scheduler.lastAttemptMs !== packet.protectedObservations.old.schedulers[role].lastAttemptMs) fail('OBSERVATION_RACE');
             schedulerFacts.push(schedulerObservation);
@@ -750,6 +758,12 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const serviceResource = `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
             const before = await this.options.cloudRun.getService(serviceResource);
             const revision = this.desiredRevisionCandidate(input.packet, role);
+            // Prove the exact reviewed body image against packet-bound Cloud
+            // Build provenance before the first Cloud Run write. Structural
+            // annotations are not provenance and cannot authorize a stage.
+            const reviewedImage = this.serviceBodyImage(this.options.serviceBodies[role]);
+            const reviewedBuildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: reviewedImage });
+            if (reviewedBuildDigest !== input.packet.desiredManifest.source[role].desiredBuildDigest) fail('SOURCE_INVALID');
             const after = await this.options.cloudRun.stageRevision({ runtime, revision, expectedGeneration: before.generation, serviceBody: this.options.serviceBodies[role], leaseCheck });
             const captured = after.latestReadyRevision === revision || after.latestCreatedRevision === revision ? revision : null;
             if (!captured) fail('SOURCE_INVALID');
@@ -847,7 +861,8 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 || !queueTargetMatchesOrAbsent(queue.target, oldQueueInput)) fail('OBSERVATION_RACE');
             if (queue.tasks.length !== 0) fail('QUEUE_NOT_EMPTY');
             validateQueueObservation({ role, ...queue }, oldQueueInput, input.packet.oldManifest.queues[role].configDigest, role);
-            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, oldSchedulerInput, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            const schedulerNowMs = this.now();
+            validateSchedulerObservation({ role, ...scheduler, nowMs: schedulerNowMs }, oldSchedulerInput, schedulerNowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             schedulers.push({ role, digest: canonicalDigest(scheduler) });
             queues.push({ role, digest: canonicalDigest(queue) });
             currentLease = queuePauseLease.currentLease();
@@ -899,7 +914,8 @@ export class LiveEpochControlPlane implements EpochControlPlane {
                 await queueTargetLease();
                 queue = await this.options.workPlanes.updateQueueTarget({ input: desiredQueue, expectedOldTarget: oldQueue.target, desiredTarget: desiredQueue.target, leaseCheck: queueTargetLease });
             } else if (!queueTargetMatches(queue.target, desiredQueue.target) && !queueHasNoHttpTarget) fail('OBSERVATION_RACE');
-            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, desiredScheduler, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            const schedulerNowMs = this.now();
+            validateSchedulerObservation({ role, ...scheduler, nowMs: schedulerNowMs }, desiredScheduler, schedulerNowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             validateQueueObservation({ role, ...queue }, desiredQueue, input.packet.desiredManifest.queues[role].configDigest, role);
             alignments.push({ role, scheduler: canonicalDigest(scheduler), queue: canonicalDigest(queue) });
             currentLease = queueTargetLease.currentLease();
@@ -983,7 +999,8 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             validateQueueObservation({ role, ...queue }, packet.protectedInputs.desired.queues[role], packet.desiredManifest.queues[role].configDigest, role);
             queues.push({ role, digest: canonicalDigest(queue) });
             const scheduler = await this.options.workPlanes.observeScheduler(packet.protectedInputs.desired.schedulers[role]);
-            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, packet.protectedInputs.desired.schedulers[role], this.now(), packet.quiescence.timeoutMs, packet.quiescence.graceMs, role);
+            const schedulerNowMs = this.now();
+            validateSchedulerObservation({ role, ...scheduler, nowMs: schedulerNowMs }, packet.protectedInputs.desired.schedulers[role], schedulerNowMs, packet.quiescence.timeoutMs, packet.quiescence.graceMs, role);
             schedulers.push({ role, digest: canonicalDigest(scheduler) });
             for (const kind of ['run', 'queue', 'taskCaller', 'maintenance'] as const) {
                 const target = packet.protectedInputs.desired.iam[role][kind];
@@ -1193,7 +1210,8 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             } else if (!queueTargetMatches(queue.target, desiredQueue.target) && !queueHasNoHttpTarget) {
                 fail('OBSERVATION_RACE');
             }
-            validateSchedulerObservation({ role, ...scheduler, nowMs: this.now() }, desiredScheduler, this.now(), input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
+            const schedulerNowMs = this.now();
+            validateSchedulerObservation({ role, ...scheduler, nowMs: schedulerNowMs }, desiredScheduler, schedulerNowMs, input.packet.quiescence.timeoutMs, input.packet.quiescence.graceMs, role);
             validateQueueObservation({ role, ...queue }, desiredQueue, input.packet.desiredManifest.queues[role].configDigest, role);
             alignments.push({ role, scheduler: canonicalDigest(scheduler), queue: canonicalDigest(queue) });
             currentLease = queueLeaseCheck.currentLease();
@@ -1302,6 +1320,14 @@ export class LiveEpochControlPlane implements EpochControlPlane {
 
     private serviceResource(runtime: ProtectedRuntimeInput): string {
         return `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
+    }
+
+    private serviceBodyImage(body: Readonly<Record<string, unknown>>): string {
+        if (!isObject(body) || !isObject(body.spec) || !isObject(body.spec.template)
+            || !isObject(body.spec.template.spec) || !Array.isArray(body.spec.template.spec.containers)
+            || body.spec.template.spec.containers.length !== 1 || !isObject(body.spec.template.spec.containers[0])
+            || typeof body.spec.template.spec.containers[0].image !== 'string') fail('SOURCE_INVALID');
+        return body.spec.template.spec.containers[0].image;
     }
 
     private async readSource(input: Readonly<{ role: Role; phase: 'old' | 'desired'; revision: string; runtime: ProtectedRuntimeInput }>): Promise<SourceObservation> {

@@ -43,7 +43,7 @@ capacity_exclusion_request() {
   local script_dir
   local args
   local selector_source="role"
-  [[ "$command" == "assert" || "$command" == "adopt" || "$command" == "release" ]] \
+  [[ "$command" == "assert" || "$command" == "adopt" ]] \
     || capacity_exclusion_die
   [[ "$CAPACITY_EXCLUSION_ACTIVE" == "true" ]] || capacity_exclusion_die
   capacity_exclusion_fd_open "$CAPACITY_EXCLUSION_READ_FD" || capacity_exclusion_die
@@ -53,10 +53,8 @@ capacity_exclusion_request() {
     selector_source="generic"
   fi
   args=("$command" '--control-write-fd' "$CAPACITY_EXCLUSION_WRITE_FD" '--control-read-fd' "$CAPACITY_EXCLUSION_READ_FD" '--selector-source' "$selector_source")
-  if [[ "$command" != "release" ]]; then
-    capacity_exclusion_validate_tokens "$entry_point" "$role"
-    args+=( '--entry-point' "$entry_point" '--role' "$role" )
-  fi
+  capacity_exclusion_validate_tokens "$entry_point" "$role"
+  args+=( '--entry-point' "$entry_point" '--role' "$role" )
   node --import tsx "$script_dir/exclusion-ipc.ts" "${args[@]}" >/dev/null
 }
 

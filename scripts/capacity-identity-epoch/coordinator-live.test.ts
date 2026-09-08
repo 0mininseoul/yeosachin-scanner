@@ -225,8 +225,8 @@ describe('live coordinator producer wire ordering', () => {
                 resource: input.resource, project: input.project, location: input.location, state: 'PAUSED',
                 target: { url: input.target.url, audience: input.target.audience, callerIdentity: input.target.callerIdentity, uriOverride: null, wireConfigurationDigest: canonicalDigest('wire') },
                 httpTargetPresent: true,
-                configuration: { rateLimits: driftQueue ? { ...input.configuration, maxConcurrentDispatches: 99 } : input.configuration },
-                configurationDigest: canonicalDigest({ rateLimits: driftQueue ? { ...input.configuration, maxConcurrentDispatches: 99 } : input.configuration }), tasks: [], complete: true,
+                configuration: { ...input.configuration, maxConcurrentDispatches: driftQueue ? 99 : input.configuration.maxConcurrentDispatches },
+                configurationDigest: canonicalDigest(canonicalQueueConfiguration({ ...input.configuration, maxConcurrentDispatches: driftQueue ? 99 : input.configuration.maxConcurrentDispatches })), tasks: [], complete: true,
             }),
             observeScheduler: async (input: ProtectedSchedulerInput) => ({ resource: input.resource, project: input.project, location: input.location, state: 'PAUSED', pauseEpochMs: 1, lastAttemptMs: null, target: input.target, configuration: input.configuration, configurationDigest: canonicalDigest(input.configuration) }),
             observeRetention: async (input: ProtectedRetentionInput) => ({ role: 'retention', ...input, configurationDigest: canonicalDigest(input.configuration) }),
@@ -242,7 +242,7 @@ describe('live coordinator producer wire ordering', () => {
             producerAlias: 'fixture.example.invalid', serviceBodies: { preflight: {}, paid: {} }, now: () => now,
             journal: authority.journal, capability: authority.capability, ownerDigest: authority.ownerDigest,
             sourceObservation: async ({ role, runtime, revision }) => ({ role, sourceSha: runtime.sourceSha, revision, metadataDigest: packet.protectedObservations.old.source[role].metadataDigest }),
-            buildObservation: async ({ image }) => canonicalDigest({ image }),
+            buildObservation: async ({ role }) => packet.protectedObservations.old.runtime[role].buildDigest,
         });
         const prepared = await control.prepare({ packet, lease: authority.lease });
         expect(prepared.proof).toMatchObject({ action: 'PREPARED' });
