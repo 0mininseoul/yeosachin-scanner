@@ -136,6 +136,9 @@ proxies the child through low descriptors 4 (parent-to-child responses) and 5
 reader for READY, child IPC, heartbeat errors, and final release. The launcher
 waits for the detached child process group, so release cannot race a still-live
 descendant.
+If the supervisor loses renewal authority, it emits a bounded fatal event and
+the dispatcher terminates the entire detached child group before attempting
+final release; a child cannot continue under a stale lease.
 
 The generic `configure-analysis-tasks-queue.sh` path remains valid without
 `ANALYSIS_CAPACITY_ROLE`; it enters the exclusion bridge only when an explicit
