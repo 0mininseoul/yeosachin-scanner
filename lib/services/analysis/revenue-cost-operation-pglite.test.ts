@@ -1673,7 +1673,7 @@ describe('revenue cost operation ledger PGlite', () => {
             .toBeLessThanOrEqual(row?.cost_cap_krw ?? 0);
     });
 
-    // Four isolated PGlite databases keep each drift assertion independent, but cold CI/WASM
+    // Five isolated PGlite databases keep each drift assertion independent, but cold CI/WASM
     // startup can exceed the 15-second global budget without indicating a hung test.
     it('fails closed for AI terminal amount, timestamp, source-attempt, and missing-child drift', async () => {
         const amount = await createDb();
@@ -1777,7 +1777,7 @@ describe('revenue cost operation ledger PGlite', () => {
             `SELECT public.settle_analysis_revenue_cost_operation_v2('${requestId}','${aiJobKey}','ai_attempt','${missingChildOperation}',1::smallint)`
         ), 'REVENUE_COST_OPERATION_FENCE');
         await expect(replayTotals(missingChild)).resolves.toEqual(beforeMissingChild);
-    }, 30_000);
+    }, 45_000);
 
     it.each(['completed', 'failed'])('rejects %s requests before a first reserve and a started replay without further cost mutation', async (requestStatus) => {
         const firstReserve = await createDb();
