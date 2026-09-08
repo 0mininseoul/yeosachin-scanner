@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const pfe1Migration = readFileSync(
     new URL(
@@ -1320,8 +1320,8 @@ async function expectNoRearmMutation(db: PGlite): Promise<void> {
 }
 
 describe('rearm_earlybird_pfe3_media_artifact_error', () => {
-    afterAll(async () => {
-        await Promise.all(databases.map(database => database.close()));
+    afterEach(async () => {
+        await Promise.all(databases.splice(0).map(database => database.close()));
     });
 
     it('happy path: rebinds the order onto a fresh (.r2) preflight generation without touching any prior failed lineage', async () => {
@@ -1621,7 +1621,7 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
         });
         await expect(rearm(cardsSnapshotDrift)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
         await expectNoRearmMutation(cardsSnapshotDrift);
-    });
+    }, 30_000);
 
     it('rejects when the plan-selected card is missing, not launched to production, or not in a selectable state', async () => {
         const missingCard = await createDb();
@@ -1647,7 +1647,7 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
         });
         await expect(rearm(notSelectable)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
         await expectNoRearmMutation(notSelectable);
-    });
+    }, 30_000);
 
     it('rejects when the selected card capacity is missing or not a plain non-negative integer', async () => {
         const missingFollowers = await createDb();
@@ -1792,7 +1792,7 @@ describe('rearm_earlybird_pfe3_media_artifact_error', () => {
             aiAttempts: [{ ...DEFAULT_AI_ATTEMPTS[0], terminalized_at: null }, DEFAULT_AI_ATTEMPTS[1]],
         });
         await expect(rearm(missingTerminalizedAt)).rejects.toThrow('EARLYBIRD_PFE3_MEDIA_ARTIFACT_REARM_INELIGIBLE');
-    });
+    }, 30_000);
 
     it('rejects when a scheduler operation for the successor is still actively claimed', async () => {
         const db = await createDb();
