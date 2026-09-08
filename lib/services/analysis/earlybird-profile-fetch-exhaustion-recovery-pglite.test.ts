@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const recoveryMigration = readFileSync(
     new URL(
@@ -702,8 +702,8 @@ function recover(
 }
 
 describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
-    afterAll(async () => {
-        await Promise.all(databases.map(database => database.close()));
+    afterEach(async () => {
+        await Promise.all(databases.splice(0).map(database => database.close()));
     });
 
     it('happy path: resets order/fulfillment onto a fresh preflight without touching the failed lineage', async () => {
@@ -951,7 +951,7 @@ describe('recover_earlybird_profile_fetch_exhaustion_fulfillment', () => {
         await expect(recover(dbWrongErrorCode)).rejects.toThrow(
             'EARLYBIRD_PROFILE_FETCH_EXHAUSTION_RECOVERY_INELIGIBLE'
         );
-    });
+    }, 30_000);
 
     it.each(['pending', 'processing', 'retryable'] as const)(
         'rejects when another job on the request is still active with status %s',

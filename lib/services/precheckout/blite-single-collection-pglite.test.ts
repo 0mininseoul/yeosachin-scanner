@@ -26,6 +26,13 @@ const claimedTargetHashMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260814160000_read_claimed_preflight_target_hash.sql',
     import.meta.url,
 ), 'utf8');
+const expiryScanMigrationName = readdirSync(new URL('../../../supabase/migrations/', import.meta.url))
+    .find(name => name.endsWith('_optimize_precheckout_blite_expiry_scan.sql'));
+if (!expiryScanMigrationName) throw new Error('PRECHECKOUT_BLITE_EXPIRY_SCAN_MIGRATION_MISSING');
+const expiryScanMigration = readFileSync(new URL(
+    `../../../supabase/migrations/${expiryScanMigrationName}`,
+    import.meta.url,
+), 'utf8');
 
 const USER_ID = '10000000-0000-4000-8000-000000000001';
 const PREFLIGHT_A = '20000000-0000-4000-8000-000000000001';
@@ -44,6 +51,8 @@ const PREFLIGHT_DEADLINE = '20000000-0000-4000-8000-000000000013';
 const PREFLIGHT_NEW_CLOCK = '20000000-0000-4000-8000-000000000014';
 const PREFLIGHT_LEGACY_CLOCK = '20000000-0000-4000-8000-000000000015';
 const PREFLIGHT_HASH_DRIFT = '20000000-0000-4000-8000-000000000016';
+const PREFLIGHT_PURGE_SECOND = '20000000-0000-4000-8000-000000000018';
+const PREFLIGHT_PURGE_FRESH = '20000000-0000-4000-8000-000000000019';
 const DRIFTED_TARGET_HASH = 'b'.repeat(64);
 const TARGET_HASH = 'a'.repeat(64);
 const PROVIDER_REFERENCE = 'ApifyRun123456';
@@ -304,6 +313,7 @@ async function createDb(): Promise<PGlite> {
     );
     await db.exec(deadlineMigration);
     await db.exec(claimedTargetHashMigration);
+    await db.exec(expiryScanMigration);
     return db;
 }
 
@@ -952,17 +962,64 @@ describe('precheckout B-lite source and lease lifecycle', () => {
         )).resolves.toMatchObject({ rows: [{ sources: 0, caches: 0 }] });
     }, 30_000);
 
-    it('purges expired source and output even when the B-lite cohort flag is off', async () => {
+    it('purges flag-off expired rows in deterministic batches and keeps a fresh row', async () => {
         const database = await createDb();
-        await seedExpiredFlagOffSource(database, PREFLIGHT_FLAG_OFF_PURGE);
+        const functionBody = await database.query<{ prosrc: string }>(
+            `SELECT procedure.prosrc
+             FROM pg_catalog.pg_proc AS procedure
+             JOIN pg_catalog.pg_namespace AS namespace
+               ON namespace.oid = procedure.pronamespace
+             WHERE namespace.nspname = 'public'
+               AND procedure.proname = 'purge_expired_precheckout_blite_sources_v1'`,
+        );
+        expect(functionBody.rows[0]!.prosrc).toMatch(
+            /FROM public\.precheckout_blite_sources AS expired_source\s+JOIN public\.analysis_preflights AS preflight/,
+        );
+
+        for (const preflightId of [
+            PREFLIGHT_FLAG_OFF_PURGE,
+            PREFLIGHT_PURGE_SECOND,
+            PREFLIGHT_PURGE_FRESH,
+        ]) {
+            await seedExpiredFlagOffSource(database, preflightId);
+        }
+        await database.query(
+            `UPDATE public.precheckout_blite_sources
+             SET expires_at=clock_timestamp() + interval '5 minutes'
+             WHERE preflight_id=$1`,
+            [PREFLIGHT_PURGE_FRESH],
+        );
 
         await expect(database.query(
             'SELECT public.purge_expired_precheckout_blite_sources_v1(1) AS result',
         )).resolves.toMatchObject({ rows: [{ result: 1 }] });
         await expect(database.query(
-            `SELECT (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS sources,
-                    (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$1) AS caches`,
+            'SELECT count(*)::int AS count FROM public.precheckout_blite_sources WHERE preflight_id=$1',
             [PREFLIGHT_FLAG_OFF_PURGE],
-        )).resolves.toMatchObject({ rows: [{ sources: 0, caches: 0 }] });
+        )).resolves.toMatchObject({ rows: [{ count: 0 }] });
+        await expect(database.query(
+            'SELECT count(*)::int AS count FROM public.precheckout_blite_sources WHERE preflight_id=$1',
+            [PREFLIGHT_PURGE_SECOND],
+        )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
+        await expect(database.query(
+            'SELECT public.purge_expired_precheckout_blite_sources_v1(1) AS result',
+        )).resolves.toMatchObject({ rows: [{ result: 1 }] });
+        await expect(database.query(
+            `SELECT
+                (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS expired_sources,
+                (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$1) AS expired_caches,
+                (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$2) AS fresh_sources,
+                (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$2) AS fresh_caches`,
+            [PREFLIGHT_PURGE_SECOND, PREFLIGHT_PURGE_FRESH],
+        )).resolves.toMatchObject({ rows: [{
+            expired_sources: 0,
+            expired_caches: 0,
+            fresh_sources: 1,
+            fresh_caches: 1,
+        }] });
+        await expect(database.query(
+            'SELECT public.purge_expired_precheckout_blite_sources_v1(1) AS result',
+        )).resolves.toMatchObject({ rows: [{ result: 0 }] });
     }, 30_000);
 });

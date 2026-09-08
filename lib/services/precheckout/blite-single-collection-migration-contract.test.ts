@@ -248,6 +248,7 @@ describe('precheckout B-lite single-collection migration', () => {
             '20260814123000_precheckout_blite_missing_source_status_fail_open.sql',
             '20260814140000_precheckout_blite_reload_schema_cache.sql',
             '20260814150000_precheckout_blite_deadline_90.sql',
+            '20260908081711_optimize_precheckout_blite_expiry_scan.sql',
         ]);
         const runbook = readRunbook();
         expect(runbook).toMatch(

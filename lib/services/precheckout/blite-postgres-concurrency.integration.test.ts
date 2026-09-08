@@ -13,6 +13,13 @@ const deadlineMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260814150000_precheckout_blite_deadline_90.sql',
     import.meta.url,
 ), 'utf8');
+const expiryScanMigrationName = readdirSync(new URL('../../../supabase/migrations/', import.meta.url))
+    .find(name => name.endsWith('_optimize_precheckout_blite_expiry_scan.sql'));
+if (!expiryScanMigrationName) throw new Error('PRECHECKOUT_BLITE_EXPIRY_SCAN_MIGRATION_MISSING');
+const expiryScanMigration = readFileSync(new URL(
+    `../../../supabase/migrations/${expiryScanMigrationName}`,
+    import.meta.url,
+), 'utf8');
 
 const databaseUrl = process.env.PRECHECKOUT_BLITE_POSTGRES_CONCURRENCY_TEST_URL;
 const destructiveTestMarker = process.env.PRECHECKOUT_BLITE_POSTGRES_CONCURRENCY_TEST_MARKER;
@@ -23,6 +30,8 @@ const describePostgres = isSafePrecheckoutBlitePostgresConcurrencyTarget(
 ) ? describe : describe.skip;
 
 const PREFLIGHT = '20000000-0000-4000-8000-000000000201';
+const PREFLIGHT_PURGE_LOCKED = '20000000-0000-4000-8000-000000000205';
+const PREFLIGHT_PURGE_AVAILABLE = '20000000-0000-4000-8000-000000000206';
 const USER = '10000000-0000-4000-8000-000000000201';
 const CLAIM = '40000000-0000-4000-8000-000000000201';
 const HASH = 'a'.repeat(64);
@@ -153,6 +162,40 @@ async function seedReadySource(pool: Pool, preflightId: string): Promise<void> {
     }
 }
 
+type PurgeFunctionMetadata = {
+    oid: string;
+    owner: string;
+    acl: string | null;
+    security_definer: boolean;
+    config: string | null;
+};
+
+type ExplainNode = {
+    'Node Type': string;
+    'Relation Name'?: string;
+    Plans?: ExplainNode[];
+};
+
+function flattenPlan(node: ExplainNode): ExplainNode[] {
+    return [node, ...(node.Plans ?? []).flatMap(flattenPlan)];
+}
+
+async function readPurgeFunctionMetadata(pool: Pool): Promise<PurgeFunctionMetadata> {
+    const result = await pool.query<PurgeFunctionMetadata>(
+        `SELECT
+            procedure.oid::text AS oid,
+            pg_catalog.pg_get_userbyid(procedure.proowner) AS owner,
+            procedure.proacl::text AS acl,
+            procedure.prosecdef AS security_definer,
+            procedure.proconfig[1] AS config
+         FROM pg_catalog.pg_proc AS procedure
+         WHERE procedure.oid =
+            'public.purge_expired_precheckout_blite_sources_v1(integer)'::regprocedure`,
+    );
+    if (!result.rows[0]) throw new Error('PRECHECKOUT_BLITE_PURGE_FUNCTION_METADATA_MISSING');
+    return result.rows[0];
+}
+
 describe('precheckout B-lite PostgreSQL concurrency target guard', () => {
     it('accepts only the explicit loopback disposable concurrency database and marker', () => {
         expect(isSafePrecheckoutBlitePostgresConcurrencyTarget(
@@ -172,6 +215,8 @@ describe('precheckout B-lite PostgreSQL concurrency target guard', () => {
 
 describePostgres('precheckout B-lite PostgreSQL lease concurrency', () => {
     let pool: Pool;
+    let functionMetadataBeforeOptimizer: PurgeFunctionMetadata;
+    let functionMetadataAfterOptimizer: PurgeFunctionMetadata;
 
     beforeAll(async () => {
         pool = new Pool({ connectionString: databaseUrl, max: 5 });
@@ -184,6 +229,9 @@ describePostgres('precheckout B-lite PostgreSQL lease concurrency', () => {
         await pool.query('GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role');
         await pool.query(migration);
         await pool.query(deadlineMigration);
+        functionMetadataBeforeOptimizer = await readPurgeFunctionMetadata(pool);
+        await pool.query(expiryScanMigration);
+        functionMetadataAfterOptimizer = await readPurgeFunctionMetadata(pool);
         await pool.query(`
             CREATE FUNCTION public.test_hold_precheckout_blite_claim(p_preflight_id UUID)
             RETURNS JSONB
@@ -313,6 +361,100 @@ describePostgres('precheckout B-lite PostgreSQL lease concurrency', () => {
             sourceHolder.release();
             cleanup.release();
             claimant.release();
+        }
+    }, 30_000);
+
+    it('loads the source-driven selector into the real PostgreSQL function', async () => {
+        const result = await pool.query<{ prosrc: string }>(
+            `SELECT procedure.prosrc
+             FROM pg_catalog.pg_proc AS procedure
+             JOIN pg_catalog.pg_namespace AS namespace
+               ON namespace.oid = procedure.pronamespace
+             WHERE namespace.nspname = 'public'
+               AND procedure.proname = 'purge_expired_precheckout_blite_sources_v1'`,
+        );
+
+        expect(result.rows[0]!.prosrc).toMatch(
+            /FROM public\.precheckout_blite_sources AS expired_source\s+JOIN public\.analysis_preflights AS preflight/,
+        );
+    });
+
+    it('preserves function identity, owner, grants, security definer, and empty search path', () => {
+        expect(functionMetadataAfterOptimizer.oid).toBe(functionMetadataBeforeOptimizer.oid);
+        expect(functionMetadataAfterOptimizer.owner).toBe(functionMetadataBeforeOptimizer.owner);
+        expect(functionMetadataAfterOptimizer.acl).toBe(functionMetadataBeforeOptimizer.acl);
+        expect(functionMetadataAfterOptimizer.security_definer).toBe(true);
+        expect(functionMetadataAfterOptimizer.config).toContain('search_path=""');
+    });
+
+    it('plans one source-relation scan beneath a parent row-lock node', async () => {
+        const result = await pool.query<{ 'QUERY PLAN': Array<{ Plan: ExplainNode }> }>(
+            `EXPLAIN (FORMAT JSON)
+             SELECT preflight.id
+             FROM public.precheckout_blite_sources AS expired_source
+             JOIN public.analysis_preflights AS preflight
+               ON preflight.id = expired_source.preflight_id
+             WHERE expired_source.expires_at <= pg_catalog.clock_timestamp()
+             ORDER BY preflight.id
+             LIMIT 100
+             FOR UPDATE OF preflight SKIP LOCKED`,
+        );
+        const nodes = flattenPlan(result.rows[0]!['QUERY PLAN'][0]!.Plan);
+
+        expect(nodes.filter(node => (
+            node['Relation Name'] === 'precheckout_blite_sources'
+        ))).toHaveLength(1);
+        expect(nodes.some(node => node['Node Type'] === 'LockRows')).toBe(true);
+    });
+
+    it('skips a locked first parent and purges the next expired parent without waiting', async () => {
+        await seedReadySource(pool, PREFLIGHT_PURGE_LOCKED);
+        await seedReadySource(pool, PREFLIGHT_PURGE_AVAILABLE);
+        await pool.query(
+            `UPDATE public.precheckout_blite_sources
+             SET collected_at=clock_timestamp() - interval '2 minutes',
+                 expires_at=clock_timestamp() - interval '1 minute'
+             WHERE preflight_id = ANY($1::uuid[])`,
+            [[PREFLIGHT_PURGE_LOCKED, PREFLIGHT_PURGE_AVAILABLE]],
+        );
+
+        const parentHolder = await pool.connect();
+        const cleanup = await pool.connect();
+        try {
+            await parentHolder.query('BEGIN');
+            await parentHolder.query(
+                'SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR UPDATE',
+                [PREFLIGHT_PURGE_LOCKED],
+            );
+
+            const purge = asService<number>(
+                cleanup,
+                'SELECT public.purge_expired_precheckout_blite_sources_v1(1) AS result',
+            );
+            const startedAt = Date.now();
+            const result = await purge;
+            expect(result).toBe(1);
+            expect(Date.now() - startedAt).toBeLessThan(1_500);
+
+            await expect(pool.query(
+                `SELECT
+                    (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$1) AS locked_sources,
+                    (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$1) AS locked_caches,
+                    (SELECT count(*)::int FROM public.precheckout_blite_sources WHERE preflight_id=$2) AS available_sources,
+                    (SELECT count(*)::int FROM public.precheckout_blite_cache WHERE preflight_id=$2) AS available_caches`,
+                [PREFLIGHT_PURGE_LOCKED, PREFLIGHT_PURGE_AVAILABLE],
+            )).resolves.toMatchObject({
+                rows: [{
+                    locked_sources: 1,
+                    locked_caches: 1,
+                    available_sources: 0,
+                    available_caches: 0,
+                }],
+            });
+        } finally {
+            await parentHolder.query('ROLLBACK').catch(() => undefined);
+            parentHolder.release();
+            cleanup.release();
         }
     }, 30_000);
 
