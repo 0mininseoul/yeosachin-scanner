@@ -23,7 +23,7 @@ values, provider payloads, or production observations.
 | Journal sequence advancement after an awaited credential | `gcs.test.ts` drives `GcsJournalStorage` against an in-memory GCS transport, advances the same-owner sequence while the first token is blocked, expects `JOURNAL_INVALID`, and proves only the winning journal POST exists. |
 | Actual selector union | `exclusion-supervisor.test.ts` starts the actual supervisor adapter twice: parent-only role-deployer rejects the nested maintenance selector; the derived parent+nested resource union returns `ADOPTED`. |
 | Genuine child authority | `exclusion-ipc.test.ts` covers role/generic precedence, queue/task-caller identity, Cloud Run service/IAM, project/queue IAM, scheduler, maintenance, retention, queue-absent maintenance, shared-SA overlap, and disjoint selectors. |
-| Shared reservation lifecycle | `coordinator.test.ts` renews the journal and shared reservation across all seven operation intervals; failure cleanup is exercised by the coordinator failure path. |
+| Shared reservation lifecycle | `coordinator.test.ts` renews the journal and shared reservation across all seven operation intervals; resume and activation-precondition failures also prove the common reservation is released. |
 | Partial renewal cleanup | `exclusion.test.ts` injects a failure on a later member and proves every owned member is deleted while preserving generation fencing. |
 | Launcher reader/lifecycle | `exclusion-launcher.test.ts` proves one dispatcher serves child proxy traffic and release, then waits for a detached descendant group. |
 | Low descriptors/direct Node import | `exclusion-shell-mapping.test.ts` checks all seven shell mappings, argv preservation, fixed FDs 4/5, and `node --import tsx` without `npx`. |
@@ -36,7 +36,7 @@ Focused epoch verification passed:
 
 ```text
 npm run test:identity-epoch -- --reporter=dot
-20 test files, 207 tests passed
+20 test files, 209 tests passed
 npx tsc --noEmit
 passed
 ```
