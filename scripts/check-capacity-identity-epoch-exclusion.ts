@@ -238,18 +238,48 @@ function assertLeaseBinding(descriptor: BridgeDescriptor): void {
     }
 }
 
-export function serializeSession(session: ExclusionSession): SerializedLease {
+export function serializeSession(
+    session: ExclusionSession,
+    requestedResources?: readonly string[],
+    includeLegacy = true,
+): SerializedLease {
+    let reservationLease = session.reservationLease;
+    if (requestedResources !== undefined) {
+        const resources = [...session.resources].sort();
+        const requested = [...requestedResources].sort();
+        if (requested.length === 0
+            || requested.some(resource => typeof resource !== 'string')
+            || new Set(requested).size !== requestedResources.length
+            || requested.some(resource => !resources.includes(resource))) {
+            fail('CAPABILITY_BINDING_MISMATCH');
+        }
+        if (reservationLease.members === undefined) {
+            if (resources.length !== 1 || requested.length !== 1) fail('CAPABILITY_BINDING_MISMATCH');
+        } else {
+            if (reservationLease.members.length !== resources.length) fail('CAPABILITY_BINDING_MISMATCH');
+            const memberByResource = new Map(resources.map((resource, index) => [resource, reservationLease.members![index]!] as const));
+            const selectedMembers = requested.map(resource => memberByResource.get(resource));
+            if (selectedMembers.some(member => member === undefined)) fail('CAPABILITY_BINDING_MISMATCH');
+            const selected = selectedMembers as NonNullable<ReservationLease['members']>;
+            const first = selected[0]!;
+            reservationLease = {
+                generation: first.generation,
+                record: first.record,
+                ...(selected.length === 1 ? {} : { members: selected }),
+            };
+        }
+    }
     return {
         reservationLease: {
-            ...session.reservationLease,
-            members: session.reservationLease.members ?? null,
+            ...reservationLease,
+            members: reservationLease.members ?? null,
         },
         // Never emit the legacy object key: it contains project/region/service
         // identity. The descriptor already binds the sorted lock order.
-        legacyLeases: session.legacyLeases.map(lease => ({
+        legacyLeases: includeLegacy ? session.legacyLeases.map(lease => ({
             generation: lease.generation,
             payloadDigest: lease.payloadDigest,
-        })),
+        })) : [],
     };
 }
 

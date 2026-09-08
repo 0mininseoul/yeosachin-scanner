@@ -999,6 +999,8 @@ fi
             env: {
                 ...process.env,
                 ...env,
+                VITEST: 'true',
+                ANALYSIS_CAPACITY_IDENTITY_EPOCH_TEST_STORAGE: 'memory',
                 PATH: `${binDir}:${process.env.PATH ?? ''}`,
                 ANALYSIS_CAPACITY_SOURCE_DIR: sourceDir,
                 ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED: stage === 'bootstrap' ? 'false' : 'true',

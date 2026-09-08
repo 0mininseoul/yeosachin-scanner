@@ -36,4 +36,9 @@ describe('ordinary identity-epoch shell mappings', () => {
         expect(source).toContain('node --import tsx');
         expect(source).not.toContain('npx tsx');
     });
+
+    it('forwards only child argv after removing the entry-point and role selectors', () => {
+        const source = readFileSync(resolve(root, 'capacity-identity-epoch/exclusion-supervisor.sh'), 'utf8');
+        expect(source).toMatch(/capacity_exclusion_start\(\)[\s\S]*?local role="\$2"[\s\S]*?shift 2[\s\S]*?for argument in "\$@"/);
+    });
 });

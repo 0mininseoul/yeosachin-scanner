@@ -82,6 +82,7 @@ capacity_exclusion_start() {
   local script_token
   local argument
   local launcher_args
+  shift 2
   capacity_exclusion_validate_tokens "$entry_point" "$role"
   [[ "$CAPACITY_EXCLUSION_ACTIVE" == "false" ]] || capacity_exclusion_die
 

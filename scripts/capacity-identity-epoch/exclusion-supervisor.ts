@@ -65,6 +65,61 @@ type ControlRequest =
 type SupervisorStorage = ReservationStorage & LegacyLockStorage;
 type SupervisorStorageFactory = (bucket: string) => SupervisorStorage;
 
+/**
+ * Provider-free child-process storage used only by Vitest's shell contract
+ * harness. Production supervisor launches always use authenticated GCS.
+ */
+class InMemorySupervisorStorage implements SupervisorStorage {
+    private readonly values = new Map<string, { generation: string; value: unknown }>();
+    private generation = 0;
+
+    async get(key: string): Promise<{ generation: string; value: unknown } | null> {
+        const value = this.values.get(key);
+        return value ? { ...value } : null;
+    }
+
+    async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<{ generation: string; value: unknown }> {
+        const current = this.values.get(key);
+        if (options.ifGenerationMatch === '0' ? current !== undefined : current?.generation !== options.ifGenerationMatch) {
+            throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        }
+        const stored = { generation: String(++this.generation), value };
+        this.values.set(key, stored);
+        return { ...stored };
+    }
+
+    async delete(key: string, options: { ifGenerationMatch: string }): Promise<void> {
+        const current = this.values.get(key);
+        if (!current || current.generation !== options.ifGenerationMatch) {
+            throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        }
+        this.values.delete(key);
+    }
+
+    async getRaw(key: string): Promise<{ generation: string; body: string } | null> {
+        const value = await this.get(key);
+        if (!value) return null;
+        if (typeof value.value !== 'string') epochFail('ADAPTER_RESPONSE_INVALID');
+        return { generation: value.generation, body: value.value };
+    }
+
+    async putRaw(key: string, body: string, options: { ifGenerationMatch: '0' | string }): Promise<{ generation: string; body: string }> {
+        const value = await this.put(key, body, options);
+        return { generation: value.generation, body };
+    }
+
+    async deleteRaw(key: string, options: { ifGenerationMatch: string }): Promise<void> {
+        await this.delete(key, options);
+    }
+}
+
+function supervisorStorageFactory(): SupervisorStorageFactory {
+    if (process.env.VITEST === 'true' && process.env.ANALYSIS_CAPACITY_IDENTITY_EPOCH_TEST_STORAGE === 'memory') {
+        return () => new InMemorySupervisorStorage();
+    }
+    return bucket => createAuthenticatedGcsJournalStorage({ bucket });
+}
+
 function fail(code: Parameters<typeof epochFail>[0]): never {
     epochFail(code);
 }
@@ -174,8 +229,12 @@ function enqueueOperation<T>(
     return next;
 }
 
-function encodeLeaseEvidence(session: ExclusionSession): string {
-    const evidence = JSON.stringify(serializeSession(session));
+function encodeLeaseEvidence(
+    session: ExclusionSession,
+    requestedResources?: readonly string[],
+    includeLegacy = true,
+): string {
+    const evidence = JSON.stringify(serializeSession(session, requestedResources, includeLegacy));
     const encoded = Buffer.from(evidence, 'utf8').toString('base64url');
     if (Buffer.byteLength(encoded, 'ascii') > MAX_EVIDENCE_BYTES) fail('ADAPTER_RESPONSE_INVALID');
     return encoded;
@@ -226,11 +285,14 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
             try {
                 request = parseRequest(line, channelNonce);
                 const currentRequest = request;
+                let responseResources: readonly string[] | undefined;
+                let responseIncludesLegacy = true;
                 await enqueueOperation(operationState, async () => {
                     if (fatalError !== undefined) throw fatalError;
                     if (currentRequest.op === 'assert') {
                         assertParentBinding(resources, currentRequest.resources);
                         await assertExclusion(session);
+                        responseResources = currentRequest.resources;
                         return;
                     }
                     if (currentRequest.op === 'renew') {
@@ -247,6 +309,8 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
                             fail('CAPABILITY_BINDING_MISMATCH');
                         }
                         await assertExclusion(session);
+                        responseResources = nested;
+                        responseIncludesLegacy = currentRequest.entryPoint === 'role-deployer';
                         return;
                     }
                     await releaseExclusion(session);
@@ -262,7 +326,9 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
                 respond(
                     currentRequest.id,
                     response,
-                    currentRequest.op === 'release' ? undefined : encodeLeaseEvidence(session),
+                    currentRequest.op === 'release'
+                        ? undefined
+                        : encodeLeaseEvidence(session, responseResources, responseIncludesLegacy),
                 );
                 if (currentRequest.op === 'release') break;
             } catch (error) {
@@ -290,7 +356,7 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
 }
 
 export async function runExclusionSupervisor(argv: readonly string[]): Promise<void> {
-    await runSupervisor(parseArguments(argv), bucket => createAuthenticatedGcsJournalStorage({ bucket }));
+    await runSupervisor(parseArguments(argv), supervisorStorageFactory());
 }
 
 export async function runExclusionSupervisorWithStorage(
