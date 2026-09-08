@@ -145,6 +145,7 @@ function requestId(): string {
 }
 
 type SupervisorResponse = Readonly<{ id: string; code: string }>;
+type DispatcherFailureHandler = (error: unknown) => void;
 
 function parseSupervisorResponse(line: string, nonce: string): SupervisorResponse {
     if (line.length > MAX_LINE) fail();
@@ -195,11 +196,14 @@ export class ControlChannelDispatcher {
     private readyReject!: (error: unknown) => void;
     private readyNonce: string | undefined;
     private closed = false;
+    private failureNotified = false;
+    private readonly onFailure?: DispatcherFailureHandler;
 
-    constructor(supervisor: ChildProcess, nonce?: string) {
+    constructor(supervisor: ChildProcess, nonce?: string, onFailure?: DispatcherFailureHandler) {
         if (!supervisor.stdout || !supervisor.stdin || (nonce !== undefined && !CHANNEL_NONCE.test(nonce))) fail();
         this.supervisor = supervisor;
         this.nonce = nonce;
+        this.onFailure = onFailure;
         this.input = createInterface({ input: supervisor.stdout, crlfDelay: Infinity });
         this.readyPromise = new Promise<string>((resolvePromise, rejectPromise) => {
             this.readyResolve = resolvePromise;
@@ -272,6 +276,15 @@ export class ControlChannelDispatcher {
                 return;
             }
             if (this.nonce === undefined) throw new EpochError('ADAPTER_REQUEST_INVALID');
+            const fatal = /^FATAL ([0-9a-f]{64}) ([A-Z_]+)$/.exec(line);
+            if (fatal) {
+                const fatalCode = fatal[2]!;
+                if (fatal[1] !== this.nonce || !RESPONSE_CODES.has(fatalCode) || fatalCode === 'ASSERT_OK'
+                    || fatalCode === 'ADOPTED' || fatalCode === 'RENEWED' || fatalCode === 'RELEASED') {
+                    throw new EpochError('ADAPTER_RESPONSE_INVALID');
+                }
+                throw new EpochError(fatalCode as EpochErrorCode);
+            }
             const response = parseSupervisorResponse(line, this.nonce);
             const pending = this.pending.get(response.id);
             if (!pending) throw new EpochError('ADAPTER_RESPONSE_INVALID');
@@ -291,6 +304,12 @@ export class ControlChannelDispatcher {
     }
 
     private failAll(error: unknown): void {
+        if (!this.failureNotified) {
+            this.failureNotified = true;
+            this.closed = true;
+            this.input.close();
+            try { this.onFailure?.(error); } catch { /* child termination remains best effort */ }
+        }
         if (this.readyNonce === undefined) this.readyReject(error);
         for (const [id, pending] of this.pending) {
             this.pending.delete(id);
@@ -358,6 +377,7 @@ async function run(options: LauncherOptions): Promise<void> {
     let childStatus = 2;
     let dispatcher: ControlChannelDispatcher | undefined;
     let childInput: ReturnType<typeof createInterface> | undefined;
+    let authorityLost = false;
     try {
         const descriptorPipe = supervisor.stdio[3];
         if (!descriptorPipe || typeof descriptorPipe === 'string' || !('write' in descriptorPipe)) fail();
@@ -366,8 +386,15 @@ async function run(options: LauncherOptions): Promise<void> {
         // Keep the supervisor streams private to the parent. The child gets
         // two independent anonymous pipes; this parent remains the only
         // reader of supervisor stdout and forwards responses to the child.
-        dispatcher = new ControlChannelDispatcher(supervisor);
+        dispatcher = new ControlChannelDispatcher(supervisor, undefined, () => {
+            // A supervisor heartbeat loss invalidates child authority for the
+            // rest of the mutation interval. Kill the whole detached group
+            // before the launcher can attempt final release.
+            authorityLost = true;
+            if (child) terminateProcessGroup(child, 'SIGTERM');
+        });
         const nonce = await dispatcher.waitForReady();
+        if (authorityLost) throw new EpochError('LOCK_LOST');
         const childStdio = ['inherit', 'inherit', 'inherit', 'ignore', 'pipe', 'pipe'] as unknown as StdioOptions;
         const environment = {
             ...process.env,

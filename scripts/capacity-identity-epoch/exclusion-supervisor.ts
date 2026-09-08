@@ -262,8 +262,14 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
     });
     let released = false;
     let fatalError: EpochError | undefined;
+    let fatalReported = false;
     const channelNonce = randomBytes(32).toString('hex');
     const operationState = { tail: Promise.resolve() as Promise<unknown> };
+    const reportFatal = (error: EpochError): void => {
+        if (fatalReported) return;
+        fatalReported = true;
+        process.stdout.write('FATAL ' + channelNonce + ' ' + error.code + '\n');
+    };
     const respond = (id: string, value: string, evidence?: string): void => {
         process.stdout.write(id + ' ' + channelNonce + ' ' + value + (evidence === undefined ? '' : ' ' + evidence) + '\n');
     };
@@ -273,8 +279,10 @@ async function runSupervisor(options: SupervisorOptions, storageFactory: Supervi
             if (fatalError !== undefined || released) return;
             session = await renewExclusion(session);
         }).catch(error => {
-            if (error instanceof EpochError) fatalError ??= error;
-            else fatalError ??= new EpochError('LOCK_LOST');
+            if (fatalError === undefined) {
+                fatalError = error instanceof EpochError ? error : new EpochError('LOCK_LOST');
+            }
+            reportFatal(fatalError);
         });
     }, renewalEveryMs);
     process.stdout.write('READY ' + channelNonce + '\n');

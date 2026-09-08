@@ -45,4 +45,34 @@ describe('mapped exclusion launcher control channel', () => {
             terminateProcessGroup(child, 'SIGTERM');
         }
     });
+
+    it('terminates the mapped child when the supervisor reports lost authority', async () => {
+        const supervisor = spawn(process.execPath, ['-e', [
+            `const nonce=${JSON.stringify(nonce)};`,
+            `process.stdout.write('READY '+nonce+'\\n');`,
+            `setTimeout(() => process.stdout.write('FATAL '+nonce+' LOCK_LOST\\n'), 10);`,
+            `process.stdin.resume();`,
+        ].join('')], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn('/bin/bash', ['-c', 'sleep 30'], {
+            detached: true,
+            stdio: 'ignore',
+        });
+        let failure: unknown;
+        const dispatcher = new ControlChannelDispatcher(supervisor, nonce, error => {
+            failure = error;
+            terminateProcessGroup(child, 'SIGTERM');
+        });
+        try {
+            await dispatcher.waitForReady();
+            await new Promise<void>((resolveExit, reject) => {
+                child.once('error', reject);
+                child.once('exit', () => resolveExit());
+            });
+            expect(failure).toEqual(expect.objectContaining({ code: 'LOCK_LOST' }));
+        } finally {
+            dispatcher.close();
+            if (supervisor.exitCode === null) supervisor.kill('SIGTERM');
+            terminateProcessGroup(child, 'SIGTERM');
+        }
+    });
 });

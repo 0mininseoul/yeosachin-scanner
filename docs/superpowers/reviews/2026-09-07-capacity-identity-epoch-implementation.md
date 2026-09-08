@@ -26,7 +26,7 @@ values, provider payloads, or production observations.
 | Genuine child authority | `exclusion-ipc.test.ts` covers role/generic precedence, queue/task-caller identity, Cloud Run service/IAM, project/queue IAM, scheduler, maintenance, retention, queue-absent maintenance, shared-SA overlap, and disjoint selectors. |
 | Shared reservation lifecycle | `coordinator.test.ts` renews the journal and shared reservation across all seven operation intervals; resume and activation-precondition failures also prove the common reservation is released. |
 | Partial renewal cleanup | `exclusion.test.ts` injects a failure on a later member and proves every owned member is deleted while preserving generation fencing. |
-| Launcher reader/lifecycle | `exclusion-launcher.test.ts` proves one dispatcher serves child proxy traffic and release, then waits for a detached descendant group. |
+| Launcher reader/lifecycle | `exclusion-launcher.test.ts` proves one dispatcher serves child proxy traffic and release, turns a supervisor `FATAL` authority-loss event into detached child-group termination, and waits for a detached descendant group. |
 | Low descriptors/direct Node import | `exclusion-shell-mapping.test.ts` checks all seven shell mappings, argv preservation, fixed FDs 4/5, and `node --import tsx` without `npx`. |
 | Native/final mutation fence | Existing live vertical and platform tests cover deferred token minting, final adapter dispatch guards, durable abort/takeover, and provider-free postconditions. |
 | Crash/recovery and no activation | Existing `live-vertical.integration.test.ts`, coordinator, journal, bridge, and integration suites cover retained mutations, takeover, recovery, abort, and `VERIFIED` without activation. |
@@ -37,7 +37,7 @@ Focused epoch verification passed:
 
 ```text
 npm run test:identity-epoch -- --reporter=dot
-20 test files, 210 tests passed
+20 test files, 211 tests passed
 npx tsc --noEmit
 passed
 ```
