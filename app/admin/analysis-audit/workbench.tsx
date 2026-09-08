@@ -464,6 +464,7 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
     const [busySlot, setBusySlot] = useState<ApifyCredentialSlot | null>(null);
     const activeRequest = useRef<RequestTracker | null>(null);
     const detailBackRef = useRef<HTMLButtonElement>(null);
+    const overviewHeadingRef = useRef<HTMLHeadingElement>(null);
     const returnPoint = useRef<{ focusKey: string; scrollY: number } | null>(null);
     const restoreOverview = useRef(false);
 
@@ -477,6 +478,7 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
         activeRequest.current?.controller.abort();
         const controller = new AbortController();
         activeRequest.current = { sequence, controller };
+        if (!append) setNextCursor(null);
         setOrdersLoading(true); setOrdersError(null);
         const params = new URLSearchParams({ pageSize: String(PAGE_SIZE) });
         if (cursor) { params.set('cursorAssembledAt', cursor.assembledAt); params.set('cursorRequestId', cursor.requestId); }
@@ -486,7 +488,8 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
             setOrders(previous => append ? [...previous, ...payload.rows] : payload.rows); setNextCursor(payload.nextCursor);
         } catch (caught) {
             if (controller.signal.aborted || activeRequest.current?.sequence !== sequence) return;
-            if (!append) setOrders([]); setOrdersError(caught instanceof Error ? caught.message : '주문 목록을 불러오지 못했습니다.');
+            if (!append) { setOrders([]); setNextCursor(null); }
+            setOrdersError(caught instanceof Error ? caught.message : '주문 목록을 불러오지 못했습니다.');
         } finally {
             if (activeRequest.current?.sequence === sequence) { activeRequest.current = null; setOrdersLoading(false); }
         }
@@ -503,7 +506,10 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
         if (!restoreOverview.current) return;
         restoreOverview.current = false;
         const point = returnPoint.current;
-        if (!point) return;
+        if (!point) {
+            overviewHeadingRef.current?.focus();
+            return;
+        }
         scrollPageTo(point.scrollY);
         const target = [...document.querySelectorAll<HTMLButtonElement>('[data-order-focus-key]')]
             .find(button => button.dataset.orderFocusKey === point.focusKey);
@@ -529,11 +535,11 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
         setSelectedRequestId(requestId);
     };
     const closeOrder = () => {
-        restoreOverview.current = returnPoint.current !== null;
+        restoreOverview.current = true;
         setSelectedRequestId(null);
     };
 
     if (selectedRequestId) return <OrderDetail requestId={selectedRequestId} onBack={closeOrder} backButtonRef={detailBackRef} />;
 
-    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
+    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1 ref={overviewHeadingRef} tabIndex={-1}>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
 }
