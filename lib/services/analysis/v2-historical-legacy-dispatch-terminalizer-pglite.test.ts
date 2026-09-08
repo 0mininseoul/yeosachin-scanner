@@ -118,22 +118,44 @@ type SeedOptions = {
     extraRejectedProviderRun?: boolean;
 };
 
+type FixtureTimes = {
+    historical: string;
+    young: string;
+    expired: string;
+    live: string;
+};
+
+async function getFixtureTimes(): Promise<FixtureTimes> {
+    const result = await db.query<FixtureTimes>(`
+        WITH fixture_clock AS (
+            SELECT pg_catalog.clock_timestamp() AS fixture_now
+        )
+        SELECT fixture_now - INTERVAL '8 days' AS historical,
+            fixture_now - INTERVAL '6 days' AS young,
+            fixture_now - INTERVAL '1 hour' AS expired,
+            fixture_now + INTERVAL '1 day' AS live
+        FROM fixture_clock
+    `);
+    return result.rows[0];
+}
+
 async function seedCandidate(index: number, options: SeedOptions = {}): Promise<void> {
+    const fixtureTimes = await getFixtureTimes();
     const requestId = UUID(index);
     const jobKey = `track:profiles:batch:${index}`;
     const dispatchReservationToken = UUID(index + 100);
     const priorLeaseToken = UUID(index + 200);
     const dispatchReservedAt = '2026-07-01T00:00:00.000Z';
     const dispatchedAt = '2026-07-01T00:01:00.000Z';
-    const deliveredAt = '2026-07-01T00:02:00.000Z';
+    const deliveredAt = fixtureTimes.historical;
     const updatedAt = options.age === 'young'
-        ? '2026-09-01T00:00:00.000Z'
-        : '2026-07-01T00:02:00.000Z';
+        ? fixtureTimes.young
+        : fixtureTimes.historical;
     const requestLeaseToken = UUID(index + 300);
     const requestLeaseExpiry = options.requestLease === 'live'
-        ? '2099-01-01T00:00:00.000Z'
+        ? fixtureTimes.live
         : options.requestLease === 'expired'
-            ? '2026-07-02T00:00:00.000Z'
+            ? fixtureTimes.expired
             : null;
     const jobLeaseToken = options.jobLease === 'live'
         || options.jobLease === 'expired'
@@ -141,9 +163,9 @@ async function seedCandidate(index: number, options: SeedOptions = {}): Promise<
         ? priorLeaseToken
         : null;
     const jobLeaseExpiry = options.jobLease === 'live'
-        ? '2099-01-01T00:00:00.000Z'
+        ? fixtureTimes.live
         : options.jobLease === 'expired'
-            ? '2026-07-02T00:00:00.000Z'
+            ? fixtureTimes.expired
             : options.jobLease === 'malformed'
                 ? null
                 : null;
@@ -252,7 +274,7 @@ async function seedCandidate(index: number, options: SeedOptions = {}): Promise<
             `INSERT INTO public.analysis_provider_admission_leases(
                 admission_id, request_id, job_key, state, expires_at
             ) VALUES ($1, $2, $3, 'leased', $4::TIMESTAMPTZ)`,
-            [UUID(index + 400), requestId, jobKey, options.admission === 'live' ? '2099-01-01T00:00:00.000Z' : '2026-07-02T00:00:00.000Z']
+            [UUID(index + 400), requestId, jobKey, options.admission === 'live' ? fixtureTimes.live : fixtureTimes.expired]
         );
     }
     if (options.aiAttempt !== 'none' && options.aiAttempt !== undefined) {
