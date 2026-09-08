@@ -46,7 +46,7 @@ The complete actual-adapter replay also passed independently:
 
 ```text
 npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot
-1 test file, 319 tests passed, 1503.99s
+1 test file, 319 tests passed, 1150.12s
 ```
 
 The red-green correction behind this replay was bounded to the ordinary
