@@ -62,6 +62,31 @@ class TakeoverDuringAppendStorage extends MemoryStorage {
     }
 }
 
+class TakeoverDuringStateReadStorage extends MemoryStorage {
+    lockKey: string | undefined;
+    journalPrefix: string | undefined;
+    takeoverOwner: string | undefined;
+    armed = false;
+    private takenOver = false;
+
+    override async list(prefix: string): Promise<ReadonlyArray<StoredObject & { key: string }>> {
+        const entries = await super.list(prefix);
+        if (!this.takenOver && this.armed && this.journalPrefix === prefix && this.lockKey && this.takeoverOwner) {
+            const lock = await super.get(this.lockKey);
+            if (!lock) throw new Error('missing lock fixture');
+            const current = lock.value as EpochHeader & { ownerDigest: string; lockFence: string; lockExpiresAt: string; epochHeaderDigest: string };
+            await super.put(this.lockKey, {
+                ...current,
+                ownerDigest: this.takeoverOwner,
+                lockFence: '2',
+                lockExpiresAt: '2099-01-01T00:01:00.000Z',
+            }, { ifGenerationMatch: lock.generation });
+            this.takenOver = true;
+        }
+        return entries;
+    }
+}
+
 class TakeoverDuringBaselineStorage extends MemoryStorage {
     lockKey: string | undefined;
     baselineKey: string | undefined;
@@ -192,6 +217,8 @@ describe('generation-fenced epoch journal', () => {
         const state = await journal.deriveState();
         expect(state.state).toBe('STAGED');
         expect(state.transitions).toHaveLength(2);
+        expect(state.lock).toMatchObject({ ownerDigest: digest('owner-a'), lockFence: '1' });
+        expect(state.resumed).toBe(false);
     });
 
     it('rejects a conflicting desired header in the same epoch namespace', async () => {
@@ -310,6 +337,19 @@ describe('generation-fenced epoch journal', () => {
         if (!lock) throw new Error('missing lock fixture');
         await storage.delete!(journal.lockKey, { ifGenerationMatch: lock.generation });
         await expect(journal.deriveState()).rejects.toThrow('LOCK_LOST');
+    });
+
+    it('fails closed when takeover changes the fence during the validated state read', async () => {
+        const storage = new TakeoverDuringStateReadStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        await journal.ensureHeader();
+        const lease = await journal.acquire(digest('owner-state-read-old'));
+        await journal.append(lease, transition(1, null, 'PREPARED', lease.lock.lockFence));
+        storage.lockKey = journal.lockKey;
+        storage.journalPrefix = journal.journalPrefix;
+        storage.takeoverOwner = digest('owner-state-read-new');
+        storage.armed = true;
+        await expect(journal.readValidatedState(lease)).rejects.toThrow(/LOCK_LOST|OBSERVATION_RACE/);
     });
 
     it('rejects malformed active locks and marks older-fence history for fresh reconciliation', async () => {

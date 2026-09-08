@@ -31,6 +31,8 @@ export type LiveProductionVerifierOptions = Readonly<{
     vercel: VercelAdapter;
     evidence: LiveEvidenceCollector;
     publicReadinessUrl: string;
+    /** Owner identity reviewed in the private bootstrap descriptor. */
+    expectedOwnerDigest: string;
     now?: () => number;
     pauseProvenance?: (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance>;
 }>;
@@ -106,10 +108,23 @@ function readinessExpected(packet: CapacityEpochPacket) {
         preflightProducerConfigFingerprint: expected.preflightFingerprint,
         paidProducerConfigFingerprintVersion: PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION,
         paidProducerConfigFingerprint: expected.paidFingerprint,
-        analysisV2AdmissionEnabled: false,
-        earlybirdWebhookAutoAdmissionEnabled: false,
+        analysisV2AdmissionEnabled: expected.analysisV2AdmissionEnabled,
+        earlybirdWebhookAutoAdmissionEnabled: expected.earlybirdWebhookAutoAdmissionEnabled,
         ready: true,
     } as const;
+}
+
+function sameValidatedJournalState(
+    left: Awaited<ReturnType<EpochJournal['readValidatedState']>>,
+    right: Awaited<ReturnType<EpochJournal['readValidatedState']>>,
+): boolean {
+    return left.state === right.state
+        && left.aborted === right.aborted
+        && left.resumed === right.resumed
+        && left.activeFence === right.activeFence
+        && left.requiresReconciliation === right.requiresReconciliation
+        && canonicalDigest(left.transitions) === canonicalDigest(right.transitions)
+        && canonicalDigest(left.lock) === canonicalDigest(right.lock);
 }
 
 function safeReadiness(value: Readonly<Record<string, unknown>>): Record<string, unknown> {
@@ -133,11 +148,29 @@ function safeReadiness(value: Readonly<Record<string, unknown>>): Record<string,
 export function createLiveProductionVerifier(options: LiveProductionVerifierOptions): LiveProductionVerifier {
     const now = options.now ?? (() => Date.now());
     return Object.freeze({
-        verify: async (lease?: JournalLease) => verifyProductionOutcome({
-            packet: options.packet,
-            read: async (): Promise<ProductionVerificationSnapshot> => {
+        verify: async (lease?: JournalLease) => {
+            // Capture the expected authority from one validated lock/state
+            // snapshot. The post-provider reader below must reproduce this
+            // exact owner, fence, generation, and lineage.
+            const authorityState = await options.journal.readValidatedState(lease);
+            if (authorityState.state !== 'VERIFIED' || authorityState.aborted || authorityState.requiresReconciliation) fail('EVIDENCE_UNAVAILABLE');
+            if (authorityState.lock.ownerDigest !== options.expectedOwnerDigest) epochFail('CAPABILITY_BINDING_MISMATCH');
+            if (lease && (lease.lock.ownerDigest !== authorityState.lock.ownerDigest
+                || lease.lock.lockFence !== authorityState.lock.lockFence || lease.generation !== authorityState.lock.generation)) {
+                epochFail('LOCK_LOST');
+            }
+            return verifyProductionOutcome({
+                packet: options.packet,
+                expectedJournal: authorityState.lock,
+                read: async (): Promise<ProductionVerificationSnapshot> => {
                 const state = await options.journal.readValidatedState(lease);
                 if (state.state !== 'VERIFIED' || state.aborted || state.requiresReconciliation) fail('EVIDENCE_UNAVAILABLE');
+                if (state.lock.ownerDigest !== options.expectedOwnerDigest) epochFail('CAPABILITY_BINDING_MISMATCH');
+                if (!sameValidatedJournalState(state, authorityState)) fail('EVIDENCE_UNAVAILABLE');
+                if (lease && (lease.lock.ownerDigest !== state.lock.ownerDigest
+                    || lease.lock.lockFence !== state.lock.lockFence || lease.generation !== state.lock.generation)) {
+                    epochFail('LOCK_LOST');
+                }
                 const source: Record<Role, unknown> = {} as Record<Role, unknown>;
                 const runtime: Record<Role, unknown> = {} as Record<Role, unknown>;
                 const queues: Record<Role, unknown> = {} as Record<Role, unknown>;
@@ -183,20 +216,22 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                 // even when no new transition has appeared yet.
                 const finalState = await options.journal.readValidatedState(lease);
                 if (finalState.state !== 'VERIFIED' || finalState.aborted || finalState.requiresReconciliation
-                    || finalState.activeFence !== state.activeFence
-                    || finalState.transitions.length !== state.transitions.length
-                    || canonicalDigest(finalState.transitions) !== canonicalDigest(state.transitions)) fail('EVIDENCE_UNAVAILABLE');
-                const lock = await options.journal.readCurrentLockState();
+                    || !sameValidatedJournalState(finalState, state)) fail('EVIDENCE_UNAVAILABLE');
                 const sharedReservation = await options.journal.inspectSharedReservation(sharedReservationResources(options.packet));
+                // Reservation cleanup is a separate storage family. Confirm
+                // the journal/lock once more after reading it so a takeover or
+                // fence change cannot be paired with the provider snapshot.
+                const confirmedState = await options.journal.readValidatedState(lease);
+                if (!sameValidatedJournalState(confirmedState, finalState)) fail('EVIDENCE_UNAVAILABLE');
                 return {
                     journal: {
-                        state: finalState.state,
-                        transitions: finalState.transitions.map(transition => ({ toState: transition.toState, resultCode: transition.resultCode })),
-                        activation: finalState.transitions.some(transition => transition.toState === 'ACTIVATED'),
-                        resumed: false,
+                        state: confirmedState.state,
+                        transitions: confirmedState.transitions.map(transition => ({ toState: transition.toState, resultCode: transition.resultCode, lockFence: transition.lockFence })),
+                        activation: confirmedState.transitions.some(transition => transition.toState === 'ACTIVATED'),
+                        resumed: confirmedState.resumed,
                         gatesOpen: readiness.analysisV2AdmissionEnabled === true || readiness.earlybirdWebhookAutoAdmissionEnabled === true,
-                        requiresReconciliation: finalState.requiresReconciliation,
-                        lock,
+                        requiresReconciliation: confirmedState.requiresReconciliation,
+                        lock: confirmedState.lock,
                         sharedReservation,
                     },
                     facts: {
@@ -204,7 +239,8 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                         retention, readiness, zeroWork, zeroWorkNowMs: validationNow,
                     },
                 };
-            },
-        }),
+                },
+            });
+        },
     });
 }

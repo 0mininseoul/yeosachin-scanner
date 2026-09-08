@@ -80,7 +80,7 @@ describe('secure production operator path', () => {
         const bad = {
             journal: {
                 state: 'VERIFIED' as State,
-                transitions: [{ toState: 'VERIFIED', resultCode: 'OK' }],
+                transitions: [{ toState: 'VERIFIED', resultCode: 'OK', lockFence: '1' }],
                 activation: false,
                 resumed: false,
                 gatesOpen: false,
@@ -92,20 +92,157 @@ describe('secure production operator path', () => {
         await expect(verifyProductionOutcome({ packet, read: async () => bad })).rejects.toThrow('LOCK_LOST');
     });
 
+    it('binds the final validated journal snapshot to the expected owner and fence', async () => {
+        const packet = createFixturePacket();
+        const snapshot = {
+            journal: {
+                state: 'VERIFIED' as State,
+                transitions: [{ toState: 'VERIFIED', resultCode: 'OK', lockFence: '7' }],
+                activation: false,
+                resumed: false,
+                gatesOpen: false,
+                requiresReconciliation: false,
+                lock: {
+                    generation: '9',
+                    ownerDigest: 'a'.repeat(64),
+                    lockFence: '7',
+                    lockExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+                sharedReservation: { present: false, complete: true, memberCount: 0 },
+            },
+            facts: null,
+        } as unknown as ProductionVerificationSnapshot;
+
+        await expect(verifyProductionOutcome({
+            packet,
+            expectedJournal: { ownerDigest: 'b'.repeat(64), lockFence: '7', generation: '9' },
+            read: async () => snapshot,
+        } as never)).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        await expect(verifyProductionOutcome({
+            packet,
+            expectedJournal: { ownerDigest: 'a'.repeat(64), lockFence: '8', generation: '9' },
+            read: async () => snapshot,
+        } as never)).rejects.toThrow('LOCK_LOST');
+    });
+
+    it('derives activation, resume, and gate-open markers from durable transitions and readiness facts', async () => {
+        const packet = createFixturePacket();
+        const snapshot = {
+            journal: {
+                state: 'VERIFIED' as State,
+                transitions: [{ toState: 'VERIFIED', resultCode: 'OK', lockFence: '2' }],
+                // Deliberately contradictory caller markers: the verifier must
+                // derive them from the durable lineage/facts below.
+                activation: false,
+                resumed: false,
+                gatesOpen: false,
+                requiresReconciliation: false,
+                lock: {
+                    generation: '9',
+                    ownerDigest: 'a'.repeat(64),
+                    lockFence: '2',
+                    lockExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+                sharedReservation: { present: false, complete: true, memberCount: 0 },
+            },
+            facts: {
+                readiness: {
+                    schemaVersion: packet.desiredManifest.readiness.schemaVersion,
+                    sourceSha: packet.desiredManifest.readiness.sourceSha,
+                    legacyTargetResource: packet.desiredManifest.readiness.legacyTargetResource,
+                    preflightFingerprint: packet.desiredManifest.readiness.preflightFingerprint,
+                    paidFingerprint: packet.desiredManifest.readiness.paidFingerprint,
+                    analysisV2AdmissionEnabled: true,
+                    earlybirdWebhookAutoAdmissionEnabled: false,
+                    ready: true,
+                },
+            },
+        } as unknown as ProductionVerificationSnapshot;
+        await expect(verifyProductionOutcome({ packet, read: async () => snapshot })).rejects.toThrow('NOT_VERIFIED');
+    });
+
+    it('rejects an activation lineage even when the snapshot marker is false', async () => {
+        const packet = createFixturePacket();
+        const snapshot = {
+            journal: {
+                state: 'VERIFIED' as State,
+                transitions: [{ toState: 'ACTIVATED', resultCode: 'OK', lockFence: '1' }],
+                activation: false,
+                resumed: false,
+                gatesOpen: false,
+                requiresReconciliation: false,
+                lock: {
+                    generation: '1',
+                    ownerDigest: 'a'.repeat(64),
+                    lockFence: '1',
+                    lockExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+                sharedReservation: { present: false, complete: true, memberCount: 0 },
+            },
+            facts: null,
+        } as unknown as ProductionVerificationSnapshot;
+        await expect(verifyProductionOutcome({ packet, read: async () => snapshot })).rejects.toThrow('NOT_VERIFIED');
+    });
+
+    it('rejects an observed open gate even when the snapshot marker is false', async () => {
+        const packet = createFixturePacket();
+        const snapshot = {
+            journal: {
+                state: 'VERIFIED' as State,
+                transitions: [{ toState: 'VERIFIED', resultCode: 'OK', lockFence: '1' }],
+                activation: false,
+                resumed: false,
+                gatesOpen: false,
+                requiresReconciliation: false,
+                lock: {
+                    generation: '1',
+                    ownerDigest: 'a'.repeat(64),
+                    lockFence: '1',
+                    lockExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+                },
+                sharedReservation: { present: false, complete: true, memberCount: 0 },
+            },
+            facts: {
+                readiness: {
+                    schemaVersion: packet.desiredManifest.readiness.schemaVersion,
+                    sourceSha: packet.desiredManifest.readiness.sourceSha,
+                    legacyTargetResource: packet.desiredManifest.readiness.legacyTargetResource,
+                    preflightFingerprint: packet.desiredManifest.readiness.preflightFingerprint,
+                    paidFingerprint: packet.desiredManifest.readiness.paidFingerprint,
+                    analysisV2AdmissionEnabled: true,
+                    earlybirdWebhookAutoAdmissionEnabled: false,
+                    ready: true,
+                },
+            },
+        } as unknown as ProductionVerificationSnapshot;
+        await expect(verifyProductionOutcome({ packet, read: async () => snapshot })).rejects.toThrow('READINESS_INVALID');
+    });
+
     it('rejects mutable final-resource drift before reporting VERIFIED', async () => {
         const packet = createFixturePacket();
         const drift = {
             journal: {
                 state: 'VERIFIED' as State,
-                transitions: [{ toState: 'VERIFIED', resultCode: 'OK' }],
+                transitions: [{ toState: 'VERIFIED', resultCode: 'OK', lockFence: '1' }],
                 activation: false,
                 resumed: false,
                 gatesOpen: false,
+                requiresReconciliation: false,
                 lock: { generation: '1', ownerDigest: 'a'.repeat(64), lockFence: '1', lockExpiresAt: new Date(Date.now() + 60_000).toISOString() },
                 sharedReservation: { present: false, complete: true, memberCount: 0 },
             },
             facts: {
                 source: { preflight: { sourceSha: 'c'.repeat(40), revision: 'drift', metadataDigest: 'a'.repeat(64) }, paid: { sourceSha: 'c'.repeat(40), revision: 'drift', metadataDigest: 'a'.repeat(64) } },
+                readiness: {
+                    schemaVersion: packet.desiredManifest.readiness.schemaVersion,
+                    sourceSha: packet.desiredManifest.readiness.sourceSha,
+                    legacyTargetResource: packet.desiredManifest.readiness.legacyTargetResource,
+                    preflightFingerprint: packet.desiredManifest.readiness.preflightFingerprint,
+                    paidFingerprint: packet.desiredManifest.readiness.paidFingerprint,
+                    analysisV2AdmissionEnabled: false,
+                    earlybirdWebhookAutoAdmissionEnabled: false,
+                    ready: true,
+                },
             },
         } as unknown as ProductionVerificationSnapshot;
         await expect(verifyProductionOutcome({ packet, read: async () => drift })).rejects.toThrow('SOURCE_INVALID');

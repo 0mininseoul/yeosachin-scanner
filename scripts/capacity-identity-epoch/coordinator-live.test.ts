@@ -72,7 +72,20 @@ function liveAuthority(
         journal.assertLive = assertLive as typeof journal.assertLive;
         journal.readValidatedState = (async (currentLease?: { generation: string; lock: EpochLock }) => {
             await journal.assertLive(currentLease!);
-            return { state: null, transitions: [], aborted: false, activeFence: currentLease!.lock.lockFence, requiresReconciliation: false };
+            return {
+                state: null,
+                transitions: [],
+                aborted: false,
+                activeFence: currentLease!.lock.lockFence,
+                resumed: false,
+                requiresReconciliation: false,
+                lock: {
+                    generation: currentLease!.generation,
+                    ownerDigest: currentLease!.lock.ownerDigest,
+                    lockFence: currentLease!.lock.lockFence,
+                    lockExpiresAt: currentLease!.lock.lockExpiresAt,
+                },
+            };
         }) as typeof journal.readValidatedState;
     }
     return { journal, storage, capability: issueCoordinatorCapability(packet, ownerDigest), ownerDigest, lease };

@@ -48,6 +48,7 @@ class MemoryRawStorage implements LegacyLockStorage {
     private nextGeneration = 0;
     puts = 0;
     deletes = 0;
+    failDeletes = 0;
 
     seed(key: string, body: string): void { this.objects.set(key, { generation: '1', body }); }
     async getRaw(key: string) { return this.objects.get(key) ?? null; }
@@ -62,9 +63,15 @@ class MemoryRawStorage implements LegacyLockStorage {
     async deleteRaw(key: string, options: { ifGenerationMatch: string }) {
         const current = this.objects.get(key);
         if (!current || current.generation !== options.ifGenerationMatch) throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        if (this.failDeletes > 0) {
+            this.failDeletes -= 1;
+            throw new Error('legacy release failed');
+        }
         this.objects.delete(key);
         this.deletes += 1;
     }
+
+    has(key: string): boolean { return this.objects.has(key); }
 }
 
 const digest = (value: string) => canonicalDigest(value);
@@ -232,6 +239,30 @@ describe('ordinary mutation exclusion bridge', () => {
             return 'finished';
         }).then(result => expect(result).toBe('finished'));
         expect(storage.size).toBe(0);
+    });
+
+    it('releases the shared reservation after a legacy cleanup failure and preserves the action error', async () => {
+        const storage = new MemoryStorage();
+        const rawStorage = new MemoryRawStorage();
+        const selectors = [
+            { bucket: 'bucket', project: 'project', region: 'region', service: 'service-a' },
+            { bucket: 'bucket', project: 'project', region: 'region', service: 'service-b' },
+        ] as const;
+        const primary = new Error('primary action failure');
+        rawStorage.failDeletes = 1;
+
+        await expect(withExclusion({
+            storage,
+            rawStorage,
+            resources: ['service:shared'],
+            epochDigest: digest('epoch-cleanup-primary'),
+            ownerDigest: digest('owner-cleanup-primary'),
+            legacyServices: selectors,
+        }, async () => { throw primary; })).rejects.toBe(primary);
+
+        expect(storage.size).toBe(0);
+        expect(rawStorage.has(legacyServiceLockKey(selectors[0]))).toBe(false);
+        expect(rawStorage.has(legacyServiceLockKey(selectors[1]))).toBe(true);
     });
 
     it('lets nested adoption await an in-flight same-owner renewal', async () => {

@@ -32,6 +32,27 @@ export type JournalLease = Readonly<{
     lock: EpochLock;
 }>;
 
+/**
+ * A journal state is only useful to a verifier together with the lock read
+ * that fenced the replay. Keeping the lock projection on the returned value
+ * prevents callers from doing a second, unrelated lock read after inspecting
+ * the append-only lineage.
+ */
+export type ValidatedJournalState = Readonly<{
+    state: State | null;
+    transitions: readonly EpochTransition[];
+    aborted: boolean;
+    activeFence: string;
+    resumed: boolean;
+    requiresReconciliation: boolean;
+    lock: Readonly<{
+        generation: string;
+        ownerDigest: string;
+        lockFence: string;
+        lockExpiresAt: string;
+    }>;
+}>;
+
 export type JournalEvidenceBaseline = Readonly<{
     capturedAtMs: number;
     digest: string;
@@ -229,22 +250,6 @@ export class EpochJournal {
     /** Read the shared reservation family without acquiring authority. */
     async inspectSharedReservation(resources: readonly string[]): Promise<ReservationInspection> {
         return this.createSharedReservation(resources).inspect();
-    }
-
-    /** Read the current epoch lock after a post-VERIFIED provider pass. */
-    async readCurrentLockState(): Promise<Readonly<{
-        generation: string;
-        ownerDigest: string;
-        lockFence: string;
-        lockExpiresAt: string;
-    }>> {
-        const lease = await this.readCurrentLock();
-        return Object.freeze({
-            generation: lease.generation,
-            ownerDigest: lease.lock.ownerDigest,
-            lockFence: lease.lock.lockFence,
-            lockExpiresAt: lease.lock.lockExpiresAt,
-        });
     }
 
     private async putWithLeaseGuard(
@@ -544,13 +549,7 @@ export class EpochJournal {
      * transition from a future fence is an invalid (or late) object and must
      * stop resume.
      */
-    async deriveState(lease?: JournalLease): Promise<{
-        state: State | null;
-        transitions: readonly EpochTransition[];
-        aborted: boolean;
-        activeFence: string;
-        requiresReconciliation: boolean;
-    }> {
+    async deriveState(lease?: JournalLease): Promise<ValidatedJournalState> {
         const activeLock = lease ? await this.readLiveLock(lease) : await this.readCurrentLock();
         const activeFence = activeLock.lock.lockFence;
         const headerObject = await this.storage.get(this.headerKey);
@@ -605,11 +604,26 @@ export class EpochJournal {
         }
         const requiresReconciliation = transitions.some((transition) =>
             compareDecimal(transition.lockFence, activeFence) < 0);
-        return { state, transitions, aborted, activeFence, requiresReconciliation };
+        const resumed = compareDecimal(activeFence, '1') > 0
+            || transitions.some(transition => transition.lockFence !== activeFence);
+        return {
+            state,
+            transitions,
+            aborted,
+            activeFence,
+            resumed,
+            requiresReconciliation,
+            lock: Object.freeze({
+                generation: finalLock.generation,
+                ownerDigest: finalLock.lock.ownerDigest,
+                lockFence: finalLock.lock.lockFence,
+                lockExpiresAt: finalLock.lock.lockExpiresAt,
+            }),
+        };
     }
 
     /** Explicit name used by resume callers; kept separate from mutation. */
-    async readValidatedState(lease?: JournalLease): Promise<ReturnType<EpochJournal['deriveState']> extends Promise<infer T> ? T : never> {
+    async readValidatedState(lease?: JournalLease): Promise<ValidatedJournalState> {
         return this.deriveState(lease);
     }
 

@@ -482,6 +482,7 @@ export async function buildLiveBootstrap(
         vercel,
         evidence,
         publicReadinessUrl: descriptor.publicReadinessUrl,
+        expectedOwnerDigest: descriptor.ownerDigest,
         now,
         pauseProvenance: bootstrapOptions.pauseProvenance,
     });

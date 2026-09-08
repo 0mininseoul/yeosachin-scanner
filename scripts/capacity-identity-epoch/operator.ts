@@ -119,7 +119,7 @@ export async function runPreparedThroughVerified(input: Readonly<{
 export type ProductionVerificationSnapshot = Readonly<{
     journal: Readonly<{
         state: State | null;
-        transitions: readonly Readonly<{ toState: State | null; resultCode: string }>[];
+        transitions: readonly Readonly<{ toState: State | null; resultCode: string; lockFence: string }>[];
         activation: boolean;
         resumed: boolean;
         gatesOpen: boolean;
@@ -152,6 +152,12 @@ export type ProductionVerificationSnapshot = Readonly<{
     }>;
 }>;
 
+export type ExpectedJournalAuthority = Readonly<{
+    ownerDigest: string;
+    lockFence: string;
+    generation: string;
+}>;
+
 export type ProductionVerificationResult = Readonly<{
     status: 'VERIFIED';
     activated: false;
@@ -175,6 +181,8 @@ function expectedRevision(packet: CapacityEpochPacket, role: Role): string {
  */
 export async function verifyProductionOutcome(input: Readonly<{
     packet: CapacityEpochPacket;
+    /** Expected authority captured before the provider read pass. */
+    expectedJournal?: ExpectedJournalAuthority;
     read: () => Promise<ProductionVerificationSnapshot>;
 }>): Promise<ProductionVerificationResult> {
     validateEpochPacket(input.packet);
@@ -186,17 +194,45 @@ export async function verifyProductionOutcome(input: Readonly<{
         epochFail('EVIDENCE_UNAVAILABLE');
     }
     const journal = requireObject(snapshot.journal, 'EVIDENCE_UNAVAILABLE');
-    if (journal.state !== 'VERIFIED' || journal.activation !== false || journal.resumed !== false || journal.gatesOpen !== false
-        || journal.requiresReconciliation === true
-        || !Array.isArray(journal.transitions)
-        || journal.transitions.some(transition => !isObject(transition) || transition.toState === 'ACTIVATED' || transition.resultCode === 'ACTIVATED')) epochFail('NOT_VERIFIED');
+    if (journal.state !== 'VERIFIED' || journal.requiresReconciliation === true || !Array.isArray(journal.transitions)) epochFail('NOT_VERIFIED');
     const lock = requireObject(journal.lock, 'LOCK_LOST');
-    if (typeof lock.generation !== 'string' || typeof lock.ownerDigest !== 'string' || !isDigest(lock.ownerDigest)
-        || typeof lock.lockFence !== 'string' || !/^\d+$/.test(lock.lockFence)
+    if (typeof lock.generation !== 'string' || !/^[1-9][0-9]*$/.test(lock.generation)
+        || typeof lock.ownerDigest !== 'string' || !isDigest(lock.ownerDigest)
+        || typeof lock.lockFence !== 'string' || !/^[1-9][0-9]*$/.test(lock.lockFence)
         || typeof lock.lockExpiresAt !== 'string' || !Number.isFinite(Date.parse(lock.lockExpiresAt))) epochFail('LOCK_LOST');
+    if (input.expectedJournal) {
+        if (!isDigest(input.expectedJournal.ownerDigest)
+            || !/^[1-9][0-9]*$/.test(input.expectedJournal.lockFence)
+            || !/^[1-9][0-9]*$/.test(input.expectedJournal.generation)) epochFail('CAPABILITY_BINDING_MISMATCH');
+        if (lock.ownerDigest !== input.expectedJournal.ownerDigest) epochFail('CAPABILITY_BINDING_MISMATCH');
+        if (lock.lockFence !== input.expectedJournal.lockFence || lock.generation !== input.expectedJournal.generation) epochFail('LOCK_LOST');
+    }
     const sharedReservation = requireObject(journal.sharedReservation, 'LOCK_LOST');
     if (sharedReservation.present !== false || sharedReservation.complete !== true || sharedReservation.memberCount !== 0) epochFail('LOCK_LOST');
+
+    const activation = journal.transitions.some(transition =>
+        !isObject(transition)
+        || typeof transition.lockFence !== 'string'
+        || !/^[1-9][0-9]*$/.test(transition.lockFence)
+        || transition.toState === 'ACTIVATED'
+        || transition.resultCode === 'ACTIVATED');
+    if (journal.transitions.some(transition => !isObject(transition)
+        || typeof transition.lockFence !== 'string'
+        || !/^[1-9][0-9]*$/.test(transition.lockFence))) epochFail('NOT_VERIFIED');
+    // Fence > 1 or any earlier-fence transition proves that this is a
+    // resumed durable lineage. The marker is checked against this derivation,
+    // never accepted as an independent caller assertion.
+    const resumed = lock.lockFence !== '1'
+        || journal.transitions.some(transition => transition.lockFence !== lock.lockFence);
+    if (journal.activation !== activation || journal.resumed !== resumed || activation || resumed) epochFail('NOT_VERIFIED');
     const facts = requireObject(snapshot.facts, 'EVIDENCE_UNAVAILABLE');
+    const readiness = facts.readiness;
+    // Gate state is an independently observed public fact. Validate and
+    // derive it before mutable resource checks so an open gate cannot be
+    // hidden behind an unrelated missing adapter fact.
+    validateReadinessObservation(readiness, input.packet.desiredManifest.readiness);
+    const gatesOpen = readiness.analysisV2AdmissionEnabled === true || readiness.earlybirdWebhookAutoAdmissionEnabled === true;
+    if (journal.gatesOpen !== gatesOpen || gatesOpen) epochFail('NOT_VERIFIED');
     const source = requireObject(facts.source, 'SOURCE_INVALID') as unknown as Record<Role, unknown>;
     for (const role of ROLES) {
         const expected = input.packet.desiredManifest.source[role];
@@ -214,7 +250,6 @@ export async function verifyProductionOutcome(input: Readonly<{
     const pauseProvenance = requireObject(facts.pauseProvenance, 'SCHEDULER_NOT_QUIESCENT') as unknown as Record<Role, unknown>;
     const iam = requireObject(facts.iam, 'IAM_ETAG_REQUIRED') as unknown as Record<Role, Record<typeof IAM_KINDS[number], unknown>>;
     const retention = facts.retention;
-    const readiness = facts.readiness;
     const zeroWork = facts.zeroWork;
     for (const role of ROLES) {
         validateRuntimeObservation(runtime[role], input.packet.protectedInputs.desired.runtime[role], {
@@ -251,7 +286,6 @@ export async function verifyProductionOutcome(input: Readonly<{
         }
     }
     validateRetentionObservation(retention, input.packet.protectedInputs.desired.retention);
-    validateReadinessObservation(readiness, input.packet.desiredManifest.readiness);
     if (typeof facts.zeroWorkNowMs !== 'number' || !Number.isSafeInteger(facts.zeroWorkNowMs)) epochFail('ZERO_WORK_INCOMPLETE');
     if (Date.parse(lock.lockExpiresAt) <= facts.zeroWorkNowMs) epochFail('LOCK_LOST');
     const zeroWorkValue = requireObject(zeroWork, 'ZERO_WORK_INCOMPLETE');

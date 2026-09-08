@@ -314,10 +314,24 @@ export function renewExclusion(session: ExclusionSession): Promise<ExclusionSess
 }
 
 export async function releaseExclusion(session: ExclusionSession): Promise<void> {
+    let firstError: unknown;
     for (let index = session.legacyLocks.length - 1; index >= 0; index -= 1) {
-        await session.legacyLocks[index]!.release(session.legacyLeases[index]!);
+        try {
+            await session.legacyLocks[index]!.release(session.legacyLeases[index]!);
+        } catch (error) {
+            // Continue the bounded reverse-order sweep. The shared
+            // reservation must still be attempted even when a legacy lock is
+            // already stale or its release endpoint fails.
+            firstError ??= error;
+        }
     }
-    await session.reservation.release(session.reservationLease);
+    try {
+        await session.reservation.release(session.reservationLease);
+    } catch (error) {
+        firstError ??= error;
+    }
+    if (firstError instanceof EpochError) throw firstError;
+    if (firstError !== undefined) epochFail('GENERATION_PRECONDITION_FAILED');
 }
 
 /** Hold all common/native locks around the complete mutation callback. */
@@ -330,6 +344,7 @@ export async function withExclusion<T>(
     let renewalError: unknown;
     let renewalInFlight: Promise<ExclusionSession> | undefined;
     let actionFailed = false;
+    let actionError: unknown;
     const renewCurrent = (): Promise<ExclusionSession> => {
         if (renewalError !== undefined) return Promise.reject(renewalError);
         if (renewalInFlight) return renewalInFlight;
@@ -368,6 +383,7 @@ export async function withExclusion<T>(
             });
         } catch (error) {
             actionFailed = true;
+            actionError = error;
             throw error;
         }
         if (renewalError !== undefined) throw renewalError;
@@ -384,8 +400,18 @@ export async function withExclusion<T>(
             renewalError ??= error;
         }
         delegationState.closed = true;
-        await releaseExclusion(session);
-        if (!actionFailed && renewalError !== undefined) throw renewalError;
+        let releaseError: unknown;
+        try {
+            await releaseExclusion(session);
+        } catch (error) {
+            releaseError = error;
+        }
+        // Never let bounded cleanup mask the primary mutation/action error.
+        // If the action succeeded, renewal is the next primary failure; only
+        // then surface a release failure.
+        if (actionFailed) throw actionError;
+        if (renewalError !== undefined) throw renewalError;
+        if (releaseError !== undefined) throw releaseError;
     }
 }
 
