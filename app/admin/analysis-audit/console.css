@@ -133,13 +133,13 @@
 
 .oc-section-heading p {
     margin: 3px 0 0;
-    color: #647281;
+    color: #526170;
     font-size: 12px;
 }
 
 .oc-section-meta {
     flex: 0 0 auto;
-    color: #6b7885;
+    color: #526170;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 11px;
 }
@@ -238,13 +238,14 @@
 
 .oc-chip--unknown {
     border-color: #cbd3dc;
-    color: #657381;
+    color: #526170;
     background: #f3f5f7;
 }
 
 .oc-table-scroll {
     width: 100%;
     overflow-x: auto;
+    contain: paint;
 }
 
 .oc-table {
@@ -264,7 +265,7 @@
 }
 
 .oc-table thead th {
-    color: #73808d;
+    color: #526170;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.04em;
@@ -305,7 +306,7 @@
 }
 
 .oc-muted {
-    color: #697887;
+    color: #526170;
 }
 
 .oc-button,
@@ -360,7 +361,7 @@
 .oc-button:focus-visible,
 .oc-link:focus-visible,
 .oc-stage-header:focus-visible {
-    outline: 3px solid rgb(29 102 143 / 28%);
+    outline: 3px solid #1b4fd8;
     outline-offset: 2px;
 }
 
@@ -407,7 +408,7 @@
 }
 
 .oc-role {
-    color: #667685;
+    color: #526170;
     font-size: 11px;
 }
 
@@ -494,6 +495,11 @@
 }
 
 .oc-alert {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
     margin: 0;
     padding: 10px 12px;
     border: 1px solid #e3b1a8;
@@ -506,7 +512,7 @@
 .oc-empty,
 .oc-loading {
     margin: 10px 0 0;
-    color: #6a7885;
+    color: #526170;
     font-size: 12px;
 }
 
@@ -526,7 +532,7 @@
 
 .oc-breadcrumb {
     justify-content: space-between;
-    color: #667583;
+    color: #526170;
 }
 
 .oc-detail-head {
@@ -537,7 +543,7 @@
     border-bottom: 1px solid #cbd3dc;
 }
 
-.oc-detail-head h2 {
+.oc-detail-head h1 {
     margin: 5px 0 4px;
     color: #152531;
     font-size: clamp(24px, 4vw, 36px);
@@ -576,7 +582,7 @@
 
 .oc-facts span,
 .oc-facts small {
-    color: #6b7885;
+    color: #526170;
     font-size: 11px;
 }
 
@@ -599,7 +605,7 @@
 
 .oc-retention-meta {
     margin-left: auto;
-    color: #778591;
+    color: #526170;
 }
 
 .oc-evidence {
@@ -672,7 +678,7 @@
 
 .oc-stage-name small {
     overflow: hidden;
-    color: #758390;
+    color: #526170;
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -728,7 +734,7 @@
 
 .oc-stage-tools .oc-stage-contract {
     margin-left: auto;
-    color: #85909b;
+    color: #526170;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 10px;
 }
@@ -759,7 +765,7 @@
     padding: 17px;
 }
 
-.oc-ledger-grid h4 {
+.oc-ledger-grid h3 {
     margin: 0 0 9px;
     color: #344c5c;
     font-size: 12px;
@@ -809,7 +815,7 @@
 
 .oc-footer {
     padding: 4px 2px;
-    color: #71808c;
+    color: #526170;
     font-size: 11px;
     text-align: right;
 }
