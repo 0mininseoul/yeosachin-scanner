@@ -14,7 +14,7 @@
 
 | Action | Path |
 |---|---|
-| Create | \`supabase/migrations/20260912100000_add_commerce_operation_canonical_tables.sql\` |
+| Create (generated path) | \`$COMMERCE_MIGRATION_PATH\` from \`npx supabase migration new add_commerce_operation_canonical_tables\` |
 | Create | \`lib/services/commerce/canonical-commerce-store.ts\` |
 | Create | \`lib/services/commerce/canonical-commerce-store.test.ts\` |
 | Create | \`lib/services/commerce/canonical-commerce-pglite.test.ts\` |
@@ -153,9 +153,9 @@ CREATE TABLE public.maintenance_jobs (
 - Create: \`lib/services/commerce/canonical-commerce-store.test.ts\`
 - Create: \`lib/services/commerce/canonical-commerce-pglite.test.ts\`
 - Create: \`lib/services/operations/canonical-operations-store.test.ts\`
-- Create: \`supabase/migrations/20260912100000_add_commerce_operation_canonical_tables.sql\`
+- Create (generated path): \`$COMMERCE_MIGRATION_PATH\`
 
-- [ ] **Step 1: Write RED tests.** Assert all seven table names, enum/checks, unique idempotency/dedupe keys, RLS/ACL, append-only protections, no browser grant, no raw webhook/token/contact keys, and the explicit forbidden transition \`payment_pending -> payment_failed\` unless the independent provider no-sale evidence RPC is called.
+- [ ] **Step 1: Write RED tests.** Assert all seven table names, enum/checks, unique idempotency/dedupe keys, RLS/ACL, append-only protections, no browser grant, no raw webhook/token/contact keys, and the explicit forbidden transition \`payment_pending -> payment_failed\` unless the independent provider no-sale evidence RPC is called. Assert every SECURITY DEFINER RPC uses \`SET search_path = ''\`, revokes EXECUTE from \`PUBLIC, anon, authenticated\`, and grants EXECUTE only to \`service_role\`.
 
 ~~~ts
 expect(sql).toContain('CREATE TABLE public.payment_events');
@@ -171,16 +171,32 @@ expect(sql).toContain('PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED');
 npx vitest run lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts
 ~~~
 
-Expected: FAIL because \`20260912100000_add_commerce_operation_canonical_tables.sql\` is absent.
+Expected: FAIL because the generated commerce/operations migration file is absent.
 
-- [ ] **Step 3: Add schema and minimal RPCs.** Add indexes \`payment_events_order_recorded_idx\`, \`fulfillment_jobs_recovery_idx\`, \`notification_outbox_delivery_idx\`, \`account_lifecycle_account_recorded_idx\`, \`system_configuration_effective_idx\`, \`system_leases_expiry_idx\`, and \`maintenance_jobs_recovery_idx\`. The only function allowed to move \`payment_pending\` is the existing evidence-gated no-sale reconciliation path; canonical event recording is append-only.
+- [ ] **Step 3: Create the migration and add schema and minimal RPCs.** Run Steps 3–4 in one shell session so the generated path variable remains available. Capture exactly one path from the CLI output, place the contract SQL above in that file, and add indexes \`payment_events_order_recorded_idx\`, \`fulfillment_jobs_recovery_idx\`, \`notification_outbox_delivery_idx\`, \`account_lifecycle_account_recorded_idx\`, \`system_configuration_effective_idx\`, \`system_leases_expiry_idx\`, and \`maintenance_jobs_recovery_idx\`. Every SECURITY DEFINER function uses \`SET search_path = ''\` and the explicit service-role-only ACL below. The only function allowed to move \`payment_pending\` is the existing evidence-gated no-sale reconciliation path; canonical event recording is append-only.
+
+~~~bash
+set -euo pipefail
+COMMERCE_MIGRATION_OUTPUT="$(npx supabase migration new add_commerce_operation_canonical_tables)"
+COMMERCE_MIGRATION_PATH="$(printf '%s\n' "$COMMERCE_MIGRATION_OUTPUT" | sed -n 's/^Created new migration at //p')"
+test "$(printf '%s\n' "$COMMERCE_MIGRATION_PATH" | awk 'NF { count++ } END { print count + 0 }')" -eq 1
+test -f "$COMMERCE_MIGRATION_PATH"
+export COMMERCE_MIGRATION_PATH
+~~~
+
+Define \`record_payment_event_v1\` as \`LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''\`, then apply its explicit service-role-only ACL:
+
+~~~sql
+REVOKE EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) TO service_role;
+~~~
 
 - [ ] **Step 4: Run GREEN and commit.**
 
 ~~~bash
 npx vitest run lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts
 git diff --check
-git add supabase/migrations/20260912100000_add_commerce_operation_canonical_tables.sql lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts
+git add "$COMMERCE_MIGRATION_PATH" lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts
 git commit -m "feat: add commerce operation canonical tables"
 ~~~
 

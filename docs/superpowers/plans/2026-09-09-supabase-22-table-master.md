@@ -98,6 +98,19 @@ export type CanonicalEnvelope = Readonly<{
 
 상세 계획은 각각 독립적으로 RED 테스트, 최소 SQL/adapter, GREEN 검증, rollback read path, commit까지 갖는다. 한 계획의 미완료를 다른 계획의 DROP/activation 권한으로 해석하지 않는다.
 
+## Migration creation and cross-plan path contract
+
+새 migration path는 미리 만든 timestamp를 사용하지 않고 각 상세 계획의 Task 1에서 아래 이름으로 생성한다. 각 계획은 CLI 출력에서 정확히 한 generated path를 task-specific shell variable에 캡처하고, 이후 해당 계획의 SQL placement와 \`git add\`에 그 variable만 재사용한다.
+
+| 상세 계획 | 생성 명령 | generated path variable |
+|---|---|---|
+| landing identity/admin | \`npx supabase migration new add_landing_lead_journey_contract\` | \`$LANDING_MIGRATION_PATH\` |
+| analysis canonicalization | \`npx supabase migration new add_analysis_canonical_tables\` | \`$ANALYSIS_MIGRATION_PATH\` |
+| commerce/operations | \`npx supabase migration new add_commerce_operation_canonical_tables\` | \`$COMMERCE_MIGRATION_PATH\` |
+| production evidence gate | no migration is created | none |
+
+The three detailed plans require Steps 3–4 to run in one shell session, verify one generated path and an existing file, and never substitute an invented migration timestamp.
+
 ## Task 1: Freeze and identity/admin contract
 
 - [ ] 2026-09-05 readiness의 0 bundle/0 parity/empty allowlist를 baseline으로 기록하고 landing journey migration과 operator private projection RED tests를 먼저 통과시킨다.
@@ -140,16 +153,18 @@ export type CanonicalEnvelope = Readonly<{
 | Wave 5 archive/restore/contract/count | gate Task 2–4 |
 | Failure handling과 rollback | 네 상세 계획 Task 4 및 공통 verification matrix |
 
-- Landing plan은 \`supabase/migrations/20260910100000_add_landing_lead_journey_contract.sql\`, \`lib/services/leads/store.ts\`, \`lib/services/analysis/anonymous-preflight.ts\`, \`app/api/leads/route.ts\`, \`app/api/admin/landing-leads/route.ts\`, \`app/admin/analysis-audit/workbench.tsx\`와 해당 테스트만 소유한다.
-- Analysis plan은 \`supabase/migrations/20260911100000_add_analysis_canonical_tables.sql\`, \`lib/services/analysis/canonical-analysis-store.ts\`, \`lib/services/analysis/canonical-analysis-read.ts\`, \`scripts/backfill-analysis-canonical.ts\`와 해당 테스트를 소유한다. 기존 execution table은 parity window 동안 read-only source로 남긴다.
-- Commerce plan은 \`supabase/migrations/20260912100000_add_commerce_operation_canonical_tables.sql\`, \`lib/services/commerce/canonical-commerce-store.ts\`, \`lib/services/operations/canonical-operations-store.ts\`, \`scripts/backfill-commerce-operations-canonical.ts\`와 webhook/fulfillment/outbox/account lifecycle adapter 테스트를 소유한다.
+- Landing plan은 generated \`$LANDING_MIGRATION_PATH\`, \`lib/services/leads/store.ts\`, \`lib/services/analysis/anonymous-preflight.ts\`, \`app/api/leads/route.ts\`, \`app/api/admin/landing-leads/route.ts\`, \`app/admin/analysis-audit/workbench.tsx\`와 해당 테스트만 소유한다.
+- Analysis plan은 generated \`$ANALYSIS_MIGRATION_PATH\`, \`lib/services/analysis/canonical-analysis-store.ts\`, \`lib/services/analysis/canonical-analysis-read.ts\`, \`scripts/backfill-analysis-canonical.ts\`와 해당 테스트를 소유한다. 기존 execution table은 parity window 동안 read-only source로 남긴다.
+- Commerce plan은 generated \`$COMMERCE_MIGRATION_PATH\`, \`lib/services/commerce/canonical-commerce-store.ts\`, \`lib/services/operations/canonical-operations-store.ts\`, \`scripts/backfill-commerce-operations-canonical.ts\`와 webhook/fulfillment/outbox/account lifecycle adapter 테스트를 소유한다.
 - Gate plan은 \`lib/services/operations/supabase-22-evidence.ts\`, \`scripts/verify-supabase-22-catalog.ts\`, \`scripts/verify-supabase-22-archive-restore.ts\`, gate contract tests와 evidence report만 소유한다. 적용된 migration, protected migration, \`.playwright-mcp/\`는 수정하지 않는다.
 
 어댑터는 실제 old caller가 존재하는 동안만 유지한다. 새 generic ORM, stage마다 RPC 하나, table count만 맞추는 rename/view chain은 만들지 않는다.
 
 ## 공통 verification matrix
 
-- [ ] 각 migration contract test는 predecessor, table/column/check/index, RLS/ACL, function search path, append-only trigger, no-secret/no-raw-ID shape를 문자열과 disposable database에서 검증한다.
+- [ ] 각 migration contract test는 predecessor, table/column/check/index, RLS/ACL, function search path, SECURITY DEFINER RPC의 EXECUTE revoke/grant (PUBLIC·anon·authenticated revoke 및 service_role only grant), append-only trigger, no-secret/no-raw-ID shape를 문자열과 disposable database에서 검증한다.
+- [ ] Landing contract는 nullable opaque \`source_preflight_id\`(FK 아님), constrained nullable \`mapping_source\`, nullable unique \`capture_token_hash\` fence, 그리고 \`mapping_status = 'unlinked_after_deletion'\` claim exclusion을 검증한다.
+- [ ] Analysis contract는 \`analysis_costs\`의 DB CHECK \`NOT usage_unknown OR amount_known IS NULL\`과 \`analysis_audit_bundles\`의 non-null immutable \`content_hash\` uniqueness \`(request_id, version, kind, content_hash)\`를 검증한다.
 - [ ] PGlite는 complete/partial/unknown/late-cost/conflict/zero-candidate fixture를 검증한다.
 - [ ] native PostgreSQL는 lease/fence, \`SKIP LOCKED\`, idempotency, concurrent claim, append-only, rollback reader를 검증한다.
 - [ ] owner result/progress/share, payment/fulfillment/retry/recovery, account deletion, operator dashboard를 canonical/legacy shadow-read로 비교한다.

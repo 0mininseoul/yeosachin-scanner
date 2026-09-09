@@ -117,7 +117,22 @@ WHERE n.nspname = 'public'
 ORDER BY c.relname;
 ~~~
 
-Join separate queries for \`pg_constraint\`, \`pg_policy\`, \`pg_roles\` ACL, \`pg_trigger\`, \`pg_proc\`, \`pg_depend\`, \`pg_publication_rel\`, sequences, partitions, views, and extensions. Mark any unresolved dependency or non-RLS table as blocked; do not auto-fix catalog state.
+Join separate queries for \`pg_constraint\`, \`pg_policy\`, \`pg_roles\` ACL, \`pg_trigger\`, \`pg_proc\`, \`pg_depend\`, \`pg_publication_rel\`, sequences, partitions, views, and extensions. For every SECURITY DEFINER RPC introduced by the detailed plans, require \`proconfig\` to set an empty \`search_path\`, require EXECUTE revoked from \`PUBLIC\`, \`anon\`, and \`authenticated\`, and require EXECUTE granted only to \`service_role\`; any deviation is blocked.
+
+~~~sql
+SELECT n.nspname,
+       p.proname,
+       pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_arguments,
+       p.proconfig,
+       p.proacl
+FROM pg_catalog.pg_proc AS p
+JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+WHERE n.nspname = 'public'
+  AND p.prosecdef
+ORDER BY p.proname, identity_arguments;
+~~~
+
+Mark any unresolved dependency or non-RLS table as blocked; do not auto-fix catalog state.
 
 - [ ] **Step 4: Run GREEN and commit.**
 

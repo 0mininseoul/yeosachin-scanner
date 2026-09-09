@@ -14,7 +14,7 @@
 
 | Action | Path |
 |---|---|
-| Create | \`supabase/migrations/20260911100000_add_analysis_canonical_tables.sql\` |
+| Create (generated path) | \`$ANALYSIS_MIGRATION_PATH\` from \`npx supabase migration new add_analysis_canonical_tables\` |
 | Create | \`lib/services/analysis/canonical-analysis-store.ts\` |
 | Create | \`lib/services/analysis/canonical-analysis-store.test.ts\` |
 | Create | \`lib/services/analysis/canonical-analysis-pglite.test.ts\` |
@@ -97,6 +97,7 @@ CREATE TABLE public.analysis_costs (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     CHECK (amount_known IS NULL OR amount_known >= 0),
     CHECK (amount_conservative IS NULL OR amount_conservative >= 0),
+    CHECK (NOT usage_unknown OR amount_known IS NULL),
     CHECK (amount_conservative IS NULL OR amount_known IS NULL OR amount_conservative >= amount_known),
     CHECK (pg_catalog.jsonb_typeof(payload) = 'object')
 );
@@ -127,12 +128,12 @@ CREATE TABLE public.analysis_audit_bundles (
     retention_class TEXT NOT NULL DEFAULT 'permanent',
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
-    UNIQUE (request_id, version, kind, candidate_key, ordinal, content_hash),
+    UNIQUE (request_id, version, kind, content_hash),
     CHECK (pg_catalog.jsonb_typeof(payload) = 'object')
 );
 ~~~
 
-모든 six table은 \`ENABLE FORCE ROW LEVEL SECURITY\`, \`REVOKE ALL ON TABLE public.analysis_jobs FROM PUBLIC, anon, authenticated, service_role\` 형태의 명시적 ACL, service-role-only RPC, immutable trigger 또는 append-only privilege를 사용한다. \`analysis_costs.usage_unknown = true\`일 때 \`amount_known = NULL\`을 유지한다.
+모든 six table은 \`ENABLE FORCE ROW LEVEL SECURITY\`, \`REVOKE ALL ON TABLE public.analysis_jobs FROM PUBLIC, anon, authenticated, service_role\` 형태의 명시적 ACL, service-role-only RPC, immutable trigger 또는 append-only privilege를 사용한다. \`analysis_costs.usage_unknown = true\`일 때 DB CHECK \`NOT usage_unknown OR amount_known IS NULL\`로 \`amount_known = NULL\`을 강제한다. \`candidate_key\`와 \`ordinal\`은 표시/정렬용 nullable metadata이며 audit uniqueness는 non-null immutable \`content_hash\`에만 의존한다.
 
 ## Task 1: RED migration contracts and minimal schema
 
@@ -140,9 +141,9 @@ CREATE TABLE public.analysis_audit_bundles (
 
 - Create: \`lib/services/analysis/canonical-analysis-store.test.ts\`
 - Create: \`lib/services/analysis/canonical-analysis-pglite.test.ts\`
-- Create: \`supabase/migrations/20260911100000_add_analysis_canonical_tables.sql\`
+- Create (generated path): \`$ANALYSIS_MIGRATION_PATH\`
 
-- [ ] **Step 1: Write RED contract tests.** Read the exact migration and assert six table names, enum/check values, owner/request indexes, FORCE RLS, no grant to \`anon\` or \`authenticated\`, no raw provider payload/token column, append-only event/audit behavior, and cost unknown semantics. PGlite fixtures cover complete, partial, unknown usage, late cost, duplicate \`job_key\`, and duplicate audit hash.
+- [ ] **Step 1: Write RED contract tests.** Read the generated migration and assert six table names, enum/check values, owner/request indexes, FORCE RLS, no grant to \`anon\` or \`authenticated\`, no raw provider payload/token column, append-only event/audit behavior, the audit uniqueness key \`(request_id, version, kind, content_hash)\`, and the DB CHECK \`NOT usage_unknown OR amount_known IS NULL\`. PGlite fixtures cover complete, partial, unknown usage, late cost, duplicate \`job_key\`, and duplicate audit hash.
 
 ~~~ts
 expect(sql).toContain('CREATE TABLE public.analysis_costs');
@@ -158,16 +159,32 @@ expect(sql).not.toMatch(/provider_token|access_token|cookie|raw_provider_payload
 npx vitest run lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts
 ~~~
 
-Expected: FAIL because \`20260911100000_add_analysis_canonical_tables.sql\` is absent.
+Expected: FAIL because the generated analysis migration file is absent.
 
-- [ ] **Step 3: Add the six tables, indexes, RLS, and service RPC boundary.** Add indexes \`analysis_jobs_dispatch_idx\` on \`(state, next_attempt_at, updated_at)\`, \`analysis_events_request_created_idx\`, \`analysis_artifacts_request_kind_idx\`, \`analysis_costs_request_recorded_idx\`, \`analysis_cache_expiry_idx\`, and \`analysis_audit_request_version_idx\`. Use \`SET search_path = ''\` in every SECURITY DEFINER function.
+- [ ] **Step 3: Create the migration and add the six tables, indexes, RLS, and service RPC boundary.** Run Steps 3–4 in one shell session so the generated path variable remains available. Capture exactly one path from the CLI output, place the contract SQL above in that file, and add indexes \`analysis_jobs_dispatch_idx\` on \`(state, next_attempt_at, updated_at)\`, \`analysis_events_request_created_idx\`, \`analysis_artifacts_request_kind_idx\`, \`analysis_costs_request_recorded_idx\`, \`analysis_cache_expiry_idx\`, and \`analysis_audit_request_version_idx\`. Every SECURITY DEFINER function uses \`SET search_path = ''\` and the explicit service-role-only ACL below.
+
+~~~bash
+set -euo pipefail
+ANALYSIS_MIGRATION_OUTPUT="$(npx supabase migration new add_analysis_canonical_tables)"
+ANALYSIS_MIGRATION_PATH="$(printf '%s\n' "$ANALYSIS_MIGRATION_OUTPUT" | sed -n 's/^Created new migration at //p')"
+test "$(printf '%s\n' "$ANALYSIS_MIGRATION_PATH" | awk 'NF { count++ } END { print count + 0 }')" -eq 1
+test -f "$ANALYSIS_MIGRATION_PATH"
+export ANALYSIS_MIGRATION_PATH
+~~~
+
+For \`enqueue_analysis_canonical_retry(UUID, TEXT)\`, revoke the default and client-role execute privileges and grant only \`service_role\`:
+
+~~~sql
+REVOKE EXECUTE ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) TO service_role;
+~~~
 
 - [ ] **Step 4: Run GREEN and commit.**
 
 ~~~bash
 npx vitest run lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts
 git diff --check
-git add supabase/migrations/20260911100000_add_analysis_canonical_tables.sql lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts
+git add "$ANALYSIS_MIGRATION_PATH" lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts
 git commit -m "feat: add analysis canonical tables"
 ~~~
 

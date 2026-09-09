@@ -14,7 +14,7 @@
 
 | Action | Path |
 |---|---|
-| Create | \`supabase/migrations/20260910100000_add_landing_lead_journey_contract.sql\` |
+| Create (generated path) | \`$LANDING_MIGRATION_PATH\` from \`npx supabase migration new add_landing_lead_journey_contract\` |
 | Create | \`lib/services/landing/landing-lead-journey.ts\` |
 | Create | \`lib/services/landing/landing-lead-journey.test.ts\` |
 | Create | \`lib/services/landing/landing-lead-journey-pglite.test.ts\` |
@@ -35,6 +35,7 @@ ALTER TABLE public.landing_leads
     ADD COLUMN journey_id UUID NOT NULL DEFAULT extensions.gen_random_uuid(),
     ADD COLUMN anonymous_principal_hash VARCHAR(64),
     ADD COLUMN auth_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    ADD COLUMN source_preflight_id UUID,
     ADD COLUMN capture_token_hash VARCHAR(64),
     ADD COLUMN mapping_status TEXT NOT NULL DEFAULT 'legacy_unlinked',
     ADD COLUMN mapping_source TEXT,
@@ -47,6 +48,12 @@ ALTER TABLE public.landing_leads
             'authenticated_user', 'unlinked_after_deletion'
         )
     ),
+    ADD CONSTRAINT landing_leads_mapping_source_check CHECK (
+        mapping_source IS NULL OR mapping_source IN (
+            'legacy_import_v1', 'capture_v1', 'preflight_v1',
+            'account_deletion_v1'
+        )
+    ),
     ADD CONSTRAINT landing_leads_capture_hash_check CHECK (
         capture_token_hash IS NULL OR capture_token_hash ~ '^[a-f0-9]{64}$'
     );
@@ -55,6 +62,8 @@ CREATE INDEX landing_leads_journey_created_idx
     ON public.landing_leads(journey_id, created_at DESC, id DESC);
 CREATE INDEX landing_leads_mapping_filter_idx
     ON public.landing_leads(mapping_status, input_context, created_at DESC, id DESC);
+CREATE UNIQUE INDEX landing_leads_capture_token_hash_uidx
+    ON public.landing_leads(capture_token_hash);
 ~~~
 
 서비스 타입은 다음 필드명과 enum을 그대로 사용한다.
@@ -80,10 +89,10 @@ export type LandingLeadJourneyClaim = Readonly<{
 
 - Create: \`lib/services/landing/landing-lead-journey.test.ts\`
 - Create: \`lib/services/landing/landing-lead-journey.ts\`
-- Create: \`supabase/migrations/20260910100000_add_landing_lead_journey_contract.sql\`
+- Create (generated path): \`$LANDING_MIGRATION_PATH\`
 - Test: \`lib/services/leads/landing-leads-migration-contract.test.ts\`
 
-- [ ] **Step 1: Write the failing tests.** Assert the migration contains all columns/checks/indexes above, keeps \`ENABLE ROW LEVEL SECURITY\` and \`REVOKE ALL ON TABLE public.landing_leads FROM PUBLIC, anon, authenticated\`, and has service-only RPCs named \`create_or_replay_landing_lead_capture\`, \`claim_landing_lead_journey\`, and \`unlink_landing_lead_journey_after_deletion\`. In \`landing-lead-journey.test.ts\`, assert domain-separated HMAC output is 64 lowercase hex and never equals the raw device ID or token.
+- [ ] **Step 1: Write the failing tests.** Assert the migration contains all columns/checks/indexes above, including \`source_preflight_id UUID\`, the constrained \`mapping_source\`, and \`landing_leads_capture_token_hash_uidx\`; keeps \`ENABLE ROW LEVEL SECURITY\` and \`REVOKE ALL ON TABLE public.landing_leads FROM PUBLIC, anon, authenticated\`; and has service-only RPCs named \`create_or_replay_landing_lead_capture\`, \`claim_landing_lead_journey\`, and \`unlink_landing_lead_journey_after_deletion\`. In \`landing-lead-journey.test.ts\`, assert domain-separated HMAC output is 64 lowercase hex and never equals the raw device ID or token.
 
 ~~~ts
 it('uses a domain-separated digest and never returns raw identity material', () => {
@@ -105,7 +114,18 @@ npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/le
 
 Expected: FAIL because the journey migration and service functions do not exist.
 
-- [ ] **Step 3: Add the minimal migration and service.** Add the contract SQL above, enable and force RLS, revoke table access from \`PUBLIC, anon, authenticated, service_role\`, grant only \`service_role\` to the server RPCs, and set every SECURITY DEFINER function to \`SET search_path = ''\`. The capture RPC must insert target/excluded rows with one \`journey_id\`, store only token hash, and be idempotent on \`capture_token_hash\`; it must not write raw device ID.
+- [ ] **Step 3: Create the migration and add the minimal schema/service.** Run Steps 3–4 in one shell session so the generated path variable remains available. Capture exactly one path from the CLI output, place the contract SQL above in that file, enable and force RLS, revoke table access from \`PUBLIC, anon, authenticated, service_role\`, grant only \`service_role\` to the server RPCs, and set every SECURITY DEFINER function to \`SET search_path = ''\`.
+
+~~~bash
+set -euo pipefail
+LANDING_MIGRATION_OUTPUT="$(npx supabase migration new add_landing_lead_journey_contract)"
+LANDING_MIGRATION_PATH="$(printf '%s\n' "$LANDING_MIGRATION_OUTPUT" | sed -n 's/^Created new migration at //p')"
+test "$(printf '%s\n' "$LANDING_MIGRATION_PATH" | awk 'NF { count++ } END { print count + 0 }')" -eq 1
+test -f "$LANDING_MIGRATION_PATH"
+export LANDING_MIGRATION_PATH
+~~~
+
+The capture RPC must insert target/excluded rows with one \`journey_id\`, store only token hash, and be idempotent on the nullable unique \`capture_token_hash\` fence; it must not write raw device ID. The claim RPC must update only rows matching \`auth_user_id IS NULL AND mapping_status <> 'unlinked_after_deletion'\`; the deletion fence must set \`unlinked_after_deletion\` and never make those rows claimable again. The \`claim_landing_lead_journey\` and \`unlink_landing_lead_journey_after_deletion\` definitions also use \`LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''\`. Every SECURITY DEFINER RPC uses the exact post-definition ACL below, with no broader grant:
 
 ~~~sql
 CREATE OR REPLACE FUNCTION public.create_or_replay_landing_lead_capture(
@@ -137,6 +157,15 @@ BEGIN
     RETURN QUERY SELECT p_journey_id, FOUND;
 END;
 $$;
+
+REVOKE EXECUTE ON FUNCTION public.create_or_replay_landing_lead_capture(UUID, TEXT, TEXT, VARCHAR, VARCHAR) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.create_or_replay_landing_lead_capture(UUID, TEXT, TEXT, VARCHAR, VARCHAR) TO service_role;
+
+REVOKE EXECUTE ON FUNCTION public.claim_landing_lead_journey(UUID, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_landing_lead_journey(UUID, UUID) TO service_role;
+
+REVOKE EXECUTE ON FUNCTION public.unlink_landing_lead_journey_after_deletion(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.unlink_landing_lead_journey_after_deletion(UUID) TO service_role;
 ~~~
 
 - [ ] **Step 4: Run GREEN and commit.**
@@ -144,7 +173,7 @@ $$;
 ~~~bash
 npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/leads/landing-leads-migration-contract.test.ts
 git diff --check
-git add lib/services/landing/landing-lead-journey.test.ts lib/services/landing/landing-lead-journey.ts supabase/migrations/20260910100000_add_landing_lead_journey_contract.sql lib/services/leads/landing-leads-migration-contract.test.ts
+git add lib/services/landing/landing-lead-journey.test.ts lib/services/landing/landing-lead-journey.ts "$LANDING_MIGRATION_PATH" lib/services/leads/landing-leads-migration-contract.test.ts
 git commit -m "feat: add landing lead journey contract"
 ~~~
 
@@ -171,7 +200,7 @@ WHERE journey_id = $1
   AND mapping_status = 'authenticated_user';
 ~~~
 
-- [ ] **Step 2: Implement minimal adapter.** \`POST /api/leads\` creates an opaque signed capture token, sends only its hash and the server-derived HMAC to \`create_or_replay_landing_lead_capture\`, and returns \`{ status: 'stored', captureToken }\` without raw device data. \`createAnonymousAnalysisV2Preflight\` consumes the token idempotently, binds the existing target row or creates it, and records analytics failure as a durable bounded event without blocking analysis. The claim RPC uses \`WHERE auth_user_id IS NULL\` and rejects a different non-null owner.
+- [ ] **Step 2: Implement minimal adapter.** \`POST /api/leads\` creates an opaque signed capture token, sends only its hash and the server-derived HMAC to \`create_or_replay_landing_lead_capture\`, and returns \`{ status: 'stored', captureToken }\` without raw device data. \`createAnonymousAnalysisV2Preflight\` consumes the token idempotently, binds the existing target row or creates it with \`source_preflight_id\`, and records analytics failure as a durable bounded event without blocking analysis. The claim RPC uses \`WHERE auth_user_id IS NULL AND mapping_status <> 'unlinked_after_deletion'\` and rejects a different non-null owner.
 
 - [ ] **Step 3: Run GREEN.**
 
