@@ -73,6 +73,7 @@ describe('analysis canonical table migration contract', () => {
             'upsert_analysis_canonical_cache',
             'append_analysis_canonical_audit',
             'enqueue_analysis_canonical_retry',
+            'load_analysis_canonical_family',
         ]) {
             expect(sql).toContain(`CREATE OR REPLACE FUNCTION public.${rpc}`);
             expect(sql).toContain(`GRANT EXECUTE ON FUNCTION public.${rpc}`);

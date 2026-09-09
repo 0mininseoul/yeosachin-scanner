@@ -34,6 +34,23 @@ export interface AnalysisParityAggregate {
     complete: boolean;
 }
 
+export function nextAnalysisCanonicalAuditVersion(
+    existingVersions: readonly number[],
+    lateCost = false,
+): number {
+    const maxVersion = existingVersions.reduce((max, version) => (
+        Number.isSafeInteger(version) && version > max ? version : max
+    ), 0);
+    // A late provider usage observation is a new immutable bundle version, never an update
+    // to the prior cost/audit row. The same monotonic rule is safe for ordinary replays.
+    const next = maxVersion + 1;
+    if (next > 100_000) {
+        throw new Error('ANALYSIS_CANONICAL_AUDIT_VERSION_EXHAUSTED');
+    }
+    if (lateCost) return next;
+    return next;
+}
+
 export function analysisCanonicalReadEnabled(
     family: AnalysisCanonicalReadFamily,
     env: Record<string, string | undefined> = process.env,
@@ -165,7 +182,13 @@ export function createAnalysisCanonicalReadStore(
             return parseBundle(result.data);
         },
 
-        async shadowRead(input) {
+        async shadowRead<T>(input: {
+            family: AnalysisCanonicalReadFamily;
+            legacy: () => Promise<T>;
+            canonical: () => Promise<T>;
+            compare?: (legacy: T, canonical: T) => AnalysisParitySummary;
+            onMismatch?: (summary: AnalysisParitySummary) => void;
+        }) {
             const legacy = await input.legacy();
             if (!analysisCanonicalReadEnabled(input.family, env)) return legacy;
             let canonical: T;

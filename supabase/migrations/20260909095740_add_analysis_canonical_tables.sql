@@ -427,6 +427,49 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.load_analysis_canonical_family(
+    p_request_id UUID,
+    p_family TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_family NOT IN ('jobs', 'evidence', 'cost', 'cache', 'audit') THEN
+        RAISE EXCEPTION 'ANALYSIS_CANONICAL_INVALID_READ_FAMILY' USING ERRCODE = '22023';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+        'jobs', CASE WHEN p_family = 'jobs' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
+            FROM public.analysis_jobs AS row
+            WHERE row.request_id = p_request_id
+        ), '[]'::JSONB) ELSE '[]'::JSONB END,
+        'events', CASE WHEN p_family = 'evidence' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
+            FROM public.analysis_events AS row
+            WHERE row.request_id = p_request_id
+        ), '[]'::JSONB) ELSE '[]'::JSONB END,
+        'artifacts', CASE WHEN p_family = 'evidence' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
+            FROM public.analysis_artifacts AS row
+            WHERE row.request_id = p_request_id
+        ), '[]'::JSONB) ELSE '[]'::JSONB END,
+        'costs', CASE WHEN p_family = 'cost' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.recorded_at, row.id)
+            FROM public.analysis_costs AS row
+            WHERE row.request_id = p_request_id
+        ), '[]'::JSONB) ELSE '[]'::JSONB END,
+        'audits', CASE WHEN p_family = 'audit' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
+            FROM public.analysis_audit_bundles AS row
+            WHERE row.request_id = p_request_id
+        ), '[]'::JSONB) ELSE '[]'::JSONB END
+    );
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.record_analysis_canonical_job(UUID, TEXT, TEXT, TEXT, BIGINT, INTEGER, INTEGER, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.append_analysis_canonical_event(UUID, UUID, TEXT, TEXT, JSONB, TEXT, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.append_analysis_canonical_artifact(UUID, UUID, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated, service_role;
@@ -434,6 +477,7 @@ REVOKE ALL ON FUNCTION public.append_analysis_canonical_cost(UUID, TEXT, TEXT, T
 REVOKE ALL ON FUNCTION public.upsert_analysis_canonical_cache(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.load_analysis_canonical_family(UUID, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 
 GRANT EXECUTE ON FUNCTION public.record_analysis_canonical_job(UUID, TEXT, TEXT, TEXT, BIGINT, INTEGER, INTEGER, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_event(UUID, UUID, TEXT, TEXT, JSONB, TEXT, TEXT) TO service_role;
@@ -442,3 +486,4 @@ GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_cost(UUID, TEXT, TEXT
 GRANT EXECUTE ON FUNCTION public.upsert_analysis_canonical_cache(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.load_analysis_canonical_family(UUID, TEXT) TO service_role;
