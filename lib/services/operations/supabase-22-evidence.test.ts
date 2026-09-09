@@ -77,11 +77,10 @@ describe('Supabase 22 evidence gate', () => {
     });
 
     it('keeps the v1 evidence shape compatible when optional operation attestations are absent', () => {
-        const {
-            paymentPendingDispositionRecorded: _payment,
-            noActivationOrCanary: _canary,
-            ...v1Input
-        } = completeInput({ publicTableCount: 21 });
+        const v1Input = Object.fromEntries(
+            Object.entries(completeInput({ publicTableCount: 21 }))
+                .filter(([key]) => key !== 'paymentPendingDispositionRecorded' && key !== 'noActivationOrCanary'),
+        ) as Supabase22GateInput;
         const result = evaluateSupabase22Gate(v1Input);
 
         expect(result.status).toBe('mismatch');
