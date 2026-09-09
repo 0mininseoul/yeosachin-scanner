@@ -11,6 +11,7 @@ Date: 2026-09-09 (Asia/Seoul)
 - `98efa726` — generated `20260909095932_add_commerce_operation_canonical_tables.sql` and schema/RLS/ACL contract tests.
 - `be4115a8` — typed payment, fulfillment, notification, account lifecycle, lease, maintenance adapters and notification shadow-read hook.
 - `3d6d0e64` — report-only bounded backfill, aggregate parity checksums, and fail-closed read-flag rollback.
+- `13148d21` — typed immutable system-configuration adapter and service-only configuration RPC.
 
 ## Schema and security evidence
 
@@ -68,7 +69,8 @@ These are the deterministic empty-source baseline checksums emitted by the guard
 
 ## Verification
 
-- Focused Vitest suite: **PASS**, 120 tests including the disposable migration replay assertion.
+- Focused Vitest suite: **PASS**, 121 tests including the disposable migration replay assertion and all touched payment/fulfillment/notification/account routes.
+- Full `npm test` was started for finishing verification; the suite remained in a long-running capacity identity epoch fixture launcher after more than 11 minutes, so it was interrupted without a test failure. The focused suite is the completion gate for this isolated lane.
 - `npx tsc --noEmit --pretty false`: **PASS**.
 - `npm run lint`: **PASS**, 0 errors and 27 existing warnings outside this change.
 - `npm run build`: webpack and TypeScript compilation **PASS**; page-data/static generation is blocked because this environment has no configured Supabase URL/API key while prerendering `/betatest` and `/_not-found`.
