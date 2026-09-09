@@ -56,6 +56,13 @@ const lifecycleInputSchema = z.object({
     state: z.string().trim().min(1).max(128),
     contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
+const configurationInputSchema = z.object({
+    configKey: z.string().trim().min(1).max(256),
+    version: z.number().int().positive(),
+    state: z.enum(['draft', 'effective', 'retired']),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    effectiveAt: z.string().datetime({ offset: true }).nullable(),
+}).strict();
 const leaseInputSchema = z.object({
     leaseKey: z.string().trim().min(1).max(256),
     kind: leaseKindSchema,
@@ -82,6 +89,7 @@ const leaseResultSchema = z.object({
 export type FulfillmentJobInput = z.infer<typeof fulfillmentInputSchema>;
 export type NotificationInput = z.infer<typeof notificationInputSchema>;
 export type AccountLifecycleInput = z.infer<typeof lifecycleInputSchema>;
+export type SystemConfigurationInput = z.infer<typeof configurationInputSchema>;
 export type SystemLeaseInput = z.infer<typeof leaseInputSchema>;
 export type MaintenanceJobInput = z.infer<typeof maintenanceInputSchema>;
 export type SystemLeaseResult = Readonly<{
@@ -196,6 +204,7 @@ export interface CanonicalOperationsStore {
     upsertFulfillmentJob(input: FulfillmentJobInput): Promise<unknown>;
     enqueueNotification(input: NotificationInput): Promise<unknown>;
     appendAccountLifecycle(input: AccountLifecycleInput): Promise<unknown>;
+    recordSystemConfiguration(input: SystemConfigurationInput): Promise<unknown>;
     acquireSystemLease(input: SystemLeaseInput): Promise<SystemLeaseResult>;
     enqueueMaintenanceJob(input: MaintenanceJobInput): Promise<unknown>;
 }
@@ -258,6 +267,26 @@ export function createCanonicalOperationsStore(
                     p_event_kind: parsed.eventKind,
                     p_state: parsed.state,
                     p_content_hash: parsed.contentHash,
+                },
+            );
+            const result = operationResultSchema.safeParse(data);
+            if (!result.success) {
+                throw new CanonicalOperationsError('CANONICAL_OPERATIONS_RESULT_INVALID');
+            }
+            return Object.freeze(result.data);
+        },
+
+        async recordSystemConfiguration(input: SystemConfigurationInput) {
+            const parsed = parseInput(configurationInputSchema, input);
+            const data = await callRpc(
+                dependencies.rpc,
+                'record_system_configuration_v1',
+                {
+                    p_config_key: parsed.configKey,
+                    p_version: parsed.version,
+                    p_state: parsed.state,
+                    p_content_hash: parsed.contentHash,
+                    p_effective_at: parsed.effectiveAt,
                 },
             );
             const result = operationResultSchema.safeParse(data);

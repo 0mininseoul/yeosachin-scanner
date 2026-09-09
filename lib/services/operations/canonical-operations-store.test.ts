@@ -41,6 +41,7 @@ describe('operations canonical migration contract', () => {
             'upsert_fulfillment_job_v1',
             'enqueue_notification_v1',
             'append_account_lifecycle_v1',
+            'record_system_configuration_v1',
             'acquire_system_lease_v1',
             'enqueue_maintenance_job_v1',
         ]) {
@@ -94,6 +95,29 @@ describe('canonical operations store', () => {
             holderHash: 'd'.repeat(64),
             leaseSeconds: 60,
         })).resolves.toMatchObject({ acquired: true, generation: 2, fenceToken: 3 });
+    });
+
+    it('records immutable configuration versions through a typed service RPC', async () => {
+        const rpc = async (name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('record_system_configuration_v1');
+            expect(params).toEqual({
+                p_config_key: 'analysis.policy',
+                p_version: 3,
+                p_state: 'draft',
+                p_content_hash: 'e'.repeat(64),
+                p_effective_at: null,
+            });
+            return { data: { status: 'recorded', duplicate: false }, error: null };
+        };
+        const store = createCanonicalOperationsStore({ rpc });
+
+        await expect(store.recordSystemConfiguration({
+            configKey: 'analysis.policy',
+            version: 3,
+            state: 'draft',
+            contentHash: 'e'.repeat(64),
+            effectiveAt: null,
+        })).resolves.toEqual({ status: 'recorded', duplicate: false });
     });
 
     it('keeps all canonical family reads disabled until explicitly enabled', () => {

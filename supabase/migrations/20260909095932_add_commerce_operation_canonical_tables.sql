@@ -397,6 +397,46 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.record_system_configuration_v1(
+    p_config_key TEXT,
+    p_version INTEGER,
+    p_state TEXT,
+    p_content_hash TEXT,
+    p_effective_at TIMESTAMPTZ
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_config_key IS NULL OR pg_catalog.length(pg_catalog.btrim(p_config_key)) = 0
+       OR p_version IS NULL OR p_version < 1
+       OR p_state NOT IN ('draft', 'effective', 'retired')
+       OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$'
+       OR (p_state = 'effective' AND p_effective_at IS NULL) THEN
+        RAISE EXCEPTION USING MESSAGE = 'SYSTEM_CONFIGURATION_INPUT_INVALID', ERRCODE = 'P0001';
+    END IF;
+
+    INSERT INTO public.system_configuration(
+        config_key,
+        version,
+        state,
+        config,
+        content_hash,
+        effective_at
+    ) VALUES (
+        p_config_key,
+        p_version,
+        p_state,
+        '{}'::JSONB,
+        p_content_hash,
+        p_effective_at
+    );
+    RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', FALSE);
+END;
+$$;
+
 CREATE FUNCTION public.acquire_system_lease_v1(
     p_lease_key TEXT,
     p_kind TEXT,
@@ -519,6 +559,8 @@ REVOKE EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, TEXT
 GRANT EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, TEXT) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTEGER) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
