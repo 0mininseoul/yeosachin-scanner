@@ -20,6 +20,7 @@ import {
     formatKst,
     kakaoSignupProfileForOutbox,
     maskKakaoName,
+    stageKakaoSignupDiscordProfile,
 } from './kakao-signup-discord';
 
 const ITEM = {
@@ -260,6 +261,40 @@ describe('Kakao signup Discord notification', () => {
 
         await expect(recoverUnstagedKakaoSignupDiscordNotifications()).resolves.toBe(1);
         expect(mocks.rpc).toHaveBeenCalledWith('recover_unstaged_kakao_signup_discord_outbox');
+    });
+
+    it('dual-writes the sanitized Kakao producer payload only when its family writer is enabled', async () => {
+        vi.stubEnv('COMMERCE_CANONICAL_NOTIFICATION_WRITE', 'true');
+        mocks.rpc.mockImplementation(async (name: string) => {
+            if (name === 'set_kakao_signup_discord_outbox_profile') return { error: null };
+            if (name === 'enqueue_notification_v1') {
+                return { data: { status: 'queued', duplicate: false }, error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+
+        await stageKakaoSignupDiscordProfile('123e4567-e89b-42d3-a456-426614174000', {
+            name: '민감한 이름',
+            birthyear: '1994',
+            gender: 'female',
+            signedUpAt: new Date('2026-07-27T00:00:00.000Z'),
+            attributionLabel: 'private campaign label',
+            attributionOrigin: 'https://everytime.kr/',
+        });
+
+        expect(mocks.rpc).toHaveBeenCalledWith('enqueue_notification_v1', expect.objectContaining({
+            p_channel: 'kakao',
+            p_event_kind: 'kakao.signup',
+            p_payload: expect.objectContaining({
+                masked_name: '민***름',
+                birthyear: '1994',
+                gender: '여성',
+                attribution_origin: 'https://everytime.kr/',
+            }),
+            p_content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+        const canonicalCall = mocks.rpc.mock.calls.find(call => call[0] === 'enqueue_notification_v1');
+        expect(JSON.stringify(canonicalCall)).not.toContain('private campaign label');
     });
 });
 

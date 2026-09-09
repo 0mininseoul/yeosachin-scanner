@@ -2,6 +2,13 @@ import 'server-only';
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalFamilyWriteEnabled,
+    maintenanceMarker,
+    queueCanonicalMaintenanceJob,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 4_000;
@@ -467,7 +474,41 @@ export async function enqueueSentryDiscordAlert(alert: SentryAlertForOutbox): Pr
         p_release: alert.release,
     });
     if (error) throw new Error('SENTRY_DISCORD_OUTBOX_ENQUEUE_FAILED');
+    await mirrorSentryCanonicalNotification(alert);
     return data === true;
+}
+
+async function mirrorSentryCanonicalNotification(alert: SentryAlertForOutbox): Promise<void> {
+    if (!isCanonicalFamilyWriteEnabled('notification')) return;
+    const occurred = alert.occurredAt instanceof Date && !Number.isNaN(alert.occurredAt.getTime())
+        ? alert.occurredAt.toISOString()
+        : null;
+    const payload = {
+        dedupe_key_hash: canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey),
+        project_slug: safeProjectSlug(alert.projectSlug),
+        occurred_at: occurred,
+        issue_url: safeIssueUrl(alert.issueUrl),
+        issue_short_id: safeShortId(alert.issueShortId),
+        error_type: safeErrorType(alert.errorType),
+        release: safeRelease(alert.release),
+    };
+    try {
+        await canonicalOperationsStore.enqueueNotification({
+            channel: 'sentry',
+            eventKind: 'sentry.issue_alert',
+            dedupeKey: `sentry:${canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey)}`,
+            payload,
+            contentHash: canonicalJsonHash('sentry-notification-content', payload),
+        });
+    } catch {
+        try {
+            await queueCanonicalMaintenanceJob(
+                maintenanceMarker('recovery', alert.dedupeKey, 'sentry-notification'),
+            );
+        } catch {
+            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
+        }
+    }
 }
 
 export async function deliverSentryDiscordAlerts(options: {

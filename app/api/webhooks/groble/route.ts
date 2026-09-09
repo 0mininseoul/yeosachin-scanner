@@ -34,7 +34,7 @@ import {
     type PaymentEventInput,
 } from '@/lib/services/commerce/canonical-commerce-store';
 import {
-    isCanonicalDualWriteEnabled,
+    isCanonicalFamilyWriteEnabled,
     queueCanonicalMaintenanceJob,
 } from '@/lib/services/operations/canonical-operations-store';
 import {
@@ -95,22 +95,44 @@ interface WebhookLogState {
 async function mirrorCanonicalPaymentEvent(
     input: PaymentEventInput | null,
 ): Promise<void> {
-    if (!input || !isCanonicalDualWriteEnabled()) return;
-    await recordPaymentEventWithMaintenance(
-        canonicalCommerceStore,
-        input,
-        async marker => {
-            try {
-                await queueCanonicalMaintenanceJob({
-                    kind: 'replay',
-                    targetKeyHash: marker.targetKeyHash,
-                    contentHash: marker.contentHash,
-                });
-            } catch {
-                // The legacy finalization is authoritative if both queues fail.
-            }
-        },
-    );
+    if (!input || !isCanonicalFamilyWriteEnabled('payment')) return;
+    try {
+        const result = await recordPaymentEventWithMaintenance(
+            canonicalCommerceStore,
+            input,
+            marker => queueCanonicalMaintenanceJob({
+                kind: 'replay',
+                targetKeyHash: marker.targetKeyHash,
+                contentHash: marker.contentHash,
+            }).then(() => undefined),
+        );
+        if (result.status === 'unavailable') {
+            operationalLogger.emit({
+                event: 'groble.webhook_canonical_mirror_unavailable',
+                severity: 'error',
+                fields: { provider: 'groble', operation: 'payment_mirror', code: result.code },
+            });
+        }
+    } catch (error) {
+        const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+            ? error.code
+            : 'CANONICAL_PAYMENT_MIRROR_FAILED';
+        operationalLogger.emit({
+            event: 'groble.webhook_canonical_mirror_failed',
+            severity: 'error',
+            fields: { provider: 'groble', operation: 'payment_mirror', code },
+        });
+    }
+}
+
+function canonicalPaymentDisposition(
+    disposition: z.infer<typeof finalizationResultSchema>[number]['disposition'],
+    status: string | null,
+): PaymentEventInput['disposition'] {
+    if (disposition === 'accepted') return 'accepted';
+    if (disposition === 'duplicate_event' || disposition === 'duplicate_payment') return 'duplicate';
+    if (status === 'payment_pending') return 'payment_pending';
+    return 'rejected';
 }
 
 function safeWebhookEventType(value: string): WebhookEventType {
@@ -321,7 +343,20 @@ async function handlePOST(
             idempotencyKey,
             eventType: 'payment.completed',
             paymentId: payment.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
             payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: payment.eventId,
+                event_type: 'payment.completed',
+                payment_id: payment.paymentId,
+                product_id: payment.productId,
+                amount_krw: payment.amountKrw,
+                occurred_at: payment.occurredAt,
+                paid_at: payment.paidAt,
+            },
+            occurredAt: payment.occurredAt,
             amountKrw: payment.amountKrw,
         };
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
@@ -387,7 +422,20 @@ async function handlePOST(
             idempotencyKey,
             eventType: 'payment.cancel_requested',
             paymentId: cancellation.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
             payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: cancellation.eventId,
+                event_type: 'payment.cancel_requested',
+                payment_id: cancellation.paymentId,
+                product_id: cancellation.productId,
+                amount_krw: cancellation.amountKrw,
+                occurred_at: cancellation.occurredAt,
+                requested_at: cancellation.requestedAt,
+            },
+            occurredAt: cancellation.occurredAt,
             amountKrw: cancellation.amountKrw,
         };
         try {
@@ -434,7 +482,22 @@ async function handlePOST(
             idempotencyKey,
             eventType: 'payment.refunded',
             paymentId: refund.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
             payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: refund.eventId,
+                event_type: 'payment.refunded',
+                payment_id: refund.paymentId,
+                product_id: refund.productId,
+                amount_krw: refund.amountKrw,
+                refund_amount_krw: refund.refundAmountKrw,
+                partial_refund: refund.partialRefund,
+                occurred_at: refund.occurredAt,
+                refunded_at: refund.refundedAt,
+            },
+            occurredAt: refund.occurredAt,
             amountKrw: refund.amountKrw,
         };
         try {
@@ -484,6 +547,18 @@ async function handlePOST(
 
     const finalization = parsed.data[0];
     const orderId = finalization.order_id;
+    if (canonicalPaymentEvent) {
+        canonicalPaymentEvent = {
+            ...canonicalPaymentEvent,
+            orderId,
+            disposition: canonicalPaymentDisposition(finalization.disposition, finalization.status),
+            payload: {
+                ...canonicalPaymentEvent.payload,
+                order_id: orderId,
+                disposition: canonicalPaymentDisposition(finalization.disposition, finalization.status),
+            },
+        };
+    }
     await mirrorCanonicalPaymentEvent(canonicalPaymentEvent);
     const shouldAdmit = envelope.type === 'payment.completed'
         && autoAdmissionEligible

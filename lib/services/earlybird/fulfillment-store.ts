@@ -15,8 +15,9 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import {
     canonicalOperationsStore,
-    isCanonicalDualWriteEnabled,
+    isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
+    queueCanonicalMaintenanceJob,
     type CanonicalOperationsStore,
 } from '@/lib/services/operations/canonical-operations-store';
 import { operationalLogger } from '@/lib/observability/server';
@@ -408,14 +409,18 @@ export function createEarlybirdFulfillmentStore(
         randomUuid: randomUUID,
     }
 ): EarlybirdFulfillmentStore {
-    const dualWrite = dependencies.dualWrite ?? isCanonicalDualWriteEnabled();
+    const dualWrite = dependencies.dualWrite ?? isCanonicalFamilyWriteEnabled('fulfillment');
     const canonicalStore = dependencies.canonicalStore ?? canonicalOperationsStore;
+    const enqueueMaintenance = dependencies.canonicalStore
+        ? canonicalStore.enqueueMaintenanceJob.bind(canonicalStore)
+        : queueCanonicalMaintenanceJob;
     const mirror = async (input: {
         orderId: string;
         requestId: string | null;
         status: EarlybirdFulfillmentStatus;
         attemptCount?: number;
         leaseGeneration?: number;
+        leaseToken?: string | null;
         leaseExpiresAt?: string | null;
         lastErrorCode?: string | null;
     }): Promise<void> => {
@@ -426,6 +431,7 @@ export function createEarlybirdFulfillmentStore(
             state: input.status,
             attemptCount: input.attemptCount ?? 0,
             leaseGeneration: input.leaseGeneration ?? 0,
+            leaseToken: input.leaseToken ?? null,
             leaseExpiresAt: input.leaseExpiresAt ?? null,
             nextAttemptAt: new Date().toISOString(),
             lastErrorCode: input.lastErrorCode ?? null,
@@ -434,7 +440,7 @@ export function createEarlybirdFulfillmentStore(
             await canonicalStore.upsertFulfillmentJob(snapshot);
         } catch {
             try {
-                await canonicalStore.enqueueMaintenanceJob(
+                await enqueueMaintenance(
                     maintenanceMarker(
                         'recovery',
                         input.orderId,
@@ -562,6 +568,7 @@ export function createEarlybirdFulfillmentStore(
                 status: row.fulfillment_status,
                 attemptCount: row.attempt_count,
                 leaseGeneration: row.lease_fence,
+                leaseToken: row.lease_token,
                 leaseExpiresAt: null,
             });
             return Object.freeze({
@@ -611,6 +618,7 @@ export function createEarlybirdFulfillmentStore(
                 requestId: row.request_id,
                 status: row.fulfillment_status,
                 leaseGeneration: claim.fence,
+                leaseToken: claim.claimToken,
             });
             return Object.freeze({
                 orderId: row.order_id,

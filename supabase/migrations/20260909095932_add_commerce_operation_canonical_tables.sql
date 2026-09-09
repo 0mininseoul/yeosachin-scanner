@@ -13,8 +13,10 @@ CREATE TABLE public.payment_events (
     )),
     payment_id TEXT NOT NULL,
     order_id UUID REFERENCES public.earlybird_orders(id) ON DELETE SET NULL,
-    disposition TEXT NOT NULL,
-    amount_krw INTEGER CHECK (amount_krw IS NULL OR amount_krw > 0),
+    disposition TEXT NOT NULL CHECK (disposition IN (
+        'accepted', 'duplicate', 'no_sale', 'rejected', 'payment_pending'
+    )),
+    amount_krw INTEGER CHECK (amount_krw IS NULL OR amount_krw >= 0),
     payload_hash TEXT NOT NULL CHECK (payload_hash ~ '^[a-f0-9]{64}$'),
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
     occurred_at TIMESTAMPTZ NOT NULL,
@@ -32,6 +34,7 @@ CREATE TABLE public.fulfillment_jobs (
     )),
     attempt_count SMALLINT NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 10),
     lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    lease_token UUID,
     lease_expires_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     last_error_code TEXT,
@@ -48,7 +51,14 @@ CREATE TABLE public.notification_outbox (
     dedupe_key TEXT NOT NULL UNIQUE,
     state TEXT NOT NULL CHECK (state IN ('queued', 'leased', 'sent', 'retryable', 'dead')),
     attempt_count SMALLINT NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 20),
+    lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    lease_token UUID,
+    lease_holder_hash TEXT CHECK (lease_holder_hash IS NULL OR lease_holder_hash ~ '^[a-f0-9]{64}$'),
+    lease_expires_at TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    delivered_at TIMESTAMPTZ,
+    terminal_at TIMESTAMPTZ,
+    last_error_code TEXT,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
     content_hash TEXT NOT NULL CHECK (content_hash ~ '^[a-f0-9]{64}$'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
@@ -105,12 +115,18 @@ CREATE TABLE public.maintenance_jobs (
     target_key_hash TEXT NOT NULL CHECK (target_key_hash ~ '^[a-f0-9]{64}$'),
     state TEXT NOT NULL CHECK (state IN ('queued', 'leased', 'succeeded', 'retryable', 'blocked')),
     attempt_count SMALLINT NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 1000),
-    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    lease_token UUID,
+    lease_holder_hash TEXT CHECK (lease_holder_hash IS NULL OR lease_holder_hash ~ '^[a-f0-9]{64}$'),
     lease_expires_at TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    terminal_at TIMESTAMPTZ,
+    last_error_code TEXT,
     payload JSONB NOT NULL DEFAULT '{}'::JSONB,
     content_hash TEXT NOT NULL CHECK (content_hash ~ '^[a-f0-9]{64}$'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    CHECK (pg_catalog.jsonb_typeof(payload) = 'object'),
     UNIQUE (kind, target_key_hash)
 );
 
@@ -194,7 +210,12 @@ CREATE FUNCTION public.record_payment_event_v1(
     p_idempotency_key TEXT,
     p_event_type TEXT,
     p_payment_id TEXT,
+    p_order_id UUID,
+    p_provider TEXT,
+    p_disposition TEXT,
     p_payload_hash TEXT,
+    p_payload JSONB,
+    p_occurred_at TIMESTAMPTZ,
     p_amount_krw INTEGER
 )
 RETURNS JSONB
@@ -209,11 +230,47 @@ BEGIN
        OR p_idempotency_key IS NULL OR pg_catalog.length(pg_catalog.btrim(p_idempotency_key)) = 0
        OR p_payment_id IS NULL OR pg_catalog.length(pg_catalog.btrim(p_payment_id)) = 0
        OR p_event_type NOT IN ('payment.completed', 'payment.cancel_requested', 'payment.refunded')
+       OR p_provider NOT IN ('groble')
+       OR p_disposition NOT IN ('accepted', 'duplicate', 'no_sale', 'rejected', 'payment_pending')
        OR p_payload_hash IS NULL OR p_payload_hash !~ '^[a-f0-9]{64}$'
-       OR (p_amount_krw IS NOT NULL AND p_amount_krw <= 0) THEN
+       OR p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object'
+       OR p_occurred_at IS NULL
+       OR (p_amount_krw IS NOT NULL AND p_amount_krw < 0) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'PAYMENT_EVENT_INPUT_INVALID',
             ERRCODE = 'P0001';
+    END IF;
+
+    SELECT payment_event.*
+    INTO v_existing
+    FROM public.payment_events AS payment_event
+    WHERE payment_event.event_id = p_event_id
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.idempotency_key IS DISTINCT FROM p_idempotency_key THEN
+            RAISE EXCEPTION USING MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        IF v_existing.event_type IS DISTINCT FROM p_event_type
+           OR v_existing.payment_id IS DISTINCT FROM p_payment_id
+           OR v_existing.order_id IS DISTINCT FROM p_order_id
+           OR v_existing.provider IS DISTINCT FROM p_provider
+           OR v_existing.disposition IS DISTINCT FROM p_disposition
+           OR v_existing.payload_hash IS DISTINCT FROM p_payload_hash
+           OR v_existing.payload IS DISTINCT FROM p_payload
+           OR v_existing.occurred_at IS DISTINCT FROM p_occurred_at
+           OR v_existing.amount_krw IS DISTINCT FROM p_amount_krw THEN
+            RAISE EXCEPTION USING MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', TRUE);
+    END IF;
+
+    SELECT payment_event.*
+    INTO v_existing
+    FROM public.payment_events AS payment_event
+    WHERE payment_event.idempotency_key = p_idempotency_key
+    FOR UPDATE;
+    IF FOUND THEN
+        RAISE EXCEPTION USING MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_KEY_CONFLICT', ERRCODE = 'P0001';
     END IF;
 
     INSERT INTO public.payment_events(
@@ -222,22 +279,26 @@ BEGIN
         provider,
         event_type,
         payment_id,
+        order_id,
         disposition,
         amount_krw,
         payload_hash,
+        payload,
         occurred_at
     ) VALUES (
         p_event_id,
         p_idempotency_key,
-        'groble',
+        p_provider,
         p_event_type,
         p_payment_id,
-        'received',
+        p_order_id,
+        p_disposition,
         p_amount_krw,
         p_payload_hash,
-        pg_catalog.clock_timestamp()
+        p_payload,
+        p_occurred_at
     )
-    ON CONFLICT (event_id) DO NOTHING;
+    ON CONFLICT DO NOTHING;
 
     IF FOUND THEN
         RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', FALSE);
@@ -246,13 +307,27 @@ BEGIN
     SELECT payment_event.*
     INTO v_existing
     FROM public.payment_events AS payment_event
-    WHERE payment_event.event_id = p_event_id;
-    IF NOT FOUND OR v_existing.idempotency_key IS DISTINCT FROM p_idempotency_key THEN
-        RAISE EXCEPTION USING
-            MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_CONFLICT',
-            ERRCODE = 'P0001';
+    WHERE payment_event.event_id = p_event_id
+       OR payment_event.idempotency_key = p_idempotency_key
+    ORDER BY payment_event.event_id = p_event_id DESC
+    LIMIT 1;
+    IF FOUND AND v_existing.event_id = p_event_id
+       AND v_existing.idempotency_key = p_idempotency_key
+       AND v_existing.event_type = p_event_type
+       AND v_existing.payment_id = p_payment_id
+       AND v_existing.order_id IS NOT DISTINCT FROM p_order_id
+       AND v_existing.provider = p_provider
+       AND v_existing.disposition = p_disposition
+       AND v_existing.payload_hash = p_payload_hash
+       AND v_existing.payload = p_payload
+       AND v_existing.occurred_at = p_occurred_at
+       AND v_existing.amount_krw IS NOT DISTINCT FROM p_amount_krw THEN
+        RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', TRUE);
     END IF;
-    RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', TRUE);
+    IF FOUND AND v_existing.idempotency_key = p_idempotency_key THEN
+        RAISE EXCEPTION USING MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_KEY_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    RAISE EXCEPTION USING MESSAGE = 'PAYMENT_EVENT_IDEMPOTENCY_CONFLICT', ERRCODE = 'P0001';
 END;
 $$;
 
@@ -262,9 +337,11 @@ CREATE FUNCTION public.upsert_fulfillment_job_v1(
     p_state TEXT,
     p_attempt_count SMALLINT,
     p_lease_generation BIGINT,
-    p_lease_expires_at TIMESTAMPTZ,
-    p_next_attempt_at TIMESTAMPTZ,
-    p_last_error_code TEXT
+    p_lease_token UUID DEFAULT NULL,
+    p_lease_expires_at TIMESTAMPTZ DEFAULT NULL,
+    p_next_attempt_at TIMESTAMPTZ DEFAULT NULL,
+    p_last_error_code TEXT DEFAULT NULL,
+    p_payload JSONB DEFAULT '{}'::JSONB
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -273,6 +350,8 @@ SET search_path = ''
 AS $$
 DECLARE
     v_job public.fulfillment_jobs%ROWTYPE;
+    v_current_rank INTEGER;
+    v_incoming_rank INTEGER;
 BEGIN
     IF p_order_id IS NULL
        OR p_state NOT IN (
@@ -281,47 +360,83 @@ BEGIN
        )
        OR p_attempt_count IS NULL OR p_attempt_count < 0 OR p_attempt_count > 10
        OR p_lease_generation IS NULL OR p_lease_generation < 0
-       OR p_next_attempt_at IS NULL THEN
+       OR p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object' THEN
         RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
-
-    INSERT INTO public.fulfillment_jobs(
-        order_id,
-        request_id,
-        state,
-        attempt_count,
-        lease_generation,
-        lease_expires_at,
-        next_attempt_at,
-        last_error_code
-    ) VALUES (
-        p_order_id,
-        p_request_id,
-        p_state,
-        p_attempt_count,
-        p_lease_generation,
-        p_lease_expires_at,
-        p_next_attempt_at,
-        p_last_error_code
-    )
-    ON CONFLICT (order_id) DO UPDATE
-    SET request_id = EXCLUDED.request_id,
-        state = EXCLUDED.state,
-        attempt_count = EXCLUDED.attempt_count,
-        lease_generation = EXCLUDED.lease_generation,
-        lease_expires_at = EXCLUDED.lease_expires_at,
-        next_attempt_at = EXCLUDED.next_attempt_at,
-        last_error_code = EXCLUDED.last_error_code,
-        updated_at = pg_catalog.clock_timestamp();
-
+    IF p_next_attempt_at IS NULL THEN
+        p_next_attempt_at := pg_catalog.clock_timestamp();
+    END IF;
     SELECT fulfillment_job.*
     INTO v_job
     FROM public.fulfillment_jobs AS fulfillment_job
-    WHERE fulfillment_job.order_id = p_order_id;
+    WHERE fulfillment_job.order_id = p_order_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO public.fulfillment_jobs(
+            order_id, request_id, state, attempt_count, lease_generation,
+            lease_token, lease_expires_at, next_attempt_at, last_error_code, payload
+        ) VALUES (
+            p_order_id, p_request_id, p_state, p_attempt_count, p_lease_generation,
+            p_lease_token, p_lease_expires_at, p_next_attempt_at, p_last_error_code, p_payload
+        )
+        RETURNING * INTO v_job;
+    ELSE
+        IF v_job.request_id IS NOT NULL AND p_request_id IS NOT NULL
+           AND v_job.request_id IS DISTINCT FROM p_request_id THEN
+            RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_REQUEST_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        IF v_job.lease_token IS NOT NULL AND p_lease_token IS NOT NULL
+           AND v_job.lease_token IS DISTINCT FROM p_lease_token
+           AND p_lease_generation <= v_job.lease_generation THEN
+            RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_FENCE_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        v_current_rank := CASE v_job.state
+            WHEN 'awaiting_operator' THEN 0
+            WHEN 'admission_pending' THEN 1
+            WHEN 'analysis_in_progress' THEN 2
+            WHEN 'retryable_failure' THEN 3
+            WHEN 'completed' THEN 4
+            WHEN 'manual_review' THEN 4
+        END;
+        v_incoming_rank := CASE p_state
+            WHEN 'awaiting_operator' THEN 0
+            WHEN 'admission_pending' THEN 1
+            WHEN 'analysis_in_progress' THEN 2
+            WHEN 'retryable_failure' THEN 3
+            WHEN 'completed' THEN 4
+            WHEN 'manual_review' THEN 4
+        END;
+        IF p_lease_generation < v_job.lease_generation THEN
+            RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_FENCE_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        IF p_lease_generation = v_job.lease_generation AND v_incoming_rank < v_current_rank THEN
+            RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_MONOTONIC_CONFLICT', ERRCODE = 'P0001';
+        END IF;
+        UPDATE public.fulfillment_jobs
+        SET request_id = COALESCE(p_request_id, v_job.request_id),
+            state = CASE WHEN p_lease_generation > v_job.lease_generation OR v_incoming_rank >= v_current_rank
+                THEN p_state ELSE v_job.state END,
+            attempt_count = GREATEST(p_attempt_count, v_job.attempt_count),
+            lease_generation = GREATEST(p_lease_generation, v_job.lease_generation),
+            lease_token = CASE WHEN p_lease_generation > v_job.lease_generation
+                THEN COALESCE(p_lease_token, v_job.lease_token) ELSE COALESCE(p_lease_token, v_job.lease_token) END,
+            lease_expires_at = COALESCE(p_lease_expires_at, v_job.lease_expires_at),
+            next_attempt_at = CASE WHEN p_lease_generation > v_job.lease_generation
+                THEN p_next_attempt_at ELSE GREATEST(p_next_attempt_at, v_job.next_attempt_at) END,
+            last_error_code = COALESCE(p_last_error_code, v_job.last_error_code),
+            payload = CASE WHEN p_payload = '{}'::JSONB AND v_job.payload <> '{}'::JSONB
+                THEN v_job.payload ELSE p_payload END,
+            updated_at = pg_catalog.clock_timestamp()
+        WHERE order_id = p_order_id
+        RETURNING * INTO v_job;
+    END IF;
     RETURN pg_catalog.jsonb_build_object(
+        'status', 'recorded',
         'order_id', v_job.order_id,
         'state', v_job.state,
-        'lease_generation', v_job.lease_generation
+        'request_id', v_job.request_id,
+        'lease_generation', v_job.lease_generation,
+        'lease_token', v_job.lease_token
     );
 END;
 $$;
@@ -330,39 +445,58 @@ CREATE FUNCTION public.enqueue_notification_v1(
     p_channel TEXT,
     p_event_kind TEXT,
     p_dedupe_key TEXT,
-    p_content_hash TEXT
+    p_payload JSONB DEFAULT '{}'::JSONB,
+    p_content_hash TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+    v_existing public.notification_outbox%ROWTYPE;
 BEGIN
     IF p_channel NOT IN ('discord', 'kakao', 'sentry')
        OR p_event_kind IS NULL OR pg_catalog.length(pg_catalog.btrim(p_event_kind)) = 0
        OR p_dedupe_key IS NULL OR pg_catalog.length(pg_catalog.btrim(p_dedupe_key)) = 0
+       OR p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object'
        OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$' THEN
         RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
-
+    SELECT notification.*
+    INTO v_existing
+    FROM public.notification_outbox AS notification
+    WHERE notification.dedupe_key = p_dedupe_key
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.channel = p_channel
+           AND v_existing.event_kind = p_event_kind
+           AND v_existing.content_hash = p_content_hash
+           AND v_existing.payload = p_payload THEN
+            RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', TRUE);
+        END IF;
+        RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_DEDUPE_CONTENT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
     INSERT INTO public.notification_outbox(
-        channel,
-        event_kind,
-        dedupe_key,
-        state,
-        content_hash
+        channel, event_kind, dedupe_key, state, payload, content_hash
     ) VALUES (
-        p_channel,
-        p_event_kind,
-        p_dedupe_key,
-        'queued',
-        p_content_hash
+        p_channel, p_event_kind, p_dedupe_key, 'queued', p_payload, p_content_hash
     )
-    ON CONFLICT (dedupe_key) DO NOTHING;
-    RETURN pg_catalog.jsonb_build_object(
-        'status', 'queued',
-        'duplicate', NOT FOUND
-    );
+    ON CONFLICT DO NOTHING;
+    IF FOUND THEN
+        RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', FALSE);
+    END IF;
+    SELECT notification.*
+    INTO v_existing
+    FROM public.notification_outbox AS notification
+    WHERE notification.dedupe_key = p_dedupe_key;
+    IF FOUND AND v_existing.channel = p_channel
+       AND v_existing.event_kind = p_event_kind
+       AND v_existing.content_hash = p_content_hash
+       AND v_existing.payload = p_payload THEN
+        RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', TRUE);
+    END IF;
+    RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_DEDUPE_CONTENT_CONFLICT', ERRCODE = 'P0001';
 END;
 $$;
 
@@ -370,7 +504,8 @@ CREATE FUNCTION public.append_account_lifecycle_v1(
     p_account_id UUID,
     p_event_kind TEXT,
     p_state TEXT,
-    p_content_hash TEXT
+    p_payload JSONB DEFAULT '{}'::JSONB,
+    p_content_hash TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -386,12 +521,13 @@ BEGIN
            'objects_purged', 'database_purged', 'retired', 'e2e'
        )
        OR p_state IS NULL OR pg_catalog.length(pg_catalog.btrim(p_state)) = 0
+       OR p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object'
        OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$' THEN
         RAISE EXCEPTION USING MESSAGE = 'ACCOUNT_LIFECYCLE_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
 
-    INSERT INTO public.account_lifecycle(account_id, event_kind, state, content_hash)
-    VALUES (p_account_id, p_event_kind, p_state, p_content_hash)
+    INSERT INTO public.account_lifecycle(account_id, event_kind, state, content_hash, payload)
+    VALUES (p_account_id, p_event_kind, p_state, p_content_hash, p_payload)
     RETURNING id INTO v_id;
     RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'id', v_id);
 END;
@@ -401,6 +537,7 @@ CREATE FUNCTION public.record_system_configuration_v1(
     p_config_key TEXT,
     p_version INTEGER,
     p_state TEXT,
+    p_config JSONB,
     p_content_hash TEXT,
     p_effective_at TIMESTAMPTZ
 )
@@ -409,29 +546,36 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+    v_existing public.system_configuration%ROWTYPE;
 BEGIN
     IF p_config_key IS NULL OR pg_catalog.length(pg_catalog.btrim(p_config_key)) = 0
        OR p_version IS NULL OR p_version < 1
        OR p_state NOT IN ('draft', 'effective', 'retired')
+       OR p_config IS NULL OR pg_catalog.jsonb_typeof(p_config) <> 'object'
        OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$'
        OR (p_state = 'effective' AND p_effective_at IS NULL) THEN
         RAISE EXCEPTION USING MESSAGE = 'SYSTEM_CONFIGURATION_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
-
+    SELECT configuration.*
+    INTO v_existing
+    FROM public.system_configuration AS configuration
+    WHERE configuration.config_key = p_config_key
+      AND configuration.version = p_version
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.state = p_state
+           AND v_existing.config = p_config
+           AND v_existing.content_hash = p_content_hash
+           AND v_existing.effective_at IS NOT DISTINCT FROM p_effective_at THEN
+            RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', TRUE);
+        END IF;
+        RAISE EXCEPTION USING MESSAGE = 'SYSTEM_CONFIGURATION_CONTENT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
     INSERT INTO public.system_configuration(
-        config_key,
-        version,
-        state,
-        config,
-        content_hash,
-        effective_at
+        config_key, version, state, config, content_hash, effective_at
     ) VALUES (
-        p_config_key,
-        p_version,
-        p_state,
-        '{}'::JSONB,
-        p_content_hash,
-        p_effective_at
+        p_config_key, p_version, p_state, p_config, p_content_hash, p_effective_at
     );
     RETURN pg_catalog.jsonb_build_object('status', 'recorded', 'duplicate', FALSE);
 END;
@@ -462,13 +606,11 @@ BEGIN
     INSERT INTO public.system_leases(lease_key, kind)
     VALUES (p_lease_key, p_kind)
     ON CONFLICT (lease_key) DO NOTHING;
-
     SELECT system_lease.*
     INTO v_lease
     FROM public.system_leases AS system_lease
     WHERE system_lease.lease_key = p_lease_key
     FOR UPDATE;
-
     IF v_lease.state IN ('available', 'expired')
        OR v_lease.lease_expires_at IS NULL
        OR v_lease.lease_expires_at <= v_now
@@ -491,7 +633,6 @@ BEGIN
             'lease_expires_at', v_lease.lease_expires_at
         );
     END IF;
-
     RETURN pg_catalog.jsonb_build_object(
         'acquired', FALSE,
         'generation', v_lease.generation,
@@ -504,30 +645,296 @@ $$;
 CREATE FUNCTION public.enqueue_maintenance_job_v1(
     p_kind TEXT,
     p_target_key_hash TEXT,
-    p_content_hash TEXT
+    p_payload JSONB DEFAULT '{}'::JSONB,
+    p_content_hash TEXT DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
+DECLARE
+    v_existing public.maintenance_jobs%ROWTYPE;
 BEGIN
     IF p_kind NOT IN (
            'recovery', 'replay', 'rearm', 'cleanup',
            'terminalize', 'purge', 'audit_assembly'
        )
        OR p_target_key_hash IS NULL OR p_target_key_hash !~ '^[a-f0-9]{64}$'
+       OR p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object'
        OR p_content_hash IS NULL OR p_content_hash !~ '^[a-f0-9]{64}$' THEN
         RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_JOB_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
+    SELECT maintenance.*
+    INTO v_existing
+    FROM public.maintenance_jobs AS maintenance
+    WHERE maintenance.kind = p_kind
+      AND maintenance.target_key_hash = p_target_key_hash
+    FOR UPDATE;
+    IF FOUND THEN
+        IF v_existing.content_hash = p_content_hash AND v_existing.payload = p_payload THEN
+            RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', TRUE);
+        END IF;
+        RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_CONTENT_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    INSERT INTO public.maintenance_jobs(kind, target_key_hash, state, payload, content_hash)
+    VALUES (p_kind, p_target_key_hash, 'queued', p_payload, p_content_hash)
+    ON CONFLICT DO NOTHING;
+    IF FOUND THEN
+        RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', FALSE);
+    END IF;
+    SELECT maintenance.*
+    INTO v_existing
+    FROM public.maintenance_jobs AS maintenance
+    WHERE maintenance.kind = p_kind
+      AND maintenance.target_key_hash = p_target_key_hash;
+    IF FOUND AND v_existing.content_hash = p_content_hash AND v_existing.payload = p_payload THEN
+        RETURN pg_catalog.jsonb_build_object('status', 'queued', 'duplicate', TRUE);
+    END IF;
+    RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_CONTENT_CONFLICT', ERRCODE = 'P0001';
+END;
+$$;
 
-    INSERT INTO public.maintenance_jobs(kind, target_key_hash, state, content_hash)
-    VALUES (p_kind, p_target_key_hash, 'queued', p_content_hash)
-    ON CONFLICT (kind, target_key_hash) DO NOTHING;
-    RETURN pg_catalog.jsonb_build_object(
-        'status', 'queued',
-        'duplicate', NOT FOUND
-    );
+CREATE FUNCTION public.claim_notification_outbox_v1(
+    p_limit INTEGER,
+    p_holder_hash TEXT,
+    p_lease_seconds INTEGER
+)
+RETURNS SETOF public.notification_outbox
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100
+       OR p_holder_hash IS NULL OR p_holder_hash !~ '^[a-f0-9]{64}$'
+       OR p_lease_seconds IS NULL OR p_lease_seconds < 60 OR p_lease_seconds > 600 THEN
+        RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_CLAIM_INPUT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT notification.id
+        FROM public.notification_outbox AS notification
+        WHERE notification.state IN ('queued', 'retryable')
+          AND notification.attempt_count < 20
+          AND notification.next_attempt_at <= pg_catalog.clock_timestamp()
+          AND (notification.lease_expires_at IS NULL OR notification.lease_expires_at <= pg_catalog.clock_timestamp())
+        ORDER BY notification.next_attempt_at, notification.created_at
+        LIMIT p_limit
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE public.notification_outbox AS notification
+    SET state = 'leased',
+        attempt_count = notification.attempt_count + 1,
+        lease_generation = notification.lease_generation + 1,
+        lease_token = extensions.gen_random_uuid(),
+        lease_holder_hash = p_holder_hash,
+        lease_expires_at = pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_lease_seconds),
+        updated_at = pg_catalog.clock_timestamp()
+    FROM candidates
+    WHERE notification.id = candidates.id
+    RETURNING notification.*;
+END;
+$$;
+
+CREATE FUNCTION public.finish_notification_outbox_v1(
+    p_outbox_id UUID,
+    p_lease_token UUID,
+    p_lease_generation BIGINT,
+    p_outcome TEXT,
+    p_error_code TEXT DEFAULT NULL,
+    p_retry_after_seconds INTEGER DEFAULT 0
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_row public.notification_outbox%ROWTYPE;
+    v_state TEXT;
+BEGIN
+    IF p_outbox_id IS NULL OR p_lease_token IS NULL OR p_lease_generation IS NULL OR p_lease_generation < 0
+       OR p_outcome NOT IN ('sent', 'retryable', 'dead')
+       OR p_retry_after_seconds IS NULL OR p_retry_after_seconds < 0 OR p_retry_after_seconds > 3600 THEN
+        RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_FINISH_INPUT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    SELECT notification.*
+    INTO v_row
+    FROM public.notification_outbox AS notification
+    WHERE notification.id = p_outbox_id
+    FOR UPDATE;
+    IF NOT FOUND OR v_row.lease_token IS DISTINCT FROM p_lease_token
+       OR v_row.lease_generation IS DISTINCT FROM p_lease_generation
+       OR v_row.state <> 'leased' THEN
+        RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_FENCE_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    v_state := CASE
+        WHEN p_outcome = 'sent' THEN 'sent'
+        WHEN p_outcome = 'dead' OR v_row.attempt_count >= 20 THEN 'dead'
+        ELSE 'retryable'
+    END;
+    UPDATE public.notification_outbox
+    SET state = v_state,
+        next_attempt_at = CASE WHEN v_state = 'retryable'
+            THEN pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_retry_after_seconds)
+            ELSE next_attempt_at END,
+        delivered_at = CASE WHEN v_state = 'sent' THEN pg_catalog.clock_timestamp() ELSE delivered_at END,
+        terminal_at = CASE WHEN v_state = 'dead' THEN pg_catalog.clock_timestamp() ELSE terminal_at END,
+        last_error_code = p_error_code,
+        lease_token = NULL,
+        lease_holder_hash = NULL,
+        lease_expires_at = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE id = p_outbox_id;
+    RETURN pg_catalog.jsonb_build_object('status', v_state, 'duplicate', FALSE);
+END;
+$$;
+
+CREATE FUNCTION public.reconcile_stale_notification_outbox_v1()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    UPDATE public.notification_outbox
+    SET state = CASE WHEN attempt_count >= 20 THEN 'dead' ELSE 'retryable' END,
+        next_attempt_at = pg_catalog.clock_timestamp(),
+        terminal_at = CASE WHEN attempt_count >= 20 THEN pg_catalog.clock_timestamp() ELSE terminal_at END,
+        last_error_code = 'LEASE_EXPIRED',
+        lease_token = NULL,
+        lease_holder_hash = NULL,
+        lease_expires_at = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE state = 'leased'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at <= pg_catalog.clock_timestamp();
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN pg_catalog.jsonb_build_object('status', 'reconciled', 'count', v_count);
+END;
+$$;
+
+CREATE FUNCTION public.claim_maintenance_jobs_v1(
+    p_limit INTEGER,
+    p_holder_hash TEXT,
+    p_lease_seconds INTEGER
+)
+RETURNS SETOF public.maintenance_jobs
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100
+       OR p_holder_hash IS NULL OR p_holder_hash !~ '^[a-f0-9]{64}$'
+       OR p_lease_seconds IS NULL OR p_lease_seconds < 60 OR p_lease_seconds > 600 THEN
+        RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_CLAIM_INPUT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    RETURN QUERY
+    WITH candidates AS (
+        SELECT maintenance.id
+        FROM public.maintenance_jobs AS maintenance
+        WHERE maintenance.state IN ('queued', 'retryable')
+          AND maintenance.attempt_count < 1000
+          AND maintenance.next_attempt_at <= pg_catalog.clock_timestamp()
+          AND (maintenance.lease_expires_at IS NULL OR maintenance.lease_expires_at <= pg_catalog.clock_timestamp())
+        ORDER BY maintenance.next_attempt_at, maintenance.created_at
+        LIMIT p_limit
+        FOR UPDATE SKIP LOCKED
+    )
+    UPDATE public.maintenance_jobs AS maintenance
+    SET state = 'leased',
+        attempt_count = maintenance.attempt_count + 1,
+        lease_generation = maintenance.lease_generation + 1,
+        lease_token = extensions.gen_random_uuid(),
+        lease_holder_hash = p_holder_hash,
+        lease_expires_at = pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_lease_seconds),
+        updated_at = pg_catalog.clock_timestamp()
+    FROM candidates
+    WHERE maintenance.id = candidates.id
+    RETURNING maintenance.*;
+END;
+$$;
+
+CREATE FUNCTION public.finish_maintenance_job_v1(
+    p_job_id UUID,
+    p_lease_token UUID,
+    p_lease_generation BIGINT,
+    p_outcome TEXT,
+    p_error_code TEXT DEFAULT NULL,
+    p_retry_after_seconds INTEGER DEFAULT 0
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_row public.maintenance_jobs%ROWTYPE;
+    v_state TEXT;
+BEGIN
+    IF p_job_id IS NULL OR p_lease_token IS NULL OR p_lease_generation IS NULL OR p_lease_generation < 0
+       OR p_outcome NOT IN ('succeeded', 'retryable', 'blocked')
+       OR p_retry_after_seconds IS NULL OR p_retry_after_seconds < 0 OR p_retry_after_seconds > 3600 THEN
+        RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_FINISH_INPUT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    SELECT maintenance.*
+    INTO v_row
+    FROM public.maintenance_jobs AS maintenance
+    WHERE maintenance.id = p_job_id
+    FOR UPDATE;
+    IF NOT FOUND OR v_row.lease_token IS DISTINCT FROM p_lease_token
+       OR v_row.lease_generation IS DISTINCT FROM p_lease_generation
+       OR v_row.state <> 'leased' THEN
+        RAISE EXCEPTION USING MESSAGE = 'MAINTENANCE_FENCE_CONFLICT', ERRCODE = 'P0001';
+    END IF;
+    v_state := CASE
+        WHEN p_outcome = 'succeeded' THEN 'succeeded'
+        WHEN p_outcome = 'blocked' OR v_row.attempt_count >= 1000 THEN 'blocked'
+        ELSE 'retryable'
+    END;
+    UPDATE public.maintenance_jobs
+    SET state = v_state,
+        next_attempt_at = CASE WHEN v_state = 'retryable'
+            THEN pg_catalog.clock_timestamp() + pg_catalog.make_interval(secs => p_retry_after_seconds)
+            ELSE next_attempt_at END,
+        terminal_at = CASE WHEN v_state = 'blocked' THEN pg_catalog.clock_timestamp() ELSE terminal_at END,
+        last_error_code = p_error_code,
+        lease_token = NULL,
+        lease_holder_hash = NULL,
+        lease_expires_at = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE id = p_job_id;
+    RETURN pg_catalog.jsonb_build_object('status', v_state, 'duplicate', FALSE);
+END;
+$$;
+
+CREATE FUNCTION public.reconcile_stale_maintenance_jobs_v1()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_count INTEGER;
+BEGIN
+    UPDATE public.maintenance_jobs
+    SET state = CASE WHEN attempt_count >= 1000 THEN 'blocked' ELSE 'retryable' END,
+        next_attempt_at = pg_catalog.clock_timestamp(),
+        terminal_at = CASE WHEN attempt_count >= 1000 THEN pg_catalog.clock_timestamp() ELSE terminal_at END,
+        last_error_code = 'LEASE_EXPIRED',
+        lease_token = NULL,
+        lease_holder_hash = NULL,
+        lease_expires_at = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE state = 'leased'
+      AND lease_expires_at IS NOT NULL
+      AND lease_expires_at <= pg_catalog.clock_timestamp();
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    RETURN pg_catalog.jsonb_build_object('status', 'reconciled', 'count', v_count);
 END;
 $$;
 
@@ -551,20 +958,32 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) TO service_role;
-REVOKE EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT) TO service_role;
-REVOKE EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, TEXT) TO service_role;
-REVOKE EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, TEXT) TO service_role;
-REVOKE EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, UUID, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, UUID, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, JSONB, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, JSONB, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, JSONB, TEXT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_system_configuration_v1(TEXT, INTEGER, TEXT, JSONB, TEXT, TIMESTAMPTZ) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTEGER) TO service_role;
-REVOKE EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, JSONB, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.claim_notification_outbox_v1(INTEGER, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_notification_outbox_v1(INTEGER, TEXT, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.finish_notification_outbox_v1(UUID, UUID, BIGINT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finish_notification_outbox_v1(UUID, UUID, BIGINT, TEXT, TEXT, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.reconcile_stale_notification_outbox_v1() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reconcile_stale_notification_outbox_v1() TO service_role;
+REVOKE EXECUTE ON FUNCTION public.claim_maintenance_jobs_v1(INTEGER, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_maintenance_jobs_v1(INTEGER, TEXT, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.finish_maintenance_job_v1(UUID, UUID, BIGINT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.finish_maintenance_job_v1(UUID, UUID, BIGINT, TEXT, TEXT, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.reconcile_stale_maintenance_jobs_v1() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reconcile_stale_maintenance_jobs_v1() TO service_role;
 REVOKE EXECUTE ON FUNCTION public.list_notification_outbox_v1(INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.list_notification_outbox_v1(INTEGER) TO service_role;
 

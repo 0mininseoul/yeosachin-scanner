@@ -86,15 +86,48 @@ describe('deleteAccountPermanently', () => {
             deleteAuthUser: vi.fn(async () => undefined),
             dualWrite: true,
             appendLifecycle: vi.fn(async input => {
-                lifecycle.push(input.eventKind);
+                lifecycle.push(`${input.eventKind}:${input.state}`);
             }),
         });
 
         expect(lifecycle).toEqual([
-            'deletion_requested',
-            'objects_purged',
-            'database_purged',
-            'retired',
+            'deletion_requested:started:begin',
+            'deletion_requested:completed:begin',
+            'deletion_requested:prepared:objects',
+            'objects_purged:prepared:object:0',
+            'objects_purged:started:object:0',
+            'objects_purged:completed:object:0',
+            'database_purged:prepared:database',
+            'database_purged:started:database',
+            'database_purged:completed:database',
+            'retired:prepared:auth',
+            'retired:started:auth',
+            'retired:completed:auth',
+            'retired:prepared:completion',
+            'retired:started:completion',
+            'retired:completed:completion',
         ]);
+    });
+
+    it('stops before the first irreversible step when lifecycle evidence is unavailable', async () => {
+        const rpc = vi.fn(async () => ({
+            data: { state: 'requested', objectKeys: ['v1/a.webp'] },
+            error: null,
+        }));
+        const deleteObject = vi.fn();
+        const appendLifecycle = vi.fn(async () => {
+            throw new Error('canonical lifecycle unavailable');
+        });
+
+        await expect(deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            deleteObject,
+            deleteAuthUser: vi.fn(),
+            dualWrite: true,
+            appendLifecycle,
+        })).rejects.toMatchObject({ code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE' });
+
+        expect(rpc).not.toHaveBeenCalled();
+        expect(deleteObject).not.toHaveBeenCalled();
     });
 });

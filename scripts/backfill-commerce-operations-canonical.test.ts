@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+    PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID,
     PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED,
     backfillCommerceOperationsCanonical,
     compareCanonicalParity,
@@ -25,6 +26,19 @@ describe('commerce canonical report-only backfill', () => {
                 checkedAt: '2026-09-09T00:00:00.000Z',
             },
         })).toEqual({ status: 'eligible_for_separate_reconciliation' });
+    });
+
+    it('keeps malformed no-sale evidence blocked', () => {
+        expect(derivePaymentDisposition({
+            orderStatus: 'payment_pending',
+            providerEvidence: {
+                disposition: 'no_sale',
+                checkedAt: 'not-a-timestamp',
+            },
+        })).toEqual({
+            status: 'blocked',
+            code: PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID,
+        });
     });
 
     it('processes at most 100 records and emits only aggregate checksums', async () => {
@@ -75,5 +89,20 @@ describe('commerce canonical report-only backfill', () => {
         }));
         expect(JSON.stringify(report)).not.toContain('legacy-id');
         expect(JSON.stringify(report)).not.toContain('canonical-id');
+    });
+
+    it('reports bounded field mismatches without values', () => {
+        const report = compareCanonicalParity(
+            [{ family: 'notification', key: 'one', content: 'ignored', fields: { state: 'queued', attempts: 1 } }],
+            [{ family: 'notification', key: 'one', content: 'ignored', fields: { state: 'sent', attempts: 1 } }],
+        );
+        expect(report).toEqual(expect.objectContaining({
+            status: 'mismatch',
+            comparedCounts: expect.objectContaining({ notification: 1 }),
+            fieldMismatches: expect.objectContaining({ notification: ['state'] }),
+            truncatedFamilies: [],
+        }));
+        expect(JSON.stringify(report)).not.toContain('queued');
+        expect(JSON.stringify(report)).not.toContain('sent');
     });
 });

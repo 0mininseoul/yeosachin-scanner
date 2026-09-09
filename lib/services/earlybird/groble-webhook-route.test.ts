@@ -180,6 +180,7 @@ describe('signed Groble webhook route', () => {
         delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
         delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
         delete process.env.COMMERCE_CANONICAL_DUAL_WRITE;
+        delete process.env.COMMERCE_CANONICAL_PAYMENT_WRITE;
     });
 
     it('keeps an accepted payment disabled when webhook auto-admission is unset', async () => {
@@ -339,7 +340,7 @@ describe('signed Groble webhook route', () => {
     });
 
     it('mirrors signed payment evidence only when the dual-write flag is explicit', async () => {
-        process.env.COMMERCE_CANONICAL_DUAL_WRITE = 'true';
+        process.env.COMMERCE_CANONICAL_PAYMENT_WRITE = 'true';
         mocks.rpc.mockImplementation(async (name: string) => {
             if (name === 'finalize_earlybird_groble_payment') {
                 return {
@@ -367,9 +368,20 @@ describe('signed Groble webhook route', () => {
                 p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
                 p_event_type: 'payment.completed',
                 p_payment_id: 'merchant_0001',
+                p_order_id: ORDER_ID,
+                p_provider: 'groble',
+                p_disposition: 'accepted',
+                p_occurred_at: '2026-07-17T21:00:00+09:00',
                 p_payload_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+                p_payload: expect.objectContaining({
+                    payment_id: 'merchant_0001',
+                    order_id: ORDER_ID,
+                    disposition: 'accepted',
+                }),
             }),
         );
+        const canonicalCall = mocks.rpc.mock.calls.find(call => call[0] === 'record_payment_event_v1');
+        expect(JSON.stringify(canonicalCall)).not.toContain('buyer@example.com');
     });
 
     it('returns a persistence failure and does not admit when credential binding fails', async () => {

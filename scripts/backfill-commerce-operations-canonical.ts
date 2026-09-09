@@ -3,6 +3,8 @@ import { pathToFileURL } from 'node:url';
 
 export const PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED =
     'PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED';
+export const PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID =
+    'PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID';
 
 export type ProviderNoSaleEvidence = Readonly<{
     disposition: 'no_sale';
@@ -10,7 +12,12 @@ export type ProviderNoSaleEvidence = Readonly<{
 }>;
 
 export type PaymentDisposition =
-    | { status: 'blocked'; code: typeof PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED }
+    | {
+        status: 'blocked';
+        code:
+            | typeof PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED
+            | typeof PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID;
+    }
     | { status: 'eligible_for_separate_reconciliation' }
     | { status: 'unchanged' };
 
@@ -25,6 +32,19 @@ export function derivePaymentDisposition(input: {
         return {
             status: 'blocked',
             code: PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED,
+        };
+    }
+    const checkedAtValue = input.providerEvidence.checkedAt;
+    const checkedAt = typeof checkedAtValue === 'string' ? new Date(checkedAtValue) : null;
+    if (
+        input.providerEvidence.disposition !== 'no_sale'
+        || !checkedAt
+        || Number.isNaN(checkedAt.getTime())
+        || checkedAtValue.trim() === ''
+    ) {
+        return {
+            status: 'blocked',
+            code: PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID,
         };
     }
     return { status: 'eligible_for_separate_reconciliation' };
@@ -58,6 +78,8 @@ export type LegacyBackfillRecord = Readonly<{
     family: BackfillFamily;
     key: string;
     content: string;
+    /** Field values are compared in memory and only mismatch field names leave the process. */
+    fields?: Readonly<Record<string, unknown>>;
     orderStatus?: string;
     providerEvidence?: ProviderNoSaleEvidence | null;
 }>;
@@ -104,13 +126,16 @@ function emptyChecksums(): Record<BackfillFamily, string> {
     ) as Record<BackfillFamily, string>;
 }
 
+const PARITY_LIMIT = 100;
+
 function hashBatch(records: readonly LegacyBackfillRecord[]): Record<BackfillFamily, string> {
     const checksums = emptyChecksums();
     for (const family of families) {
         const digest = createHash('sha256');
         for (const record of records
             .filter(candidate => candidate.family === family)
-            .sort((left, right) => left.key.localeCompare(right.key))) {
+            .slice(0, PARITY_LIMIT)
+            .sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0)) {
             digest.update(`${record.key.length}:${record.key}\n${record.content.length}:${record.content}\n`);
         }
         checksums[family] = digest.digest('hex');
@@ -125,6 +150,9 @@ export interface CanonicalParityReport {
     canonicalCounts: Readonly<Record<BackfillFamily, number>>;
     sourceChecksums: Readonly<Record<BackfillFamily, string>>;
     canonicalChecksums: Readonly<Record<BackfillFamily, string>>;
+    comparedCounts: Readonly<Record<BackfillFamily, number>>;
+    fieldMismatches: Readonly<Record<BackfillFamily, readonly string[]>>;
+    truncatedFamilies: readonly BackfillFamily[];
 }
 
 function familyCounts(records: readonly LegacyBackfillRecord[]): Record<BackfillFamily, number> {
@@ -133,23 +161,84 @@ function familyCounts(records: readonly LegacyBackfillRecord[]): Record<Backfill
     return counts;
 }
 
+function recordFields(record: LegacyBackfillRecord): Readonly<Record<string, unknown>> {
+    return record.fields ?? { content: record.content };
+}
+
+function fieldParity(
+    sourceRecords: readonly LegacyBackfillRecord[],
+    canonicalRecords: readonly LegacyBackfillRecord[],
+): {
+    compared: number;
+    mismatches: string[];
+} {
+    const sourceByKey = new Map(sourceRecords.map(record => [record.key, record]));
+    const canonicalByKey = new Map(canonicalRecords.map(record => [record.key, record]));
+    const fields = new Set<string>();
+    let compared = 0;
+    for (const [key, source] of sourceByKey) {
+        const canonical = canonicalByKey.get(key);
+        if (!canonical) {
+            fields.add('missing_record');
+            continue;
+        }
+        compared += 1;
+        const sourceFields = recordFields(source);
+        const canonicalFields = recordFields(canonical);
+        const allFields = new Set([
+            ...Object.keys(sourceFields),
+            ...Object.keys(canonicalFields),
+        ]);
+        for (const field of allFields) {
+            const sourceValue = JSON.stringify(sourceFields[field]);
+            const canonicalValue = JSON.stringify(canonicalFields[field]);
+            if (sourceValue !== canonicalValue) fields.add(field);
+        }
+    }
+    if (sourceByKey.size !== canonicalByKey.size) fields.add('record_count');
+    return {
+        compared,
+        mismatches: [...fields].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
+    };
+}
+
 export function compareCanonicalParity(
     sourceRecords: readonly LegacyBackfillRecord[],
     canonicalRecords: readonly LegacyBackfillRecord[],
 ): CanonicalParityReport {
     const sourceChecksums = hashBatch(sourceRecords);
     const canonicalChecksums = hashBatch(canonicalRecords);
+    const sourceCounts = familyCounts(sourceRecords);
+    const canonicalCounts = familyCounts(canonicalRecords);
+    const comparedCounts = Object.fromEntries(families.map(family => [family, 0])) as Record<BackfillFamily, number>;
+    const fieldMismatches = Object.fromEntries(families.map(family => [family, []])) as unknown as Record<BackfillFamily, readonly string[]>;
+    const truncatedFamilies: BackfillFamily[] = [];
+    for (const family of families) {
+        const source = sourceRecords.filter(record => record.family === family).slice(0, PARITY_LIMIT);
+        const canonical = canonicalRecords.filter(record => record.family === family).slice(0, PARITY_LIMIT);
+        const parity = fieldParity(source, canonical);
+        comparedCounts[family] = parity.compared;
+        fieldMismatches[family] = parity.mismatches;
+        if (
+            sourceRecords.filter(record => record.family === family).length > PARITY_LIMIT
+            || canonicalRecords.filter(record => record.family === family).length > PARITY_LIMIT
+        ) truncatedFamilies.push(family);
+    }
     const mismatchedFamilies = families.filter(family =>
         sourceChecksums[family] !== canonicalChecksums[family]
-        || familyCounts(sourceRecords)[family] !== familyCounts(canonicalRecords)[family]
+        || sourceCounts[family] !== canonicalCounts[family]
+        || fieldMismatches[family].length > 0
     );
     return {
         status: mismatchedFamilies.length === 0 ? 'match' : 'mismatch',
         mismatchedFamilies,
-        sourceCounts: familyCounts(sourceRecords),
-        canonicalCounts: familyCounts(canonicalRecords),
+        sourceCounts,
+        canonicalCounts,
         sourceChecksums,
         canonicalChecksums,
+        comparedCounts,
+        fieldMismatches,
+        truncatedFamilies,
     };
 }
 

@@ -6,8 +6,9 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
 import {
     canonicalOperationsStore,
-    isCanonicalDualWriteEnabled,
+    isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
+    queueCanonicalMaintenanceJob,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -197,25 +198,32 @@ async function sendClaimedItem(
 }
 
 async function mirrorPaymentNotification(item: EarlybirdPaymentDiscordItem): Promise<void> {
-    if (!isCanonicalDualWriteEnabled()) return;
+    if (!isCanonicalFamilyWriteEnabled('notification')) return;
+    const payload = {
+        order_id: item.order_id,
+        plan_id: item.plan_id,
+        amount_krw: item.actual_amount_krw,
+        paid_at: item.paid_at,
+    };
     const contentHash = canonicalEvidenceHash(
         'payment-discord-content',
-        `${item.order_id}:${item.paid_at}:${item.plan_id}`,
+        JSON.stringify(payload),
     );
     try {
         await canonicalOperationsStore.enqueueNotification({
             channel: 'discord',
             eventKind: 'earlybird.payment.completed',
             dedupeKey: `earlybird-payment:${item.order_id}`,
+            payload,
             contentHash,
         });
     } catch {
         try {
-            await canonicalOperationsStore.enqueueMaintenanceJob(
+            await queueCanonicalMaintenanceJob(
                 maintenanceMarker('recovery', item.order_id, 'payment-notification'),
             );
         } catch {
-            // Legacy outbox delivery remains authoritative.
+            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
         }
     }
 }

@@ -8,6 +8,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.rpc } }));
 import {
     buildSentryDiscordPayload,
     deliverSentryDiscordAlerts,
+    enqueueSentryDiscordAlert,
     isAuthenticSentryInternalIntegration,
     isAuthenticSentryServiceHook,
     parseProductionSentryInternalIntegrationIssue,
@@ -207,6 +208,41 @@ describe('Sentry Service Hook Discord bridge', () => {
         expect(rendered).toContain('WEB-1234');
         expect(rendered).toContain('TypeError');
         expect(rendered).toContain('v1.2.3');
+    });
+
+    it('dual-writes a sanitized Sentry producer payload after the legacy enqueue', async () => {
+        vi.stubEnv('COMMERCE_CANONICAL_NOTIFICATION_WRITE', 'true');
+        mocks.rpc.mockImplementation(async (name: string) => {
+            if (name === 'enqueue_sentry_discord_alert_outbox') {
+                return { data: true, error: null };
+            }
+            if (name === 'enqueue_notification_v1') {
+                return { data: { status: 'queued', duplicate: false }, error: null };
+            }
+            throw new Error(`unexpected RPC ${name}`);
+        });
+
+        await expect(enqueueSentryDiscordAlert({
+            dedupeKey: 'd'.repeat(64),
+            projectSlug: 'web-app',
+            occurredAt: new Date('2026-07-28T00:00:00.000Z'),
+            issueUrl: 'https://sentry.io/organizations/acme/issues/1234/',
+            issueShortId: 'WEB-1234',
+            errorType: 'TypeError',
+            release: 'v1.2.3',
+        })).resolves.toBe(true);
+
+        expect(mocks.rpc).toHaveBeenCalledWith('enqueue_notification_v1', expect.objectContaining({
+            p_channel: 'sentry',
+            p_event_kind: 'sentry.issue_alert',
+            p_payload: expect.objectContaining({
+                project_slug: 'web-app',
+                issue_short_id: 'WEB-1234',
+                error_type: 'TypeError',
+                release: 'v1.2.3',
+            }),
+            p_content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
     });
 
     it('drops malicious issue summary values and renders only safe defaults', () => {

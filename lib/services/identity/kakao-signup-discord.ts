@@ -2,6 +2,13 @@ import 'server-only';
 
 import * as Sentry from '@sentry/nextjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    isCanonicalFamilyWriteEnabled,
+    maintenanceMarker,
+    queueCanonicalMaintenanceJob,
+    canonicalOperationsStore,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 10_000;
@@ -44,6 +51,24 @@ function configuredDiscord(): DiscordConfig | null {
 
 function unavailable(value: unknown): string | null {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function safeAttributionOrigin(value: unknown): string | null {
+    const candidate = unavailable(value);
+    if (!candidate || candidate.length > 512) return null;
+    try {
+        const url = new URL(candidate);
+        if (
+            (url.protocol !== 'https:' && url.protocol !== 'http:')
+            || url.username
+            || url.password
+            || url.search
+            || url.hash
+        ) return null;
+        return url.toString();
+    } catch {
+        return null;
+    }
 }
 
 /** Never retain separators; preserve only the explicitly approved first/last graphemes. */
@@ -244,6 +269,38 @@ export function kakaoSignupProfileForOutbox(profile: KakaoSignupProfile) {
     };
 }
 
+async function mirrorKakaoSignupNotification(
+    userId: string,
+    payload: ReturnType<typeof kakaoSignupProfileForOutbox>,
+): Promise<void> {
+    if (!isCanonicalFamilyWriteEnabled('notification')) return;
+    const canonicalPayload = {
+        user_id: userId,
+        masked_name: payload.masked_name,
+        birthyear: payload.birthyear,
+        gender: payload.gender,
+        signed_up_at: payload.signed_up_at,
+        attribution_origin: safeAttributionOrigin(payload.attribution_origin),
+    };
+    try {
+        await canonicalOperationsStore.enqueueNotification({
+            channel: 'kakao',
+            eventKind: 'kakao.signup',
+            dedupeKey: `kakao-signup:${canonicalJsonHash('kakao-signup-key', userId)}`,
+            payload: canonicalPayload,
+            contentHash: canonicalJsonHash('kakao-signup-content', canonicalPayload),
+        });
+    } catch {
+        try {
+            await queueCanonicalMaintenanceJob(
+                maintenanceMarker('recovery', userId, 'kakao-signup-notification'),
+            );
+        } catch {
+            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
+        }
+    }
+}
+
 /** Updates only a trigger-created first-signup row; it can never enqueue a relogin. */
 export async function stageKakaoSignupDiscordProfile(
     userId: string,
@@ -260,7 +317,11 @@ export async function stageKakaoSignupDiscordProfile(
             p_attribution_label: payload.attribution_label,
             p_attribution_origin: payload.attribution_origin,
         });
-        if (error) operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+        if (error) {
+            operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+            return;
+        }
+        await mirrorKakaoSignupNotification(userId, payload);
     } catch {
         operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
     }

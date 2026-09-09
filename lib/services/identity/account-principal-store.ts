@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
+import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
 import {
     canonicalOperationsStore,
-    isCanonicalDualWriteEnabled,
+    isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
+    queueCanonicalMaintenanceJob,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const accountClassSchema = z.enum(['production', 'e2e_test']);
@@ -187,18 +188,27 @@ async function mirrorAccountClassification(account: {
     traffic_class: z.infer<typeof trafficClassSchema>;
     lifecycle: z.infer<typeof lifecycleSchema>;
 }): Promise<void> {
-    if (!isCanonicalDualWriteEnabled()) return;
+    if (!isCanonicalFamilyWriteEnabled('account')) return;
     const state = `${account.account_class}:${account.traffic_class}:${account.lifecycle}`;
+    const payload = {
+        account_class: account.account_class,
+        traffic_class: account.traffic_class,
+        lifecycle: account.lifecycle,
+    };
     try {
         await canonicalOperationsStore.appendAccountLifecycle({
             accountId: account.id,
             eventKind: 'classification',
             state,
-            contentHash: canonicalEvidenceHash('account-classification', `${account.id}:${state}`),
+            payload,
+            contentHash: canonicalJsonHash('account-classification', {
+                account_id: account.id,
+                ...payload,
+            }),
         });
     } catch {
         try {
-            await canonicalOperationsStore.enqueueMaintenanceJob(
+            await queueCanonicalMaintenanceJob(
                 maintenanceMarker('recovery', account.id, 'account-classification'),
             );
         } catch {
