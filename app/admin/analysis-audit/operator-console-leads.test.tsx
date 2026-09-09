@@ -24,6 +24,14 @@ function jsonResponse(value: unknown, status = 200): Response {
     return new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 }
 
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(resolvePromise => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
+}
+
 let container: HTMLDivElement | undefined;
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,6 +58,10 @@ function renderWorkbench(): void {
 function setNativeValue(element: HTMLInputElement | HTMLSelectElement, value: string): void {
     const setter = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')?.set;
     setter?.call(element, value);
+}
+
+function leadsNextButton(panel: Element): HTMLButtonElement {
+    return panel.querySelector('.oc-pager button') as HTMLButtonElement;
 }
 
 describe('operator console landing Leads section', () => {
@@ -85,6 +97,179 @@ describe('operator console landing Leads section', () => {
         await settle();
         expect(leadsPanel.textContent).toContain('@excluded.account');
         expect(leadsPanel.textContent).not.toContain('@target.account');
+    });
+
+    it.each([
+        ['the context changes', async (panel: Element) => {
+            await act(async () => (panel.querySelector('[data-landing-lead-context="excluded"]') as HTMLButtonElement).click());
+        }],
+        ['the mapping filter changes', async (panel: Element) => {
+            const select = panel.querySelector('[aria-label="리드 필터"] select') as HTMLSelectElement;
+            await act(async () => {
+                setNativeValue(select, 'authenticated_user');
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        }],
+        ['the date filter changes', async (panel: Element) => {
+            const date = panel.querySelector('input[type="date"]') as HTMLInputElement;
+            await act(async () => {
+                setNativeValue(date, '2026-09-05');
+                date.dispatchEvent(new Event('change', { bubbles: true }));
+            });
+        }],
+        ['the search filter changes', async (panel: Element) => {
+            const input = panel.querySelector('input[type="search"]') as HTMLInputElement;
+            await act(async () => {
+                setNativeValue(input, ' @Target.Account ');
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+        }],
+    ] as const)('clears stale rows and the next cursor synchronously while %s is pending', async (_label, trigger) => {
+        const pending = deferred<Response>();
+        let leadRequests = 0;
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') return Promise.resolve(jsonResponse({ inventory: [] }));
+            if (url.pathname === '/api/admin/order-audit') return Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            if (url.pathname === '/api/admin/landing-leads') {
+                leadRequests += 1;
+                return leadRequests === 1
+                    ? Promise.resolve(jsonResponse({ rows: [row], nextCursor: 'target-cursor' }))
+                    : pending.promise;
+            }
+            return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        renderWorkbench();
+        await settle();
+
+        const leadsPanel = container!.querySelector('[data-testid="landing-leads-panel"]')!;
+        expect(leadsPanel.textContent).toContain('@target.account');
+        expect(leadsNextButton(leadsPanel).disabled).toBe(false);
+
+        await trigger(leadsPanel);
+
+        expect(leadsPanel.textContent).not.toContain('@target.account');
+        expect(leadsPanel.textContent).toContain('리드 목록을 불러오는 중…');
+        expect(leadsPanel.textContent).not.toContain('다음 페이지 있음');
+        expect(leadsNextButton(leadsPanel).disabled).toBe(true);
+        expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/api/admin/landing-leads')).length).toBe(2);
+
+        pending.resolve(jsonResponse({ rows: [], nextCursor: null }));
+        await settle();
+    });
+
+    it('clears stale rows and the next cursor when retrying after an append failure', async () => {
+        const pendingRetry = deferred<Response>();
+        let leadRequests = 0;
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') return Promise.resolve(jsonResponse({ inventory: [] }));
+            if (url.pathname === '/api/admin/order-audit') return Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            if (url.pathname === '/api/admin/landing-leads') {
+                leadRequests += 1;
+                if (leadRequests === 1) return Promise.resolve(jsonResponse({ rows: [row], nextCursor: 'target-cursor' }));
+                if (leadRequests === 2) return Promise.resolve(jsonResponse({ error: 'append failed' }, 503));
+                return pendingRetry.promise;
+            }
+            return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        renderWorkbench();
+        await settle();
+
+        const leadsPanel = container!.querySelector('[data-testid="landing-leads-panel"]')!;
+        await act(async () => leadsNextButton(leadsPanel).click());
+        await settle();
+        expect(leadsPanel.textContent).toContain('@target.account');
+        expect(leadsPanel.textContent).toContain('다음 페이지 있음');
+        expect(leadsPanel.textContent).toContain('운영 데이터를 불러오지 못했습니다.');
+
+        const retry = [...leadsPanel.querySelectorAll('button')].find(button => button.textContent === '리드 다시 시도') as HTMLButtonElement;
+        expect(retry).toBeTruthy();
+        await act(async () => retry.click());
+
+        expect(leadRequests).toBe(3);
+        expect(leadsPanel.textContent).not.toContain('@target.account');
+        expect(leadsPanel.textContent).toContain('리드 목록을 불러오는 중…');
+        expect(leadsPanel.textContent).not.toContain('다음 페이지 있음');
+        expect(leadsNextButton(leadsPanel).disabled).toBe(true);
+
+        pendingRetry.resolve(jsonResponse({ rows: [], nextCursor: null }));
+        await settle();
+    });
+
+    it('preserves existing rows and the next cursor while an append request is pending', async () => {
+        const pendingAppend = deferred<Response>();
+        let leadRequests = 0;
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') return Promise.resolve(jsonResponse({ inventory: [] }));
+            if (url.pathname === '/api/admin/order-audit') return Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            if (url.pathname === '/api/admin/landing-leads') {
+                leadRequests += 1;
+                return leadRequests === 1
+                    ? Promise.resolve(jsonResponse({ rows: [row], nextCursor: 'target-cursor' }))
+                    : pendingAppend.promise;
+            }
+            return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        renderWorkbench();
+        await settle();
+
+        const leadsPanel = container!.querySelector('[data-testid="landing-leads-panel"]')!;
+        await act(async () => leadsNextButton(leadsPanel).click());
+
+        expect(leadsPanel.textContent).toContain('@target.account');
+        expect(leadsPanel.textContent).toContain('다음 페이지 있음');
+        expect(leadsNextButton(leadsPanel).disabled).toBe(true);
+        expect(leadsPanel.textContent).not.toContain('리드 목록을 불러오는 중…');
+
+        pendingAppend.resolve(jsonResponse({ rows: [excludedRow], nextCursor: null }));
+        await settle();
+        expect(leadsPanel.textContent).toContain('@target.account');
+        expect(leadsPanel.textContent).toContain('@excluded.account');
+        expect(leadsPanel.textContent).not.toContain('다음 페이지 있음');
+    });
+
+    it('ignores an out-of-order response from an older context', async () => {
+        const pendingExcluded = deferred<Response>();
+        const pendingTarget = deferred<Response>();
+        let targetRequests = 0;
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') return Promise.resolve(jsonResponse({ inventory: [] }));
+            if (url.pathname === '/api/admin/order-audit') return Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            if (url.pathname === '/api/admin/landing-leads') {
+                if (url.searchParams.get('context') === 'excluded') return pendingExcluded.promise;
+                targetRequests += 1;
+                return targetRequests === 1
+                    ? Promise.resolve(jsonResponse({ rows: [row], nextCursor: 'target-cursor' }))
+                    : pendingTarget.promise;
+            }
+            return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        renderWorkbench();
+        await settle();
+
+        const leadsPanel = container!.querySelector('[data-testid="landing-leads-panel"]')!;
+        const excluded = leadsPanel.querySelector('[data-landing-lead-context="excluded"]') as HTMLButtonElement;
+        const target = leadsPanel.querySelector('[data-landing-lead-context="target"]') as HTMLButtonElement;
+        await act(async () => excluded.click());
+        await act(async () => target.click());
+        expect(fetchMock.mock.calls.some(([input]) => new URL(String(input), 'http://localhost').searchParams.get('context') === 'excluded')).toBe(true);
+        expect(targetRequests).toBe(2);
+
+        pendingTarget.resolve(jsonResponse({ rows: [{ ...row, instagramId: 'latest.account' }], nextCursor: null }));
+        await settle();
+        expect(leadsPanel.textContent).toContain('@latest.account');
+
+        pendingExcluded.resolve(jsonResponse({ rows: [excludedRow], nextCursor: null }));
+        await settle();
+        expect(leadsPanel.textContent).toContain('@latest.account');
+        expect(leadsPanel.textContent).not.toContain('@excluded.account');
     });
 
     it('renders Target/Excluded tabs, normalized filters, empty-safe rows, and keyset pagination', async () => {
