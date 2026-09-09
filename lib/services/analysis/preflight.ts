@@ -186,6 +186,8 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     releaseClaimRpc: 'release_analysis_preflight_claim',
     completeRpc: 'complete_analysis_v2_preflight',
     blockRpc: 'block_analysis_v2_preflight',
+    // Kept as a compatibility label for callers that inspect the registry;
+    // setExclusion never routes through this legacy exclusion-only RPC.
     exclusionRpc: 'set_analysis_v2_preflight_exclusion',
     anonymousCompleteRpc: 'complete_anonymous_analysis_v2_preflight',
     anonymousBlockRpc: 'block_anonymous_analysis_v2_preflight',
@@ -1642,15 +1644,18 @@ export function createSupabasePreflightStore(
         },
 
         async setExclusion(input, options) {
-            const scopedClient = options?.client ?? client;
+            const scopedClient = options?.client;
+            if (!scopedClient) {
+                throw new Error(
+                    'PREFLIGHT_PERSISTENCE_ERROR: exclusion requires an authenticated scoped client.',
+                );
+            }
             const { data, error } = await scopedClient.rpc(
-                options?.client
-                    ? PREFLIGHT_DATABASE_NAMES.ownerExclusionRpc
-                    : PREFLIGHT_DATABASE_NAMES.exclusionRpc,
+                PREFLIGHT_DATABASE_NAMES.ownerExclusionRpc,
                 {
                     p_preflight_id: input.preflightId,
                     p_user_id: input.userId,
-                    ...(options?.client ? { p_claim_token_hash: null } : {}),
+                    p_claim_token_hash: null,
                     p_decision: input.decision,
                     p_excluded_instagram_id: input.excludedInstagramId,
                 },

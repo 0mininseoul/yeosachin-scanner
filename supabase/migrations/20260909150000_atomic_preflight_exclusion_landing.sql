@@ -71,6 +71,19 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_NOT_FOUND', ERRCODE = 'P0001';
     END IF;
 
+    -- Lifecycle and expiry remain authoritative even for an identical retry.
+    -- They must be checked before replay/self-heal so an expired or consumed
+    -- row can never recreate an excluded landing lead.
+    IF v_preflight.expires_at <= v_now OR v_preflight.status = 'expired' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_EXPIRED', ERRCODE = 'P0001';
+    END IF;
+    IF v_preflight.status = 'consumed' THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_CONSUMED', ERRCODE = 'P0001';
+    END IF;
+    IF v_preflight.status NOT IN ('pending', 'processing', 'ready') THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';
+    END IF;
+
     IF p_user_id IS NOT NULL
        AND v_preflight.beta_entry_provenance IS NOT NULL
        AND NOT public.analysis_beta_has_access() THEN
@@ -93,15 +106,6 @@ BEGIN
     END IF;
     IF v_preflight.exclusion_decision <> 'pending' THEN
         RAISE EXCEPTION USING MESSAGE = 'PREFLIGHT_IMMUTABLE', ERRCODE = 'P0001';
-    END IF;
-    IF v_preflight.expires_at <= v_now OR v_preflight.status = 'expired' THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_EXPIRED', ERRCODE = 'P0001';
-    END IF;
-    IF v_preflight.status = 'consumed' THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_CONSUMED', ERRCODE = 'P0001';
-    END IF;
-    IF v_preflight.status NOT IN ('pending', 'processing', 'ready') THEN
-        RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_NOT_READY', ERRCODE = 'P0001';
     END IF;
     IF p_decision = 'exclude'
        AND v_excluded_instagram_id = pg_catalog.lower(v_preflight.target_instagram_id) THEN
@@ -195,5 +199,12 @@ REVOKE ALL ON FUNCTION public.set_authenticated_analysis_v2_preflight_exclusion(
 GRANT EXECUTE ON FUNCTION public.set_authenticated_analysis_v2_preflight_exclusion(
     UUID, UUID, TEXT, TEXT
 ) TO authenticated;
+
+-- The historical service-only exclusion RPC has no landing-write boundary.
+-- Keep its signature for mixed-version schema compatibility, but hard-fail
+-- that unscoped path so all supported decisions use the atomic RPC above.
+REVOKE ALL ON FUNCTION public.set_analysis_v2_preflight_exclusion(
+    UUID, UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';

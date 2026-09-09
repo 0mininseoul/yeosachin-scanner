@@ -69,6 +69,10 @@ describe('landing lead journey migration', () => {
         expect(journeySql).toContain("p_input_context <> 'target'");
         expect(journeySql).toContain('LANDING_LEAD_CAPTURE_MISMATCH');
         expect(journeySql).toContain('v_existing.instagram_id IS DISTINCT FROM lower(p_instagram_id)');
+        expect(journeySql).toContain('v_existing.journey_id IS DISTINCT FROM v_target.journey_id');
+        expect(journeySql).toContain('v_existing.mapping_status IS DISTINCT FROM v_target.mapping_status');
         expect(journeySql).toContain('v_existing.anonymous_principal_hash IS DISTINCT FROM p_anonymous_principal_hash');
+        expect(journeySql).toContain('v_existing.auth_user_id IS DISTINCT FROM v_target.auth_user_id');
+        expect(journeySql).toContain('GET DIAGNOSTICS v_inserted = ROW_COUNT');
     });
 });

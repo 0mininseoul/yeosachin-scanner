@@ -1472,7 +1472,7 @@ describe('preflight persistence adapter', () => {
         expect(query.select.mock.calls[0][0]).not.toContain('excluded_instagram_id');
     });
 
-    it('uses fenced completion, blocking, and scalar exclusion RPC contracts', async () => {
+    it('uses fenced completion and blocking RPC contracts, then hard-fails unscoped exclusion', async () => {
         const rpc = vi.fn(async () => ({ data: true, error: null }));
         const store = createSupabasePreflightStore({
             rpc,
@@ -1486,12 +1486,14 @@ describe('preflight persistence adapter', () => {
         await store.finalizeReady(claim(), snapshot);
         await store.finalizeBlocked(claim(), 'TARGET_NOT_FOUND');
         await store.blockQueueUnavailable(preflightId, userId);
-        await store.setExclusion({
+        await expect(store.setExclusion({
             preflightId,
             userId,
             decision: 'exclude',
             excludedInstagramId: 'owner.name',
-        });
+        })).rejects.toThrow(
+            'PREFLIGHT_PERSISTENCE_ERROR: exclusion requires an authenticated scoped client.',
+        );
 
         expect(rpc).toHaveBeenNthCalledWith(1, PREFLIGHT_DATABASE_NAMES.completeRpc, {
             p_preflight_id: preflightId,
@@ -1524,12 +1526,7 @@ describe('preflight persistence adapter', () => {
             p_claim_token: null,
             p_error_code: 'QUEUE_UNAVAILABLE',
         });
-        expect(rpc).toHaveBeenNthCalledWith(4, PREFLIGHT_DATABASE_NAMES.exclusionRpc, {
-            p_preflight_id: preflightId,
-            p_user_id: userId,
-            p_decision: 'exclude',
-            p_excluded_instagram_id: 'owner.name',
-        });
+        expect(rpc).toHaveBeenCalledTimes(3);
     });
 
     it('uses the owner-or-claim atomic exclusion RPC for an authenticated owner client', async () => {
@@ -1564,11 +1561,12 @@ describe('preflight persistence adapter', () => {
     });
 
     it('maps a conflicting write-once exclusion decision to an immutable error', async () => {
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { code: 'P0001', message: 'PREFLIGHT_IMMUTABLE' },
+        }));
         const store = createSupabasePreflightStore({
-            rpc: vi.fn(async () => ({
-                data: null,
-                error: { code: 'P0001', message: 'PREFLIGHT_IMMUTABLE' },
-            })),
+            rpc,
             from: vi.fn() as never,
         });
 
@@ -1577,6 +1575,11 @@ describe('preflight persistence adapter', () => {
             userId,
             decision: 'skip',
             excludedInstagramId: null,
+        }, {
+            client: {
+                rpc,
+                from: vi.fn() as never,
+            },
         });
 
         await expect(update).rejects.toBeInstanceOf(PreflightImmutableError);
@@ -1584,14 +1587,15 @@ describe('preflight persistence adapter', () => {
     });
 
     it('maps a blocked preflight exclusion RPC result to an immutable error', async () => {
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: {
+                code: 'P0001',
+                message: 'ANALYSIS_V2_PREFLIGHT_NOT_READY',
+            },
+        }));
         const store = createSupabasePreflightStore({
-            rpc: vi.fn(async () => ({
-                data: null,
-                error: {
-                    code: 'P0001',
-                    message: 'ANALYSIS_V2_PREFLIGHT_NOT_READY',
-                },
-            })),
+            rpc,
             from: vi.fn() as never,
         });
 
@@ -1600,6 +1604,11 @@ describe('preflight persistence adapter', () => {
             userId,
             decision: 'skip',
             excludedInstagramId: null,
+        }, {
+            client: {
+                rpc,
+                from: vi.fn() as never,
+            },
         })).rejects.toMatchObject({
             name: 'PreflightImmutableError',
             message: 'ANALYSIS_V2_PREFLIGHT_NOT_READY',

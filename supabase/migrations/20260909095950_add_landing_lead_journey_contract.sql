@@ -150,6 +150,8 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
     v_target public.landing_leads%ROWTYPE;
+    v_existing public.landing_leads%ROWTYPE;
+    v_inserted INTEGER;
 BEGIN
     IF p_instagram_id !~ '^[a-z0-9._]{1,30}$' THEN
         RAISE EXCEPTION 'LANDING_LEAD_INPUT_INVALID';
@@ -174,6 +176,28 @@ BEGIN
         pg_catalog.clock_timestamp()
     )
     ON CONFLICT (source_preflight_id) WHERE input_context = 'excluded' DO NOTHING;
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+    IF v_inserted = 1 THEN
+        RETURN TRUE;
+    END IF;
+
+    -- A legacy excluded row may already occupy the partial unique key.  It is
+    -- replay-compatible only when it remains bound to the same target
+    -- journey, mapping role, and principal/owner identity.  Do not let
+    -- ON CONFLICT turn a mismatched row into a successful durable decision.
+    SELECT * INTO v_existing
+    FROM public.landing_leads
+    WHERE source_preflight_id = p_source_preflight_id
+      AND input_context = 'excluded'
+    FOR UPDATE;
+    IF NOT FOUND
+       OR v_existing.instagram_id IS DISTINCT FROM p_instagram_id
+       OR v_existing.journey_id IS DISTINCT FROM v_target.journey_id
+       OR v_existing.mapping_status IS DISTINCT FROM v_target.mapping_status
+       OR v_existing.anonymous_principal_hash IS DISTINCT FROM v_target.anonymous_principal_hash
+       OR v_existing.auth_user_id IS DISTINCT FROM v_target.auth_user_id THEN
+        RAISE EXCEPTION 'LANDING_LEAD_TARGET_MISMATCH';
+    END IF;
     RETURN TRUE;
 END;
 $$;
