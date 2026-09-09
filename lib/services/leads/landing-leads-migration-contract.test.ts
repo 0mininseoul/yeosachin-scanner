@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -6,6 +7,18 @@ const sql = readFileSync(
     join(process.cwd(), 'supabase/migrations/20260719160000_add_landing_leads.sql'),
     'utf8',
 );
+
+const migrationDirectory = join(process.cwd(), 'supabase/migrations');
+const journeyMigrationName = readdirSync(migrationDirectory)
+    .filter(name => name.endsWith('_add_landing_lead_journey_contract.sql'))[0];
+const journeySql = journeyMigrationName
+    ? readFileSync(join(migrationDirectory, journeyMigrationName), 'utf8')
+    : '';
+const postDeployMigrationNames = readdirSync(migrationDirectory)
+    .filter(name => name.endsWith('_revoke_legacy_landing_lead_insert_after_rpc_ready.sql'));
+const postDeploySql = postDeployMigrationNames[0]
+    ? readFileSync(join(migrationDirectory, postDeployMigrationNames[0]), 'utf8')
+    : '';
 
 describe('landing_leads migration', () => {
     it('creates the table with the hardened id and timestamp defaults', () => {
@@ -20,5 +33,69 @@ describe('landing_leads migration', () => {
         expect(sql).toContain('REVOKE ALL ON TABLE public.landing_leads FROM anon, authenticated');
         expect(sql).toContain('GRANT INSERT, SELECT ON TABLE public.landing_leads TO service_role');
         expect(sql).not.toMatch(/CREATE POLICY[\s\S]*landing_leads/i);
+    });
+});
+
+describe('landing lead journey migration', () => {
+    it('adds the journey, mapping, and one-time capture columns', () => {
+        expect(journeyMigrationName).toBeTruthy();
+        expect(journeySql).toContain('journey_id UUID NOT NULL');
+        expect(journeySql).toContain('anonymous_principal_hash VARCHAR(64)');
+        expect(journeySql).toContain('auth_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL');
+        expect(journeySql).toContain('source_preflight_id UUID');
+        expect(journeySql).toContain('capture_token_hash VARCHAR(64)');
+        expect(journeySql).toContain('mapping_status TEXT NOT NULL');
+        expect(journeySql).toContain('linked_at TIMESTAMPTZ');
+        expect(journeySql).toContain('landing_leads_capture_token_hash_uidx');
+        expect(journeySql).toContain('landing_leads_journey_created_idx');
+        expect(journeySql).toContain('landing_leads_mapping_filter_idx');
+    });
+
+    it('keeps Wave A compatibility while preserving the RPC-only final ACL shape', () => {
+        expect(journeySql).toContain('ALTER TABLE public.landing_leads ENABLE ROW LEVEL SECURITY');
+        expect(journeySql).toContain('ALTER TABLE public.landing_leads FORCE ROW LEVEL SECURITY');
+        expect(journeySql).toMatch(/REVOKE ALL ON TABLE public\.landing_leads FROM PUBLIC, anon, authenticated, service_role/);
+        expect(journeySql).toContain('GRANT INSERT ON TABLE public.landing_leads TO service_role;');
+        expect(journeySql).not.toMatch(/GRANT\s+(?:INSERT,\s*SELECT|SELECT,\s*INSERT)\s+ON TABLE public\.landing_leads\s+TO service_role/i);
+    });
+
+    it('generates one Wave B migration that revokes only the legacy INSERT', () => {
+        expect(postDeployMigrationNames).toHaveLength(1);
+        expect(postDeploySql).toContain('REVOKE INSERT ON TABLE public.landing_leads FROM service_role;');
+        expect(postDeploySql).not.toMatch(/REVOKE ALL\s+ON TABLE public\.landing_leads/i);
+        expect(postDeploySql).not.toMatch(/GRANT\s+\w[\w,\s]*\s+ON TABLE public\.landing_leads/i);
+    });
+
+    it('defines constrained mappings and service-only security-definer RPCs', () => {
+        expect(journeySql).toContain('landing_leads_context_shape_v2_check');
+        const addIndex = journeySql.indexOf('ADD CONSTRAINT landing_leads_context_shape_v2_check');
+        const validateIndex = journeySql.indexOf('VALIDATE CONSTRAINT landing_leads_context_shape_v2_check');
+        const dropIndex = journeySql.indexOf('DROP CONSTRAINT landing_leads_context_shape_check');
+        expect(addIndex).toBeGreaterThan(-1);
+        expect(journeySql.slice(addIndex)).toContain('NOT VALID');
+        expect(validateIndex).toBeGreaterThan(addIndex);
+        expect(dropIndex).toBeGreaterThan(validateIndex);
+        expect(journeySql).toMatch(/pg_catalog\.pg_constraint[\s\S]*conname = 'landing_leads_context_shape_check'[\s\S]*DROP CONSTRAINT landing_leads_context_shape_check/);
+        expect(journeySql).toMatch(/mapping_status IN \([\s\S]*'legacy_unlinked',[\s\S]*'anonymous_device',[\s\S]*'authenticated_user',[\s\S]*'unlinked_after_deletion'/);
+        expect(journeySql).toMatch(/'legacy_import_v1',[\s\S]*'capture_v1',[\s\S]*'preflight_v1',[\s\S]*'account_deletion_v1'/);
+        expect(journeySql).toContain("capture_token_hash ~ '^[a-f0-9]{64}$'");
+        for (const name of [
+            'create_or_replay_landing_lead_capture',
+            'claim_landing_lead_journey',
+            'unlink_landing_lead_journey_after_deletion',
+        ]) {
+            expect(journeySql).toContain(`CREATE OR REPLACE FUNCTION public.${name}`);
+            expect(journeySql).toMatch(new RegExp(`public\\.${name}[\\s\\S]*?SECURITY DEFINER SET search_path = ''`));
+            expect(journeySql).toMatch(new RegExp(`REVOKE EXECUTE ON FUNCTION public\\.${name}\\(`));
+            expect(journeySql).toMatch(new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}\\([\\s\\S]*?\\) TO service_role`));
+        }
+        expect(journeySql).toContain("p_input_context <> 'target'");
+        expect(journeySql).toContain('LANDING_LEAD_CAPTURE_MISMATCH');
+        expect(journeySql).toContain('v_existing.instagram_id IS DISTINCT FROM lower(p_instagram_id)');
+        expect(journeySql).toContain('v_existing.journey_id IS DISTINCT FROM v_target.journey_id');
+        expect(journeySql).toContain('v_existing.mapping_status IS DISTINCT FROM v_target.mapping_status');
+        expect(journeySql).toContain('v_existing.anonymous_principal_hash IS DISTINCT FROM p_anonymous_principal_hash');
+        expect(journeySql).toContain('v_existing.auth_user_id IS DISTINCT FROM v_target.auth_user_id');
+        expect(journeySql).toContain('GET DIAGNOSTICS v_inserted = ROW_COUNT');
     });
 });

@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ insert: vi.fn(), from: vi.fn() }));
+const mocks = vi.hoisted(() => ({ insert: vi.fn(), from: vi.fn(), rpc: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { from: mocks.from },
+    supabaseAdmin: { from: mocks.from, rpc: mocks.rpc },
 }));
 
 import { insertLandingLead, LeadPersistenceError } from './store';
@@ -10,6 +10,7 @@ import { insertLandingLead, LeadPersistenceError } from './store';
 beforeEach(() => {
     mocks.insert.mockReset();
     mocks.from.mockReset();
+    mocks.rpc.mockReset();
     mocks.from.mockReturnValue({ insert: mocks.insert });
 });
 
@@ -39,21 +40,44 @@ describe('insertLandingLead', () => {
         });
     });
 
-    it('stores an excluded lead with its replay key and no raw input', async () => {
-        mocks.insert.mockResolvedValue({ error: null });
-
-        await insertLandingLead({
+    it('hard-fences excluded context from service-level inserts', async () => {
+        await expect(insertLandingLead({
             instagramId: 'girlfriend.name',
             inputContext: 'excluded',
             sourcePreflightId: '123e4567-e89b-42d3-a456-426614174000',
+        } as never)).rejects.toMatchObject({
+            code: 'LEAD_INSERT_FAILED',
+            message: 'excluded landing leads require the atomic preflight exclusion decision',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
+    });
+
+    it('persists only the capture token hash and principal HMAC for a journey capture', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: [{
+                journey_id: '123e4567-e89b-42d3-a456-426614174000',
+                created: true,
+            }],
+            error: null,
         });
 
-        expect(mocks.insert).toHaveBeenCalledWith(expect.objectContaining({
-            instagram_id: 'girlfriend.name',
-            input_context: 'excluded',
-            source_preflight_id: '123e4567-e89b-42d3-a456-426614174000',
-            raw_input: undefined,
-        }));
+        const result = await insertLandingLead({
+            instagramId: 'suzy',
+            captureToken: 'v1.opaque.signature',
+            anonymousPrincipalHash: 'a'.repeat(64),
+            journeyId: '123e4567-e89b-42d3-a456-426614174000',
+        });
+
+        expect(result).toMatchObject({ status: 'stored', captureToken: 'v1.opaque.signature' });
+        expect(mocks.rpc).toHaveBeenCalledWith('create_or_replay_landing_lead_capture', {
+            p_journey_id: '123e4567-e89b-42d3-a456-426614174000',
+            p_instagram_id: 'suzy',
+            p_input_context: 'target',
+            p_anonymous_principal_hash: 'a'.repeat(64),
+            p_capture_token_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        });
+        expect(JSON.stringify(mocks.rpc.mock.calls)).not.toContain('v1.opaque.signature');
     });
 
     it('throws LeadPersistenceError when supabase reports an error', async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { deleteAccountPermanently } from './account-deletion';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 
 describe('deleteAccountPermanently', () => {
     it('purges every result object before database and Auth deletion', async () => {
@@ -67,5 +68,145 @@ describe('deleteAccountPermanently', () => {
 
         expect(deleteObject).not.toHaveBeenCalled();
         expect(deleteAuthUser).toHaveBeenCalledOnce();
+    });
+
+    it('records completion lifecycle evidence before returning for an already-completed begin result', async () => {
+        const lifecycle: string[] = [];
+        const rpc = vi.fn(async (name: string) => ({
+            data: name === 'begin_account_deletion_v1'
+                ? { state: 'completed', objectKeys: [] }
+                : true,
+            error: null,
+        }));
+        const appendLifecycle = vi.fn(async input => {
+            lifecycle.push(`${input.eventKind}:${input.state}`);
+        });
+
+        await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            dualWrite: true,
+            appendLifecycle,
+            deleteObject: vi.fn(),
+            deleteAuthUser: vi.fn(),
+        });
+
+        expect(lifecycle).toEqual([
+            'deletion_requested:started:begin',
+            'deletion_requested:completed:begin',
+            'retired:completed:completion',
+        ]);
+        expect(appendLifecycle).toHaveBeenCalledTimes(3);
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('appends lifecycle evidence before each irreversible deletion phase', async () => {
+        const lifecycle: string[] = [];
+        const rpc = vi.fn(async (name: string) => ({
+            data: name === 'begin_account_deletion_v1'
+                ? { state: 'requested', objectKeys: ['v1/a.webp'] }
+                : name === 'complete_account_deletion_v1'
+                    ? true
+                    : { state: 'database_purged' },
+            error: null,
+        }));
+
+        await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            deleteObject: vi.fn(async () => undefined),
+            deleteAuthUser: vi.fn(async () => undefined),
+            dualWrite: true,
+            appendLifecycle: vi.fn(async input => {
+                lifecycle.push(`${input.eventKind}:${input.state}`);
+            }),
+        });
+
+        expect(lifecycle).toEqual([
+            'deletion_requested:started:begin',
+            'deletion_requested:completed:begin',
+            'deletion_requested:prepared:objects',
+            'objects_purged:prepared:object:0',
+            'objects_purged:started:object:0',
+            'objects_purged:completed:object:0',
+            'database_purged:prepared:database',
+            'database_purged:started:database',
+            'database_purged:completed:database',
+            'retired:prepared:auth',
+            'retired:started:auth',
+            'retired:completed:auth',
+            'retired:prepared:completion',
+            'retired:started:completion',
+            'retired:completed:completion',
+        ]);
+    });
+
+    it('stops before the first irreversible step when lifecycle evidence is unavailable', async () => {
+        const rpc = vi.fn(async () => ({
+            data: { state: 'requested', objectKeys: ['v1/a.webp'] },
+            error: null,
+        }));
+        const deleteObject = vi.fn();
+        const appendLifecycle = vi.fn(async () => {
+            throw new Error('canonical lifecycle unavailable');
+        });
+
+        await expect(deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            deleteObject,
+            deleteAuthUser: vi.fn(),
+            dualWrite: true,
+            appendLifecycle,
+        })).rejects.toMatchObject({ code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE' });
+
+        expect(rpc).not.toHaveBeenCalled();
+        expect(deleteObject).not.toHaveBeenCalled();
+    });
+
+    it('bounds a never-settling lifecycle append before any irreversible step', async () => {
+        vi.useFakeTimers();
+        try {
+            const rpc = vi.fn();
+            const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                rpc,
+                dualWrite: true,
+                appendLifecycle: vi.fn(() => new Promise<never>(() => undefined)),
+                deleteObject: vi.fn(),
+                deleteAuthUser: vi.fn(),
+            });
+            const outcome = expect(pending).rejects.toMatchObject({
+                code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE',
+            });
+            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
+            await outcome;
+            expect(rpc).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('bounds a never-settling lifecycle recovery enqueue after append failure', async () => {
+        vi.useFakeTimers();
+        try {
+            const rpc = vi.fn();
+            const queueMaintenanceJob = vi.fn(() => new Promise<never>(() => undefined));
+            const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                rpc,
+                dualWrite: true,
+                appendLifecycle: vi.fn(async () => {
+                    throw new Error('canonical lifecycle unavailable');
+                }),
+                queueMaintenanceJob,
+                deleteObject: vi.fn(),
+                deleteAuthUser: vi.fn(),
+            });
+            const outcome = expect(pending).rejects.toMatchObject({
+                code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE',
+            });
+            await vi.runAllTimersAsync();
+            await outcome;
+            expect(rpc).not.toHaveBeenCalled();
+            expect(queueMaintenanceJob).toHaveBeenCalledOnce();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -27,6 +28,16 @@ import {
     parseGroblePaymentRefundedEvent,
     verifyGrobleWebhookSignature,
 } from '@/lib/services/groble/webhook';
+import {
+    canonicalCommerceStore,
+    recordPaymentEventWithMaintenance,
+    type PaymentEventInput,
+} from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    isCanonicalFamilyWriteEnabled,
+    queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
+} from '@/lib/services/operations/canonical-operations-store';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -80,6 +91,49 @@ interface WebhookLogState {
     orderId?: string | null;
     planId?: PaidEarlybirdPlanId;
     amountKrw?: number;
+}
+
+async function mirrorCanonicalPaymentEvent(
+    input: PaymentEventInput | null,
+): Promise<void> {
+    if (!input || !isCanonicalFamilyWriteEnabled('payment')) return;
+    try {
+        const result = await withCanonicalMirrorTimeout(() => recordPaymentEventWithMaintenance(
+                canonicalCommerceStore,
+                input,
+                marker => queueCanonicalMaintenanceJob({
+                    kind: 'replay',
+                    targetKeyHash: marker.targetKeyHash,
+                    contentHash: marker.contentHash,
+                }).then(() => undefined),
+            ));
+        if (result.status === 'unavailable') {
+            operationalLogger.emit({
+                event: 'groble.webhook_canonical_mirror_unavailable',
+                severity: 'error',
+                fields: { provider: 'groble', operation: 'payment_mirror', code: result.code },
+            });
+        }
+    } catch (error) {
+        const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+            ? error.code
+            : 'CANONICAL_PAYMENT_MIRROR_FAILED';
+        operationalLogger.emit({
+            event: 'groble.webhook_canonical_mirror_failed',
+            severity: 'error',
+            fields: { provider: 'groble', operation: 'payment_mirror', code },
+        });
+    }
+}
+
+function canonicalPaymentDisposition(
+    disposition: z.infer<typeof finalizationResultSchema>[number]['disposition'],
+    status: string | null,
+): PaymentEventInput['disposition'] {
+    if (disposition === 'accepted') return 'accepted';
+    if (disposition === 'duplicate_event' || disposition === 'duplicate_payment') return 'duplicate';
+    if (status === 'payment_pending') return 'payment_pending';
+    return 'rejected';
 }
 
 function safeWebhookEventType(value: string): WebhookEventType {
@@ -233,6 +287,7 @@ async function handlePOST(
 
     let persistence;
     let state: WebhookLogState = { webhookEventType };
+    let canonicalPaymentEvent: PaymentEventInput | null = null;
     let autoAdmissionEligible = false;
     if (envelope.type === 'payment.completed') {
         let payment;
@@ -284,6 +339,27 @@ async function handlePOST(
             payment.paidAt,
             autoAdmissionConfig,
         );
+        canonicalPaymentEvent = {
+            eventId: payment.eventId,
+            idempotencyKey,
+            eventType: 'payment.completed',
+            paymentId: payment.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: payment.eventId,
+                event_type: 'payment.completed',
+                payment_id: payment.paymentId,
+                product_id: payment.productId,
+                amount_krw: payment.amountKrw,
+                occurred_at: payment.occurredAt,
+                paid_at: payment.paidAt,
+            },
+            occurredAt: payment.occurredAt,
+            amountKrw: payment.amountKrw,
+        };
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             const params = {
@@ -342,6 +418,27 @@ async function handlePOST(
             planId: planForProduct(cancellation.productId, config),
             amountKrw: cancellation.amountKrw,
         };
+        canonicalPaymentEvent = {
+            eventId: cancellation.eventId,
+            idempotencyKey,
+            eventType: 'payment.cancel_requested',
+            paymentId: cancellation.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: cancellation.eventId,
+                event_type: 'payment.cancel_requested',
+                payment_id: cancellation.paymentId,
+                product_id: cancellation.productId,
+                amount_krw: cancellation.amountKrw,
+                occurred_at: cancellation.occurredAt,
+                requested_at: cancellation.requestedAt,
+            },
+            occurredAt: cancellation.occurredAt,
+            amountKrw: cancellation.amountKrw,
+        };
         try {
             persistence = await supabaseAdmin.rpc(
                 'finalize_earlybird_groble_cancel_request',
@@ -379,6 +476,29 @@ async function handlePOST(
         state = {
             ...state,
             planId: planForProduct(refund.productId, config),
+            amountKrw: refund.amountKrw,
+        };
+        canonicalPaymentEvent = {
+            eventId: refund.eventId,
+            idempotencyKey,
+            eventType: 'payment.refunded',
+            paymentId: refund.paymentId,
+            orderId: null,
+            provider: 'groble',
+            disposition: 'accepted',
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            payload: {
+                event_id: refund.eventId,
+                event_type: 'payment.refunded',
+                payment_id: refund.paymentId,
+                product_id: refund.productId,
+                amount_krw: refund.amountKrw,
+                refund_amount_krw: refund.refundAmountKrw,
+                partial_refund: refund.partialRefund,
+                occurred_at: refund.occurredAt,
+                refunded_at: refund.refundedAt,
+            },
+            occurredAt: refund.occurredAt,
             amountKrw: refund.amountKrw,
         };
         try {
@@ -428,6 +548,19 @@ async function handlePOST(
 
     const finalization = parsed.data[0];
     const orderId = finalization.order_id;
+    if (canonicalPaymentEvent) {
+        canonicalPaymentEvent = {
+            ...canonicalPaymentEvent,
+            orderId,
+            disposition: canonicalPaymentDisposition(finalization.disposition, finalization.status),
+            payload: {
+                ...canonicalPaymentEvent.payload,
+                order_id: orderId,
+                disposition: canonicalPaymentDisposition(finalization.disposition, finalization.status),
+            },
+        };
+    }
+    await mirrorCanonicalPaymentEvent(canonicalPaymentEvent);
     const shouldAdmit = envelope.type === 'payment.completed'
         && autoAdmissionEligible
         && orderId !== null

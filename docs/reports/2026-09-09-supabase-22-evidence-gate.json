@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "supabase-22-evidence-v1",
+  "status": "blocked",
+  "publicTableCount": 174,
+  "canonicalTables": [],
+  "unexpectedTables": [],
+  "missingTables": [],
+  "dependencyClean": false,
+  "migrationHistoryClean": false,
+  "genuineCompletedBundleCount": 0,
+  "parityStatus": "blocked",
+  "archiveManifest": {
+    "verified": false,
+    "aggregateChecksum": null,
+    "restoreStatus": "blocked"
+  },
+  "rollbackEvidenceVerified": false,
+  "observationWindowClosed": false,
+  "ownerApprovalRecorded": false,
+  "canonicalSetMatch": false,
+  "catalogDependencyClean": false,
+  "paymentPendingDispositionRecorded": false,
+  "noActivationOrCanary": false,
+  "archiveRestoreChecksumMatch": false,
+  "destructiveOperations": "refused",
+  "missingGates": [
+    "public-table-count",
+    "canonical-table-set",
+    "dependency-inventory",
+    "migration-history",
+    "genuine-completed-bundle",
+    "per-order-parity",
+    "archive-manifest",
+    "restore-drill",
+    "rollback-evidence",
+    "observation-window",
+    "separate-approval",
+    "payment-pending-disposition",
+    "no-activation-or-canary"
+  ]
+}

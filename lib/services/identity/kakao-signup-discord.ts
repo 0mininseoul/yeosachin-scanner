@@ -2,6 +2,17 @@ import 'server-only';
 
 import * as Sentry from '@sentry/nextjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    CANONICAL_HASH_NAMESPACES,
+    canonicalJsonHash,
+} from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    isCanonicalFamilyWriteEnabled,
+    maintenanceMarker,
+    queueCanonicalMaintenanceJob,
+    canonicalOperationsStore,
+    withCanonicalMirrorTimeout,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 10_000;
@@ -44,6 +55,32 @@ function configuredDiscord(): DiscordConfig | null {
 
 function unavailable(value: unknown): string | null {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function safeAttributionOrigin(value: unknown): string | null {
+    const candidate = unavailable(value);
+    if (!candidate || candidate.length > 512) return null;
+    try {
+        const url = new URL(candidate);
+        if (
+            (url.protocol !== 'https:' && url.protocol !== 'http:')
+            || url.username
+            || url.password
+            || url.search
+            || url.hash
+        ) return null;
+        const normalized = url.toString();
+        // Keep this projection byte-for-byte compatible with the legacy
+        // outbox column check and its SQL shadow reader: root origins only,
+        // lowercase DNS labels, and no localhost/private-IP destinations.
+        if (
+            !/^https?:\/\/[a-z0-9][a-z0-9.-]{0,251}\/$/.test(normalized)
+            || /^https?:\/\/(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})\//.test(normalized)
+        ) return null;
+        return normalized;
+    } catch {
+        return null;
+    }
 }
 
 /** Never retain separators; preserve only the explicitly approved first/last graphemes. */
@@ -240,8 +277,40 @@ export function kakaoSignupProfileForOutbox(profile: KakaoSignupProfile) {
         gender: safeGender(profile.gender),
         signed_up_at: profile.signedUpAt.toISOString(),
         attribution_label: profile.attributionLabel ?? null,
-        attribution_origin: profile.attributionOrigin ?? null,
+        attribution_origin: safeAttributionOrigin(profile.attributionOrigin),
     };
+}
+
+async function mirrorKakaoSignupNotification(
+    userId: string,
+    payload: ReturnType<typeof kakaoSignupProfileForOutbox>,
+): Promise<void> {
+    if (!isCanonicalFamilyWriteEnabled('notification')) return;
+    const canonicalPayload = {
+        user_id: userId,
+        masked_name: payload.masked_name,
+        birthyear: payload.birthyear,
+        gender: payload.gender,
+        signed_up_at: payload.signed_up_at,
+        attribution_origin: safeAttributionOrigin(payload.attribution_origin),
+    };
+    try {
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
+                channel: 'kakao',
+                eventKind: 'kakao.signup',
+                dedupeKey: `kakao-signup:${canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationKey, userId)}`,
+                payload: canonicalPayload,
+                contentHash: canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationContent, canonicalPayload),
+            }));
+    } catch {
+        try {
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                    maintenanceMarker('recovery', userId, 'kakao-signup-notification'),
+                ));
+        } catch {
+            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
+        }
+    }
 }
 
 /** Updates only a trigger-created first-signup row; it can never enqueue a relogin. */
@@ -260,7 +329,11 @@ export async function stageKakaoSignupDiscordProfile(
             p_attribution_label: payload.attribution_label,
             p_attribution_origin: payload.attribution_origin,
         });
-        if (error) operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+        if (error) {
+            operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
+            return;
+        }
+        await mirrorKakaoSignupNotification(userId, payload);
     } catch {
         operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
     }

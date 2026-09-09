@@ -45,6 +45,7 @@ import {
     tryClaimAnalyticsEvent,
 } from '@/lib/services/analytics-funnel';
 import { anonymousPreflightDeviceId } from '@/lib/services/analysis/anonymous-preflight-device';
+import { consumeLandingLeadCaptureToken, readLandingLeadCaptureToken } from '@/lib/services/landing-lead';
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
@@ -608,6 +609,12 @@ export function useAnalysisV2Preflight({
             });
             const deviceId = flow === 'standard' ? anonymousPreflightDeviceId() : null;
             if (deviceId) headers.set('X-Anonymous-Device-Id', deviceId);
+            const landingCaptureToken = flow === 'standard'
+                ? readLandingLeadCaptureToken()
+                : null;
+            if (landingCaptureToken) {
+                headers.set('X-Landing-Lead-Capture-Token', landingCaptureToken);
+            }
             if (testAdmission) {
                 headers.set('X-Analysis-Test-Admission', testAdmission.token);
             }
@@ -670,6 +677,7 @@ export function useAnalysisV2Preflight({
             if (testAdmission) {
                 consumeTestAdmissionCredential(sessionStorage, normalized);
             }
+            if (landingCaptureToken) consumeLandingLeadCaptureToken();
             claimTokenRef.current = accepted.data.claimToken ?? null;
             setClaimToken(accepted.data.claimToken ?? null);
             setPreflight(accepted.data);

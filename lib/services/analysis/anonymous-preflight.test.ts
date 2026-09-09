@@ -6,13 +6,17 @@ import {
     readAnonymousAnalysisV2Preflight,
     reserveAnonymousAnalysisV2PreflightDispatch,
     reserveAnonymousPreflightBudget,
+    setAnonymousAnalysisV2PreflightExclusion,
 } from './anonymous-preflight';
 import { createAnonymousPreflightClaim } from './anonymous-preflight-claim';
+import { createCaptureToken } from '@/lib/services/landing/landing-lead-journey';
 import {
     buildReadyPreflightSnapshot,
+    InvalidPreflightExclusionError,
     launchStatusSnapshot,
     planCatalogSnapshot,
     pricingSnapshot,
+    PreflightImmutableError,
     type ReadyPreflightSnapshot,
 } from './preflight';
 
@@ -52,6 +56,78 @@ describe('anonymous preflight service', () => {
                 p_target_input_hash: 'a'.repeat(64),
             }),
         );
+    });
+
+    it('repairs a missed landing capture at the preflight boundary without forwarding raw identity material', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const capture = createCaptureToken('device-123', env.ANONYMOUS_PREFLIGHT_CLAIM_SECRET);
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                preflight_id: preflightId,
+                expires_at: '2026-08-05T00:30:00.000Z',
+                created: true,
+                preflight_status: 'pending',
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: [{ journey_id: capture.journeyId, created: true }],
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: true, error: null });
+
+        await createAnonymousAnalysisV2Preflight({
+            targetInstagramId: 'target_user',
+            targetInputHash: 'a'.repeat(64),
+            idempotencyKey: 'anonymous-preflight-002',
+            claimToken: claim.token,
+            landingCaptureToken: capture.token,
+            anonymousDeviceId: 'device-123',
+            env,
+        }, { client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } });
+
+        expect(landingRpc).toHaveBeenNthCalledWith(1, 'create_or_replay_landing_lead_capture', expect.objectContaining({
+            p_journey_id: capture.journeyId,
+            p_capture_token_hash: capture.tokenHash,
+            p_anonymous_principal_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+        expect(landingRpc).toHaveBeenNthCalledWith(2, 'bind_landing_lead_journey_to_preflight', {
+            p_journey_id: capture.journeyId,
+            p_source_preflight_id: preflightId,
+        });
+        expect(JSON.stringify(landingRpc.mock.calls)).not.toContain(capture.token);
+        expect(JSON.stringify(landingRpc.mock.calls)).not.toContain('device-123');
+    });
+
+    it('does not report preflight success when the landing capture cannot be persisted', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                preflight_id: preflightId,
+                expires_at: '2026-08-05T00:30:00.000Z',
+                created: true,
+                preflight_status: 'pending',
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: { message: 'LANDING_LEAD_PERSISTENCE_ERROR' },
+        });
+
+        await expect(createAnonymousAnalysisV2Preflight({
+            targetInstagramId: 'target_user',
+            targetInputHash: 'a'.repeat(64),
+            idempotencyKey: 'anonymous-preflight-003',
+            claimToken: claim.token,
+            landingCaptureToken: createCaptureToken('device-123', env.ANONYMOUS_PREFLIGHT_CLAIM_SECRET).token,
+            anonymousDeviceId: 'device-123',
+            env,
+        }, { client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } })).rejects.toMatchObject({
+            message: 'LANDING_LEAD_PERSISTENCE_ERROR:capture',
+            preflightId,
+        });
     });
 
     it('requires the signed token before reading anonymous status', async () => {
@@ -161,6 +237,85 @@ describe('anonymous preflight service', () => {
             ownerPreflightId: preflightId,
         });
     });
+
+    it('claims the anonymous preflight and landing journey through one atomic RPC', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                claimed: true,
+                preflight_status: 'claimed',
+                owner_preflight_id: null,
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn();
+
+        await expect(claimAnonymousAnalysisV2Preflight(
+            preflightId,
+            claim.token,
+            '223e4567-e89b-42d3-a456-426614174000',
+            { env, client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } },
+        )).resolves.toEqual({ claimed: true, ownerPreflightId: null });
+
+        expect(preflightRpc).toHaveBeenCalledWith(
+            'claim_anonymous_analysis_v2_preflight_with_landing',
+            expect.objectContaining({ p_preflight_id: preflightId }),
+        );
+        expect(landingRpc).not.toHaveBeenCalled();
+    });
+
+    it('writes anonymous exclusions through the owner-or-claim atomic RPC', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+
+        await expect(setAnonymousAnalysisV2PreflightExclusion({
+            preflightId,
+            claimToken: claim.token,
+            decision: 'exclude',
+            excludedInstagramId: 'excluded.user',
+        }, { env, client: { rpc } })).resolves.toBe(true);
+
+        expect(rpc).toHaveBeenCalledWith(
+            'set_analysis_v2_preflight_exclusion_with_landing',
+            {
+                p_preflight_id: preflightId,
+                p_user_id: null,
+                p_claim_token_hash: claim.tokenHash,
+                p_decision: 'exclude',
+                p_excluded_instagram_id: 'excluded.user',
+            },
+        );
+    });
+
+    it('preserves atomic exclusion validation errors for the anonymous route', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: null,
+                error: { message: 'ANALYSIS_V2_INVALID_EXCLUSION' },
+            })
+            .mockResolvedValueOnce({
+                data: null,
+                error: { message: 'ANALYSIS_V2_PREFLIGHT_EXPIRED' },
+            });
+
+        await expect(setAnonymousAnalysisV2PreflightExclusion({
+            preflightId,
+            claimToken: claim.token,
+            decision: 'exclude',
+            excludedInstagramId: 'target.user',
+        }, { env, client: { rpc } })).rejects.toBeInstanceOf(InvalidPreflightExclusionError);
+        await expect(setAnonymousAnalysisV2PreflightExclusion({
+            preflightId,
+            claimToken: claim.token,
+            decision: 'exclude',
+            excludedInstagramId: 'excluded.user',
+        }, { env, client: { rpc } })).rejects.toMatchObject({
+            name: 'PreflightImmutableError',
+            message: 'ANALYSIS_V2_PREFLIGHT_EXPIRED',
+        } satisfies Partial<PreflightImmutableError>);
+    });
+
     it('uses versioned role-aware dispatch RPCs for new anonymous tasks', async () => {
         const claim = createAnonymousPreflightClaim({ env });
         const dispatchToken = '323e4567-e89b-42d3-a456-426614174000';

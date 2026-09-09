@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    formatOrderAuditParityCliError,
     parseOrderAuditParityCliArgs,
     runOrderAuditParityCli,
     type OrderAuditParityCliDependencies,
@@ -46,6 +47,14 @@ function snapshot(completed: boolean): OrderAuditParitySnapshot {
 }
 
 describe('order-audit parity report CLI', () => {
+    it('includes the mutation refusal marker in CLI errors', () => {
+        expect(formatOrderAuditParityCliError()).toEqual({
+            status: 'failed',
+            errorCode: 'ANALYSIS_ORDER_AUDIT_PARITY_FAILED',
+            destructiveOperations: 'refused',
+        });
+    });
+
     it('accepts bounded repeated request IDs and optional shadow-read/archive markers', () => {
         expect(parseOrderAuditParityCliArgs([`--request-id=${REQUEST_A}`])).toMatchObject({
             shadowRead: false,

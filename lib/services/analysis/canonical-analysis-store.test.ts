@@ -1,0 +1,446 @@
+import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
+import {
+    createAnalysisCanonicalStore,
+    type AnalysisCanonicalSupabaseClient,
+} from './canonical-analysis-store';
+
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+function canonicalMigrationPath(): URL {
+    const directory = new URL('../../../supabase/migrations/', import.meta.url);
+    const files = readdirSync(directory).filter(file => (
+        file.endsWith('_add_analysis_canonical_tables.sql')
+    ));
+    expect(files).toHaveLength(1);
+    return new URL(files[0]!, directory);
+}
+
+function migrationSql(): string {
+    return readFileSync(canonicalMigrationPath(), 'utf8');
+}
+
+describe('analysis canonical table migration contract', () => {
+    it('defines the six additive canonical tables and their request indexes', () => {
+        const sql = migrationSql();
+        for (const table of [
+            'analysis_jobs',
+            'analysis_events',
+            'analysis_artifacts',
+            'analysis_costs',
+            'analysis_cache',
+            'analysis_audit_bundles',
+        ]) {
+            expect(sql).toContain(`CREATE TABLE public.${table}`);
+            expect(sql).toContain(`ALTER TABLE public.${table} ENABLE ROW LEVEL SECURITY`);
+            expect(sql).toContain(`ALTER TABLE public.${table} FORCE ROW LEVEL SECURITY`);
+            expect(sql).toMatch(new RegExp(
+                `REVOKE ALL ON TABLE public\\.${table}\\s+FROM PUBLIC, anon, authenticated, service_role`
+            ));
+        }
+        for (const index of [
+            'analysis_jobs_dispatch_idx',
+            'analysis_events_request_created_idx',
+            'analysis_artifacts_request_kind_idx',
+            'analysis_costs_request_recorded_idx',
+            'analysis_cache_expiry_idx',
+            'analysis_audit_request_version_idx',
+        ]) {
+            expect(sql).toContain(`CREATE INDEX ${index}`);
+        }
+    });
+
+    it('keeps canonical domains, ownership, and unknown cost semantics explicit', () => {
+        const sql = migrationSql();
+        expect(sql).toContain("kind IN ('coordinator', 'collection', 'ai', 'finalize', 'recovery')");
+        expect(sql).toContain("state IN ('queued', 'leased', 'running', 'succeeded', 'failed', 'blocked')");
+        expect(sql).toContain('request_id UUID NOT NULL REFERENCES public.analysis_requests(id)');
+        expect(sql).toContain('usage_unknown BOOLEAN NOT NULL');
+        expect(sql).toContain('CHECK (amount_known IS NULL OR amount_known >= 0)');
+        expect(sql).toContain('CHECK (NOT usage_unknown OR amount_known IS NULL)');
+        expect(sql).toContain('UNIQUE (request_id, version, kind, content_hash)');
+        expect(sql).toContain("candidate_key TEXT");
+        expect(sql).toContain("ordinal INTEGER");
+    });
+
+    it('exposes only service-role RPCs and rejects raw provider secrets', () => {
+        const sql = migrationSql();
+        for (const rpc of [
+            'record_analysis_canonical_job',
+            'append_analysis_canonical_event',
+            'append_analysis_canonical_artifact',
+            'append_analysis_canonical_cost',
+            'upsert_analysis_canonical_cache',
+            'append_analysis_canonical_audit',
+            'append_analysis_canonical_late_cost_audit',
+            'enqueue_analysis_canonical_retry',
+            'load_analysis_canonical_family',
+        ]) {
+            expect(sql).toContain(`CREATE OR REPLACE FUNCTION public.${rpc}`);
+            expect(sql).toContain(`GRANT EXECUTE ON FUNCTION public.${rpc}`);
+            expect(sql).toMatch(new RegExp(
+                `REVOKE ALL ON FUNCTION public\\.${rpc}\\([\\s\\S]*?FROM PUBLIC, anon, authenticated, service_role`
+            ));
+        }
+        expect(sql).toMatch(/SECURITY DEFINER[\s\S]*SET search_path = ''/);
+        expect(sql).not.toMatch(/provider_token|access_token|cookie|raw_provider_payload/i);
+        expect(sql).toContain('CREATE TRIGGER analysis_events_append_only');
+        expect(sql).toContain('CREATE TRIGGER analysis_audit_bundles_append_only');
+        expect(sql).toContain('FOR UPDATE');
+        expect(sql).toContain('late_cost_audit');
+    });
+
+    it('loads the cache family with an explicit bounded query', () => {
+        const sql = migrationSql();
+        expect(sql).toContain("p_family = 'cache'");
+        expect(sql).toContain("'caches'");
+        expect(sql).toMatch(/FROM public\.analysis_cache[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_jobs[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_events[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_artifacts[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_costs[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_audit_bundles[\s\S]*?LIMIT 100/);
+    });
+});
+
+const requestId = '123e4567-e89b-42d3-a456-426614174000';
+const hash = 'a'.repeat(64);
+
+function rpcClient(
+    rpc: AnalysisCanonicalSupabaseClient['rpc'] = vi.fn(async () => ({
+        data: {},
+        error: null,
+    }))
+): AnalysisCanonicalSupabaseClient {
+    return { rpc };
+}
+
+afterEach(() => {
+    vi.unstubAllEnvs();
+});
+
+describe('analysis canonical server adapter', () => {
+    it('bounds a canonical record and retry-marker RPC that never settles', async () => {
+        vi.useFakeTimers();
+        try {
+            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_WRITE', 'true');
+            const rpc = vi.fn(() => new Promise<never>(() => undefined));
+            const store = createAnalysisCanonicalStore(rpcClient(rpc));
+            const record = store.recordJob({
+                requestId,
+                jobKey: 'coordinator:finalize',
+                kind: 'coordinator',
+                state: 'succeeded',
+            });
+
+            await vi.runAllTimersAsync();
+            await expect(record).resolves.toEqual({ status: 'blocked', family: 'jobs' });
+            expect(rpc).toHaveBeenCalledTimes(2);
+            expect(CANONICAL_MIRROR_TIMEOUT_MS).toBeLessThanOrEqual(2_000);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps all canonical writes disabled unless the family flag is explicit', async () => {
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendCost({
+            requestId,
+            provider: 'vertex',
+            operationKey: 'score:001',
+            stage: 'score',
+            amountKnown: null,
+            amountConservative: 0.014,
+            usageUnknown: true,
+            sourceHash: hash,
+        })).resolves.toEqual({ status: 'disabled', usageUnknown: true });
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('appends an unknown-usage cost without inventing a known amount', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        const rpc = vi.fn(async () => ({ data: {}, error: null }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendCost({
+            requestId,
+            provider: 'vertex',
+            operationKey: 'score:001',
+            stage: 'score',
+            amountKnown: null,
+            amountConservative: 0.014,
+            usageUnknown: true,
+            sourceHash: hash,
+        })).resolves.toEqual({ status: 'appended', usageUnknown: true });
+        expect(rpc).toHaveBeenCalledWith('append_analysis_canonical_cost', expect.objectContaining({
+            p_request_id: requestId,
+            p_amount_known: null,
+            p_amount_conservative: 0.014,
+            p_usage_unknown: true,
+            p_source_hash: hash,
+        }));
+    });
+
+    it('rejects forbidden payload keys before crossing the RPC boundary', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_WRITE', 'true');
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendArtifact({
+            requestId,
+            kind: 'evidence',
+            artifactKey: 'evidence:1',
+            state: 'retained',
+            contentHash: hash,
+            retentionClass: 'standard',
+            payload: { providerToken: 'must-not-cross-boundary' },
+        })).rejects.toThrow('forbidden payload key');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('rejects source-sensitive identity fields before crossing the RPC boundary', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_WRITE', 'true');
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendArtifact({
+            requestId,
+            kind: 'evidence',
+            artifactKey: 'evidence:source-sensitive',
+            state: 'retained',
+            contentHash: hash,
+            retentionClass: 'standard',
+            payload: { targetUsername: 'sensitive' },
+        })).rejects.toThrow('forbidden payload key');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('rejects extra keys inside a typed evidence payload', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_WRITE', 'true');
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendArtifact({
+            requestId,
+            kind: 'manifest',
+            artifactKey: 'evidence:typed',
+            state: 'retained',
+            contentHash: hash,
+            retentionClass: 'standard',
+            payload: {
+                targetManifest: {
+                    key: 'manifest:1',
+                    inputHash: hash,
+                    likerSourceHash: hash,
+                    commentSourceHash: hash,
+                    resultHash: hash,
+                    interactorCount: 1,
+                    likerCount: 1,
+                    commentCount: 0,
+                    retention: 'permanent',
+                    extra: true,
+                },
+            },
+        })).rejects.toThrow('unknown nested payload key');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('queues one bounded retry marker after a one-sided canonical write', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'temporary write failure' } })
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: { family: 'audit', retryKey: `${requestId}:audit` },
+                    content_hash: createHash('sha256')
+                        .update(`${requestId}:audit`)
+                        .digest('hex'),
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00.000Z',
+                },
+                error: null,
+            });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+            retentionClass: 'permanent',
+            payload: { resultStatus: 'completed' },
+        })).resolves.toEqual({ status: 'retry_queued', family: 'audit' });
+        expect(rpc).toHaveBeenNthCalledWith(2, 'enqueue_analysis_canonical_retry', {
+            p_request_id: requestId,
+            p_family: 'audit',
+        });
+    });
+
+    it('reports a cache write as blocked when no durable retry marker can be persisted', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { message: 'cache unavailable' },
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.upsertCache({
+            requestId,
+            scope: 'ai',
+            cacheKeyHash: hash,
+            state: 'ready',
+            expiresAt: '2026-09-10T00:00:00.000Z',
+        })).resolves.toEqual({ status: 'blocked', family: 'cache' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc).toHaveBeenCalledWith('enqueue_analysis_canonical_retry', {
+            p_request_id: requestId,
+            p_family: 'cache',
+        });
+    });
+
+    it('does not claim retry_queued when the retry marker RPC itself fails', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { message: 'database unavailable' },
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+            retentionClass: 'permanent',
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+    });
+
+    it('requires a non-empty retry marker response before claiming retry_queued', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({ data: {}, error: null });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+            retentionClass: 'permanent',
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('requires a typed durable retry marker payload before claiming retry_queued', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: { family: 'audit' },
+                    content_hash: hash,
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00.000Z',
+                },
+                error: null,
+            });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('rejects a retry marker with extra payload keys or non-canonical timestamps', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: {
+                        family: 'audit',
+                        retryKey: `${requestId}:audit`,
+                        extra: 'must-not-cross-boundary',
+                    },
+                    content_hash: createHash('sha256')
+                        .update(`${requestId}:audit`)
+                        .digest('hex'),
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00Z',
+                },
+                error: null,
+            });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('requires a request-safe identity for canonical cache writes', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_WRITE', 'true');
+        const store = createAnalysisCanonicalStore(rpcClient(vi.fn(async () => ({ data: {}, error: null }))));
+
+        await expect(store.upsertCache({
+            requestId,
+            scope: 'ai',
+            cacheKeyHash: hash,
+            state: 'ready',
+            expiresAt: '2026-09-10T00:00:00.000Z',
+        })).resolves.toEqual({ status: 'appended' });
+    });
+
+    it('sends a durable late-cost idempotency key', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: { version: 1 },
+            error: null,
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendLateCostAudit({
+            requestId,
+            provider: 'vertex',
+            operationKey: 'provider-run:late',
+            stage: 'provider_cost',
+            amountKnown: 0.01,
+            amountConservative: 0.01,
+            usageUnknown: false,
+            sourceHash: hash,
+            idempotencyKey: 'late-cost:source-1',
+            auditPayload: { lateCost: true },
+        })).resolves.toEqual({ status: 'appended', usageUnknown: false, version: 1 });
+        expect(rpc).toHaveBeenCalledWith('append_analysis_canonical_late_cost_audit', expect.objectContaining({
+            p_idempotency_key: 'late-cost:source-1',
+        }));
+    });
+});

@@ -1,4 +1,4 @@
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -20,7 +20,6 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
-import { insertLandingLead } from '@/lib/services/leads/store';
 import { demoPreflightLifecycle, demoReadyPreflight, demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
@@ -67,29 +66,11 @@ async function authenticatedSession() {
     };
 }
 
-function captureExcludedLandingLead(
-    preflightId: string,
-    excludedInstagramId: string,
-): void {
-    try {
-        after(async () => {
-            try {
-                await insertLandingLead({
-                    instagramId: excludedInstagramId,
-                    inputContext: 'excluded',
-                    sourcePreflightId: preflightId,
-                });
-            } catch {
-                // Lead capture is best-effort and must never alter the exclusion decision.
-            }
-        });
-    } catch {
-        // The durable exclusion remains authoritative when background work is unavailable.
-    }
-}
-
 function exclusionFailureErrorCode(error: unknown): 'PREFLIGHT_PERSISTENCE_ERROR' | 'INTERNAL_ERROR' {
-    return error instanceof Error && error.message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+    return error instanceof Error && (
+        error.message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        || error.message.startsWith('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:')
+    )
         ? 'PREFLIGHT_PERSISTENCE_ERROR'
         : 'INTERNAL_ERROR';
 }
@@ -291,9 +272,6 @@ async function handlePATCH(
                     : null,
             }, { client: session.supabase });
             if (!updated) return errorResponse(409, 'PREFLIGHT_IMMUTABLE', '이 사전 점검 요청은 변경할 수 없습니다.');
-            if (anonymousParsed.data.decision === 'exclude') {
-                captureExcludedLandingLead(preflightId, anonymousParsed.data.excludedInstagramId);
-            }
             operationalLogger.emit({
                 event: 'preflight.exclusion_decided',
                 severity: 'info',
@@ -387,12 +365,6 @@ async function handlePATCH(
                 ? parsed.data.excludedInstagramId
                 : null,
         }, { client: supabase });
-        if (parsed.data.decision === 'exclude') {
-            captureExcludedLandingLead(
-                preflightId,
-                parsed.data.excludedInstagramId,
-            );
-        }
         operationalLogger.emit({
             event: 'preflight.exclusion_decided',
             severity: 'info',
@@ -438,6 +410,12 @@ async function handlePATCH(
             return errorResponse(409, error.message, '이 사전 점검 요청은 변경할 수 없습니다.');
         }
         const errorCode = exclusionFailureErrorCode(error);
+        void recordPreflightFailure({
+            ...(observedUserId ? { userId: observedUserId } : {}),
+            ...(observedPreflightId ? { preflightId: observedPreflightId } : {}),
+            stage: 'exclusion',
+            errorCode: 'INTERNAL_ERROR',
+        });
         operationalLogger.emit({
             event: 'preflight.failed',
             severity: 'error',

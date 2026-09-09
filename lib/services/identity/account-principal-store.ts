@@ -1,5 +1,13 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalFamilyWriteEnabled,
+    maintenanceMarker,
+    queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const accountClassSchema = z.enum(['production', 'e2e_test']);
 const trafficClassSchema = z.enum([
@@ -175,6 +183,41 @@ async function rpcSingle<T>(
     return parsed.data;
 }
 
+async function mirrorAccountClassification(account: {
+    id: string;
+    account_class: z.infer<typeof accountClassSchema>;
+    traffic_class: z.infer<typeof trafficClassSchema>;
+    lifecycle: z.infer<typeof lifecycleSchema>;
+}): Promise<void> {
+    if (!isCanonicalFamilyWriteEnabled('account')) return;
+    const state = `${account.account_class}:${account.traffic_class}:${account.lifecycle}`;
+    const payload = {
+        account_class: account.account_class,
+        traffic_class: account.traffic_class,
+        lifecycle: account.lifecycle,
+    };
+    try {
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.appendAccountLifecycle({
+            accountId: account.id,
+            eventKind: 'classification',
+            state,
+            payload,
+            contentHash: canonicalJsonHash('account-classification', {
+                account_id: account.id,
+                ...payload,
+            }),
+        }));
+    } catch {
+        try {
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                maintenanceMarker('recovery', account.id, 'account-classification'),
+            ));
+        } catch {
+            // Principal admission remains authoritative when the mirror is down.
+        }
+    }
+}
+
 export async function loadAccountPrincipal(
     userId: string,
 ): Promise<AccountPrincipal | null> {
@@ -209,6 +252,7 @@ export async function ensureAccountPrincipal(input: {
             'ACCOUNT_PRINCIPAL_RESULT_INVALID',
         );
     }
+    await mirrorAccountClassification(result);
     return result;
 }
 
@@ -233,6 +277,7 @@ export async function upsertKakaoAccountProfile(input: {
             'ACCOUNT_PRINCIPAL_RESULT_INVALID',
         );
     }
+    await mirrorAccountClassification(result);
     return result;
 }
 

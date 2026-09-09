@@ -6,6 +6,13 @@ import {
     normalizeLeadInstagramId,
 } from '@/lib/services/leads/contracts';
 import { insertLandingLead } from '@/lib/services/leads/store';
+import {
+    createCaptureToken,
+    deriveAnonymousPrincipalHash,
+    landingLeadCaptureSecret,
+} from '@/lib/services/landing/landing-lead-journey';
+
+const STABLE_DEVICE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
@@ -38,10 +45,23 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     const attribution = parsed.data.attribution ?? {};
+    const deviceId = request.headers.get('x-anonymous-device-id')?.trim();
+    if (!deviceId || !STABLE_DEVICE_ID_PATTERN.test(deviceId)) {
+        return errorResponse(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.');
+    }
     const userAgent = request.headers.get('user-agent')?.slice(0, 500) || undefined;
+    let capture;
+    let anonymousPrincipalHash: string;
+    try {
+        const secret = landingLeadCaptureSecret();
+        capture = createCaptureToken(deviceId, secret);
+        anonymousPrincipalHash = deriveAnonymousPrincipalHash(deviceId, secret);
+    } catch {
+        return errorResponse(503, 'LEAD_UNAVAILABLE', '잠시 후 다시 시도해주세요.');
+    }
 
     try {
-        await insertLandingLead({
+        const stored = await insertLandingLead({
             instagramId,
             rawInput: parsed.data.rawInput,
             utmSource: attribution.source,
@@ -51,10 +71,15 @@ export async function POST(request: Request): Promise<NextResponse> {
             utmTerm: attribution.term,
             referrer: parsed.data.referrer,
             userAgent,
+            captureToken: capture.token,
+            journeyId: capture.journeyId,
+            anonymousPrincipalHash,
         });
+        return NextResponse.json({
+            status: 'stored',
+            captureToken: stored && 'captureToken' in stored ? stored.captureToken : capture.token,
+        }, { status: 201 });
     } catch {
         return errorResponse(503, 'LEAD_UNAVAILABLE', '잠시 후 다시 시도해주세요.');
     }
-
-    return NextResponse.json({ status: 'stored' }, { status: 201 });
 }

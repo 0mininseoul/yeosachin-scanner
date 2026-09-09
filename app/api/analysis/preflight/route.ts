@@ -60,6 +60,7 @@ import {
 import {
     AnonymousPreflightClaimInvalidError,
     AnonymousPreflightIdempotencyConflictError,
+    AnonymousPreflightLandingCaptureError,
     AnonymousPreflightRateLimitedError,
     createAnonymousAnalysisV2Preflight,
     markAnonymousAnalysisV2PreflightDispatched,
@@ -73,6 +74,7 @@ import {
     requestClientIp,
 } from '@/lib/services/analysis/anonymous-preflight-claim';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
+import { captureAndBindLandingLeadJourney } from '@/lib/services/landing/landing-lead-journey';
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
@@ -80,6 +82,7 @@ import {
 } from '@/lib/services/identity/account-principal-store';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
+const STABLE_DEVICE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function errorResponse(status: number, code: string, message: string): NextResponse {
     return NextResponse.json({
@@ -204,6 +207,11 @@ async function handleAnonymousPOST(
             return failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
         targetInstagramId = parsed.data.targetInstagramId;
+
+        const landingDeviceId = request.headers.get('x-anonymous-device-id')?.trim();
+        if (!landingDeviceId || !STABLE_DEVICE_ID_PATTERN.test(landingDeviceId)) {
+            return failed(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.');
+        }
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
             return failed(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.');
@@ -228,9 +236,11 @@ async function handleAnonymousPOST(
 
         const env = process.env;
         const targetInputHash = preflightTargetInputHash(targetInstagramId, env);
-        const deviceValue = request.headers.get('x-anonymous-device-id')?.trim()
-            || request.headers.get('user-agent')?.trim()
-            || 'missing-device';
+        const deviceValue = request.headers.get('x-anonymous-device-id')?.trim();
+        if (!deviceValue || !STABLE_DEVICE_ID_PATTERN.test(deviceValue)) {
+            return failed(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.');
+        }
+        const landingCaptureToken = request.headers.get('x-landing-lead-capture-token')?.trim() || undefined;
         const budget = await reserveAnonymousPreflightBudget({
             ipHash: hashAnonymousRateLimitValue(requestClientIp(request), 'ip', env),
             deviceHash: hashAnonymousRateLimitValue(deviceValue, 'device', env),
@@ -254,8 +264,10 @@ async function handleAnonymousPOST(
             targetInputHash,
             idempotencyKey,
             claimToken: claim.token,
+            landingCaptureToken,
+            anonymousDeviceId: deviceValue,
             env,
-        }, { client, env });
+        }, { client, landingClient: supabaseAdmin, env });
         preflightId = created.preflightId;
         if (created.status === 'expired') throw new PreflightExpiredError();
         if (created.status === 'consumed') throw new PreflightConsumedError();
@@ -341,6 +353,9 @@ async function handleAnonymousPOST(
             status: created.created ? 202 : 200,
         });
     } catch (error) {
+        if (error instanceof AnonymousPreflightLandingCaptureError) {
+            preflightId = error.preflightId;
+        }
         if (error instanceof AnonymousPreflightRateLimitedError) {
             return failed(429, 'PREFLIGHT_RATE_LIMITED', '사전 점검 요청이 너무 많습니다. 로그인 후 계속할 수 있습니다.');
         }
@@ -442,6 +457,13 @@ async function handlePOST(
                 : failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
         targetInstagramId = parsed.data.targetInstagramId;
+
+        const landingDeviceId = request.headers.get('x-anonymous-device-id')?.trim();
+        if (!landingDeviceId || !STABLE_DEVICE_ID_PATTERN.test(landingDeviceId)) {
+            return demoCandidate
+                ? suppressOperationalObservation(demoErrorResponse(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.'))
+                : failed(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.');
+        }
 
         const idempotencyKey = request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
@@ -565,6 +587,22 @@ async function handlePOST(
         preflightId = created.preflightId;
         if (created.status === 'expired') throw new PreflightExpiredError();
         if (created.status === 'consumed') throw new PreflightConsumedError();
+
+        // Authenticated landing, post-OAuth, and direct /analyze flows all pass
+        // through the same exact target capture boundary. The response is not
+        // acknowledged until the target row is positively bound to this
+        // preflight and user journey.
+        await captureAndBindLandingLeadJourney(
+            supabaseAdmin,
+            {
+                preflightId: created.preflightId,
+                targetInstagramId: parsed.data.targetInstagramId,
+                landingCaptureToken: request.headers.get('x-landing-lead-capture-token')?.trim() || undefined,
+                anonymousDeviceId: landingDeviceId,
+                authUserId: user.id,
+                env: process.env,
+            },
+        );
 
         const reservation = await preflightStore.reserveDispatch(
             created.preflightId,

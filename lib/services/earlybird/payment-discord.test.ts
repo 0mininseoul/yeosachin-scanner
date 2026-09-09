@@ -153,6 +153,29 @@ describe('earlybird payment Discord notification', () => {
         expect(JSON.parse(fetcher.mock.calls[0][1].body).allowed_mentions).toEqual({ parse: [] });
     });
 
+    it('dual-writes a bounded notification payload independently of legacy delivery', async () => {
+        vi.stubEnv('COMMERCE_CANONICAL_NOTIFICATION_WRITE', 'true');
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [ITEM], error: null })
+            .mockResolvedValueOnce({ data: { status: 'queued', duplicate: false }, error: null })
+            .mockResolvedValueOnce({ error: null });
+        const fetcher = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+
+        await expect(deliverEarlybirdPaymentDiscordNotifications({ fetcher })).resolves.toBe(1);
+
+        expect(mocks.rpc).toHaveBeenCalledWith('enqueue_notification_v1', expect.objectContaining({
+            p_channel: 'discord',
+            p_event_kind: 'earlybird.payment.completed',
+            p_payload: {
+                order_id: ITEM.order_id,
+                plan_id: ITEM.plan_id,
+                amount_krw: ITEM.actual_amount_krw,
+                paid_at: ITEM.paid_at,
+            },
+            p_content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+    });
+
     it('does not call Supabase or Discord when payment notifications are disabled or incomplete', async () => {
         vi.stubEnv('PAYMENT_DISCORD_ENABLED', 'false');
         const fetcher = vi.fn();

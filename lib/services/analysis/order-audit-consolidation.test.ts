@@ -161,6 +161,65 @@ describe('order-audit consolidation parity tooling', () => {
         })).not.toThrow();
     });
 
+    it('rejects redacted and equivalent email or phone key variants', () => {
+        for (const key of [
+            'redacted_email', 'maskedPhone', 'email_hash', 'phone_digest',
+            'normalized_email', 'mobile_number', 'contact_sha256', 'mailAddress',
+        ]) {
+            expect(() => assertPiiSafeConsolidationOutput({ [key]: 'redacted' }))
+                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+        }
+    });
+
+    it('rejects phone values under aggregate-safe keys without retaining the value', () => {
+        for (const value of ['010-1234-5678', '01012345678', '+82 10 1234 5678', '+821012345678']) {
+            let error: unknown;
+            try {
+                assertPiiSafeConsolidationOutput({ value });
+            } catch (caught) {
+                error = caught;
+            }
+            expect(error).toBeInstanceOf(Error);
+            expect(String(error)).not.toContain(value);
+            expect(() => assertPiiSafeConsolidationOutput({ value }))
+                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+        }
+    });
+
+    it('does not record a zero-payment evidence set as disposition proof', () => {
+        const readiness = evaluateConsolidationReadiness({
+            genuineCompletedBundleCount: 1,
+            perOrderParityCount: 1,
+            aggregateChecksumsMatch: true,
+            archiveManifestVerified: true,
+            restoreDrillVerified: true,
+            rollbackEvidenceVerified: true,
+            dependencyInventoryComplete: true,
+            separateApprovalGranted: true,
+            observationWindowClosed: true,
+            publicTableCount: 22,
+            canonicalSetMatch: true,
+            catalogDependencyClean: true,
+            paymentPendingDispositionRecorded: true,
+            noActivationOrCanary: true,
+            archiveRestoreChecksumMatch: true,
+            paymentPendingEvidence: {
+                pendingOrderCount: 0,
+                independentlyEvidencedCount: 0,
+                dispositionRecordedCount: 0,
+            },
+            noActivationEvidence: {
+                source: 'independent-read-only',
+                verified: true,
+                admissionActivated: false,
+                realCanaryStarted: false,
+            },
+        });
+
+        expect(readiness.status).toBe('blocked');
+        expect(readiness.missingGates).toContain('payment-pending-disposition');
+    });
+
     it('keeps archive scaffolding reversible and marks restore verification as not run', () => {
         const manifest = createArchiveManifest({
             selectedCount: 0,
@@ -171,6 +230,7 @@ describe('order-audit consolidation parity tooling', () => {
             mode: 'dry-run',
             reversible: true,
             destructiveOperations: 'refused',
+            retention: null,
             restore: { status: 'not_run', verified: false },
         });
         expect(verifyArchiveRestore(manifest, {
@@ -195,6 +255,12 @@ describe('order-audit consolidation parity tooling', () => {
             'dependency-inventory',
             'separate-approval',
             'observation-window',
+            'public-table-count',
+            'canonical-set',
+            'catalog-dependency',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+            'archive-restore-checksum',
         ]);
     });
 
@@ -225,6 +291,12 @@ describe('order-audit consolidation parity tooling', () => {
             dependencyInventoryComplete: false,
             separateApprovalGranted: false,
             observationWindowClosed: false,
+            publicTableCount: 0,
+            canonicalSetMatch: false,
+            catalogDependencyClean: false,
+            paymentPendingDispositionRecorded: false,
+            noActivationOrCanary: false,
+            archiveRestoreChecksumMatch: false,
         });
         expect(readiness.status).toBe('blocked');
         expect(readiness.missingGates).toEqual([
@@ -237,6 +309,12 @@ describe('order-audit consolidation parity tooling', () => {
             'dependency-inventory',
             'separate-approval',
             'observation-window',
+            'public-table-count',
+            'canonical-set',
+            'catalog-dependency',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+            'archive-restore-checksum',
         ]);
         expect(() => assertConsolidationMutationRefused()).toThrow(
             'ANALYSIS_ORDER_AUDIT_CONSOLIDATION_MUTATION_REFUSED',

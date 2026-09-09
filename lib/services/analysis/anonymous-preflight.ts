@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    InvalidPreflightExclusionError,
+    PreflightImmutableError,
     launchStatusSnapshot,
     planCatalogSnapshot,
     preflightPolicyVersions,
@@ -14,6 +16,10 @@ import {
     readAnonymousPreflightClaim,
 } from './anonymous-preflight-claim';
 import { PLAN_PRICING_VERSION } from '@/lib/domain/analysis/plan-catalog';
+import {
+    captureAndBindLandingLeadJourney,
+    type LandingLeadJourneyRpcClient,
+} from '@/lib/services/landing/landing-lead-journey';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -24,7 +30,8 @@ export const ANONYMOUS_PREFLIGHT_DATABASE_NAMES = Object.freeze({
     createRpc: 'create_anonymous_analysis_v2_preflight',
     readRpc: 'read_anonymous_analysis_v2_preflight_public',
     claimRpc: 'claim_anonymous_analysis_v2_preflight',
-    exclusionRpc: 'set_anonymous_analysis_v2_preflight_exclusion',
+    claimWithLandingRpc: 'claim_anonymous_analysis_v2_preflight_with_landing',
+    exclusionRpc: 'set_analysis_v2_preflight_exclusion_with_landing',
     // New anonymous producers stamp the same trusted preflight dispatch
     // contract as authenticated producers. The historical RPCs remain
     // marker-free for roleless mixed-version drain only.
@@ -48,6 +55,7 @@ export interface AnonymousPreflightClient {
 
 interface ServiceOptions {
     client?: AnonymousPreflightClient;
+    landingClient?: LandingLeadJourneyRpcClient;
     env?: Record<string, string | undefined>;
 }
 
@@ -82,6 +90,16 @@ export class AnonymousPreflightRateLimitedError extends Error {
     }
 }
 
+export class AnonymousPreflightLandingCaptureError extends Error {
+    constructor(
+        readonly preflightId: string,
+        cause: unknown,
+    ) {
+        super(cause instanceof Error ? cause.message : 'ANONYMOUS_PREFLIGHT_LANDING_CAPTURE_FAILED');
+        this.name = 'AnonymousPreflightLandingCaptureError';
+    }
+}
+
 function rpcRow(data: unknown, label: string): Record<string, unknown> | null {
     if (Array.isArray(data)) {
         if (data.length === 0) return null;
@@ -104,6 +122,19 @@ function rpcError(error: RpcError, operation: string): never {
         || error.message === 'ANONYMOUS_PREFLIGHT_NOT_FOUND'
     ) {
         throw new AnonymousPreflightClaimInvalidError();
+    }
+    if (error.message === 'ANALYSIS_V2_INVALID_EXCLUSION') {
+        throw new InvalidPreflightExclusionError();
+    }
+    if (error.message === 'ANALYSIS_V2_PREFLIGHT_EXPIRED') {
+        throw new PreflightImmutableError(error.message);
+    }
+    if (
+        error.message === 'PREFLIGHT_IMMUTABLE'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_CONSUMED'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_NOT_READY'
+    ) {
+        throw new PreflightImmutableError(error.message);
     }
     const rpcCode = typeof error.code === 'string'
         && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
@@ -158,6 +189,12 @@ export interface CreateAnonymousPreflightInput {
     targetInputHash: string;
     idempotencyKey: string;
     claimToken: string;
+    /** Opaque landing capture token, kept in memory and never persisted raw. */
+    landingCaptureToken?: string;
+    /** Compatibility alias for callers already naming the value captureToken. */
+    captureToken?: string;
+    /** Used only to derive a server-side principal HMAC. */
+    anonymousDeviceId?: string;
     env?: Record<string, string | undefined>;
 }
 
@@ -200,8 +237,31 @@ export async function createAnonymousAnalysisV2Preflight(
     if (error) rpcError(error, 'create');
     const row = rpcRow(data, 'create');
     if (!row) throw new Error('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:create');
+    const createdPreflightId = requireUuid(String(row.preflight_id), 'ID');
+    if (options.landingClient) {
+        // The preflight is only acknowledged after the exact target capture is
+        // positively persisted and bound. A caller can retry the same
+        // idempotency key when this repair path fails.
+        try {
+            await captureAndBindLandingLeadJourney(
+                options.landingClient,
+                {
+                    preflightId: createdPreflightId,
+                    targetInstagramId: input.targetInstagramId,
+                    landingCaptureToken: input.landingCaptureToken ?? input.captureToken,
+                    anonymousDeviceId: input.anonymousDeviceId,
+                    env,
+                },
+            );
+        } catch (error) {
+            // Preserve the exact durable preflight identity for the failure
+            // ledger. The caller cannot otherwise assign it because this
+            // function must reject until capture/bind succeeds.
+            throw new AnonymousPreflightLandingCaptureError(createdPreflightId, error);
+        }
+    }
     return {
-        preflightId: requireUuid(String(row.preflight_id), 'ID'),
+        preflightId: createdPreflightId,
         expiresAt: String(row.expires_at),
         created: row.created === true,
         status: requireCreatedStatus(row.preflight_status),
@@ -243,11 +303,16 @@ export async function claimAnonymousAnalysisV2Preflight(
     const env = options.env ?? process.env;
     const claim = requireClaim(claimToken, env);
     const client = options.client ?? supabaseAdmin;
-    const { data, error } = await client.rpc(ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimRpc, {
-        p_preflight_id: id,
-        p_claim_token_hash: claim.tokenHash,
-        p_user_id: ownerId,
-    });
+    const { data, error } = await client.rpc(
+        options.landingClient
+            ? ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimWithLandingRpc
+            : ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimRpc,
+        {
+            p_preflight_id: id,
+            p_claim_token_hash: claim.tokenHash,
+            p_user_id: ownerId,
+        },
+    );
     if (error) rpcError(error, 'claim');
     const row = rpcRow(data, 'claim');
     if (!row || typeof row.claimed !== 'boolean') {
@@ -272,6 +337,7 @@ export async function setAnonymousAnalysisV2PreflightExclusion(input: {
     const client = options.client ?? supabaseAdmin;
     const { data, error } = await client.rpc(ANONYMOUS_PREFLIGHT_DATABASE_NAMES.exclusionRpc, {
         p_preflight_id: id,
+        p_user_id: null,
         p_claim_token_hash: claim.tokenHash,
         p_decision: input.decision,
         p_excluded_instagram_id: input.excludedInstagramId,

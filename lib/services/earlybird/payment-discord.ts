@@ -3,6 +3,17 @@ import 'server-only';
 import * as Sentry from '@sentry/nextjs';
 import { formatKst, maskKakaoName } from '@/lib/services/identity/kakao-signup-discord';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    CANONICAL_HASH_NAMESPACES,
+    canonicalJsonHash,
+} from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalFamilyWriteEnabled,
+    maintenanceMarker,
+    queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 10_000;
@@ -190,6 +201,37 @@ async function sendClaimedItem(
     }
 }
 
+async function mirrorPaymentNotification(item: EarlybirdPaymentDiscordItem): Promise<void> {
+    if (!isCanonicalFamilyWriteEnabled('notification')) return;
+    const payload = {
+        order_id: item.order_id,
+        plan_id: item.plan_id,
+        amount_krw: item.actual_amount_krw,
+        paid_at: item.paid_at,
+    };
+    const contentHash = canonicalJsonHash(
+        CANONICAL_HASH_NAMESPACES.paymentNotificationContent,
+        payload,
+    );
+    try {
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
+                channel: 'discord',
+                eventKind: 'earlybird.payment.completed',
+                dedupeKey: `earlybird-payment:${item.order_id}`,
+                payload,
+                contentHash,
+            }));
+    } catch {
+        try {
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                    maintenanceMarker('recovery', item.order_id, 'payment-notification'),
+                ));
+        } catch {
+            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
+        }
+    }
+}
+
 export async function deliverEarlybirdPaymentDiscordNotifications(options: {
     limit?: number;
     fetcher?: typeof fetch;
@@ -213,6 +255,7 @@ export async function deliverEarlybirdPaymentDiscordNotifications(options: {
     }
 
     const claimed = (data ?? []) as EarlybirdPaymentDiscordItem[];
+    await Promise.all(claimed.map(item => mirrorPaymentNotification(item)));
     await Promise.all(claimed.map(item => sendClaimedItem(
         item,
         config,

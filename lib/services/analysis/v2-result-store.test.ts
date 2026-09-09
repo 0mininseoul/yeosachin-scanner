@@ -809,6 +809,26 @@ describe('analysis V2 result finalization and loading', () => {
         log.mockRestore();
     });
 
+    it('keeps user-visible success when canonical audit enqueue fails', async () => {
+        const fake = rpcClient({
+            data: { finalized: true, requestStatus: 'completed', summary: rawSummary() },
+            error: null,
+        });
+        const canonicalStore = {
+            appendAuditRow: vi.fn(async () => {
+                throw new Error('canonical audit unavailable');
+            }),
+        };
+
+        await expect(createSupabaseAnalysisV2ResultStore(fake.client, {
+            canonicalStore: canonicalStore as never,
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        }).finalize({
+            ...claim('coordinator:finalize'), targetProfileImageUrl: null,
+        })).resolves.toMatchObject({ requestStatus: 'completed' });
+        expect(canonicalStore.appendAuditRow).toHaveBeenCalledOnce();
+    });
+
     it('returns a compact opaque result image path even when the stored CDN URL is long', async () => {
         const previousSecret = process.env.IMAGE_PROXY_SIGNING_SECRET;
         process.env.IMAGE_PROXY_SIGNING_SECRET = 'result-image-secret-that-is-longer-than-thirty-two-characters';
@@ -970,6 +990,34 @@ describe('analysis V2 result finalization and loading', () => {
         });
         expect(second?.femaleAccounts.map(row => row.instagramId)).toEqual(['woman.3']);
         expect(second?.femaleNextCursor).toBeNull();
+    });
+
+    it('hooks the server-only result reader into the default-off canonical shadow path', async () => {
+        const fake = rpcClient({ data: rawSnapshot(1), error: null });
+        const legacyProjection = { requestStatus: 'completed' };
+        const canonicalReadStore = {
+            shadowRead: vi.fn(async (input: {
+                family: string;
+                legacy: () => Promise<unknown>;
+                canonical: () => Promise<unknown>;
+            }) => {
+                expect(input.family).toBe('audit');
+                await input.legacy();
+                await input.canonical();
+                return legacyProjection;
+            }),
+            loadRequest: vi.fn(),
+        };
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+            canonicalReadStore: canonicalReadStore as never,
+        });
+
+        await expect(store.loadPage({ requestId, userId, pageSize: 1 }))
+            .resolves.toMatchObject({ requestId });
+        expect(canonicalReadStore.shadowRead).toHaveBeenCalledOnce();
+        expect(canonicalReadStore.loadRequest).toHaveBeenCalledWith(requestId, 'audit');
+        expect(JSON.stringify(canonicalReadStore.shadowRead.mock.calls)).not.toContain(userId);
     });
 
     it('fails from any exact live job claim without a finalizer-only restriction', async () => {

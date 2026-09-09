@@ -83,23 +83,84 @@ export function stableChecksum(value: unknown): string {
 }
 
 const forbiddenOutputKeys = new Set([
-    'userid', 'useruuid', 'user_id', 'user_uuid',
-    'ownerid', 'owneruuid', 'owner_id', 'owner_uuid',
-    'actorid', 'actoruuid', 'actor_id', 'actor_uuid',
-    'requestid', 'request_id', 'orderid', 'order_id',
-    'preflightid', 'preflight_id', 'accountid', 'account_id',
-    'provideraccount', 'provider_account', 'provideraccountid', 'provider_account_id',
-    'token', 'accesstoken', 'access_token', 'providertoken', 'provider_token',
-    'authorization', 'cookie', 'secret', 'session', 'sessionid', 'session_id',
-    'claimtoken', 'claim_token', 'jobclaimtoken', 'job_claim_token',
-    'reservationtoken', 'reservation_token', 'producerclaimtoken', 'producer_claim_token',
-    'raw', 'rawdata', 'raw_data', 'rawpayload', 'raw_payload',
-    'providerpayload', 'provider_payload', 'providerresponse', 'provider_response',
-    'payload', 'comment', 'commenttext', 'comment_text', 'username', 'handle',
+    'userid', 'useruuid', 'ownerid', 'owneruuid', 'actorid', 'actoruuid',
+    'requestid', 'orderid', 'preflightid', 'accountid', 'provideraccount',
+    'provideraccountid', 'token', 'accesstoken', 'providertoken', 'authorization',
+    'cookie', 'secret', 'session', 'sessionid', 'sessionkey', 'claimtoken', 'jobclaimtoken',
+    'reservationtoken', 'producerclaimtoken', 'raw', 'rawdata', 'rawpayload',
+    'providerpayload', 'providerresponse', 'payload', 'comment', 'commenttext',
+    'username', 'handle',
+    // Raw/anonymous device and browser/network identifiers.
+    'device', 'deviceid', 'deviceidentifier', 'rawdevice', 'rawdeviceid',
+    'rawdeviceidentifier', 'anonymousdevice', 'anonymousdeviceid',
+    'anonymousdeviceidentifier', 'anonymousprincipal', 'anonymousprincipalid',
+    'rawanonymousdevice', 'rawanonymousdeviceid', 'anonymousprincipalhash',
+    'principalhash', 'anonymous', 'ua', 'useragent', 'rawuseragent', 'httpuseragent',
+    'useragentstring',
+    'clientuseragent', 'ip', 'ipaddress', 'clientip', 'remoteip', 'forwardedfor',
+    'xforwardedfor', 'remoteaddr', 'clientaddr', 'forwardedaddr', 'ipv4', 'ipv6',
+    'devicefingerprint', 'anonymousdevicefingerprint',
+    // Credentials and key material, including camelCase/snake_case forms after
+    // normalization below.
+    'apikey', 'secretkey', 'accesskey', 'privatekey', 'signingkey', 'encryptionkey',
+    'hashkey', 'hmac', 'hmackey', 'internalhmac', 'tokenhash', 'apikeyhash',
+    'capturetokenhash',
+    // Contact details are never valid in a sanitized aggregate.  Keep these
+    // explicit as well as pattern-protected so masked/redacted values cannot
+    // cross the report boundary under a renamed key.
+    'email', 'emailaddress', 'emailhash', 'emailvalue', 'redactedemail', 'maskedemail',
+    'phone', 'phonenumber', 'phonehash', 'phonevalue', 'redactedphone', 'maskedphone',
+    'mobile', 'mobilenumber', 'mobilehash', 'telephone', 'telephonenumber', 'tel',
+    'contact', 'contactemail', 'contactphone', 'contactmobile', 'mail', 'mailaddress',
+    'mailhash', 'sms', 'smsnumber', 'fax',
 ]);
+const forbiddenOutputKeyPatterns = [
+    /(?:token|secret|credential|password|authorization|cookie)/,
+    /(?:session|claim|reservation|producer)(?:key|token|hash)/,
+    /(?:api|access|refresh|secret|private|signing|encryption)(?:key|token|secret|credential)/,
+    /(?:raw|anonymous)?device(?:$|id|identifier|hash|fingerprint|data|value)/,
+    /anonymous(?:device|principal)(?:$|id|identifier|hash|fingerprint|data|value)/,
+    /(?:client|remote|forwarded|xforwarded)?ip(?:$|address|v4|v6|value)/,
+    /(?:raw|http|client)?useragent(?:$|string|hash|value)/,
+    /(?:hash|hmac)key/,
+    // Identity and tracking aliases are forbidden even when callers add a
+    // suffix or use snake_case/camelCase spelling.  Do not broaden this to
+    // every hash: aggregate/content checksums are intentional evidence.
+    /(?:user|owner|visitor|principal|actor|subject|account|identity|customer|member|profile|target|subscriber|tenant|organization|org|team|client|tracking|session|email|phone|mobile|contact)(?:id|uuid|hash|fingerprint)/,
+    /(?:ip|address)(?:id|hash|fingerprint)/,
+    /(?:visitor|tracking|browser|device|fingerprint)(?:id|uuid|hash|fingerprint)/,
+    /fingerprint/,
+    // Email/phone/contact aliases remain forbidden even when their value is
+    // redacted, masked, or otherwise no longer syntactically identifiable.
+    /(?:e?mail|phone|mobile|telephone|tel|contact|sms|fax)/,
+];
 const UUID_VALUE_PATTERN = UUID_PATTERN;
 const EMAIL_VALUE_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const URL_VALUE_PATTERN = /^https?:\/\//i;
+const IPV4_VALUE_PATTERN = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+const IPV6_VALUE_PATTERN = /^[0-9a-f:]{2,39}$/i;
+const CREDENTIAL_VALUE_PATTERN = /^(?:bearer|basic)\s+|^(?:sk|pk|api[_-]?key|token)[_-]/i;
+const PHONE_VALUE_PATTERNS = [
+    // Korean mobile/landline and VoIP numbers, with optional +82 country code.
+    /^(?:\+?82[\s.-]?)?0?(?:1[016789]|2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|7[0-9])[\s.-]?\d{3,4}[\s.-]?\d{4}$/,
+    // North-American numbers are included only when the country/area prefix
+    // makes the shape unambiguous; generic digit strings remain valid counts.
+    /^\+?1[\s.-]?\(?[2-9]\d{2}\)?[\s.-]?\d{3}[\s.-]?\d{4}$/,
+];
+
+function normalizeOutputKey(key: string): string {
+    return key.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isForbiddenOutputKey(key: string): boolean {
+    const normalized = normalizeOutputKey(key);
+    return forbiddenOutputKeys.has(normalized)
+        || forbiddenOutputKeyPatterns.some(pattern => pattern.test(normalized));
+}
+
+function isPhoneValue(value: string): boolean {
+    return PHONE_VALUE_PATTERNS.some(pattern => pattern.test(value));
+}
 
 /** Reject any value that could turn an aggregate report into an identifier/payload export. */
 export function assertPiiSafeConsolidationOutput(value: unknown): void {
@@ -110,14 +171,16 @@ export function assertPiiSafeConsolidationOutput(value: unknown): void {
         }
         if (typeof current === 'string') {
             if (UUID_VALUE_PATTERN.test(current) || EMAIL_VALUE_PATTERN.test(current)
-                || URL_VALUE_PATTERN.test(current)) {
+                || URL_VALUE_PATTERN.test(current) || IPV4_VALUE_PATTERN.test(current)
+                || (current.includes(':') && IPV6_VALUE_PATTERN.test(current))
+                || CREDENTIAL_VALUE_PATTERN.test(current) || isPhoneValue(current)) {
                 throw new Error('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
             }
             return;
         }
         if (!current || typeof current !== 'object') return;
         for (const [key, child] of Object.entries(current)) {
-            if (forbiddenOutputKeys.has(key.toLowerCase())) {
+            if (isForbiddenOutputKey(key)) {
                 throw new Error('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
             }
             visit(child);
@@ -261,6 +324,26 @@ export type ConsolidationReadinessInput = Readonly<{
     dependencyInventoryComplete: boolean;
     separateApprovalGranted: boolean;
     observationWindowClosed: boolean;
+    /** Production contract attestations are required and fail closed when false. */
+    publicTableCount: number;
+    canonicalSetMatch: boolean;
+    catalogDependencyClean: boolean;
+    paymentPendingDispositionRecorded: boolean;
+    noActivationOrCanary: boolean;
+    archiveRestoreChecksumMatch: boolean;
+    /** Independent read-only proof for the legacy no-activation attestation. */
+    noActivationEvidence?: Readonly<{
+        source: 'independent-read-only';
+        verified: true;
+        admissionActivated: false;
+        realCanaryStarted: false;
+    }>;
+    /** Independent provider/disposition counts; zero/zero/zero is not proof. */
+    paymentPendingEvidence?: Readonly<{
+        pendingOrderCount: number;
+        independentlyEvidencedCount: number;
+        dispositionRecordedCount: number;
+    }>;
 }>;
 
 export type ConsolidationReadiness = Readonly<{
@@ -273,7 +356,7 @@ export type ConsolidationReadiness = Readonly<{
 export function evaluateConsolidationReadiness(
     input: ConsolidationReadinessInput,
 ): ConsolidationReadiness {
-    const gates = {
+    const gates: Record<string, boolean> = {
         'genuine-completed-bundle': input.genuineCompletedBundleCount > 0,
         'per-order-parity': input.genuineCompletedBundleCount > 0
             && input.perOrderParityCount === input.genuineCompletedBundleCount,
@@ -285,6 +368,27 @@ export function evaluateConsolidationReadiness(
         'separate-approval': input.separateApprovalGranted,
         'observation-window': input.observationWindowClosed,
     };
+    gates['public-table-count'] = input.publicTableCount === 22;
+    gates['canonical-set'] = input.canonicalSetMatch === true;
+    gates['catalog-dependency'] = input.catalogDependencyClean === true;
+    const paymentEvidence = input.paymentPendingEvidence;
+    const paymentEvidenceVerified = paymentEvidence !== undefined
+        && Number.isSafeInteger(paymentEvidence.pendingOrderCount)
+        && paymentEvidence.pendingOrderCount > 0
+        && Number.isSafeInteger(paymentEvidence.independentlyEvidencedCount)
+        && paymentEvidence.independentlyEvidencedCount === paymentEvidence.pendingOrderCount
+        && Number.isSafeInteger(paymentEvidence.dispositionRecordedCount)
+        && paymentEvidence.dispositionRecordedCount === paymentEvidence.pendingOrderCount;
+    gates['payment-pending-disposition'] = input.paymentPendingDispositionRecorded === true
+        && paymentEvidenceVerified;
+    const activationEvidence = input.noActivationEvidence;
+    const activationEvidenceVerified = activationEvidence?.source === 'independent-read-only'
+        && activationEvidence.verified === true
+        && activationEvidence.admissionActivated === false
+        && activationEvidence.realCanaryStarted === false;
+    gates['no-activation-or-canary'] = input.noActivationOrCanary === true
+        && activationEvidenceVerified;
+    gates['archive-restore-checksum'] = input.archiveRestoreChecksumMatch === true;
     const missingGates = Object.entries(gates)
         .filter(([, passed]) => !passed)
         .map(([name]) => name);
@@ -307,7 +411,8 @@ export type ArchiveManifest = Readonly<{
     mode: 'dry-run';
     reversible: true;
     destructiveOperations: 'refused';
-    retention: 'permanent';
+    /** Retention is unknown until an external archive manifest is verified. */
+    retention: string | null;
     selectedCount: number;
     aggregateChecksum: string | null;
     parityStatus: 'ready' | 'mismatch' | 'blocked';
@@ -337,7 +442,7 @@ export function createArchiveManifest(input: {
         mode: 'dry-run',
         reversible: true,
         destructiveOperations: 'refused',
-        retention: 'permanent',
+        retention: null,
         selectedCount: input.selectedCount,
         aggregateChecksum: input.aggregateChecksum,
         parityStatus: input.parityStatus,
@@ -423,6 +528,12 @@ export function buildOrderAuditParityAggregate(
         dependencyInventoryComplete: false,
         separateApprovalGranted: false,
         observationWindowClosed: false,
+        publicTableCount: 0,
+        canonicalSetMatch: false,
+        catalogDependencyClean: false,
+        paymentPendingDispositionRecorded: false,
+        noActivationOrCanary: false,
+        archiveRestoreChecksumMatch: false,
     });
     const archiveParityReady = reports.length > 0
         && realCompletedCount > 0

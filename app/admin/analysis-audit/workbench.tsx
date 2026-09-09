@@ -91,6 +91,33 @@ const COST_LABEL: Record<OrderAuditListRow['cost']['status'], string> = {
     not_available: '원장 없음',
 };
 
+const landingLeadListRowSchema = z.object({
+    instagramId: z.string().regex(/^[a-z0-9._]{1,30}$/),
+    inputContext: z.enum(['target', 'excluded']),
+    mappingStatus: z.enum([
+        'legacy_unlinked', 'anonymous_device', 'authenticated_user', 'unlinked_after_deletion',
+    ]),
+    rowCountInJourney: z.number().int().positive().max(100),
+    firstSeenAt: z.string().datetime({ offset: true }),
+    lastSeenAt: z.string().datetime({ offset: true }),
+}).strict();
+
+const landingLeadProjectionSchema = z.object({
+    rows: z.array(landingLeadListRowSchema).max(50),
+    nextCursor: z.string().max(512).nullable(),
+}).strict();
+
+type LandingLeadListRow = z.infer<typeof landingLeadListRowSchema>;
+type LandingLeadContext = 'target' | 'excluded';
+type LandingLeadMappingStatus = LandingLeadListRow['mappingStatus'];
+
+const LANDING_LEAD_MAPPING_LABEL: Record<LandingLeadMappingStatus, string> = {
+    authenticated_user: '인증 사용자',
+    anonymous_device: '익명 기기',
+    legacy_unlinked: '기존 미연결',
+    unlinked_after_deletion: '삭제 후 연결 해제',
+};
+
 function responseError(status: number): Error {
     if (status === 401) return new Error('운영자 세션이 필요합니다.');
     if (status === 403) return new Error('운영자 권한이 없습니다.');
@@ -458,6 +485,92 @@ function OrderDetail({ requestId, onBack, backButtonRef }: { requestId: string; 
     return <section className="oc-detail" aria-labelledby="detail-title"><div className="oc-breadcrumb"><button ref={backButtonRef} type="button" className="oc-link" onClick={onBack}>← 주문 목록</button><span className="oc-mono">{requestId} · v{summary.version}</span></div><div className="oc-detail-head"><div><p className="oc-kicker">주문 감사 번들</p><h1 id="detail-title">@{summary.targetInstagramId ?? '대상 미상'}</h1><p className="oc-muted">조립 {timestampLabel(summary.assembledAt)} · 번들 해시 <span className="oc-mono">{shortHash(summary.bundleHash)}</span></p></div><div className="oc-detail-status"><OrderStatus status={summary.completeness} /><span className="oc-muted">{summary.planId} · {summary.accessMode}</span></div></div><div className="oc-facts" aria-label="주문 요약"><div><span>실측 원가</span><strong>{displayCostKnownUsd(summary.cost.knownUsd, summary.cost.status)}</strong><small>{summary.cost.knownUsd === null ? summary.cost.status === 'not_available' ? '원가 원장 없음' : '사용량 미상으로 미확정' : '직접 귀속된 알려진 USD'}</small></div><div><span>보수 추정 상한</span><strong>{displayUsd(summary.cost.conservativeUsd)}</strong><small>확정 원가와 별도로 표시</small></div><div><span>원가 귀속</span><strong>{COST_LABEL[summary.cost.status]}</strong><small>{summary.cost.missingSourceCodes?.join(', ') || '누락 소스 없음'}</small></div><div><span>과금 계정</span><strong>{attributedSlots.length > 0 ? attributedSlots[0]!.split(': ')[1] : '미상'}</strong><small>{attributedSlots.length > 0 ? attributedSlots.join(' · ') : 'Apify 슬롯 귀속 없음'}</small></div></div><div className="oc-retention-banner"><RetentionChip state={summary.retention.state} /><span>{summary.retention.state === 'retained' ? '실행 테이블이 정리되어도 이 영구 감사 사본은 남습니다.' : summary.retention.state === 'fenced' ? '퍼지 펜스가 걸려 보관 상태를 확인해야 합니다.' : summary.retention.state === 'pending' ? '조립 큐가 처리 중이며 영구 보관 완료를 기다립니다.' : '큐 상태를 읽을 수 없어 영구 보관을 확정할 수 없습니다.'}</span>{summary.retention.purgeFenceReason ? <span className="oc-muted">펜스 이유: {summary.retention.purgeFenceReason}</span> : null}<span className="oc-mono oc-retention-meta">source_set {shortHash(summary.sourceSetHash)}{summary.retention.purgeFencedAt ? ` · 펜스 ${timestampLabel(summary.retention.purgeFencedAt)}` : ''}</span></div><section className="oc-section oc-evidence" aria-labelledby="evidence-title"><div className="oc-section-heading"><div><h2 id="evidence-title">증거 단계</h2><p>파이프라인 순서 · 모든 단계에서 선언 / 수집을 함께 비교합니다.</p></div><span className="oc-section-meta">최초 이탈 {firstDivergence ? firstDivergence.kind === 'unknown' ? '확인 불가' : firstDivergence.key : '없음'}</span></div><div className="oc-stage-rail">{specs.map(spec => <EvidenceStage key={spec.key} requestId={requestId} spec={spec} firstDivergence={firstDivergence} />)}</div></section></section>;
 }
 
+function landingLeadDateBoundary(value: string, endOfDay: boolean): string | null {
+    if (!value) return null;
+    const date = new Date(`${value}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function LandingLeadsPanel() {
+    const [context, setContext] = useState<LandingLeadContext>('target');
+    const [mappingStatus, setMappingStatus] = useState<LandingLeadMappingStatus | ''>('');
+    const [instagramId, setInstagramId] = useState('');
+    const [from, setFrom] = useState('');
+    const [to, setTo] = useState('');
+    const [rows, setRows] = useState<readonly LandingLeadListRow[]>([]);
+    const [nextCursor, setNextCursor] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const requestSequence = useRef(0);
+
+    const load = useCallback(async (cursor: string | null, append: boolean) => {
+        const sequence = requestSequence.current + 1;
+        requestSequence.current = sequence;
+        if (!append) {
+            setRows([]);
+            setNextCursor(null);
+        }
+        setLoading(true);
+        setError(null);
+        const params = new URLSearchParams({ context, pageSize: String(PAGE_SIZE) });
+        if (mappingStatus) params.set('mappingStatus', mappingStatus);
+        const normalizedInstagramId = instagramId.trim().replace(/^@+/, '').toLowerCase();
+        if (normalizedInstagramId) params.set('instagramId', normalizedInstagramId);
+        const fromIso = landingLeadDateBoundary(from, false);
+        const toIso = landingLeadDateBoundary(to, true);
+        if (fromIso) params.set('from', fromIso);
+        if (toIso) params.set('to', toIso);
+        if (cursor) params.set('cursor', cursor);
+        try {
+            const payload = await requestJson(`/api/admin/landing-leads?${params.toString()}`, landingLeadProjectionSchema);
+            if (requestSequence.current !== sequence) return;
+            setRows(previous => append ? [...previous, ...payload.rows] : payload.rows);
+            setNextCursor(payload.nextCursor);
+        } catch (caught) {
+            if (requestSequence.current !== sequence) return;
+            if (!append) {
+                setRows([]);
+                setNextCursor(null);
+            }
+            setError(caught instanceof Error ? caught.message : '리드 목록을 불러오지 못했습니다.');
+        } finally {
+            if (requestSequence.current === sequence) setLoading(false);
+        }
+    }, [context, from, instagramId, mappingStatus, to]);
+
+    useEffect(() => {
+        void load(null, false);
+    }, [load]);
+
+    const changeContext = (nextContext: LandingLeadContext) => {
+        if (nextContext === context) return;
+        setContext(nextContext);
+        setNextCursor(null);
+    };
+
+    const changeMappingStatus = (value: string) => {
+        setMappingStatus(value as LandingLeadMappingStatus | '');
+        setNextCursor(null);
+    };
+
+    return <section className="oc-section" aria-labelledby="landing-leads-title" data-testid="landing-leads-panel">
+        <div className="oc-section-heading"><div><h2 id="landing-leads-title">Leads</h2><p>익명 journey에 묶인 target / excluded 입력 · 키셋 페이지</p></div><span className="oc-section-meta">{loading && rows.length === 0 ? '확인 중' : error && rows.length === 0 ? '확인 불가' : `${rows.length}건 표시`}</span></div>
+        <div className="oc-button-row" role="tablist" aria-label="리드 입력 구분">
+            <button type="button" role="tab" aria-selected={context === 'target'} className="oc-button oc-button--small" data-landing-lead-context="target" onClick={() => changeContext('target')}>Target</button>
+            <button type="button" role="tab" aria-selected={context === 'excluded'} className="oc-button oc-button--small" data-landing-lead-context="excluded" onClick={() => changeContext('excluded')}>Excluded</button>
+        </div>
+        <div className="oc-stage-tools" aria-label="리드 필터">
+            <label>매핑 상태 <select value={mappingStatus} onChange={event => changeMappingStatus(event.target.value)}><option value="">전체</option>{Object.entries(LANDING_LEAD_MAPPING_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label>인스타 아이디 <input type="search" value={instagramId} placeholder="@username" onChange={event => { setInstagramId(event.target.value); setNextCursor(null); }} /></label>
+            <label>시작일 <input type="date" value={from} onChange={event => { setFrom(event.target.value); setNextCursor(null); }} /></label>
+            <label>종료일 <input type="date" value={to} onChange={event => { setTo(event.target.value); setNextCursor(null); }} /></label>
+        </div>
+        <PageError message={error} actionLabel="리드 다시 시도" onAction={() => void load(null, false)} />
+        <div className="oc-table-scroll"><table className="oc-table"><caption className="oc-sr-only">landing leads 목록</caption><thead><tr><th scope="col">인스타 아이디</th><th scope="col">입력</th><th scope="col">매핑</th><th scope="col">journey 행</th><th scope="col">최초 관측</th><th scope="col">최근 관측</th></tr></thead><tbody>{rows.length === 0 && !loading && !error ? <tr><td colSpan={6} className="oc-empty">조건에 맞는 리드가 없습니다.</td></tr> : null}{rows.map(row => <tr key={`${row.inputContext}:${row.instagramId}:${row.firstSeenAt}`}><th scope="row" className="oc-target">@{row.instagramId}</th><td>{row.inputContext}</td><td>{LANDING_LEAD_MAPPING_LABEL[row.mappingStatus]}</td><td className="oc-number">{row.rowCountInJourney}</td><td>{timestampLabel(row.firstSeenAt)}</td><td>{timestampLabel(row.lastSeenAt)}</td></tr>)}</tbody></table></div>
+        <div className="oc-pager" aria-live="polite"><span>{loading && rows.length === 0 ? '리드 목록을 불러오는 중…' : error && rows.length === 0 ? '리드 목록 확인 불가' : `${rows.length}건을 로드했습니다${nextCursor ? ' · 다음 페이지 있음' : ''}`}</span><button type="button" className="oc-button oc-button--small" disabled={loading || nextCursor === null} onClick={() => { if (nextCursor) void load(nextCursor, true); }}>{loading ? '불러오는 중…' : '다음 25건'}</button></div>
+    </section>;
+}
+
 export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId: string }) {
     const [inventory, setInventory] = useState<readonly ApifyAccountCreditInventoryRow[] | null>(null);
     const [orders, setOrders] = useState<readonly OrderAuditListRow[]>([]);
@@ -550,5 +663,5 @@ export function AnalysisAuditWorkbench({ initialRequestId }: { initialRequestId:
 
     if (selectedRequestId) return <OrderDetail requestId={selectedRequestId} onBack={closeOrder} backButtonRef={detailBackRef} />;
 
-    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1 ref={overviewHeadingRef} tabIndex={-1}>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryLoadError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><PageError message={inventoryActionError} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryLoadError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
+    return <div className="oc-console-content"><header className="oc-masthead"><div><p className="oc-kicker">운영자 전용 · production data</p><h1 ref={overviewHeadingRef} tabIndex={-1}>판독 운영 콘솔</h1><p>Apify 계정 상태와 영구 감사 번들을 한 표면에서 확인합니다.</p></div><div className="oc-session-note"><span className="oc-session-dot" aria-hidden="true" />operator session<br /><b>private / no-store</b></div></header><p className="oc-contract-note">현재 운영 API 응답만 표시합니다. 잔액·원가·보관 상태를 확인할 수 없으면 숫자를 만들지 않고 <b>미상</b>으로 남깁니다.</p><PageError message={inventoryLoadError} actionLabel="계정 다시 시도" onAction={() => void loadInventory()} /><PageError message={inventoryActionError} /><section className="oc-section oc-section--top" aria-labelledby="attention-title"><AttentionList accounts={orderedInventory} orders={orders} loading={inventoryLoading || ordersLoading} unavailable={Boolean(inventoryLoadError || ordersError)} onOpenOrder={openOrder} /></section><section className="oc-section" aria-labelledby="paid-title"><div className="oc-section-heading"><div><h2 id="paid-title">유료 계정</h2><p>secondary 1개 · 실제 과금이 발생하는 유일한 Apify 슬롯</p></div><span className="oc-section-meta">1 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <PaidAccount row={paid} busy={paidBusy} onRefresh={() => void refreshPaid()} />}</section><section className="oc-section" aria-labelledby="free-title"><div className="oc-section-heading"><div><h2 id="free-title">무료 계정 9개</h2><p>secondary를 제외한 모든 canonical 슬롯 · 수동 배차 제외 / 복귀</p></div><span className="oc-section-meta">9 / 10</span></div>{inventoryLoading && !inventory ? <p className="oc-loading" role="status">계정 상태를 불러오는 중…</p> : !inventory ? <p className="oc-empty">계정 상태를 확인할 수 없습니다. 위의 다시 시도를 사용하세요.</p> : <AccountTable rows={free} busySlot={busySlot} onToggle={row => void toggleExclusion(row)} />}</section><OrdersTable rows={orders} loading={ordersLoading} nextCursor={nextCursor} error={ordersError} onOpen={openOrder} onNext={() => { if (nextCursor) void loadOrdersPage(nextCursor, true); }} onRetry={() => void loadOrdersPage(null, false)} /><LandingLeadsPanel /><footer className="oc-footer">영구 보관 상태는 주문 감사 큐가 제공한 상태만 표시합니다. 이 화면은 provider/source 원문을 보관하거나 표시하지 않습니다.</footer></div>;
 }
