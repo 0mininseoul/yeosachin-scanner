@@ -261,6 +261,13 @@ export type ConsolidationReadinessInput = Readonly<{
     dependencyInventoryComplete: boolean;
     separateApprovalGranted: boolean;
     observationWindowClosed: boolean;
+    /** Supabase 22 production contract evidence, optional for legacy parity callers. */
+    publicTableCount?: number;
+    canonicalSetMatch?: boolean;
+    catalogDependencyClean?: boolean;
+    paymentPendingDispositionRecorded?: boolean;
+    noActivationOrCanary?: boolean;
+    archiveRestoreChecksumMatch?: boolean;
 }>;
 
 export type ConsolidationReadiness = Readonly<{
@@ -273,7 +280,7 @@ export type ConsolidationReadiness = Readonly<{
 export function evaluateConsolidationReadiness(
     input: ConsolidationReadinessInput,
 ): ConsolidationReadiness {
-    const gates = {
+    const gates: Record<string, boolean> = {
         'genuine-completed-bundle': input.genuineCompletedBundleCount > 0,
         'per-order-parity': input.genuineCompletedBundleCount > 0
             && input.perOrderParityCount === input.genuineCompletedBundleCount,
@@ -285,6 +292,25 @@ export function evaluateConsolidationReadiness(
         'separate-approval': input.separateApprovalGranted,
         'observation-window': input.observationWindowClosed,
     };
+    // Existing parity callers predate the production 22-table contract. Keep their
+    // report shape stable, while requiring every new gate when any contract evidence
+    // field is supplied by the production verifier.
+    const contractEvidenceRequested = [
+        input.publicTableCount,
+        input.canonicalSetMatch,
+        input.catalogDependencyClean,
+        input.paymentPendingDispositionRecorded,
+        input.noActivationOrCanary,
+        input.archiveRestoreChecksumMatch,
+    ].some(value => value !== undefined);
+    if (contractEvidenceRequested) {
+        gates['public-table-count'] = input.publicTableCount === 22;
+        gates['canonical-set'] = input.canonicalSetMatch === true;
+        gates['catalog-dependency'] = input.catalogDependencyClean === true;
+        gates['payment-pending-disposition'] = input.paymentPendingDispositionRecorded === true;
+        gates['no-activation-or-canary'] = input.noActivationOrCanary === true;
+        gates['archive-restore-checksum'] = input.archiveRestoreChecksumMatch === true;
+    }
     const missingGates = Object.entries(gates)
         .filter(([, passed]) => !passed)
         .map(([name]) => name);

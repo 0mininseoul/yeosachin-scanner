@@ -16,10 +16,15 @@ const DESTRUCTIVE_OPTIONS = new Set([
     '--execute', '--apply', '--drop', '--truncate', '--rename', '--delete', '--mutate',
 ]);
 
+function optionName(value: string): string {
+    return value.split('=', 1)[0];
+}
+
 export type OrderAuditParityCliOptions = Readonly<{
     requestIds: readonly string[];
     shadowRead: boolean;
     includeArchiveManifest: boolean;
+    reportOnly?: boolean;
 }>;
 
 export function parseOrderAuditParityCliArgs(
@@ -28,11 +33,17 @@ export function parseOrderAuditParityCliArgs(
     const requestIds: string[] = [];
     let shadowRead = false;
     let includeArchiveManifest = false;
+    let reportOnly = false;
 
     for (let index = 0; index < args.length; index += 1) {
         const option = args[index];
-        if (DESTRUCTIVE_OPTIONS.has(option)) {
+        if (DESTRUCTIVE_OPTIONS.has(optionName(option))) {
             throw new Error('destructive mode is not supported');
+        }
+        if (option === '--report-only') {
+            if (reportOnly) throw new Error('--report-only must appear exactly once');
+            reportOnly = true;
+            continue;
         }
         if (option === '--shadow-read') {
             if (shadowRead) throw new Error('--shadow-read must appear exactly once');
@@ -74,11 +85,12 @@ export function parseOrderAuditParityCliArgs(
     }
 
     if (requestIds.length === 0) throw new Error('at least one --request-id is required');
-    return {
+    const parsed = {
         requestIds,
         shadowRead,
         includeArchiveManifest,
     };
+    return reportOnly ? { ...parsed, reportOnly: true } : parsed;
 }
 
 export interface OrderAuditParityCliDependencies {
@@ -101,8 +113,9 @@ function outputAggregate(
     includeArchiveManifest: boolean,
 ): Record<string, unknown> {
     if (includeArchiveManifest) return aggregate;
-    const { archive: _archive, ...withoutArchive } = aggregate;
-    return withoutArchive;
+    return Object.fromEntries(
+        Object.entries(aggregate).filter(([key]) => key !== 'archive'),
+    );
 }
 
 export async function runOrderAuditParityCli(
