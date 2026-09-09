@@ -140,6 +140,13 @@ const URL_VALUE_PATTERN = /^https?:\/\//i;
 const IPV4_VALUE_PATTERN = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 const IPV6_VALUE_PATTERN = /^[0-9a-f:]{2,39}$/i;
 const CREDENTIAL_VALUE_PATTERN = /^(?:bearer|basic)\s+|^(?:sk|pk|api[_-]?key|token)[_-]/i;
+const PHONE_VALUE_PATTERNS = [
+    // Korean mobile/landline and VoIP numbers, with optional +82 country code.
+    /^(?:\+?82[\s.-]?)?0?(?:1[016789]|2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|7[0-9])[\s.-]?\d{3,4}[\s.-]?\d{4}$/,
+    // North-American numbers are included only when the country/area prefix
+    // makes the shape unambiguous; generic digit strings remain valid counts.
+    /^\+?1[\s.-]?\(?[2-9]\d{2}\)?[\s.-]?\d{3}[\s.-]?\d{4}$/,
+];
 
 function normalizeOutputKey(key: string): string {
     return key.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -149,6 +156,10 @@ function isForbiddenOutputKey(key: string): boolean {
     const normalized = normalizeOutputKey(key);
     return forbiddenOutputKeys.has(normalized)
         || forbiddenOutputKeyPatterns.some(pattern => pattern.test(normalized));
+}
+
+function isPhoneValue(value: string): boolean {
+    return PHONE_VALUE_PATTERNS.some(pattern => pattern.test(value));
 }
 
 /** Reject any value that could turn an aggregate report into an identifier/payload export. */
@@ -162,7 +173,7 @@ export function assertPiiSafeConsolidationOutput(value: unknown): void {
             if (UUID_VALUE_PATTERN.test(current) || EMAIL_VALUE_PATTERN.test(current)
                 || URL_VALUE_PATTERN.test(current) || IPV4_VALUE_PATTERN.test(current)
                 || (current.includes(':') && IPV6_VALUE_PATTERN.test(current))
-                || CREDENTIAL_VALUE_PATTERN.test(current)) {
+                || CREDENTIAL_VALUE_PATTERN.test(current) || isPhoneValue(current)) {
                 throw new Error('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
             }
             return;

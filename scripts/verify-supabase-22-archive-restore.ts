@@ -24,6 +24,7 @@ const UUID_PATTERN =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/i;
 const MAX_REQUESTS = 20;
+const MAX_ARCHIVE_PROOF_RECORDS = MAX_REQUESTS;
 const READ_ONLY_OPTIONS = new Set([
     '--execute', '--apply', '--drop', '--truncate', '--rename', '--delete', '--mutate',
 ]);
@@ -96,7 +97,8 @@ function parseEncryption(value: unknown): { algorithm: string; verified: true } 
 function parseArchiveManifest(value: unknown): Supabase22ArchiveManifest {
     if (!isRecord(value)
         || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
-        || !isGenuineArchiveManifest(value)) {
+        || !isGenuineArchiveManifest(value)
+        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS) {
         throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
     }
     return {
@@ -112,7 +114,8 @@ function parseArchiveManifest(value: unknown): Supabase22ArchiveManifest {
 function parseRestoreManifest(value: unknown): Supabase22RestoreManifest {
     if (!isRecord(value)
         || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
-        || !isGenuineRestoreManifest(value)) {
+        || !isGenuineRestoreManifest(value)
+        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS) {
         throw new Error('SUPABASE_22_RESTORE_MANIFEST_INVALID');
     }
     return {
@@ -317,6 +320,7 @@ function parseRestoredManifest(value: unknown): Supabase22RestoredManifest {
         || value.source !== 'independent-read-only'
         || !Number.isSafeInteger(value.selectedCount)
         || (value.selectedCount as number) <= 0
+        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS
         || typeof value.restoreChecksum !== 'string'
         || !HASH_PATTERN.test(value.restoreChecksum)
         || value.encryptionAlgorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
@@ -349,7 +353,7 @@ export type Supabase22ArchiveRestoreReport = Readonly<{
     destructiveOperations: 'refused';
 }>;
 
-type Supabase22IndependentArchiveProof = Readonly<{
+export type Supabase22IndependentArchiveProof = Readonly<{
     source: 'independent-read-only';
     selectedCount: number;
     archiveChecksum: string;
@@ -360,14 +364,18 @@ type Supabase22IndependentArchiveProof = Readonly<{
     isolatedRestoreVerified: true;
 }>;
 
-function parseIndependentArchiveProof(value: unknown): Supabase22IndependentArchiveProof {
+export function parseSupabase22IndependentArchiveProof(
+    value: unknown,
+): Supabase22IndependentArchiveProof {
     if (!isRecord(value)
         || !hasOnlyKeys(value, INDEPENDENT_ARCHIVE_PROOF_KEYS)
         || value.source !== 'independent-read-only'
         || !Number.isSafeInteger(value.selectedCount)
         || (value.selectedCount as number) <= 0
+        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS
         || !Number.isSafeInteger(value.restoreCount)
         || (value.restoreCount as number) <= 0
+        || (value.restoreCount as number) > MAX_ARCHIVE_PROOF_RECORDS
         || typeof value.archiveChecksum !== 'string'
         || !HASH_PATTERN.test(value.archiveChecksum)
         || typeof value.restoreChecksum !== 'string'
@@ -561,7 +569,7 @@ export async function runSupabase22ArchiveRestoreCli(
         let archiveProof: Supabase22IndependentArchiveProof | null = null;
         if (dependencies.readArchiveEvidence) {
             try {
-                archiveProof = parseIndependentArchiveProof(await dependencies.readArchiveEvidence(
+                archiveProof = parseSupabase22IndependentArchiveProof(await dependencies.readArchiveEvidence(
                     options.requestIds,
                     aggregate.aggregateChecksum,
                 ));

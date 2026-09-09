@@ -95,6 +95,10 @@ export type Supabase22GateInput = Readonly<{
     }>;
 }>;
 
+const NO_ACTIVATION_EVIDENCE_KEYS = [
+    'source', 'verified', 'admissionActivated', 'realCanaryStarted',
+] as const;
+
 export type Supabase22Evidence = Supabase22GateInput & Readonly<{
     schemaVersion: 'supabase-22-evidence-v1';
     status: Supabase22GateStatus;
@@ -117,6 +121,16 @@ function exactCanonicalSet(input: Supabase22GateInput): boolean {
 
 function addGate(gates: string[], gate: string): void {
     if (!gates.includes(gate)) gates.push(gate);
+}
+
+function isIndependentNoActivationEvidence(value: unknown): boolean {
+    return isRecord(value)
+        && Object.keys(value).length === NO_ACTIVATION_EVIDENCE_KEYS.length
+        && NO_ACTIVATION_EVIDENCE_KEYS.every(key => Object.prototype.hasOwnProperty.call(value, key))
+        && value.source === 'independent-read-only'
+        && value.verified === true
+        && value.admissionActivated === false
+        && value.realCanaryStarted === false;
 }
 
 function isSafeRetentionClass(value: unknown): value is string {
@@ -226,11 +240,7 @@ export function evaluateSupabase22Gate(input: Supabase22GateInput): Supabase22Ev
     if (input.paymentPendingDispositionRecorded !== true || !paymentEvidenceVerified) {
         addGate(missingGates, 'payment-pending-disposition');
     }
-    const activationEvidence = input.noActivationEvidence;
-    const activationEvidenceVerified = activationEvidence?.source === 'independent-read-only'
-        && activationEvidence.verified === true
-        && activationEvidence.admissionActivated === false
-        && activationEvidence.realCanaryStarted === false;
+    const activationEvidenceVerified = isIndependentNoActivationEvidence(input.noActivationEvidence);
     if (input.noActivationOrCanary !== true || !activationEvidenceVerified) {
         addGate(missingGates, 'no-activation-or-canary');
     }
@@ -326,6 +336,36 @@ export type Supabase22CatalogDependency = Readonly<{
     objectName: string;
     resolved: boolean;
     allowed: boolean;
+    /** All pg_depend edges for this object, in deterministic order. */
+    details?: readonly Supabase22CatalogDependencyDetail[];
+}>;
+
+export type Supabase22CatalogDependencyDetail = Readonly<{
+    dependentObject: string;
+    referencedObject: string;
+    dependencyType: string;
+    classId: string;
+    refClassId: string;
+    objectSubId: number;
+    refObjectSubId: number;
+    resolved: boolean;
+    allowed: boolean;
+}>;
+
+export type Supabase22CatalogPolicyDetail = Readonly<{
+    policyName: string;
+    command?: string;
+    roles?: readonly string[];
+    usingExpression?: string | null;
+    checkExpression?: string | null;
+    permissive?: boolean;
+}>;
+
+export type Supabase22CatalogPolicy = Readonly<{
+    tableName: string;
+    enabled: boolean;
+    /** All pg_policy rows for this table, in deterministic order. */
+    details?: readonly Supabase22CatalogPolicyDetail[];
 }>;
 
 export type Supabase22CatalogMetadataAvailability = Readonly<{
@@ -358,7 +398,7 @@ export type Supabase22CatalogSnapshot = Readonly<{
     partitions: readonly Supabase22CatalogDependency[];
     publications: readonly Supabase22CatalogDependency[];
     triggers: readonly Supabase22CatalogDependency[];
-    policies: readonly Readonly<{ tableName: string; enabled: boolean }>[];
+    policies: readonly Supabase22CatalogPolicy[];
     /** Every catalog query must explicitly attest that its result is available. */
     metadataAvailability: Supabase22CatalogMetadataAvailability;
 }>;
@@ -407,6 +447,53 @@ function catalogObjectsClean(
         && values.every(value => value.resolved === true && value.allowed === true);
 }
 
+function catalogDependencyDetailsClean(value: Supabase22CatalogDependency): boolean {
+    if (!Array.isArray(value.details)) return false;
+    const detailKeys = new Set<string>();
+    return value.details.every(detail => {
+        if (!isRecord(detail)
+            || typeof detail.dependentObject !== 'string'
+            || typeof detail.referencedObject !== 'string'
+            || typeof detail.dependencyType !== 'string'
+            || typeof detail.classId !== 'string'
+            || typeof detail.refClassId !== 'string'
+            || !Number.isSafeInteger(detail.objectSubId)
+            || (detail.objectSubId as number) < 0
+            || !Number.isSafeInteger(detail.refObjectSubId)
+            || (detail.refObjectSubId as number) < 0
+            || typeof detail.resolved !== 'boolean'
+            || typeof detail.allowed !== 'boolean') {
+            return false;
+        }
+        const key = [
+            detail.dependentObject,
+            detail.referencedObject,
+            detail.dependencyType,
+            detail.classId,
+            detail.refClassId,
+            String(detail.objectSubId),
+            String(detail.refObjectSubId),
+        ].join('\u0000');
+        if (detailKeys.has(key)) return false;
+        detailKeys.add(key);
+        return true;
+    });
+}
+
+function catalogPolicyDetailsClean(value: Supabase22CatalogPolicy): boolean {
+    if (!Array.isArray(value.details)) return false;
+    const policyNames = new Set<string>();
+    return value.details.every(detail => {
+        if (!isRecord(detail)
+            || typeof detail.policyName !== 'string'
+            || policyNames.has(detail.policyName)) {
+            return false;
+        }
+        policyNames.add(detail.policyName);
+        return true;
+    });
+}
+
 function comparableCatalogObjectName(value: unknown): string {
     if (typeof value !== 'string') return '';
     return value.trim()
@@ -419,6 +506,7 @@ function comparableCatalogObjectName(value: unknown): string {
 function completeObjectCoverage(
     values: readonly Readonly<{ objectName: string }>[],
     expectedObjectNames: readonly string[],
+    exact = true,
 ): boolean {
     if (values.length === 0 || expectedObjectNames.length === 0) return false;
     const observed = values.map(value => comparableCatalogObjectName(value.objectName));
@@ -426,7 +514,7 @@ function completeObjectCoverage(
     return observed.every(name => name.length > 0)
         && new Set(observed).size === observed.length
         && new Set(expected).size === expected.length
-        && observed.length === expected.length
+        && (!exact || observed.length === expected.length)
         && expected.every(name => observed.includes(name));
 }
 
@@ -524,7 +612,11 @@ export function evaluateSupabase22Catalog(
     const dependencyClean = metadataAvailability.dependency
         && dependencies !== null
         && catalogObjectsClean(dependencies, true)
-        && completeObjectCoverage(dependencies, relevantDependencyObjects);
+        && dependencies.every(catalogDependencyDetailsClean)
+        // pg_depend also reports dependent objects such as policies, triggers,
+        // and rewrite rules. Those extra rows are valid evidence; every table
+        // and security-definer routine still needs a covered aggregate row.
+        && completeObjectCoverage(dependencies, relevantDependencyObjects, false);
     const foreignKeysClean = metadataAvailability.foreignKey
         && foreignKeys !== null
         && catalogObjectsClean(foreignKeys);
@@ -541,7 +633,7 @@ export function evaluateSupabase22Catalog(
             policies.map(policy => ({ objectName: policy.tableName })),
             publicTables,
         )
-        && policies.every(policy => policy.enabled === true);
+        && policies.every(policy => policy.enabled === true && catalogPolicyDetailsClean(policy));
     const legacyWritersClean = metadataAvailability.legacyWriter
         && legacyWriters !== null
         && completeObjectCoverage(legacyWriters, publicTables)
@@ -633,13 +725,34 @@ export const SUPABASE_22_CATALOG_QUERIES = {
     policies: `
 SELECT n.nspname AS schema_name,
        c.relname AS table_name,
-       p.polname AS policy_name,
-       c.relrowsecurity AS enabled
-FROM pg_catalog.pg_policy AS p
-JOIN pg_catalog.pg_class AS c ON c.oid = p.polrelid
+       c.relrowsecurity AS enabled,
+       COALESCE(
+           pg_catalog.jsonb_agg(
+               pg_catalog.jsonb_build_object(
+                   'policy_name', p.polname,
+                   'command', p.polcmd,
+                   'roles', COALESCE((
+                       SELECT pg_catalog.jsonb_agg(
+                           pg_catalog.pg_get_userbyid(role_oid)
+                           ORDER BY pg_catalog.pg_get_userbyid(role_oid)
+                       )
+                       FROM pg_catalog.unnest(p.polroles) AS role_oid
+                   ), '[]'::jsonb),
+                   'using_expression', pg_catalog.pg_get_expr(p.polqual, p.polrelid),
+                   'check_expression', pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid),
+                   'permissive', p.polpermissive
+               )
+               ORDER BY p.polname
+           ) FILTER (WHERE p.oid IS NOT NULL),
+           '[]'::jsonb
+       ) AS policy_details
+FROM pg_catalog.pg_class AS c
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_policy AS p ON p.polrelid = c.oid
 WHERE n.nspname = 'public'
-ORDER BY c.relname, p.polname
+  AND c.relkind IN ('r', 'p')
+GROUP BY n.nspname, c.oid, c.relname, c.relrowsecurity
+ORDER BY c.relname
 LIMIT ${SUPABASE_22_CATALOG_SENTINEL_LIMIT}
 `,
     acls: `
@@ -685,9 +798,11 @@ LIMIT ${SUPABASE_22_CATALOG_SENTINEL_LIMIT}
 `,
     dependencies: `
 SELECT dependent_object.object_identity AS object_name,
-       (dependent_object.object_identity IS NOT NULL
-        AND referenced_object.object_identity IS NOT NULL) AS resolved,
-       (
+       pg_catalog.bool_and(
+           dependent_object.object_identity IS NOT NULL
+           AND referenced_object.object_identity IS NOT NULL
+       ) AS resolved,
+       pg_catalog.bool_and(
            dependency.deptype IN ('n', 'a', 'i')
            AND dependency.classid IN (
                'pg_catalog.pg_class'::pg_catalog.regclass,
@@ -727,7 +842,62 @@ SELECT dependent_object.object_identity AS object_name,
                'pg_catalog.pg_cast'::pg_catalog.regclass,
                'pg_catalog.pg_extension'::pg_catalog.regclass
            )
-       ) AS allowed
+       ) AS allowed,
+       pg_catalog.jsonb_agg(
+           pg_catalog.jsonb_build_object(
+               'dependent_object', dependent_object.object_identity,
+               'referenced_object', referenced_object.object_identity,
+               'dependency_type', dependency.deptype,
+               'class_id', dependency.classid::text,
+               'ref_class_id', dependency.refclassid::text,
+               'object_sub_id', dependency.objsubid,
+               'ref_object_sub_id', dependency.refobjsubid,
+               'resolved', dependent_object.object_identity IS NOT NULL
+                   AND referenced_object.object_identity IS NOT NULL,
+               'allowed', dependency.deptype IN ('n', 'a', 'i')
+                   AND dependency.classid IN (
+                       'pg_catalog.pg_class'::pg_catalog.regclass,
+                       'pg_catalog.pg_proc'::pg_catalog.regclass,
+                       'pg_catalog.pg_type'::pg_catalog.regclass,
+                       'pg_catalog.pg_constraint'::pg_catalog.regclass,
+                       'pg_catalog.pg_trigger'::pg_catalog.regclass,
+                       'pg_catalog.pg_rewrite'::pg_catalog.regclass,
+                       'pg_catalog.pg_namespace'::pg_catalog.regclass,
+                       'pg_catalog.pg_attrdef'::pg_catalog.regclass,
+                       'pg_catalog.pg_policy'::pg_catalog.regclass,
+                       'pg_catalog.pg_partitioned_table'::pg_catalog.regclass,
+                       'pg_catalog.pg_init_privs'::pg_catalog.regclass,
+                       'pg_catalog.pg_enum'::pg_catalog.regclass,
+                       'pg_catalog.pg_collation'::pg_catalog.regclass,
+                       'pg_catalog.pg_opclass'::pg_catalog.regclass,
+                       'pg_catalog.pg_operator'::pg_catalog.regclass,
+                       'pg_catalog.pg_cast'::pg_catalog.regclass,
+                       'pg_catalog.pg_extension'::pg_catalog.regclass
+                   )
+                   AND dependency.refclassid IN (
+                       'pg_catalog.pg_class'::pg_catalog.regclass,
+                       'pg_catalog.pg_proc'::pg_catalog.regclass,
+                       'pg_catalog.pg_type'::pg_catalog.regclass,
+                       'pg_catalog.pg_constraint'::pg_catalog.regclass,
+                       'pg_catalog.pg_trigger'::pg_catalog.regclass,
+                       'pg_catalog.pg_rewrite'::pg_catalog.regclass,
+                       'pg_catalog.pg_namespace'::pg_catalog.regclass,
+                       'pg_catalog.pg_attrdef'::pg_catalog.regclass,
+                       'pg_catalog.pg_policy'::pg_catalog.regclass,
+                       'pg_catalog.pg_partitioned_table'::pg_catalog.regclass,
+                       'pg_catalog.pg_init_privs'::pg_catalog.regclass,
+                       'pg_catalog.pg_enum'::pg_catalog.regclass,
+                       'pg_catalog.pg_collation'::pg_catalog.regclass,
+                       'pg_catalog.pg_opclass'::pg_catalog.regclass,
+                       'pg_catalog.pg_operator'::pg_catalog.regclass,
+                       'pg_catalog.pg_cast'::pg_catalog.regclass,
+                       'pg_catalog.pg_extension'::pg_catalog.regclass
+                   )
+           )
+           ORDER BY dependency.classid::text, dependency.objid, dependency.objsubid,
+                    dependency.refclassid::text, dependency.refobjid,
+                    dependency.refobjsubid, dependency.deptype
+       ) AS dependency_details
 FROM pg_catalog.pg_depend AS dependency
 CROSS JOIN LATERAL pg_catalog.pg_identify_object(
     dependency.classid,
@@ -741,6 +911,7 @@ CROSS JOIN LATERAL pg_catalog.pg_identify_object(
 ) AS referenced_object(object_type, object_schema, object_name, object_identity)
 WHERE dependent_object.object_schema = 'public'
    OR referenced_object.object_schema = 'public'
+GROUP BY dependent_object.object_identity
 ORDER BY object_name
 LIMIT ${SUPABASE_22_CATALOG_SENTINEL_LIMIT}
 `,
@@ -817,7 +988,19 @@ LIMIT ${SUPABASE_22_CATALOG_SENTINEL_LIMIT}
 `,
     legacyWriters: `
 SELECT n.nspname || '.' || c.relname AS object_name,
-       NULL::boolean AS active
+       EXISTS (
+           SELECT 1
+           FROM pg_catalog.pg_locks AS lock_row
+           JOIN pg_catalog.pg_stat_activity AS activity
+             ON activity.pid = lock_row.pid
+           WHERE lock_row.relation = c.oid
+             AND lock_row.granted = true
+             AND activity.state = 'active'
+             AND lock_row.mode IN (
+                 'RowExclusiveLock', 'ShareRowExclusiveLock',
+                 'ExclusiveLock', 'AccessExclusiveLock'
+             )
+       ) AS active
 FROM pg_catalog.pg_class AS c
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
@@ -863,18 +1046,98 @@ function safeCatalogIdentityArguments(value: unknown): value is string {
     return typeof value === 'string' && value.length <= 256;
 }
 
-function parseCatalogDependency(value: unknown): Supabase22CatalogDependency {
+function safeCatalogDetailText(value: unknown): value is string {
+    return typeof value === 'string' && value.length <= 16_384;
+}
+
+function parseCatalogPolicyDetail(value: unknown): Supabase22CatalogPolicyDetail {
     if (!isRecord(value)
-        || !hasOnlyKeys(value, ['objectName', 'resolved', 'allowed'])
-        || !safeCatalogName(value.objectName)
+        || !hasOnlyKeys(value, ['policyName'], [
+            'command', 'roles', 'usingExpression', 'checkExpression', 'permissive',
+        ])
+        || !safeCatalogName(value.policyName)
+        || (value.command !== undefined && !safeCatalogDetailText(value.command))
+        || (value.roles !== undefined
+            && (!Array.isArray(value.roles)
+                || value.roles.some(role => !safeCatalogName(role))))
+        || (value.usingExpression !== undefined
+            && value.usingExpression !== null
+            && !safeCatalogDetailText(value.usingExpression))
+        || (value.checkExpression !== undefined
+            && value.checkExpression !== null
+            && !safeCatalogDetailText(value.checkExpression))
+        || (value.permissive !== undefined && typeof value.permissive !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
+    return {
+        policyName: value.policyName,
+        ...(value.command === undefined ? {} : { command: value.command }),
+        ...(value.roles === undefined ? {} : {
+            roles: sortedUnique(value.roles as string[]),
+        }),
+        ...(value.usingExpression === undefined ? {} : { usingExpression: value.usingExpression }),
+        ...(value.checkExpression === undefined ? {} : { checkExpression: value.checkExpression }),
+        ...(value.permissive === undefined ? {} : { permissive: value.permissive }),
+    };
+}
+
+function parseCatalogDependencyDetail(value: unknown): Supabase22CatalogDependencyDetail {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, [
+            'dependentObject', 'referencedObject', 'dependencyType', 'classId', 'refClassId',
+            'objectSubId', 'refObjectSubId', 'resolved', 'allowed',
+        ])
+        || !safeCatalogName(value.dependentObject)
+        || !safeCatalogName(value.referencedObject)
+        || !safeCatalogDetailText(value.dependencyType)
+        || !safeCatalogDetailText(value.classId)
+        || !safeCatalogDetailText(value.refClassId)
+        || !Number.isSafeInteger(value.objectSubId)
+        || (value.objectSubId as number) < 0
+        || !Number.isSafeInteger(value.refObjectSubId)
+        || (value.refObjectSubId as number) < 0
         || typeof value.resolved !== 'boolean'
         || typeof value.allowed !== 'boolean') {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
+    return {
+        dependentObject: value.dependentObject,
+        referencedObject: value.referencedObject,
+        dependencyType: value.dependencyType,
+        classId: value.classId,
+        refClassId: value.refClassId,
+        objectSubId: value.objectSubId as number,
+        refObjectSubId: value.refObjectSubId as number,
+        resolved: value.resolved,
+        allowed: value.allowed,
+    };
+}
+
+function parseCatalogDependency(value: unknown): Supabase22CatalogDependency {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, ['objectName', 'resolved', 'allowed'], ['details'])
+        || !safeCatalogName(value.objectName)
+        || typeof value.resolved !== 'boolean'
+        || typeof value.allowed !== 'boolean'
+        || (value.details !== undefined
+            && (!Array.isArray(value.details)
+                || value.details.some(detail => {
+                    try {
+                        parseCatalogDependencyDetail(detail);
+                        return false;
+                    } catch {
+                        return true;
+                    }
+                })))) {
         throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
     }
     return {
         objectName: value.objectName,
         resolved: value.resolved,
         allowed: value.allowed,
+        ...(value.details === undefined ? {} : {
+            details: (value.details as unknown[]).map(parseCatalogDependencyDetail),
+        }),
     };
 }
 
@@ -995,15 +1258,31 @@ export function parseSupabase22CatalogSnapshot(value: unknown): Supabase22Catalo
     for (const key of Object.keys(objectCollections) as Array<keyof typeof objectCollections>) {
         objectCollections[key] = (value[key] as unknown[]).map(parseCatalogDependency);
     }
-    const policies: Array<{ tableName: string; enabled: boolean }> = [];
+    const policies: Supabase22CatalogPolicy[] = [];
     for (const raw of value.policies as unknown[]) {
         if (!isRecord(raw)
-            || !hasOnlyKeys(raw, ['tableName', 'enabled'])
+            || !hasOnlyKeys(raw, ['tableName', 'enabled'], ['details'])
             || !safeCatalogName(raw.tableName)
-            || typeof raw.enabled !== 'boolean') {
+            || typeof raw.enabled !== 'boolean'
+            || (raw.details !== undefined
+                && (!Array.isArray(raw.details)
+                    || raw.details.some(detail => {
+                        try {
+                            parseCatalogPolicyDetail(detail);
+                            return false;
+                        } catch {
+                            return true;
+                        }
+                    })))) {
             throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
         }
-        policies.push({ tableName: raw.tableName, enabled: raw.enabled });
+        policies.push({
+            tableName: raw.tableName,
+            enabled: raw.enabled,
+            ...(raw.details === undefined ? {} : {
+                details: (raw.details as unknown[]).map(parseCatalogPolicyDetail),
+            }),
+        });
     }
     return {
         tables,
@@ -1039,6 +1318,176 @@ function parseCatalogRow(
 function parseConfiguredSearchPath(value: unknown): boolean {
     if (!Array.isArray(value)) return false;
     return value.some(entry => entry === 'search_path=' || entry === 'search_path=""');
+}
+
+function parseCatalogJsonArray(value: unknown): unknown[] {
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'string') throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(value) as unknown;
+    } catch {
+        throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
+    }
+    if (!Array.isArray(parsed)) throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
+    return parsed;
+}
+
+function parseRawPolicyDetail(value: unknown): Supabase22CatalogPolicyDetail {
+    const row = parseCatalogRow(value, ['policy_name'], [
+        'command', 'roles', 'using_expression', 'check_expression', 'permissive',
+    ]);
+    if (row.roles !== undefined) {
+        const roles = row.roles === null ? [] : parseCatalogJsonArray(row.roles);
+        row.roles = roles;
+    }
+    return parseCatalogPolicyDetail({
+        policyName: row.policy_name,
+        ...(row.command === undefined ? {} : { command: row.command }),
+        ...(row.roles === undefined ? {} : { roles: row.roles }),
+        ...(row.using_expression === undefined ? {} : { usingExpression: row.using_expression }),
+        ...(row.check_expression === undefined ? {} : { checkExpression: row.check_expression }),
+        ...(row.permissive === undefined ? {} : { permissive: row.permissive }),
+    });
+}
+
+function parseRawPolicyDetailFromRow(
+    row: Record<string, unknown>,
+): Supabase22CatalogPolicyDetail {
+    return parseRawPolicyDetail({
+        policy_name: row.policy_name,
+        ...(row.command === undefined ? {} : { command: row.command }),
+        ...(row.roles === undefined ? {} : { roles: row.roles }),
+        ...(row.using_expression === undefined ? {} : {
+            using_expression: row.using_expression,
+        }),
+        ...(row.check_expression === undefined ? {} : {
+            check_expression: row.check_expression,
+        }),
+        ...(row.permissive === undefined ? {} : { permissive: row.permissive }),
+    });
+}
+
+const DEPENDENCY_DETAIL_ROW_KEYS = [
+    'dependent_object', 'referenced_object', 'dependency_type', 'class_id', 'ref_class_id',
+    'object_sub_id', 'ref_object_sub_id', 'resolved', 'allowed',
+] as const;
+
+function parseRawDependencyDetail(value: unknown): Supabase22CatalogDependencyDetail {
+    const row = parseCatalogRow(value, [...DEPENDENCY_DETAIL_ROW_KEYS]);
+    return parseCatalogDependencyDetail({
+        dependentObject: row.dependent_object,
+        referencedObject: row.referenced_object,
+        dependencyType: row.dependency_type,
+        classId: row.class_id,
+        refClassId: row.ref_class_id,
+        objectSubId: row.object_sub_id,
+        refObjectSubId: row.ref_object_sub_id,
+        resolved: row.resolved,
+        allowed: row.allowed,
+    });
+}
+
+function parseRawDependencyDetailFromRow(
+    row: Record<string, unknown>,
+): Supabase22CatalogDependencyDetail {
+    return parseRawDependencyDetail({
+        dependent_object: row.dependent_object,
+        referenced_object: row.referenced_object,
+        dependency_type: row.dependency_type,
+        class_id: row.class_id,
+        ref_class_id: row.ref_class_id,
+        object_sub_id: row.object_sub_id,
+        ref_object_sub_id: row.ref_object_sub_id,
+        resolved: row.resolved,
+        allowed: row.allowed,
+    });
+}
+
+function dependencyDetailSortKey(detail: Supabase22CatalogDependencyDetail): string {
+    return [
+        detail.dependentObject,
+        detail.referencedObject,
+        detail.dependencyType,
+        detail.classId,
+        detail.refClassId,
+        String(detail.objectSubId),
+        String(detail.refObjectSubId),
+        String(detail.resolved),
+        String(detail.allowed),
+    ].join('\u0000');
+}
+
+function policyDetailSortKey(detail: Supabase22CatalogPolicyDetail): string {
+    return detail.policyName;
+}
+
+function aggregateCatalogDependencies(
+    rows: readonly Supabase22CatalogDependency[],
+): Supabase22CatalogDependency[] {
+    const grouped = new Map<string, Supabase22CatalogDependency>();
+    for (const row of rows) {
+        const key = comparableCatalogObjectName(row.objectName) || row.objectName;
+        const previous = grouped.get(key);
+        if (!previous) {
+            grouped.set(key, {
+                objectName: row.objectName,
+                resolved: row.resolved,
+                allowed: row.allowed,
+                details: [...(row.details ?? [])],
+            });
+            continue;
+        }
+        grouped.set(key, {
+            objectName: previous.objectName,
+            resolved: previous.resolved && row.resolved,
+            allowed: previous.allowed && row.allowed,
+            details: [
+                ...(previous.details ?? []),
+                ...(row.details ?? []),
+            ],
+        });
+    }
+    return [...grouped.values()]
+        .map(row => ({
+            ...row,
+            details: [...(row.details ?? [])].sort((left, right) =>
+                dependencyDetailSortKey(left).localeCompare(dependencyDetailSortKey(right))),
+        }))
+        .sort((left, right) => left.objectName.localeCompare(right.objectName));
+}
+
+function aggregateCatalogPolicies(
+    rows: readonly Supabase22CatalogPolicy[],
+): Supabase22CatalogPolicy[] {
+    const grouped = new Map<string, Supabase22CatalogPolicy>();
+    for (const row of rows) {
+        const key = comparableCatalogObjectName(row.tableName) || row.tableName;
+        const previous = grouped.get(key);
+        if (!previous) {
+            grouped.set(key, {
+                tableName: row.tableName,
+                enabled: row.enabled,
+                details: [...(row.details ?? [])],
+            });
+            continue;
+        }
+        grouped.set(key, {
+            tableName: previous.tableName,
+            enabled: previous.enabled && row.enabled,
+            details: [
+                ...(previous.details ?? []),
+                ...(row.details ?? []),
+            ],
+        });
+    }
+    return [...grouped.values()]
+        .map(row => ({
+            ...row,
+            details: [...(row.details ?? [])].sort((left, right) =>
+                policyDetailSortKey(left).localeCompare(policyDetailSortKey(right))),
+        }))
+        .sort((left, right) => left.tableName.localeCompare(right.tableName));
 }
 
 /**
@@ -1080,14 +1529,34 @@ export function adaptSupabase22CatalogRows(
     });
 
     const policies = rows.policies.map(raw => {
-        const row = parseCatalogRow(raw, ['schema_name', 'table_name', 'policy_name', 'enabled']);
+        const row = parseCatalogRow(raw, ['schema_name', 'table_name', 'enabled'], [
+            'policy_name', 'command', 'roles', 'using_expression', 'check_expression',
+            'permissive', 'policy_details',
+        ]);
         if (row.schema_name !== 'public'
             || !safeCatalogName(row.table_name)
-            || !safeCatalogName(row.policy_name)
             || typeof row.enabled !== 'boolean') {
             throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
         }
-        return { tableName: row.table_name, enabled: row.enabled };
+        const hasDetails = row.policy_details !== undefined;
+        const hasFlatDetail = row.policy_name !== undefined
+            || row.command !== undefined
+            || row.roles !== undefined
+            || row.using_expression !== undefined
+            || row.check_expression !== undefined
+            || row.permissive !== undefined;
+        if (hasDetails && hasFlatDetail) {
+            throw new Error('SUPABASE_22_CATALOG_ROW_AMBIGUOUS');
+        }
+        const details = hasDetails
+            ? row.policy_details === null ? [] : parseCatalogJsonArray(row.policy_details)
+                .map(parseRawPolicyDetail)
+            : row.policy_name === undefined ? [] : [parseRawPolicyDetailFromRow(row)];
+        return {
+            tableName: row.table_name,
+            enabled: row.enabled,
+            details,
+        };
     });
 
     const acls = rows.acls.map(raw => {
@@ -1139,17 +1608,36 @@ export function adaptSupabase22CatalogRows(
         };
     });
 
-    const parseDependencyRows = (queryName: keyof Supabase22CatalogRows) => rows[queryName].map(raw => {
-        const row = parseCatalogRow(raw, ['object_name', 'resolved', 'allowed']);
+    const parseDependencyRows = (
+        queryName: keyof Supabase22CatalogRows,
+    ): Supabase22CatalogDependency[] => rows[queryName].map(raw => {
+        const isDependency = queryName === 'dependencies';
+        const row = parseCatalogRow(raw, ['object_name', 'resolved', 'allowed'], isDependency ? [
+            'dependency_details', 'dependent_object', 'referenced_object', 'dependency_type',
+            'class_id', 'ref_class_id', 'object_sub_id', 'ref_object_sub_id',
+        ] : []);
         if (!safeCatalogName(row.object_name)
             || typeof row.resolved !== 'boolean'
             || typeof row.allowed !== 'boolean') {
             throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
         }
+        const detailKeysPresent = DEPENDENCY_DETAIL_ROW_KEYS.some(key =>
+            Object.prototype.hasOwnProperty.call(row, key));
+        const hasDetails = row.dependency_details !== undefined;
+        if (hasDetails && detailKeysPresent) {
+            throw new Error('SUPABASE_22_CATALOG_ROW_AMBIGUOUS');
+        }
+        const details = !isDependency ? undefined : hasDetails
+            ? row.dependency_details === null ? [] : parseCatalogJsonArray(row.dependency_details)
+                .map(parseRawDependencyDetail)
+            : detailKeysPresent
+                ? [parseRawDependencyDetailFromRow(row)]
+                : [];
         return {
             objectName: row.object_name,
             resolved: row.resolved,
             allowed: row.allowed,
+            ...(details === undefined ? {} : { details }),
         };
     });
 
@@ -1171,7 +1659,7 @@ export function adaptSupabase22CatalogRows(
     return {
         tables,
         acls,
-        dependencies: parseDependencyRows('dependencies'),
+        dependencies: aggregateCatalogDependencies(parseDependencyRows('dependencies')),
         foreignKeys: parseDependencyRows('foreignKeys'),
         securityDefinerFunctions: routines,
         migrationHistory,
@@ -1181,7 +1669,7 @@ export function adaptSupabase22CatalogRows(
         partitions: parseDependencyRows('partitions'),
         publications: parseDependencyRows('publications'),
         triggers: parseDependencyRows('triggers'),
-        policies,
+        policies: aggregateCatalogPolicies(policies),
         metadataAvailability: {
             catalog: true,
             acl: true,
@@ -1419,6 +1907,8 @@ export function evaluateSupabase22RollbackEvidence(
 const TRAFFIC_FAMILY_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
 const MAX_TRAFFIC_FAMILIES = 64;
 const MAX_TRAFFIC_ROWS = 2048;
+const MAX_TRAFFIC_COUNTER = MAX_TRAFFIC_ROWS;
+const MAX_TOTAL_TRAFFIC_COUNTER = MAX_TRAFFIC_FAMILIES * MAX_TRAFFIC_COUNTER;
 const TRAFFIC_OBJECT_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/;
 
 /**
@@ -1443,6 +1933,7 @@ function parseTrafficEvidence(value: unknown): Supabase22RollbackEvidenceInput {
         || !Object.prototype.hasOwnProperty.call(value, 'observationEvidence')
         || !Number.isSafeInteger(value.activeLegacyWriterCount)
         || (value.activeLegacyWriterCount as number) < 0
+        || (value.activeLegacyWriterCount as number) > MAX_TOTAL_TRAFFIC_COUNTER
         || !isRecord(value.observationEvidence)
         || Object.keys(value.observationEvidence).length !== 3
         || value.observationEvidence.source !== 'bounded-read-only'
@@ -1501,9 +1992,11 @@ function parseTrafficEvidence(value: unknown): Supabase22RollbackEvidenceInput {
         if (typeof measurement.retryQueueCount !== 'number'
             || !Number.isSafeInteger(measurement.retryQueueCount)
             || measurement.retryQueueCount < 0
+            || measurement.retryQueueCount > MAX_TRAFFIC_COUNTER
             || typeof measurement.activeLegacyWriterCount !== 'number'
             || !Number.isSafeInteger(measurement.activeLegacyWriterCount)
-            || measurement.activeLegacyWriterCount < 0) {
+            || measurement.activeLegacyWriterCount < 0
+            || measurement.activeLegacyWriterCount > MAX_TRAFFIC_COUNTER) {
             return true;
         }
         sanitizedFamilies.push({

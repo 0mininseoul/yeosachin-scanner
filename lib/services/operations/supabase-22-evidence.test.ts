@@ -261,4 +261,19 @@ describe('Supabase 22 evidence gate', () => {
             'no-activation-or-canary',
         ]));
     });
+
+    it('refuses an unbounded activation assertion with extra fields', () => {
+        const result = evaluateSupabase22Gate(completeInput({
+            noActivationEvidence: {
+                source: 'independent-read-only',
+                verified: true,
+                admissionActivated: false,
+                realCanaryStarted: false,
+                observationCount: Number.MAX_SAFE_INTEGER,
+            } as never,
+        }));
+
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toContain('no-activation-or-canary');
+    });
 });

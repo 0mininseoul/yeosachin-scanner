@@ -2,6 +2,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
     SUPABASE_22_CATALOG_ROW_LIMIT,
+    adaptSupabase22CatalogRows,
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
@@ -204,5 +205,114 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
         expect(evidence.aclClean).toBe(false);
         expect(evidence.clean).toBe(false);
+    });
+
+    it('aggregates policy and pg_depend rows into deterministic one-row-per-object evidence', () => {
+        const snapshot = adaptSupabase22CatalogRows({
+            tables: [
+                {
+                    relname: 'users',
+                    relkind: 'r',
+                    relpersistence: 'p',
+                    relrowsecurity: true,
+                    relforcerowsecurity: true,
+                },
+            ],
+            policies: [
+                {
+                    schema_name: 'public',
+                    table_name: 'users',
+                    policy_name: 'z-last',
+                    enabled: true,
+                    command: 'r',
+                    roles: ['authenticated'],
+                    using_expression: '(owner_id = auth.uid())',
+                    check_expression: null,
+                    permissive: true,
+                },
+                {
+                    schema_name: 'public',
+                    table_name: 'users',
+                    policy_name: 'a-first',
+                    enabled: true,
+                    command: 'w',
+                    roles: ['authenticated'],
+                    using_expression: null,
+                    check_expression: '(owner_id = auth.uid())',
+                    permissive: true,
+                },
+            ],
+            acls: [],
+            routines: [],
+            dependencies: [
+                {
+                    object_name: 'public.users',
+                    dependent_object: 'public.users',
+                    referenced_object: 'public.users_id_seq',
+                    dependency_type: 'n',
+                    class_id: 'pg_class',
+                    ref_class_id: 'pg_class',
+                    object_sub_id: 0,
+                    ref_object_sub_id: 0,
+                    resolved: true,
+                    allowed: true,
+                },
+                {
+                    object_name: 'public.users',
+                    dependent_object: 'public.users',
+                    referenced_object: 'public.auth_uid',
+                    dependency_type: 'n',
+                    class_id: 'pg_policy',
+                    ref_class_id: 'pg_proc',
+                    object_sub_id: 0,
+                    ref_object_sub_id: 0,
+                    resolved: true,
+                    allowed: true,
+                },
+            ],
+            foreignKeys: [],
+            triggers: [],
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            migrationHistory: [],
+            legacyWriters: [],
+        });
+
+        expect(snapshot.policies).toHaveLength(1);
+        expect(snapshot.policies[0]).toMatchObject({
+            tableName: 'users',
+            enabled: true,
+            details: [
+                {
+                    policyName: 'a-first',
+                    command: 'w',
+                    roles: ['authenticated'],
+                    usingExpression: null,
+                    checkExpression: '(owner_id = auth.uid())',
+                    permissive: true,
+                },
+                {
+                    policyName: 'z-last',
+                    command: 'r',
+                    roles: ['authenticated'],
+                    usingExpression: '(owner_id = auth.uid())',
+                    checkExpression: null,
+                    permissive: true,
+                },
+            ],
+        });
+        expect(snapshot.dependencies).toHaveLength(1);
+        expect(snapshot.dependencies[0]?.details).toHaveLength(2);
+        expect(snapshot.dependencies[0]?.details?.map(detail => detail.referencedObject))
+            .toEqual(['public.auth_uid', 'public.users_id_seq']);
+    });
+
+    it('uses an observed activity boolean for legacy-writer rows instead of a null placeholder', () => {
+        const query = SUPABASE_22_CATALOG_QUERIES.legacyWriters;
+        expect(query).toContain('pg_catalog.pg_stat_activity');
+        expect(query).toContain('EXISTS');
+        expect(query).not.toContain('NULL::boolean');
     });
 });

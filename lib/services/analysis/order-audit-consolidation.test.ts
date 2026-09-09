@@ -171,6 +171,21 @@ describe('order-audit consolidation parity tooling', () => {
         }
     });
 
+    it('rejects phone values under aggregate-safe keys without retaining the value', () => {
+        for (const value of ['010-1234-5678', '01012345678', '+82 10 1234 5678', '+821012345678']) {
+            let error: unknown;
+            try {
+                assertPiiSafeConsolidationOutput({ value });
+            } catch (caught) {
+                error = caught;
+            }
+            expect(error).toBeInstanceOf(Error);
+            expect(String(error)).not.toContain(value);
+            expect(() => assertPiiSafeConsolidationOutput({ value }))
+                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+        }
+    });
+
     it('does not record a zero-payment evidence set as disposition proof', () => {
         const readiness = evaluateConsolidationReadiness({
             genuineCompletedBundleCount: 1,

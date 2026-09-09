@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    parseSupabase22IndependentArchiveProof,
     parseSupabase22ArchiveRestoreCliArgs,
     runSupabase22ArchiveRestoreCli,
     type Supabase22ArchiveRestoreCliDependencies,
@@ -251,6 +252,19 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
             retentionClass: 'standard',
         });
         expect(result.report.checksumMatch).toBe(true);
+    });
+
+    it('rejects an independently supplied archive proof outside the bounded selection', () => {
+        expect(() => parseSupabase22IndependentArchiveProof({
+            source: 'independent-read-only',
+            selectedCount: 21,
+            archiveChecksum: HASH,
+            restoreCount: 1,
+            restoreChecksum: HASH,
+            encryptionAlgorithm: 'AES-256-GCM',
+            retentionClass: 'standard',
+            isolatedRestoreVerified: true,
+        })).toThrow('SUPABASE_22_INDEPENDENT_ARCHIVE_PROOF_INVALID');
     });
 
     it('compares an encrypted isolated restore by count and aggregate checksum', async () => {

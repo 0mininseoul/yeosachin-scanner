@@ -185,6 +185,35 @@ describe('Supabase 22 rollback and traffic evidence', () => {
         })).rejects.toThrow('SUPABASE_22_TRAFFIC_PAYLOAD_INVALID');
     });
 
+    it('rejects traffic counters that exceed the bounded observation envelope', async () => {
+        await expect(collectSupabase22RollbackEvidence({
+            readBoundedTrafficEvidence: async () => ({
+                measurements: [{
+                    family: 'analysis',
+                    objectName: 'analysis-jobs',
+                    observedAt: '2026-09-09T12:00:00.000Z',
+                    sampleCount: 1,
+                    sampleLimit: 10,
+                    truncated: false,
+                    serverOnly: true,
+                    legacyReaderAvailable: true,
+                    canonicalReaderEnabled: true,
+                    canonicalWriterEnabled: true,
+                    shadowMismatch: false,
+                    retryQueueCount: Number.MAX_SAFE_INTEGER,
+                    retryQueueBounded: true,
+                    activeLegacyWriterCount: 0,
+                }],
+                activeLegacyWriterCount: 0,
+                observationEvidence: {
+                    source: 'bounded-read-only',
+                    closed: true,
+                    closedAt: '2026-09-09T12:00:00.000Z',
+                },
+            }),
+        })).rejects.toThrow('SUPABASE_22_TRAFFIC_PAYLOAD_INVALID');
+    });
+
     it('requires independent provider evidence and a disposition for every pending order', () => {
         expect(isPaymentPendingDispositionRecorded({
             pendingOrderCount: 1,
