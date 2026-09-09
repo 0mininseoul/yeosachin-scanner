@@ -139,6 +139,15 @@ const canonicalReadFlags: Record<CanonicalFamily, string> = {
     maintenance: 'COMMERCE_CANONICAL_MAINTENANCE_READ',
 };
 
+export function rollbackCanonicalReadFlags(
+    environment: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+    return Object.fromEntries([
+        ...Object.entries(environment),
+        ...Object.values(canonicalReadFlags).map(flag => [flag, 'false']),
+    ]);
+}
+
 export function isCanonicalFamilyReadEnabled(
     family: CanonicalFamily,
     environment: Record<string, string | undefined> = process.env,

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
     createCanonicalOperationsStore,
     isCanonicalFamilyReadEnabled,
+    rollbackCanonicalReadFlags,
 } from './canonical-operations-store';
 
 function migrationSql(): string {
@@ -103,5 +104,22 @@ describe('canonical operations store', () => {
         expect(isCanonicalFamilyReadEnabled('maintenance', {
             COMMERCE_CANONICAL_MAINTENANCE_READ: 'TRUE',
         })).toBe(false);
+    });
+
+    it('provides a fail-closed rollback environment for every family read flag', () => {
+        const rolledBack = rollbackCanonicalReadFlags({
+            COMMERCE_CANONICAL_PAYMENT_READ: 'true',
+            COMMERCE_CANONICAL_FULFILLMENT_READ: 'true',
+            COMMERCE_CANONICAL_NOTIFICATION_READ: 'true',
+            COMMERCE_CANONICAL_ACCOUNT_READ: 'true',
+            COMMERCE_CANONICAL_CONFIG_READ: 'true',
+            COMMERCE_CANONICAL_LEASE_READ: 'true',
+            COMMERCE_CANONICAL_MAINTENANCE_READ: 'true',
+        });
+        expect(Object.values(rolledBack)).toEqual(expect.arrayContaining([
+            'false',
+        ]));
+        expect(isCanonicalFamilyReadEnabled('payment', rolledBack)).toBe(false);
+        expect(isCanonicalFamilyReadEnabled('maintenance', rolledBack)).toBe(false);
     });
 });
