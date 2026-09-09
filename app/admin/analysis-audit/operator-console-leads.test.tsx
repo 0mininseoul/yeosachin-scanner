@@ -53,6 +53,40 @@ function setNativeValue(element: HTMLInputElement | HTMLSelectElement, value: st
 }
 
 describe('operator console landing Leads section', () => {
+    it('clears target rows and count while an excluded request is pending', async () => {
+        let releaseExcluded: ((response: Response) => void) | undefined;
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = new URL(String(input), 'http://localhost');
+            if (url.pathname === '/api/admin/apify-accounts') return Promise.resolve(jsonResponse({ inventory: [] }));
+            if (url.pathname === '/api/admin/order-audit') return Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            if (url.pathname === '/api/admin/landing-leads') {
+                if (url.searchParams.get('context') === 'excluded') {
+                    return new Promise<Response>(resolve => { releaseExcluded = resolve; });
+                }
+                return Promise.resolve(jsonResponse({ rows: [row], nextCursor: 'target-cursor' }));
+            }
+            return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        renderWorkbench();
+        await settle();
+
+        const leadsPanel = container!.querySelector('[data-testid="landing-leads-panel"]')!;
+        expect(leadsPanel.textContent).toContain('@target.account');
+
+        const contextExcluded = leadsPanel.querySelector('[data-landing-lead-context="excluded"]') as HTMLButtonElement;
+        await act(async () => contextExcluded.click());
+
+        expect(leadsPanel.textContent).not.toContain('@target.account');
+        expect(leadsPanel.querySelector('.oc-section-meta')?.textContent).toBe('확인 중');
+        expect(leadsPanel.textContent).toContain('리드 목록을 불러오는 중…');
+
+        releaseExcluded!(jsonResponse({ rows: [excludedRow], nextCursor: null }));
+        await settle();
+        expect(leadsPanel.textContent).toContain('@excluded.account');
+        expect(leadsPanel.textContent).not.toContain('@target.account');
+    });
+
     it('renders Target/Excluded tabs, normalized filters, empty-safe rows, and keyset pagination', async () => {
         const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
             const url = new URL(String(input), 'http://localhost');

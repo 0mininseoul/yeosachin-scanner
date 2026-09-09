@@ -506,6 +506,10 @@ function LandingLeadsPanel() {
     const load = useCallback(async (cursor: string | null, append: boolean) => {
         const sequence = requestSequence.current + 1;
         requestSequence.current = sequence;
+        if (!append) {
+            setRows([]);
+            setNextCursor(null);
+        }
         setLoading(true);
         setError(null);
         const params = new URLSearchParams({ context, pageSize: String(PAGE_SIZE) });
