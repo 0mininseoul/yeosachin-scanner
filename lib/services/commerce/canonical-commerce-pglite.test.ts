@@ -45,4 +45,37 @@ describe('commerce canonical SQL smoke contract', () => {
         expect(sql).toContain('CREATE INDEX payment_events_order_recorded_idx');
         expect(sql).toContain('CREATE INDEX maintenance_jobs_recovery_idx');
     });
+
+    it('executes the additive migration against disposable PostgreSQL with only legacy table stubs', async () => {
+        const db = new PGlite();
+        const sql = migrationSql()
+            .replace(/^REVOKE[^;]*;\n?/gm, '')
+            .replace(/^GRANT[^;]*;\n?/gm, '');
+        await db.exec(`
+            CREATE SCHEMA extensions;
+            CREATE FUNCTION extensions.gen_random_uuid()
+            RETURNS uuid
+            LANGUAGE SQL
+            AS 'SELECT pg_catalog.gen_random_uuid()';
+            CREATE TABLE public.users(id uuid PRIMARY KEY);
+            CREATE TABLE public.earlybird_orders(id uuid PRIMARY KEY);
+            CREATE TABLE public.analysis_requests(id uuid PRIMARY KEY);
+        `);
+        await db.exec(sql);
+        const result = await db.query<{ relname: string; relforcerowsecurity: boolean }>(`
+            SELECT c.relname, c.relforcerowsecurity
+            FROM pg_catalog.pg_class AS c
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public'
+              AND c.relname IN (
+                'payment_events', 'fulfillment_jobs', 'notification_outbox',
+                'account_lifecycle', 'system_configuration', 'system_leases',
+                'maintenance_jobs'
+              )
+            ORDER BY c.relname
+        `);
+        expect(result.rows).toHaveLength(7);
+        expect(result.rows.every(row => row.relforcerowsecurity)).toBe(true);
+        await db.close();
+    });
 });
