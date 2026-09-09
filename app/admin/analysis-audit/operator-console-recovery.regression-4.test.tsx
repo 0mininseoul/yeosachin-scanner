@@ -61,8 +61,10 @@ describe('operator console loading and recovery', () => {
     it('distinguishes pending and unavailable attention data, then retries each failed source', async () => {
         const inventoryInitial = deferred<Response>();
         const ordersInitial = deferred<Response>();
+        const leadsInitial = deferred<Response>();
         let inventoryRequests = 0;
         let orderRequests = 0;
+        let leadsRequests = 0;
         const fetchMock = vi.fn((input: RequestInfo | URL) => {
             const url = new URL(String(input), 'http://localhost');
             if (url.pathname === '/api/admin/apify-accounts') {
@@ -77,6 +79,12 @@ describe('operator console loading and recovery', () => {
                     ? ordersInitial.promise
                     : Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
             }
+            if (url.pathname === '/api/admin/landing-leads') {
+                leadsRequests += 1;
+                return leadsRequests === 1
+                    ? leadsInitial.promise
+                    : Promise.resolve(jsonResponse({ rows: [], nextCursor: null }));
+            }
             return Promise.resolve(jsonResponse({ error: 'not found' }, 404));
         });
         vi.stubGlobal('fetch', fetchMock);
@@ -88,15 +96,18 @@ describe('operator console loading and recovery', () => {
 
         const attention = container.querySelector('[aria-labelledby="attention-title"]');
         const orders = container.querySelector('[aria-labelledby="orders-title"]');
+        const leads = container.querySelector('[data-testid="landing-leads-panel"]');
         expect(attention?.textContent).toContain('확인 중');
         expect(attention?.textContent).not.toContain('0건');
         expect(attention?.textContent).not.toContain('확인이 필요한 항목이 없습니다');
         expect(orders?.textContent).toContain('확인 중');
         expect(orders?.textContent).not.toContain('0건 표시');
+        expect(leads?.textContent).toContain('확인 중');
 
         await act(async () => {
             inventoryInitial.resolve(jsonResponse({ error: 'failed' }, 500));
             ordersInitial.resolve(jsonResponse({ error: 'failed' }, 500));
+            leadsInitial.resolve(jsonResponse({ error: 'failed' }, 500));
         });
         await settle();
 
@@ -105,23 +116,29 @@ describe('operator console loading and recovery', () => {
         expect(attention?.textContent).not.toContain('확인이 필요한 항목이 없습니다');
         expect(orders?.textContent).toContain('확인 불가');
         expect(orders?.textContent).not.toContain('0건 표시');
+        expect(leads?.textContent).toContain('확인 불가');
 
         const inventoryRetry = [...container.querySelectorAll('button')]
             .find(button => button.textContent === '계정 다시 시도');
         const ordersRetry = [...container.querySelectorAll('button')]
             .find(button => button.textContent === '주문 다시 시도');
+        const leadsRetry = [...container.querySelectorAll('button')]
+            .find(button => button.textContent === '리드 다시 시도');
         expect(inventoryRetry).toBeDefined();
         expect(ordersRetry).toBeDefined();
+        expect(leadsRetry).toBeDefined();
 
-        await act(async () => inventoryRetry!.click());
-        await settle();
-        await settle();
-        await act(async () => ordersRetry!.click());
+        await act(async () => {
+            inventoryRetry!.click();
+            ordersRetry!.click();
+            leadsRetry!.click();
+        });
         await settle();
         await settle();
 
         expect(inventoryRequests).toBe(2);
         expect(orderRequests).toBe(2);
+        expect(leadsRequests).toBe(2);
         expect([...container.querySelectorAll('[role="alert"]')].map(node => node.textContent)).toEqual([]);
         expect(attention?.textContent).toContain('0건');
         expect(attention?.textContent).toContain('확인이 필요한 항목이 없습니다');
