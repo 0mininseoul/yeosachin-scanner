@@ -8,6 +8,7 @@ import {
     reserveAnonymousPreflightBudget,
 } from './anonymous-preflight';
 import { createAnonymousPreflightClaim } from './anonymous-preflight-claim';
+import { createCaptureToken } from '@/lib/services/landing/landing-lead-journey';
 import {
     buildReadyPreflightSnapshot,
     launchStatusSnapshot,
@@ -52,6 +53,48 @@ describe('anonymous preflight service', () => {
                 p_target_input_hash: 'a'.repeat(64),
             }),
         );
+    });
+
+    it('repairs a missed landing capture at the preflight boundary without forwarding raw identity material', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const capture = createCaptureToken('device-123', env.ANONYMOUS_PREFLIGHT_CLAIM_SECRET);
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                preflight_id: preflightId,
+                expires_at: '2026-08-05T00:30:00.000Z',
+                created: true,
+                preflight_status: 'pending',
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: [{ journey_id: capture.journeyId, created: true }],
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: true, error: null });
+
+        await createAnonymousAnalysisV2Preflight({
+            targetInstagramId: 'target_user',
+            targetInputHash: 'a'.repeat(64),
+            idempotencyKey: 'anonymous-preflight-002',
+            claimToken: claim.token,
+            landingCaptureToken: capture.token,
+            anonymousDeviceId: 'device-123',
+            env,
+        }, { client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } });
+
+        expect(landingRpc).toHaveBeenNthCalledWith(1, 'create_or_replay_landing_lead_capture', expect.objectContaining({
+            p_journey_id: capture.journeyId,
+            p_capture_token_hash: capture.tokenHash,
+            p_anonymous_principal_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }));
+        expect(landingRpc).toHaveBeenNthCalledWith(2, 'bind_landing_lead_journey_to_preflight', {
+            p_journey_id: capture.journeyId,
+            p_source_preflight_id: preflightId,
+        });
+        expect(JSON.stringify(landingRpc.mock.calls)).not.toContain(capture.token);
+        expect(JSON.stringify(landingRpc.mock.calls)).not.toContain('device-123');
     });
 
     it('requires the signed token before reading anonymous status', async () => {

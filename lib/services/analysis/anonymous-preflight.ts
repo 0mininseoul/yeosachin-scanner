@@ -14,6 +14,17 @@ import {
     readAnonymousPreflightClaim,
 } from './anonymous-preflight-claim';
 import { PLAN_PRICING_VERSION } from '@/lib/domain/analysis/plan-catalog';
+import {
+    bindLandingLeadJourneyToPreflight,
+    captureTokenJourneyId,
+    claimLandingLeadJourney,
+    createOrReplayLandingLeadCapture,
+    deriveAnonymousPrincipalHash,
+    hashCaptureToken,
+    landingLeadCaptureSecret,
+    readCaptureToken,
+    type LandingLeadJourneyRpcClient,
+} from '@/lib/services/landing/landing-lead-journey';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -48,6 +59,7 @@ export interface AnonymousPreflightClient {
 
 interface ServiceOptions {
     client?: AnonymousPreflightClient;
+    landingClient?: LandingLeadJourneyRpcClient;
     env?: Record<string, string | undefined>;
 }
 
@@ -158,6 +170,12 @@ export interface CreateAnonymousPreflightInput {
     targetInputHash: string;
     idempotencyKey: string;
     claimToken: string;
+    /** Opaque landing capture token, kept in memory and never persisted raw. */
+    landingCaptureToken?: string;
+    /** Compatibility alias for callers already naming the value captureToken. */
+    captureToken?: string;
+    /** Used only to derive a server-side principal HMAC. */
+    anonymousDeviceId?: string;
     env?: Record<string, string | undefined>;
 }
 
@@ -200,6 +218,39 @@ export async function createAnonymousAnalysisV2Preflight(
     if (error) rpcError(error, 'create');
     const row = rpcRow(data, 'create');
     if (!row) throw new Error('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:create');
+    const landingCaptureToken = input.landingCaptureToken ?? input.captureToken;
+    if (landingCaptureToken) {
+        // Landing capture is deliberately best-effort. A dropped lead request is
+        // repaired at the preflight boundary, but a malformed/temporarily
+        // unavailable capture must never block analysis admission.
+        try {
+            const captureSecret = landingLeadCaptureSecret(env);
+            const parsedCapture = readCaptureToken(landingCaptureToken, captureSecret);
+            if (parsedCapture) {
+                const tokenHash = parsedCapture.tokenHash;
+                const journeyId = captureTokenJourneyId(tokenHash);
+                const landingClient = options.landingClient ?? supabaseAdmin;
+                await createOrReplayLandingLeadCapture(landingClient, {
+                    journeyId,
+                    instagramId: input.targetInstagramId,
+                    inputContext: 'target',
+                    anonymousPrincipalHash: deriveAnonymousPrincipalHash(
+                        input.anonymousDeviceId ?? 'missing-device',
+                        captureSecret,
+                    ),
+                    captureTokenHash: hashCaptureToken(landingCaptureToken, captureSecret),
+                });
+                await bindLandingLeadJourneyToPreflight(
+                    landingClient,
+                    journeyId,
+                    requireUuid(String(row.preflight_id), 'ID'),
+                );
+            }
+        } catch {
+            // A bounded durable preflight already exists; do not turn optional
+            // landing attribution into a user-visible analysis failure.
+        }
+    }
     return {
         preflightId: requireUuid(String(row.preflight_id), 'ID'),
         expiresAt: String(row.expires_at),
@@ -257,6 +308,9 @@ export async function claimAnonymousAnalysisV2Preflight(
         || row.owner_preflight_id === undefined
         ? null
         : requireUuid(String(row.owner_preflight_id), 'OWNER_PREFLIGHT_ID');
+    if (row.claimed && options.landingClient) {
+        await claimLandingLeadJourney(options.landingClient, id, ownerId);
+    }
     return { claimed: row.claimed, ownerPreflightId };
 }
 

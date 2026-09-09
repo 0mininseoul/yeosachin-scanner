@@ -6,6 +6,10 @@ import {
     normalizeLeadInstagramId,
 } from '@/lib/services/leads/contracts';
 import { insertLandingLead } from '@/lib/services/leads/store';
+import {
+    createCaptureToken,
+    deriveAnonymousPrincipalHash,
+} from '@/lib/services/landing/landing-lead-journey';
 
 function errorResponse(status: number, code: string, error: string): NextResponse {
     return NextResponse.json({ code, error }, { status });
@@ -39,9 +43,18 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const attribution = parsed.data.attribution ?? {};
     const userAgent = request.headers.get('user-agent')?.slice(0, 500) || undefined;
+    const deviceId = request.headers.get('x-anonymous-device-id')?.trim()
+        || userAgent
+        || 'missing-device';
+    let capture;
+    try {
+        capture = createCaptureToken(deviceId);
+    } catch {
+        return errorResponse(503, 'LEAD_UNAVAILABLE', '잠시 후 다시 시도해주세요.');
+    }
 
     try {
-        await insertLandingLead({
+        const stored = await insertLandingLead({
             instagramId,
             rawInput: parsed.data.rawInput,
             utmSource: attribution.source,
@@ -51,10 +64,15 @@ export async function POST(request: Request): Promise<NextResponse> {
             utmTerm: attribution.term,
             referrer: parsed.data.referrer,
             userAgent,
+            captureToken: capture.token,
+            journeyId: capture.journeyId,
+            anonymousPrincipalHash: deriveAnonymousPrincipalHash(deviceId),
         });
+        return NextResponse.json({
+            status: 'stored',
+            captureToken: stored && 'captureToken' in stored ? stored.captureToken : capture.token,
+        }, { status: 201 });
     } catch {
         return errorResponse(503, 'LEAD_UNAVAILABLE', '잠시 후 다시 시도해주세요.');
     }
-
-    return NextResponse.json({ status: 'stored' }, { status: 201 });
 }

@@ -73,6 +73,7 @@ import {
     requestClientIp,
 } from '@/lib/services/analysis/anonymous-preflight-claim';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
+import { createCaptureToken } from '@/lib/services/landing/landing-lead-journey';
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
@@ -231,6 +232,8 @@ async function handleAnonymousPOST(
         const deviceValue = request.headers.get('x-anonymous-device-id')?.trim()
             || request.headers.get('user-agent')?.trim()
             || 'missing-device';
+        const landingCaptureToken = request.headers.get('x-landing-lead-capture-token')?.trim()
+            || createCaptureToken(deviceValue, undefined).token;
         const budget = await reserveAnonymousPreflightBudget({
             ipHash: hashAnonymousRateLimitValue(requestClientIp(request), 'ip', env),
             deviceHash: hashAnonymousRateLimitValue(deviceValue, 'device', env),
@@ -254,8 +257,10 @@ async function handleAnonymousPOST(
             targetInputHash,
             idempotencyKey,
             claimToken: claim.token,
+            landingCaptureToken,
+            anonymousDeviceId: deviceValue,
             env,
-        }, { client, env });
+        }, { client, landingClient: supabaseAdmin, env });
         preflightId = created.preflightId;
         if (created.status === 'expired') throw new PreflightExpiredError();
         if (created.status === 'consumed') throw new PreflightConsumedError();

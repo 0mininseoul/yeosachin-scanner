@@ -1,4 +1,11 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import {
+    captureTokenJourneyId,
+    createOrReplayLandingLeadCapture,
+    createOrReplayLandingLeadExclusion,
+    hashCaptureToken,
+    type LandingLeadJourneyClaim,
+} from '@/lib/services/landing/landing-lead-journey';
 
 export class LeadPersistenceError extends Error {
     readonly code = 'LEAD_INSERT_FAILED' as const;
@@ -38,11 +45,60 @@ export type InsertLandingLeadInput = {
     | (LandingLeadAttributionInput & {
         inputContext?: 'target';
         sourcePreflightId?: never;
+        captureToken?: string;
+        anonymousPrincipalHash?: string;
+        journeyId?: string;
     })
     | ExcludedLeadPrivacyBoundary
 );
 
-export async function insertLandingLead(input: InsertLandingLeadInput): Promise<void> {
+export type StoredLandingLeadCapture = Readonly<{
+    status: 'stored';
+    captureToken: string;
+    journeyId: string;
+    created: boolean;
+}>;
+
+export async function insertLandingLead(
+    input: InsertLandingLeadInput,
+): Promise<void | StoredLandingLeadCapture> {
+    if (input.inputContext === 'excluded') {
+        try {
+            await createOrReplayLandingLeadExclusion(
+                supabaseAdmin,
+                input.sourcePreflightId,
+                input.instagramId,
+            );
+            return;
+        } catch (error) {
+            throw new LeadPersistenceError(error instanceof Error ? error.message : 'landing lead exclusion failed');
+        }
+    }
+
+    if (input.captureToken && input.anonymousPrincipalHash) {
+        try {
+            const journeyId = input.journeyId ?? captureTokenJourneyId(hashCaptureToken(input.captureToken));
+            const captured: LandingLeadJourneyClaim = await createOrReplayLandingLeadCapture(
+                supabaseAdmin,
+                {
+                    journeyId,
+                    instagramId: input.instagramId,
+                    inputContext: 'target',
+                    anonymousPrincipalHash: input.anonymousPrincipalHash,
+                    captureTokenHash: hashCaptureToken(input.captureToken),
+                },
+            );
+            return {
+                status: 'stored',
+                captureToken: input.captureToken,
+                journeyId: captured.journeyId,
+                created: captured.created,
+            };
+        } catch (error) {
+            throw new LeadPersistenceError(error instanceof Error ? error.message : 'landing lead capture failed');
+        }
+    }
+
     const { error } = await supabaseAdmin.from('landing_leads').insert({
         instagram_id: input.instagramId,
         input_context: input.inputContext ?? 'target',

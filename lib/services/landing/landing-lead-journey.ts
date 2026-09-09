@@ -84,6 +84,12 @@ function secretFor(env: Record<string, string | undefined> = process.env): strin
     return DEFAULT_LOCAL_SECRET;
 }
 
+export function landingLeadCaptureSecret(
+    env: Record<string, string | undefined> = process.env,
+): string {
+    return secretFor(env);
+}
+
 function digest(domain: string, value: string, secret: string): string {
     return createHmac('sha256', secret)
         .update(`${domain}\0${value}`, 'utf8')

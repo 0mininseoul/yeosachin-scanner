@@ -26,7 +26,10 @@ function request(body: unknown, {
 
 beforeEach(() => {
     mocks.insertLandingLead.mockReset();
-    mocks.insertLandingLead.mockResolvedValue(undefined);
+    mocks.insertLandingLead.mockResolvedValue({
+        status: 'stored',
+        captureToken: 'v1.capture.signature',
+    });
 });
 
 describe('POST /api/leads', () => {
@@ -60,6 +63,10 @@ describe('POST /api/leads', () => {
             referrer: 'https://ref',
         }, { userAgent: 'MyUA' }));
         expect(res.status).toBe(201);
+        await expect(res.json()).resolves.toEqual({
+            status: 'stored',
+            captureToken: 'v1.capture.signature',
+        });
         expect(mocks.insertLandingLead).toHaveBeenCalledWith(expect.objectContaining({
             instagramId: 'suzy_kim.02',
             rawInput: '@Suzy_Kim.02',
@@ -68,6 +75,15 @@ describe('POST /api/leads', () => {
             referrer: 'https://ref',
             userAgent: 'MyUA',
         }));
+    });
+
+    it('never forwards the raw device id to the persistence adapter', async () => {
+        const res = await POST(request({ instagramId: 'suzy' }, {}));
+        expect(res.status).toBe(201);
+        const call = mocks.insertLandingLead.mock.calls[0]?.[0] as Record<string, unknown>;
+        expect(call).not.toHaveProperty('deviceId');
+        expect(call.anonymousPrincipalHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(call.captureToken).toMatch(/^v1\./);
     });
 
     it('returns 503 when persistence fails', async () => {

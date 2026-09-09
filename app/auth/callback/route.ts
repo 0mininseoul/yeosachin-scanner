@@ -27,6 +27,7 @@ import {
     claimAnonymousAnalysisV2Preflight,
     type AnonymousPreflightClient,
 } from '@/lib/services/analysis/anonymous-preflight';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     AUTH_REDIRECT_INTENT_COOKIE,
     readAnonymousPreflightOAuthContinuation,
@@ -255,7 +256,7 @@ async function restoreAnonymousPreflightClaim(
                 preflightId,
                 claimToken,
                 userId,
-                { client },
+                { client, landingClient: supabaseAdmin },
             );
             // Keep the boolean fallback for test/runtime adapters that still
             // expose the pre-migration claim result shape.

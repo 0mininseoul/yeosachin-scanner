@@ -11,6 +11,29 @@ ALTER TABLE public.landing_leads
     ADD COLUMN mapping_source TEXT,
     ADD COLUMN linked_at TIMESTAMPTZ;
 
+-- The original context check predated preflight attribution and rejected a
+-- target row once it was bound to its preflight. Replace only that constraint
+-- with a compatible shape check; no table, row, or function is removed.
+ALTER TABLE public.landing_leads
+    DROP CONSTRAINT landing_leads_context_shape_check;
+
+ALTER TABLE public.landing_leads
+    ADD CONSTRAINT landing_leads_context_shape_check CHECK (
+        (input_context = 'target')
+        OR (
+            input_context = 'excluded'
+            AND source_preflight_id IS NOT NULL
+            AND raw_input IS NULL
+            AND utm_source IS NULL
+            AND utm_medium IS NULL
+            AND utm_campaign IS NULL
+            AND utm_content IS NULL
+            AND utm_term IS NULL
+            AND referrer IS NULL
+            AND user_agent IS NULL
+        )
+    );
+
 ALTER TABLE public.landing_leads
     ADD CONSTRAINT landing_leads_mapping_status_check CHECK (
         mapping_status IN (
@@ -52,6 +75,8 @@ CREATE OR REPLACE FUNCTION public.create_or_replay_landing_lead_capture(
 RETURNS TABLE(journey_id UUID, created BOOLEAN)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
 AS $$
+DECLARE
+    v_existing_journey_id UUID;
 BEGIN
     IF p_input_context NOT IN ('target', 'excluded')
        OR p_instagram_id !~ '^[a-z0-9._]{1,30}$'
@@ -69,7 +94,15 @@ BEGIN
         'anonymous_device', 'capture_v1', pg_catalog.clock_timestamp()
     )
     ON CONFLICT (capture_token_hash) DO NOTHING;
-    RETURN QUERY SELECT p_journey_id, FOUND;
+    IF FOUND THEN
+        RETURN QUERY SELECT p_journey_id, TRUE;
+        RETURN;
+    END IF;
+    SELECT lead.journey_id INTO v_existing_journey_id
+    FROM public.landing_leads AS lead
+    WHERE lead.capture_token_hash = p_capture_token_hash
+    LIMIT 1;
+    RETURN QUERY SELECT v_existing_journey_id, FALSE;
 END;
 $$;
 
@@ -147,7 +180,8 @@ BEGIN
            pg_catalog.bool_or(auth_user_id IS NOT NULL AND auth_user_id <> p_user_id)
     INTO v_has_rows, v_conflict
     FROM public.landing_leads
-    WHERE (journey_id = p_journey_id OR source_preflight_id = p_journey_id);
+    WHERE (journey_id = p_journey_id OR source_preflight_id = p_journey_id)
+      AND mapping_status <> 'unlinked_after_deletion';
     IF NOT v_has_rows THEN
         RETURN FALSE;
     END IF;
