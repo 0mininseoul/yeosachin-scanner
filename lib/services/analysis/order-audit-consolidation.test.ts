@@ -161,6 +161,50 @@ describe('order-audit consolidation parity tooling', () => {
         })).not.toThrow();
     });
 
+    it('rejects redacted and equivalent email or phone key variants', () => {
+        for (const key of [
+            'redacted_email', 'maskedPhone', 'email_hash', 'phone_digest',
+            'normalized_email', 'mobile_number', 'contact_sha256', 'mailAddress',
+        ]) {
+            expect(() => assertPiiSafeConsolidationOutput({ [key]: 'redacted' }))
+                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+        }
+    });
+
+    it('does not record a zero-payment evidence set as disposition proof', () => {
+        const readiness = evaluateConsolidationReadiness({
+            genuineCompletedBundleCount: 1,
+            perOrderParityCount: 1,
+            aggregateChecksumsMatch: true,
+            archiveManifestVerified: true,
+            restoreDrillVerified: true,
+            rollbackEvidenceVerified: true,
+            dependencyInventoryComplete: true,
+            separateApprovalGranted: true,
+            observationWindowClosed: true,
+            publicTableCount: 22,
+            canonicalSetMatch: true,
+            catalogDependencyClean: true,
+            paymentPendingDispositionRecorded: true,
+            noActivationOrCanary: true,
+            archiveRestoreChecksumMatch: true,
+            paymentPendingEvidence: {
+                pendingOrderCount: 0,
+                independentlyEvidencedCount: 0,
+                dispositionRecordedCount: 0,
+            },
+            noActivationEvidence: {
+                source: 'independent-read-only',
+                verified: true,
+                admissionActivated: false,
+                realCanaryStarted: false,
+            },
+        });
+
+        expect(readiness.status).toBe('blocked');
+        expect(readiness.missingGates).toContain('payment-pending-disposition');
+    });
+
     it('keeps archive scaffolding reversible and marks restore verification as not run', () => {
         const manifest = createArchiveManifest({
             selectedCount: 0,

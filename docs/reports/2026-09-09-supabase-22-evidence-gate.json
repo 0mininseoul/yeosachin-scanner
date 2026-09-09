@@ -20,7 +20,7 @@
   "canonicalSetMatch": false,
   "catalogDependencyClean": false,
   "paymentPendingDispositionRecorded": false,
-  "noActivationOrCanary": true,
+  "noActivationOrCanary": false,
   "archiveRestoreChecksumMatch": false,
   "destructiveOperations": "refused",
   "missingGates": [

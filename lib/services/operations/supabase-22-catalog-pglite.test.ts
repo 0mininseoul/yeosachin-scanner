@@ -1,6 +1,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+    SUPABASE_22_CATALOG_ROW_LIMIT,
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
@@ -43,49 +44,42 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 const result = await db.query<{ relname: string }>(sql);
                 expect(result.rows.map(row => row.relname)).toEqual(['analysis_requests', 'users']);
             }
-            return {
+            const queryName = Object.entries(SUPABASE_22_CATALOG_QUERIES)
+                .find(([, candidate]) => candidate === sql)?.[0];
+            const rows: Record<string, readonly unknown[]> = {
                 tables: [
                     {
-                        name: 'users',
+                        relname: 'users',
                         relkind: 'r',
-                        rlsEnabled: true,
-                        forceRls: false,
+                        relpersistence: 'p',
+                        relrowsecurity: true,
+                        relforcerowsecurity: false,
                     },
                     {
-                        name: 'analysis_requests',
+                        relname: 'analysis_requests',
                         relkind: 'r',
-                        rlsEnabled: true,
-                        forceRls: false,
+                        relpersistence: 'p',
+                        relrowsecurity: true,
+                        relforcerowsecurity: false,
                     },
                 ],
-                acls: [{ objectName: 'analysis_requests', resolved: true, serviceRoleOnly: true }],
-                dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
-                foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
-                securityDefinerFunctions: [],
-                migrationHistory: [{ version: '20260905000000' }],
-                legacyWriters: [],
+                policies: [],
+                acls: [],
+                routines: [],
+                dependencies: [],
+                foreignKeys: [],
+                triggers: [],
                 views: [],
                 sequences: [],
                 partitions: [],
                 publications: [],
-                triggers: [],
-                policies: [],
-                metadataAvailability: {
-                    catalog: true,
-                    acl: true,
-                    routine: true,
-                    trigger: true,
-                    dependency: true,
-                    migration: true,
-                    rls: true,
-                    view: true,
-                    publication: true,
-                    sequence: true,
-                    partition: true,
-                    foreignKey: true,
-                    legacyWriter: true,
-                },
+                migrationHistory: [{ version: '20260905000000', pending: false }],
+                legacyWriters: [
+                    { object_name: 'public.users', active: false },
+                    { object_name: 'public.analysis_requests', active: false },
+                ],
             };
+            return { rows: rows[queryName ?? ''] ?? [], rowCount: rows[queryName ?? '']?.length ?? 0 };
         };
 
         const evidence = await collectSupabase22CatalogEvidence({ query });
@@ -97,8 +91,21 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(evidence.missingTables).toEqual(CANONICAL_TABLES.filter(
             table => !['analysis_requests', 'users'].includes(table),
         ));
-        expect(evidence.dependencyClean).toBe(true);
+        expect(evidence.dependencyClean).toBe(false);
         expect(evidence.rlsClean).toBe(true);
+    });
+
+    it('rejects an ambiguous/truncated catalog result at the bounded adapter boundary', async () => {
+        await expect(collectSupabase22CatalogEvidence({
+            query: async sql => {
+                const queryName = Object.entries(SUPABASE_22_CATALOG_QUERIES)
+                    .find(([, candidate]) => candidate === sql)?.[0];
+                if (queryName === 'tables') {
+                    return { rows: [], rowCount: SUPABASE_22_CATALOG_ROW_LIMIT + 1 };
+                }
+                return { rows: [], rowCount: 0 };
+            },
+        })).rejects.toThrow('SUPABASE_22_CATALOG_RESULT_AMBIGUOUS');
     });
 
     it('fails closed when any catalog evidence family is absent', () => {

@@ -121,6 +121,138 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
         expect(JSON.stringify(writeStdout.mock.calls)).not.toContain('do-not-emit');
     });
 
+    it('never upgrades a fabricated sanitized ready manifest to readiness', async () => {
+        const writeStdout = vi.fn();
+        const dependencies: Supabase22ArchiveRestoreCliDependencies = {
+            readManifest: vi.fn(async () => ({
+                schemaVersion: 'supabase-22-evidence-v1',
+                status: 'ready' as const,
+                publicTableCount: 22,
+                canonicalTables: [
+                    'account_lifecycle', 'analysis_artifacts', 'analysis_audit_bundles',
+                    'analysis_cache', 'analysis_costs', 'analysis_events', 'analysis_jobs',
+                    'analysis_preflights', 'analysis_provider_runs', 'analysis_requests',
+                    'analysis_results', 'earlybird_orders', 'earlybird_waitlist',
+                    'fulfillment_jobs', 'landing_leads', 'maintenance_jobs',
+                    'notification_outbox', 'payment_events', 'result_feedback',
+                    'system_configuration', 'system_leases', 'users',
+                ],
+                unexpectedTables: [],
+                missingTables: [],
+                dependencyClean: true,
+                migrationHistoryClean: true,
+                genuineCompletedBundleCount: 1,
+                parityStatus: 'ready' as const,
+                archiveManifest: {
+                    verified: true,
+                    aggregateChecksum: HASH,
+                    restoreStatus: 'verified' as const,
+                    manifest: {
+                        schemaVersion: 'supabase-22-archive-manifest-v1',
+                        selectedCount: 1,
+                        aggregateChecksum: HASH,
+                        encrypted: true,
+                        encryption: { algorithm: 'AES-256-GCM', verified: true },
+                        retentionClass: 'permanent',
+                    },
+                    restoreManifest: {
+                        schemaVersion: 'supabase-22-restore-manifest-v1',
+                        selectedCount: 1,
+                        aggregateChecksum: HASH,
+                        encrypted: true,
+                        encryption: { algorithm: 'AES-256-GCM', verified: true },
+                        retentionClass: 'permanent',
+                    },
+                },
+                rollbackEvidenceVerified: true,
+                observationWindowClosed: true,
+                ownerApprovalRecorded: true,
+                canonicalSetMatch: true,
+                catalogDependencyClean: true,
+                paymentPendingDispositionRecorded: true,
+                noActivationOrCanary: true,
+                archiveRestoreChecksumMatch: true,
+                destructiveOperations: 'refused' as const,
+                missingGates: [],
+            })),
+            readRestoreManifest: vi.fn(),
+            readSnapshot: vi.fn(),
+            writeStdout,
+        };
+
+        const result = await runSupabase22ArchiveRestoreCli(
+            ['--report-only', '--manifest', 'fabricated.json'],
+            dependencies,
+        );
+
+        expect(result.exitCode).toBe(1);
+        expect(result.report.status).toBe('blocked');
+    });
+
+    it('binds request-id archive output to an independent read-only proof', async () => {
+        const writeStdout = vi.fn();
+        const readArchiveEvidence = vi.fn(async (
+            _requestIds: readonly string[],
+            expectedChecksum: string | null,
+        ) => ({
+            source: 'independent-read-only',
+            selectedCount: 1,
+            archiveChecksum: expectedChecksum ?? HASH,
+            restoreCount: 1,
+            restoreChecksum: expectedChecksum ?? HASH,
+            encryptionAlgorithm: 'AES-256-GCM',
+            retentionClass: 'standard',
+            isolatedRestoreVerified: true,
+        }));
+        const dependencies: Supabase22ArchiveRestoreCliDependencies = {
+            readSnapshot: vi.fn(async () => ({
+                request: { completed: true, productionOrder: true, sourceDataPresent: true },
+                bundle: { present: true, completeness: 'complete' as const, costStatus: 'complete' as const, version: 1 },
+                recovery: { present: true, completed: true },
+                sections: {
+                    relationships: {
+                        sourceCount: 1, bundleCount: 1, sourceChecksum: HASH,
+                        bundleChecksum: HASH, sourceComplete: true, bundleComplete: true,
+                    },
+                    targetEvidence: {
+                        sourceCount: 1, bundleCount: 1, sourceChecksum: HASH,
+                        bundleChecksum: HASH, sourceComplete: true, bundleComplete: true,
+                    },
+                    candidates: {
+                        sourceCount: 1, bundleCount: 1, sourceChecksum: HASH,
+                        bundleChecksum: HASH, sourceComplete: true, bundleComplete: true,
+                    },
+                    risk: {
+                        sourceCount: 1, bundleCount: 1, sourceChecksum: HASH,
+                        bundleChecksum: HASH, sourceComplete: true, bundleComplete: true,
+                    },
+                    costLedger: {
+                        sourceCount: 1, bundleCount: 1, sourceChecksum: HASH,
+                        bundleChecksum: HASH, sourceComplete: true, bundleComplete: true,
+                    },
+                },
+            })),
+            readManifest: vi.fn(),
+            readRestoreManifest: vi.fn(),
+            readArchiveEvidence,
+            writeStdout,
+        };
+
+        const result = await runSupabase22ArchiveRestoreCli([
+            '--report-only', '--request-id', REQUEST_ID, '--archive-manifest',
+        ], dependencies);
+
+        expect(readArchiveEvidence).toHaveBeenCalledWith([REQUEST_ID], expect.any(String));
+        expect(result.exitCode).toBe(1);
+        expect(result.report.status).toBe('blocked');
+        expect(result.report.archiveManifest).toMatchObject({
+            verified: true,
+            encrypted: true,
+            retentionClass: 'standard',
+        });
+        expect(result.report.checksumMatch).toBe(true);
+    });
+
     it('compares an encrypted isolated restore by count and aggregate checksum', async () => {
         const writeStdout = vi.fn();
         const dependencies: Supabase22ArchiveRestoreCliDependencies = {
@@ -207,12 +339,9 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
             '--report-only', '--manifest', 'evidence.json', '--restore-path', 'restored.json',
         ], dependencies);
 
-        expect(result.exitCode).toBe(0);
+        expect(result.exitCode).toBe(1);
         expect(result.report).toMatchObject({
-            status: 'ready',
-            restoreStatus: 'verified',
-            checksumMatch: true,
-            archiveManifest: { encrypted: true, retentionClass: 'permanent' },
+            status: 'blocked',
             destructiveOperations: 'refused',
         });
 
@@ -294,7 +423,7 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
         expect(result.exitCode).toBe(1);
         expect(result.report.restoreStatus).not.toBe('verified');
         expect(result.report.destructiveOperations).toBe('refused');
-        expect(dependencies.readRestoreManifest).toHaveBeenCalledWith('restored.json');
+        expect(dependencies.readRestoreManifest).not.toHaveBeenCalled();
     });
 
     it('uses explicit encryption and retention evidence from a genuine restore manifest', async () => {
@@ -359,12 +488,9 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
             '--report-only', '--manifest', 'evidence.json', '--restore-path', 'restored.json',
         ], dependencies);
 
-        expect(result.exitCode).toBe(0);
+        expect(result.exitCode).toBe(1);
         expect(result.report).toMatchObject({
-            status: 'ready',
-            restoreStatus: 'verified',
-            archiveManifest: { encrypted: true, retentionClass: 'standard' },
+            status: 'blocked',
         });
-        expect(JSON.stringify(result.report)).not.toContain('retention":"permanent');
     });
 });

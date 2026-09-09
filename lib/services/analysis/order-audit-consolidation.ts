@@ -105,6 +105,14 @@ const forbiddenOutputKeys = new Set([
     'apikey', 'secretkey', 'accesskey', 'privatekey', 'signingkey', 'encryptionkey',
     'hashkey', 'hmac', 'hmackey', 'internalhmac', 'tokenhash', 'apikeyhash',
     'capturetokenhash',
+    // Contact details are never valid in a sanitized aggregate.  Keep these
+    // explicit as well as pattern-protected so masked/redacted values cannot
+    // cross the report boundary under a renamed key.
+    'email', 'emailaddress', 'emailhash', 'emailvalue', 'redactedemail', 'maskedemail',
+    'phone', 'phonenumber', 'phonehash', 'phonevalue', 'redactedphone', 'maskedphone',
+    'mobile', 'mobilenumber', 'mobilehash', 'telephone', 'telephonenumber', 'tel',
+    'contact', 'contactemail', 'contactphone', 'contactmobile', 'mail', 'mailaddress',
+    'mailhash', 'sms', 'smsnumber', 'fax',
 ]);
 const forbiddenOutputKeyPatterns = [
     /(?:token|secret|credential|password|authorization|cookie)/,
@@ -122,6 +130,9 @@ const forbiddenOutputKeyPatterns = [
     /(?:ip|address)(?:id|hash|fingerprint)/,
     /(?:visitor|tracking|browser|device|fingerprint)(?:id|uuid|hash|fingerprint)/,
     /fingerprint/,
+    // Email/phone/contact aliases remain forbidden even when their value is
+    // redacted, masked, or otherwise no longer syntactically identifiable.
+    /(?:e?mail|phone|mobile|telephone|tel|contact|sms|fax)/,
 ];
 const UUID_VALUE_PATTERN = UUID_PATTERN;
 const EMAIL_VALUE_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -309,6 +320,19 @@ export type ConsolidationReadinessInput = Readonly<{
     paymentPendingDispositionRecorded: boolean;
     noActivationOrCanary: boolean;
     archiveRestoreChecksumMatch: boolean;
+    /** Independent read-only proof for the legacy no-activation attestation. */
+    noActivationEvidence?: Readonly<{
+        source: 'independent-read-only';
+        verified: true;
+        admissionActivated: false;
+        realCanaryStarted: false;
+    }>;
+    /** Independent provider/disposition counts; zero/zero/zero is not proof. */
+    paymentPendingEvidence?: Readonly<{
+        pendingOrderCount: number;
+        independentlyEvidencedCount: number;
+        dispositionRecordedCount: number;
+    }>;
 }>;
 
 export type ConsolidationReadiness = Readonly<{
@@ -336,8 +360,23 @@ export function evaluateConsolidationReadiness(
     gates['public-table-count'] = input.publicTableCount === 22;
     gates['canonical-set'] = input.canonicalSetMatch === true;
     gates['catalog-dependency'] = input.catalogDependencyClean === true;
-    gates['payment-pending-disposition'] = input.paymentPendingDispositionRecorded === true;
-    gates['no-activation-or-canary'] = input.noActivationOrCanary === true;
+    const paymentEvidence = input.paymentPendingEvidence;
+    const paymentEvidenceVerified = paymentEvidence !== undefined
+        && Number.isSafeInteger(paymentEvidence.pendingOrderCount)
+        && paymentEvidence.pendingOrderCount > 0
+        && Number.isSafeInteger(paymentEvidence.independentlyEvidencedCount)
+        && paymentEvidence.independentlyEvidencedCount === paymentEvidence.pendingOrderCount
+        && Number.isSafeInteger(paymentEvidence.dispositionRecordedCount)
+        && paymentEvidence.dispositionRecordedCount === paymentEvidence.pendingOrderCount;
+    gates['payment-pending-disposition'] = input.paymentPendingDispositionRecorded === true
+        && paymentEvidenceVerified;
+    const activationEvidence = input.noActivationEvidence;
+    const activationEvidenceVerified = activationEvidence?.source === 'independent-read-only'
+        && activationEvidence.verified === true
+        && activationEvidence.admissionActivated === false
+        && activationEvidence.realCanaryStarted === false;
+    gates['no-activation-or-canary'] = input.noActivationOrCanary === true
+        && activationEvidenceVerified;
     gates['archive-restore-checksum'] = input.archiveRestoreChecksumMatch === true;
     const missingGates = Object.entries(gates)
         .filter(([, passed]) => !passed)

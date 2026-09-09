@@ -2,8 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import {
     assertPiiSafeConsolidationOutput,
+    adaptSupabase22CatalogRows,
+    collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
-    parseSupabase22CatalogSnapshot,
     SUPABASE_22_CANONICAL_TABLES,
     type Supabase22CatalogEvidence,
 } from '../lib/services/operations/supabase-22-evidence';
@@ -79,6 +80,7 @@ export function parseSupabase22CatalogCliArgs(
 
 export interface Supabase22CatalogCliDependencies {
     readCatalog(): Promise<unknown>;
+    queryCatalog?(sql: string): PromiseLike<unknown>;
     readManifest?(path: string): Promise<unknown>;
     writeStdout(value: string): void;
 }
@@ -233,10 +235,18 @@ export async function runSupabase22CatalogCli(
     try {
         if (options.manifestPath) {
             if (!dependencies.readManifest) throw new Error('SUPABASE_22_CATALOG_MANIFEST_READ_UNAVAILABLE');
-            evidence = parseManifest(await dependencies.readManifest(options.manifestPath));
+            // A caller-supplied manifest is descriptive only; catalog readiness must
+            // be derived from the bounded row reader below, never from booleans in JSON.
+            parseManifest(await dependencies.readManifest(options.manifestPath));
+            evidence = unavailableCatalogEvidence();
+        } else if (dependencies.queryCatalog) {
+            evidence = await collectSupabase22CatalogEvidence({ query: dependencies.queryCatalog });
         } else {
-            evidence = evaluateSupabase22Catalog(parseSupabase22CatalogSnapshot(
-                await dependencies.readCatalog(),
+            const rawCatalog = await dependencies.readCatalog();
+            // A prebuilt snapshot is not a row-to-snapshot proof and must not
+            // silently become catalog readiness.
+            evidence = evaluateSupabase22Catalog(adaptSupabase22CatalogRows(
+                rawCatalog as Parameters<typeof adaptSupabase22CatalogRows>[0],
             ));
         }
     } catch {

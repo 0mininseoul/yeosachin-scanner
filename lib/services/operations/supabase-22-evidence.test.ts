@@ -49,6 +49,17 @@ function completeInput(overrides: Partial<Supabase22GateInput> = {}): Supabase22
         paymentPendingDispositionRecorded: true,
         noActivationOrCanary: true,
         archiveRestoreChecksumMatch: true,
+        paymentPendingEvidence: {
+            pendingOrderCount: 1,
+            independentlyEvidencedCount: 1,
+            dispositionRecordedCount: 1,
+        },
+        noActivationEvidence: {
+            source: 'independent-read-only',
+            verified: true,
+            admissionActivated: false,
+            realCanaryStarted: false,
+        },
         ...overrides,
     };
 }
@@ -235,6 +246,19 @@ describe('Supabase 22 evidence gate', () => {
             'payment-pending-disposition',
             'no-activation-or-canary',
             'archive-restore-checksum',
+        ]));
+    });
+
+    it('does not treat truthy legacy payment or activation attestations as proof', () => {
+        const input = { ...completeInput() } as Record<string, unknown>;
+        delete input.paymentPendingEvidence;
+        delete input.noActivationEvidence;
+        const result = evaluateSupabase22Gate(input as unknown as Supabase22GateInput);
+
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toEqual(expect.arrayContaining([
+            'payment-pending-disposition',
+            'no-activation-or-canary',
         ]));
     });
 });
