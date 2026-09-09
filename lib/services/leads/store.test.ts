@@ -40,19 +40,17 @@ describe('insertLandingLead', () => {
         });
     });
 
-    it('stores an excluded lead with its replay key and no raw input', async () => {
-        mocks.rpc.mockResolvedValue({ data: true, error: null });
-
-        await insertLandingLead({
+    it('hard-fences excluded context from service-level inserts', async () => {
+        await expect(insertLandingLead({
             instagramId: 'girlfriend.name',
             inputContext: 'excluded',
             sourcePreflightId: '123e4567-e89b-42d3-a456-426614174000',
+        } as never)).rejects.toMatchObject({
+            code: 'LEAD_INSERT_FAILED',
+            message: 'excluded landing leads require the atomic preflight exclusion decision',
         });
-
-        expect(mocks.rpc).toHaveBeenCalledWith('create_or_replay_landing_lead_exclusion', {
-            p_source_preflight_id: '123e4567-e89b-42d3-a456-426614174000',
-            p_instagram_id: 'girlfriend.name',
-        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it('persists only the capture token hash and principal HMAC for a journey capture', async () => {

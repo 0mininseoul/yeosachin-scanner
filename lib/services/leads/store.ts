@@ -2,7 +2,6 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     captureTokenJourneyId,
     createOrReplayLandingLeadCapture,
-    createOrReplayLandingLeadExclusion,
     hashCaptureToken,
     type LandingLeadJourneyClaim,
 } from '@/lib/services/landing/landing-lead-journey';
@@ -26,31 +25,18 @@ interface LandingLeadAttributionInput {
     userAgent?: string;
 }
 
-interface ExcludedLeadPrivacyBoundary {
-    inputContext: 'excluded';
-    sourcePreflightId: string;
-    rawInput?: never;
-    utmSource?: never;
-    utmMedium?: never;
-    utmCampaign?: never;
-    utmContent?: never;
-    utmTerm?: never;
-    referrer?: never;
-    userAgent?: never;
-}
-
 export type InsertLandingLeadInput = {
     instagramId: string;
-} & (
-    | (LandingLeadAttributionInput & {
-        inputContext?: 'target';
-        sourcePreflightId?: never;
-        captureToken?: string;
-        anonymousPrincipalHash?: string;
-        journeyId?: string;
-    })
-    | ExcludedLeadPrivacyBoundary
-);
+} & LandingLeadAttributionInput & {
+    // Excluded rows are created only inside the atomic preflight exclusion RPC.
+    // Keep this target-only at the type boundary, then retain a runtime fence
+    // for untyped callers and stale mixed-version code.
+    inputContext?: 'target';
+    sourcePreflightId?: never;
+    captureToken?: string;
+    anonymousPrincipalHash?: string;
+    journeyId?: string;
+};
 
 export type StoredLandingLeadCapture = Readonly<{
     status: 'stored';
@@ -62,21 +48,11 @@ export type StoredLandingLeadCapture = Readonly<{
 export async function insertLandingLead(
     input: InsertLandingLeadInput,
 ): Promise<void | StoredLandingLeadCapture> {
-    if (input.inputContext === 'excluded') {
-        try {
-            const created = await createOrReplayLandingLeadExclusion(
-                supabaseAdmin,
-                input.sourcePreflightId,
-                input.instagramId,
-            );
-            if (!created) {
-                throw new LeadPersistenceError('landing lead exclusion target missing');
-            }
-            return;
-        } catch (error) {
-            if (error instanceof LeadPersistenceError) throw error;
-            throw new LeadPersistenceError(error instanceof Error ? error.message : 'landing lead exclusion failed');
-        }
+    const requestedContext = (input as unknown as { inputContext?: unknown }).inputContext;
+    if (requestedContext !== undefined && requestedContext !== 'target') {
+        throw new LeadPersistenceError(
+            'excluded landing leads require the atomic preflight exclusion decision',
+        );
     }
 
     if (input.captureToken && input.anonymousPrincipalHash) {
@@ -105,7 +81,7 @@ export async function insertLandingLead(
 
     const { error } = await supabaseAdmin.from('landing_leads').insert({
         instagram_id: input.instagramId,
-        input_context: input.inputContext ?? 'target',
+        input_context: 'target',
         source_preflight_id: input.sourcePreflightId,
         raw_input: input.rawInput,
         utm_source: input.utmSource,

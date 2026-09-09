@@ -16,7 +16,7 @@ SET lock_timeout = '5s'
 SET statement_timeout = '2min'
 AS $$
 DECLARE
-    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_now TIMESTAMP WITH TIME ZONE;
     v_preflight public.analysis_preflights%ROWTYPE;
     v_excluded_instagram_id TEXT;
 BEGIN
@@ -47,6 +47,11 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_INVALID_EXCLUSION', ERRCODE = 'P0001';
     END IF;
 
+    -- The initial timestamp only narrows the anonymous lookup. A caller can
+    -- wait on the row lock long enough for either the claim or preflight to
+    -- expire, so lifecycle decisions must use a fresh wall clock after the
+    -- lock has been acquired.
+    v_now := pg_catalog.clock_timestamp();
     SELECT preflight.*
     INTO v_preflight
     FROM public.analysis_preflights AS preflight
@@ -69,6 +74,15 @@ BEGIN
             RAISE EXCEPTION USING MESSAGE = 'ANONYMOUS_PREFLIGHT_CLAIM_INVALID', ERRCODE = 'P0001';
         END IF;
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PREFLIGHT_NOT_FOUND', ERRCODE = 'P0001';
+    END IF;
+
+    v_now := pg_catalog.clock_timestamp();
+    IF p_user_id IS NULL
+       AND (
+           v_preflight.claim_expires_at IS NULL
+           OR v_preflight.claim_expires_at <= v_now
+       ) THEN
+        RAISE EXCEPTION USING MESSAGE = 'ANONYMOUS_PREFLIGHT_CLAIM_INVALID', ERRCODE = 'P0001';
     END IF;
 
     -- Lifecycle and expiry remain authoritative even for an identical retry.
@@ -205,6 +219,12 @@ GRANT EXECUTE ON FUNCTION public.set_authenticated_analysis_v2_preflight_exclusi
 -- that unscoped path so all supported decisions use the atomic RPC above.
 REVOKE ALL ON FUNCTION public.set_analysis_v2_preflight_exclusion(
     UUID, UUID, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
+
+-- The landing exclusion helper is an internal leaf of the atomic boundary;
+-- callers must not invoke it as a service-level persistence shortcut.
+REVOKE ALL ON FUNCTION public.create_or_replay_landing_lead_exclusion(
+    UUID, TEXT
 ) FROM PUBLIC, anon, authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';

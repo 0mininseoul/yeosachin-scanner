@@ -340,20 +340,6 @@ export async function bindLandingLeadJourneyToPreflight(
     return result.data === true;
 }
 
-export async function createOrReplayLandingLeadExclusion(
-    client: LandingLeadJourneyRpcClient,
-    sourcePreflightId: string,
-    instagramId: string,
-): Promise<boolean> {
-    const normalizedInstagramId = normalizeInstagramId(instagramId);
-    const result = await client.rpc('create_or_replay_landing_lead_exclusion', {
-        p_source_preflight_id: validUuid(sourcePreflightId, 'PREFLIGHT'),
-        p_instagram_id: normalizedInstagramId,
-    });
-    if (result.error) throwRpc(result.error, 'exclusion');
-    return result.data === true;
-}
-
 export async function claimLandingLeadJourney(
     client: LandingLeadJourneyRpcClient,
     journeyId: string,

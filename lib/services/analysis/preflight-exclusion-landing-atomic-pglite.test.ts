@@ -239,6 +239,13 @@ describe('atomic preflight exclusion landing RPC', () => {
         );
     });
 
+    it('refreshes the wall clock and rechecks expiry after the preflight row lock', () => {
+        expect(atomicExclusion.match(/v_now := pg_catalog\.clock_timestamp\(\);/g)).toHaveLength(2);
+        expect(atomicExclusion).toMatch(
+            /FOR UPDATE;[\s\S]*?IF NOT FOUND[\s\S]*?v_now := pg_catalog\.clock_timestamp\(\);[\s\S]*?v_preflight\.claim_expires_at[\s\S]*?v_preflight\.expires_at <= v_now/,
+        );
+    });
+
     it('enforces browser-only execution and RLS on the durable landing boundary', async () => {
         const db = await createDatabase();
         const privileges = await db.query<{
@@ -246,6 +253,7 @@ describe('atomic preflight exclusion landing RPC', () => {
             authenticated_execute: boolean;
             service_execute: boolean;
             legacy_service_execute: boolean;
+            exclusion_helper_service_execute: boolean;
             anon_select: boolean;
             authenticated_select: boolean;
             service_select: boolean;
@@ -273,6 +281,11 @@ describe('atomic preflight exclusion landing RPC', () => {
                     'public.set_analysis_v2_preflight_exclusion(uuid,uuid,text,text)'::regprocedure,
                     'EXECUTE'
                 ) AS legacy_service_execute,
+                pg_catalog.has_function_privilege(
+                    'service_role',
+                    'public.create_or_replay_landing_lead_exclusion(uuid,text)'::regprocedure,
+                    'EXECUTE'
+                ) AS exclusion_helper_service_execute,
                 pg_catalog.has_table_privilege('anon', 'public.landing_leads', 'SELECT') AS anon_select,
                 pg_catalog.has_table_privilege('authenticated', 'public.landing_leads', 'SELECT') AS authenticated_select,
                 pg_catalog.has_table_privilege('service_role', 'public.landing_leads', 'SELECT') AS service_select,
@@ -286,6 +299,7 @@ describe('atomic preflight exclusion landing RPC', () => {
             authenticated_execute: true,
             service_execute: false,
             legacy_service_execute: false,
+            exclusion_helper_service_execute: false,
             anon_select: false,
             authenticated_select: false,
             service_select: false,
