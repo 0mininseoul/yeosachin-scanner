@@ -211,13 +211,13 @@ function assertPayload(value: AnalysisCanonicalPayload | undefined, path = 'payl
 
 function stableValue(value: unknown): unknown {
     if (Array.isArray(value)) return value.map(stableValue);
+    if (value instanceof Date) return value.toISOString();
     if (isRecord(value)) {
         return Object.fromEntries(
             Object.keys(value).sort().map(key => [key, stableValue(value[key])])
         );
     }
     if (typeof value === 'bigint') return value.toString();
-    if (value instanceof Date) return value.toISOString();
     return value;
 }
 

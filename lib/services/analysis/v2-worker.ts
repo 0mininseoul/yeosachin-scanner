@@ -146,7 +146,6 @@ async function recordCanonicalWorkerCompletion(
                 generation: claim.generation,
                 successorCount,
             },
-            contentHash: claim.inputHash,
         });
     } catch {
         // Canonical evidence is dual-written during the observation window. The legacy

@@ -188,16 +188,33 @@ export async function backfillAnalysisCanonical(input: {
 
     const validRows = result.data.filter(isSourceRow);
     const blocked = result.data.length - validRows.length;
-    const batch = buildBackfillBatch(validRows, limit);
+    let eligibleRows = validRows;
+    if (input.cursor) {
+        const cursorIndex = validRows.findIndex(row => (
+            stableHash(sourceBackfillIdempotency(row)) === input.cursor
+        ));
+        if (cursorIndex < 0) {
+            return {
+                status: 'blocked',
+                scanned: result.data.length,
+                complete: 0,
+                blocked: blocked + 1,
+                checksum: null,
+                nextCursor: null,
+            };
+        }
+        eligibleRows = validRows.slice(cursorIndex + 1);
+    }
+    const batch = buildBackfillBatch(eligibleRows, limit);
     const nextCursor = batch.rows.length > 0
         ? stableHash(sourceBackfillIdempotency(batch.rows[batch.rows.length - 1]!))
         : null;
     return {
-        status: 'report_only',
+        status: blocked > 0 ? 'blocked' : 'report_only',
         scanned: result.data.length,
         complete: batch.rows.length,
         blocked,
-        checksum: batch.rows.length > 0 ? batch.checksum : null,
+        checksum: blocked > 0 || batch.rows.length === 0 ? null : batch.checksum,
         nextCursor,
     };
 }
