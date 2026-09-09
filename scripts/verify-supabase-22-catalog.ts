@@ -30,7 +30,8 @@ const CATALOG_EVIDENCE_KEYS = [
     'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
     'missingTables', 'dependencyClean', 'migrationHistoryClean', 'rlsClean',
     'routinesClean', 'canonicalRelationsAclClean', 'privateRoutinesAclClean',
-    'serviceRpcsAclClean', 'aclClean', 'triggersClean', 'foreignKeysClean', 'viewsClean',
+    'serviceRpcsAclClean', 'clientRpcsAclClean', 'aclClean', 'triggersClean',
+    'foreignKeysClean', 'viewsClean',
     'publicationsClean', 'sequencesClean', 'partitionsClean', 'legacyWritersClean',
     'metadataAvailability', 'clean', 'destructiveOperations',
 ] as const;
@@ -118,6 +119,7 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         || typeof manifest.canonicalRelationsAclClean !== 'boolean'
         || typeof manifest.privateRoutinesAclClean !== 'boolean'
         || typeof manifest.serviceRpcsAclClean !== 'boolean'
+        || typeof manifest.clientRpcsAclClean !== 'boolean'
         || typeof manifest.aclClean !== 'boolean'
         || typeof manifest.triggersClean !== 'boolean'
         || typeof manifest.foreignKeysClean !== 'boolean'
@@ -153,6 +155,7 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         && manifest.canonicalRelationsAclClean
         && manifest.privateRoutinesAclClean
         && manifest.serviceRpcsAclClean
+        && manifest.clientRpcsAclClean
         && manifest.aclClean
         && manifest.triggersClean
         && manifest.foreignKeysClean
@@ -187,6 +190,7 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         canonicalRelationsAclClean: manifest.canonicalRelationsAclClean,
         privateRoutinesAclClean: manifest.privateRoutinesAclClean,
         serviceRpcsAclClean: manifest.serviceRpcsAclClean,
+        clientRpcsAclClean: manifest.clientRpcsAclClean,
         aclClean: manifest.aclClean,
         triggersClean: manifest.triggersClean,
         foreignKeysClean: manifest.foreignKeysClean,

@@ -24,10 +24,20 @@ describe('Supabase 22 catalog verifier CLI', () => {
     it('exposes only read-only catalog fragments with explicit service-only ACL inputs', () => {
         for (const query of Object.values(SUPABASE_22_CATALOG_QUERIES)) {
             expect(query.trim()).toMatch(/^SELECT\b/i);
-            expect(query).not.toMatch(/\b(DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE|GRANT|REVOKE)\b/i);
+            const sqlWithoutLiterals = query.replace(/'(?:''|[^'])*'/g, "''");
+            expect(sqlWithoutLiterals)
+                .not.toMatch(/\b(DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE|GRANT|REVOKE)\b/i);
         }
         expect(SUPABASE_22_CATALOG_QUERIES.acls).toContain("has_table_privilege('anon'");
         expect(SUPABASE_22_CATALOG_QUERIES.acls).toContain("has_table_privilege('service_role'");
+        const normalizedAclQuery = SUPABASE_22_CATALOG_QUERIES.acls.replace(/\s+/g, ' ');
+        expect(normalizedAclQuery).not.toContain("has_table_privilege('anon', c.oid, 'ALL')");
+        expect(normalizedAclQuery).not.toContain("has_table_privilege('service_role', c.oid, 'ALL')");
+        for (const privilege of [
+            'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN',
+        ]) {
+            expect(normalizedAclQuery).toContain(`'${privilege}'`);
+        }
         expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('pg_identify_object');
         expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('pg_catalog.pg_proc');
         expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('CROSS JOIN LATERAL');

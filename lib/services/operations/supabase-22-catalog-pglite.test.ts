@@ -6,6 +6,7 @@ import {
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
+    SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES,
     SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
     SUPABASE_22_CANONICAL_ROUTINE_NAMES,
     SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
@@ -29,8 +30,13 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
     beforeAll(async () => {
         db = await PGlite.create();
         await db.exec(`
+            CREATE ROLE anon;
+            CREATE ROLE authenticated;
+            CREATE ROLE service_role;
             CREATE TABLE public.users (id integer);
             CREATE TABLE public.analysis_requests (id integer);
+            REVOKE ALL ON TABLE public.users, public.analysis_requests
+                FROM PUBLIC, anon, authenticated, service_role;
         `);
     });
 
@@ -43,13 +49,34 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         const query = async (sql: string): Promise<unknown> => {
             queryCount += 1;
             expect(sql.trim()).toMatch(/^SELECT\b/i);
-            expect(sql.toUpperCase()).not.toMatch(/\b(DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE)\b/);
+            expect(sql.replace(/'(?:''|[^'])*'/g, "''").toUpperCase())
+                .not.toMatch(/\b(DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE)\b/);
             if (sql.trim() === SUPABASE_22_CATALOG_QUERY.trim()) {
                 const result = await db.query<{ relname: string }>(sql);
                 expect(result.rows.map(row => row.relname)).toEqual(['analysis_requests', 'users']);
             }
             const queryName = Object.entries(SUPABASE_22_CATALOG_QUERIES)
                 .find(([, candidate]) => candidate === sql)?.[0];
+            if (queryName === 'acls') {
+                const aclResult = await db.query<{
+                    object_name: string;
+                    object_kind: string;
+                    public_allowed: boolean;
+                    anon_allowed: boolean;
+                    authenticated_allowed: boolean;
+                    service_allowed: boolean;
+                }>(sql);
+                expect(aclResult.rows.map(row => row.object_name)).toEqual([
+                    'analysis_requests', 'users',
+                ]);
+                expect(aclResult.rows.every(row =>
+                    row.object_kind === 'relation'
+                    && row.public_allowed === false
+                    && row.anon_allowed === false
+                    && row.authenticated_allowed === false
+                    && row.service_allowed === false,
+                )).toBe(true);
+            }
             const rows: Record<string, readonly unknown[]> = {
                 tables: [
                     {
@@ -99,6 +126,20 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(evidence.rlsClean).toBe(true);
     });
 
+    it('reports a non-SELECT table privilege instead of treating the ACL as empty', async () => {
+        await db.exec('GRANT MAINTAIN ON TABLE public.users TO service_role');
+        try {
+            const result = await db.query<{
+                object_name: string;
+                service_allowed: boolean;
+            }>(SUPABASE_22_CATALOG_QUERIES.acls);
+            expect(result.rows.find(row => row.object_name === 'users')?.service_allowed)
+                .toBe(true);
+        } finally {
+            await db.exec('REVOKE MAINTAIN ON TABLE public.users FROM service_role');
+        }
+    });
+
     it('fails closed when a public table is RLS-enabled but not FORCE RLS', () => {
         const snapshot = {
             tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
@@ -137,6 +178,28 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         };
 
         expect(evaluateSupabase22Catalog(snapshot as never).rlsClean).toBe(false);
+    });
+
+    it('keeps invoker-only analysis helpers out of the SECURITY DEFINER allowlist', () => {
+        const invokerHelpers = [
+            'analysis_canonical_json_object_has_exact_keys',
+            'analysis_canonical_json_value_valid',
+            'analysis_canonical_payload_valid',
+            'analysis_canonical_payload_has_only_keys',
+        ];
+        for (const name of invokerHelpers) {
+            expect(SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES).not.toContain(name);
+            expect(SUPABASE_22_CANONICAL_ROUTINE_NAMES).not.toContain(name);
+        }
+        expect(SUPABASE_22_CATALOG_QUERIES.routines).toMatch(/p\.prosecdef/);
+        expect(SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES).toEqual([
+            'claim_anonymous_analysis_v2_preflight_with_landing',
+            'set_analysis_v2_preflight_exclusion_with_landing',
+            'set_authenticated_analysis_v2_preflight_exclusion',
+        ]);
+        for (const name of SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES) {
+            expect(SUPABASE_22_CANONICAL_ROUTINE_NAMES).toContain(name);
+        }
     });
 
     it('rejects an ambiguous/truncated catalog result at the bounded adapter boundary', async () => {
@@ -285,6 +348,16 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             executeAuthenticated: false,
             executeServiceRole: true,
         });
+        const clientRpc = (name: string) => ({
+            name,
+            identityArguments: '',
+            securityDefiner: true,
+            searchPathEmpty: true,
+            executePublic: false,
+            executeAnon: name === 'set_analysis_v2_preflight_exclusion_with_landing',
+            executeAuthenticated: true,
+            executeServiceRole: false,
+        });
         const snapshot = {
             tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
                 name,
@@ -303,6 +376,12 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                     objectKind: 'routine' as const,
                     serviceRoleAllowed: true,
                 })),
+                ...SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES.map(name => ({
+                    ...relationAcl(name),
+                    objectKind: 'routine' as const,
+                    anonAllowed: name === 'set_analysis_v2_preflight_exclusion_with_landing',
+                    authenticatedAllowed: true,
+                })),
             ],
             dependencies: [
                 ...SUPABASE_22_CANONICAL_TABLES,
@@ -317,6 +396,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             securityDefinerFunctions: [
                 ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.map(privateRoutine),
                 ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.map(serviceRpc),
+                ...SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES.map(clientRpc),
             ],
             migrationHistory: [{ version: '20260905000000', pending: false }],
             legacyWriters: SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
@@ -354,6 +434,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(evidence.canonicalRelationsAclClean).toBe(true);
         expect(evidence.privateRoutinesAclClean).toBe(true);
         expect(evidence.serviceRpcsAclClean).toBe(true);
+        expect(evidence.clientRpcsAclClean).toBe(true);
         expect(evidence.aclClean).toBe(true);
         expect(evidence.routinesClean).toBe(true);
 
@@ -392,6 +473,31 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(serviceRpcRevoked.serviceRpcsAclClean).toBe(false);
         expect(serviceRpcRevoked.aclClean).toBe(false);
 
+        const clientRpcRevoked = evaluateSupabase22Catalog({
+            ...snapshot,
+            acls: snapshot.acls.map(acl => acl.objectName
+                === SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]
+                ? { ...acl, authenticatedAllowed: false }
+                : acl),
+            securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine =>
+                routine.name === SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]
+                    ? { ...routine, executeAuthenticated: false }
+                    : routine),
+        } as never);
+        expect(clientRpcRevoked.clientRpcsAclClean).toBe(false);
+        expect(clientRpcRevoked.aclClean).toBe(false);
+
+        const missingClientRpc = evaluateSupabase22Catalog({
+            ...snapshot,
+            acls: snapshot.acls.filter(acl => acl.objectName
+                !== SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]),
+            securityDefinerFunctions: snapshot.securityDefinerFunctions.filter(routine =>
+                routine.name !== SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]),
+        } as never);
+        expect(missingClientRpc.routinesClean).toBe(false);
+        expect(missingClientRpc.clientRpcsAclClean).toBe(false);
+        expect(missingClientRpc.aclClean).toBe(false);
+
         const extraRoutine = evaluateSupabase22Catalog({
             ...snapshot,
             securityDefinerFunctions: [
@@ -409,6 +515,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         } as never);
         expect(extraRoutine.privateRoutinesAclClean).toBe(false);
         expect(extraRoutine.serviceRpcsAclClean).toBe(false);
+        expect(extraRoutine.clientRpcsAclClean).toBe(false);
         expect(extraRoutine.aclClean).toBe(false);
     });
 
