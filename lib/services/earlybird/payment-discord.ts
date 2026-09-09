@@ -3,6 +3,12 @@ import 'server-only';
 import * as Sentry from '@sentry/nextjs';
 import { formatKst, maskKakaoName } from '@/lib/services/identity/kakao-signup-discord';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalDualWriteEnabled,
+    maintenanceMarker,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 10_000;
@@ -190,6 +196,30 @@ async function sendClaimedItem(
     }
 }
 
+async function mirrorPaymentNotification(item: EarlybirdPaymentDiscordItem): Promise<void> {
+    if (!isCanonicalDualWriteEnabled()) return;
+    const contentHash = canonicalEvidenceHash(
+        'payment-discord-content',
+        `${item.order_id}:${item.paid_at}:${item.plan_id}`,
+    );
+    try {
+        await canonicalOperationsStore.enqueueNotification({
+            channel: 'discord',
+            eventKind: 'earlybird.payment.completed',
+            dedupeKey: `earlybird-payment:${item.order_id}`,
+            contentHash,
+        });
+    } catch {
+        try {
+            await canonicalOperationsStore.enqueueMaintenanceJob(
+                maintenanceMarker('recovery', item.order_id, 'payment-notification'),
+            );
+        } catch {
+            // Legacy outbox delivery remains authoritative.
+        }
+    }
+}
+
 export async function deliverEarlybirdPaymentDiscordNotifications(options: {
     limit?: number;
     fetcher?: typeof fetch;
@@ -213,6 +243,7 @@ export async function deliverEarlybirdPaymentDiscordNotifications(options: {
     }
 
     const claimed = (data ?? []) as EarlybirdPaymentDiscordItem[];
+    await Promise.all(claimed.map(item => mirrorPaymentNotification(item)));
     await Promise.all(claimed.map(item => sendClaimedItem(
         item,
         config,

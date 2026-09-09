@@ -13,6 +13,12 @@ import {
     dispatchAnalysisV2Job,
     enqueueAnalysisV2FreshAdmissionTask,
 } from '@/lib/services/analysis/v2-tasks';
+import {
+    canonicalOperationsStore,
+    isCanonicalDualWriteEnabled,
+    maintenanceMarker,
+    type CanonicalOperationsStore,
+} from '@/lib/services/operations/canonical-operations-store';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
 
@@ -395,11 +401,52 @@ export function createEarlybirdFulfillmentStore(
     dependencies: {
         rpc: EarlybirdFulfillmentRpcClient['rpc'];
         randomUuid: () => string;
+        dualWrite?: boolean;
+        canonicalStore?: Pick<CanonicalOperationsStore, 'upsertFulfillmentJob' | 'enqueueMaintenanceJob'>;
     } = {
         rpc: (name, params) => supabaseAdmin.rpc(name, params),
         randomUuid: randomUUID,
     }
 ): EarlybirdFulfillmentStore {
+    const dualWrite = dependencies.dualWrite ?? isCanonicalDualWriteEnabled();
+    const canonicalStore = dependencies.canonicalStore ?? canonicalOperationsStore;
+    const mirror = async (input: {
+        orderId: string;
+        requestId: string | null;
+        status: EarlybirdFulfillmentStatus;
+        attemptCount?: number;
+        leaseGeneration?: number;
+        leaseExpiresAt?: string | null;
+        lastErrorCode?: string | null;
+    }): Promise<void> => {
+        if (!dualWrite) return;
+        const snapshot = {
+            orderId: input.orderId,
+            requestId: input.requestId,
+            state: input.status,
+            attemptCount: input.attemptCount ?? 0,
+            leaseGeneration: input.leaseGeneration ?? 0,
+            leaseExpiresAt: input.leaseExpiresAt ?? null,
+            nextAttemptAt: new Date().toISOString(),
+            lastErrorCode: input.lastErrorCode ?? null,
+        } as const;
+        try {
+            await canonicalStore.upsertFulfillmentJob(snapshot);
+        } catch {
+            try {
+                await canonicalStore.enqueueMaintenanceJob(
+                    maintenanceMarker(
+                        'recovery',
+                        input.orderId,
+                        `fulfillment:${input.status}`,
+                    ),
+                );
+            } catch {
+                // Legacy fulfillment remains authoritative when both mirrors fail.
+            }
+        }
+    };
+
     const validatedOrderId = (value: string) => {
         const parsed = uuidSchema.safeParse(value);
         if (!parsed.success) {
@@ -417,7 +464,13 @@ export function createEarlybirdFulfillmentStore(
                 { p_order_id: validatedOrderId(orderId) }
             );
             if (error) persistenceError(error);
-            return identityFromRow(oneRow(data, identityRowSchema));
+            const identity = identityFromRow(oneRow(data, identityRowSchema));
+            await mirror({
+                orderId: identity.orderId,
+                requestId: identity.requestId,
+                status: identity.status,
+            });
+            return identity;
         },
 
         async autoAdmitEligible(limit) {
@@ -437,7 +490,13 @@ export function createEarlybirdFulfillmentStore(
             )) {
                 persistenceError();
             }
-            return Object.freeze(parsed.data.map(identityFromRow));
+            const identities = parsed.data.map(identityFromRow);
+            await Promise.all(identities.map(identity => mirror({
+                orderId: identity.orderId,
+                requestId: identity.requestId,
+                status: identity.status,
+            })));
+            return Object.freeze(identities);
         },
 
         async listRecoverable(limit) {
@@ -453,7 +512,13 @@ export function createEarlybirdFulfillmentStore(
             if (error) persistenceError(error);
             const parsed = identityRowsSchema.safeParse(data);
             if (!parsed.success) persistenceError();
-            return Object.freeze(parsed.data.map(identityFromRow));
+            const identities = parsed.data.map(identityFromRow);
+            await Promise.all(identities.map(identity => mirror({
+                orderId: identity.orderId,
+                requestId: identity.requestId,
+                status: identity.status,
+            })));
+            return Object.freeze(identities);
         },
 
         async claim(orderId) {
@@ -491,6 +556,14 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
+            await mirror({
+                orderId: orderId.toLowerCase(),
+                requestId: null,
+                status: row.fulfillment_status,
+                attemptCount: row.attempt_count,
+                leaseGeneration: row.lease_fence,
+                leaseExpiresAt: null,
+            });
             return Object.freeze({
                 claimed: row.claimed,
                 status: row.fulfillment_status,
@@ -533,6 +606,12 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
+            await mirror({
+                orderId: row.order_id,
+                requestId: row.request_id,
+                status: row.fulfillment_status,
+                leaseGeneration: claim.fence,
+            });
             return Object.freeze({
                 orderId: row.order_id,
                 status: row.fulfillment_status,
@@ -557,6 +636,12 @@ export function createEarlybirdFulfillmentStore(
                 }
             );
             if (error || data !== 'manual_review') persistenceError(error);
+            await mirror({
+                orderId: orderId.toLowerCase(),
+                requestId: null,
+                status: 'manual_review',
+                lastErrorCode: parsedCode.data,
+            });
             return 'manual_review';
         },
 
@@ -569,6 +654,11 @@ export function createEarlybirdFulfillmentStore(
             if (error) persistenceError(error);
             const row = oneRow(data, schemaFailureRecoveryRowSchema);
             if (row.order_id !== parsedOrderId) persistenceError();
+            await mirror({
+                orderId: row.order_id,
+                requestId: null,
+                status: row.fulfillment_status,
+            });
             return Object.freeze({
                 orderId: row.order_id,
                 status: row.fulfillment_status,
@@ -596,6 +686,11 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
+            await mirror({
+                orderId: row.order_id,
+                requestId: row.request_id,
+                status: row.fulfillment_status,
+            });
             return identityFromRow(row);
         },
 

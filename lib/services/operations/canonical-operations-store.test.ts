@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+    createCanonicalOperationsStore,
+    isCanonicalFamilyReadEnabled,
+} from './canonical-operations-store';
 
 function migrationSql(): string {
     const migration = readdirSync(join(process.cwd(), 'supabase/migrations'))
@@ -43,5 +47,61 @@ describe('operations canonical migration contract', () => {
             expect(sql).toContain(`REVOKE EXECUTE ON FUNCTION public.${functionName}`);
             expect(sql).toContain(`GRANT EXECUTE ON FUNCTION public.${functionName}`);
         }
+    });
+});
+
+describe('canonical operations store', () => {
+    it('dedupes notifications and preserves lease fences through typed RPCs', async () => {
+        const rpc = async (name: string, params: Record<string, unknown>) => {
+            if (name === 'enqueue_notification_v1') {
+                expect(params).toEqual({
+                    p_channel: 'discord',
+                    p_event_kind: 'payment.completed',
+                    p_dedupe_key: 'payment:event-1',
+                    p_content_hash: 'c'.repeat(64),
+                });
+                return { data: { status: 'queued', duplicate: true }, error: null };
+            }
+            expect(name).toBe('acquire_system_lease_v1');
+            expect(params).toEqual({
+                p_lease_key: 'provider:groble',
+                p_kind: 'provider',
+                p_holder_hash: 'd'.repeat(64),
+                p_lease_seconds: 60,
+            });
+            return {
+                data: {
+                    acquired: true,
+                    generation: 2,
+                    fence_token: 3,
+                    lease_expires_at: '2026-09-09T00:01:00.000Z',
+                },
+                error: null,
+            };
+        };
+        const store = createCanonicalOperationsStore({ rpc });
+
+        await expect(store.enqueueNotification({
+            channel: 'discord',
+            eventKind: 'payment.completed',
+            dedupeKey: 'payment:event-1',
+            contentHash: 'c'.repeat(64),
+        })).resolves.toEqual({ status: 'queued', duplicate: true });
+        await expect(store.acquireSystemLease({
+            leaseKey: 'provider:groble',
+            kind: 'provider',
+            holderHash: 'd'.repeat(64),
+            leaseSeconds: 60,
+        })).resolves.toMatchObject({ acquired: true, generation: 2, fenceToken: 3 });
+    });
+
+    it('keeps all canonical family reads disabled until explicitly enabled', () => {
+        expect(isCanonicalFamilyReadEnabled('payment', {})).toBe(false);
+        expect(isCanonicalFamilyReadEnabled('maintenance', {
+            COMMERCE_CANONICAL_MAINTENANCE_READ: 'true',
+        })).toBe(true);
+        expect(isCanonicalFamilyReadEnabled('maintenance', {
+            COMMERCE_CANONICAL_MAINTENANCE_READ: 'TRUE',
+        })).toBe(false);
     });
 });

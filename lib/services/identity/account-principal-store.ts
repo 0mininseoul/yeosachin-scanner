@@ -1,5 +1,11 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalDualWriteEnabled,
+    maintenanceMarker,
+} from '@/lib/services/operations/canonical-operations-store';
 
 const accountClassSchema = z.enum(['production', 'e2e_test']);
 const trafficClassSchema = z.enum([
@@ -175,6 +181,32 @@ async function rpcSingle<T>(
     return parsed.data;
 }
 
+async function mirrorAccountClassification(account: {
+    id: string;
+    account_class: z.infer<typeof accountClassSchema>;
+    traffic_class: z.infer<typeof trafficClassSchema>;
+    lifecycle: z.infer<typeof lifecycleSchema>;
+}): Promise<void> {
+    if (!isCanonicalDualWriteEnabled()) return;
+    const state = `${account.account_class}:${account.traffic_class}:${account.lifecycle}`;
+    try {
+        await canonicalOperationsStore.appendAccountLifecycle({
+            accountId: account.id,
+            eventKind: 'classification',
+            state,
+            contentHash: canonicalEvidenceHash('account-classification', `${account.id}:${state}`),
+        });
+    } catch {
+        try {
+            await canonicalOperationsStore.enqueueMaintenanceJob(
+                maintenanceMarker('recovery', account.id, 'account-classification'),
+            );
+        } catch {
+            // Principal admission remains authoritative when the mirror is down.
+        }
+    }
+}
+
 export async function loadAccountPrincipal(
     userId: string,
 ): Promise<AccountPrincipal | null> {
@@ -209,6 +241,7 @@ export async function ensureAccountPrincipal(input: {
             'ACCOUNT_PRINCIPAL_RESULT_INVALID',
         );
     }
+    await mirrorAccountClassification(result);
     return result;
 }
 
@@ -233,6 +266,7 @@ export async function upsertKakaoAccountProfile(input: {
             'ACCOUNT_PRINCIPAL_RESULT_INVALID',
         );
     }
+    await mirrorAccountClassification(result);
     return result;
 }
 

@@ -1,5 +1,12 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    canonicalOperationsStore,
+    isCanonicalDualWriteEnabled,
+    maintenanceMarker,
+    type AccountLifecycleInput,
+} from '@/lib/services/operations/canonical-operations-store';
 import {
     createResultImageR2Writer,
     loadResultImageR2Config,
@@ -15,6 +22,8 @@ type Dependencies = {
     rpc?: (name: string, params: Record<string, unknown>) => RpcResult;
     deleteObject?: (objectKey: string) => Promise<void>;
     deleteAuthUser?: (accountId: string) => Promise<void>;
+    dualWrite?: boolean;
+    appendLifecycle?: (input: AccountLifecycleInput) => Promise<unknown>;
 };
 
 export class AccountDeletionError extends Error {
@@ -36,6 +45,35 @@ export async function deleteAccountPermanently(
 ): Promise<void> {
     const id = z.string().uuid().parse(accountId);
     const rpc = dependencies.rpc ?? ((name, params) => supabaseAdmin.rpc(name, params));
+    const dualWrite = dependencies.dualWrite ?? isCanonicalDualWriteEnabled();
+    const appendLifecycle = dependencies.appendLifecycle
+        ?? canonicalOperationsStore.appendAccountLifecycle;
+    const recordLifecycle = async (
+        eventKind: AccountLifecycleInput['eventKind'],
+        state: string,
+    ): Promise<void> => {
+        if (!dualWrite) return;
+        const input: AccountLifecycleInput = {
+            accountId: id,
+            eventKind,
+            state,
+            contentHash: canonicalEvidenceHash(
+                `account-lifecycle:${eventKind}`,
+                `${id}:${state}`,
+            ),
+        };
+        try {
+            await appendLifecycle(input);
+        } catch {
+            try {
+                await canonicalOperationsStore.enqueueMaintenanceJob(
+                    maintenanceMarker('recovery', id, `account:${eventKind}`),
+                );
+            } catch {
+                // Deletion remains authoritative even if the mirror is unavailable.
+            }
+        }
+    };
     const begin = await rpc('begin_account_deletion_v1', { p_account_id: id });
     if (begin.error) throw new AccountDeletionError('ACCOUNT_DELETION_BEGIN_FAILED');
     const parsed = beginResultSchema.safeParse(begin.data);
@@ -44,6 +82,7 @@ export async function deleteAccountPermanently(
     if (parsed.data.state === 'completed') return;
 
     if (parsed.data.state !== 'database_purged') {
+        await recordLifecycle('deletion_requested', parsed.data.state);
         let deleteObject = dependencies.deleteObject;
         if (!deleteObject && parsed.data.objectKeys.length > 0) {
             const writer = createResultImageR2Writer(loadResultImageR2Config(process.env));
@@ -58,6 +97,7 @@ export async function deleteAccountPermanently(
             throw new AccountDeletionError('ACCOUNT_DELETION_OBJECT_PURGE_FAILED');
         }
 
+        await recordLifecycle('objects_purged', 'objects_purged');
         const finalized = await rpc('finalize_account_deletion_database_v1', {
             p_account_id: id,
             p_deleted_object_keys: parsed.data.objectKeys,
@@ -67,6 +107,7 @@ export async function deleteAccountPermanently(
         }
     }
 
+    await recordLifecycle('database_purged', 'database_purged');
     try {
         if (dependencies.deleteAuthUser) {
             await dependencies.deleteAuthUser(id);
@@ -78,6 +119,7 @@ export async function deleteAccountPermanently(
         throw new AccountDeletionError('ACCOUNT_DELETION_AUTH_DELETE_FAILED');
     }
 
+    await recordLifecycle('retired', 'retired');
     const completed = await rpc('complete_account_deletion_v1', { p_account_id: id });
     if (completed.error || completed.data !== true) {
         throw new AccountDeletionError('ACCOUNT_DELETION_COMPLETION_FAILED');

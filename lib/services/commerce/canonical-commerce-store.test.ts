@@ -1,6 +1,10 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+    createCanonicalCommerceStore,
+    recordPaymentEventWithMaintenance,
+} from './canonical-commerce-store';
 
 function migrationSql(): string {
     const migration = readdirSync(join(process.cwd(), 'supabase/migrations'))
@@ -69,5 +73,57 @@ describe('commerce canonical migration contract', () => {
         expect(sql).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.record_payment_event_v1\(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER\) TO service_role;/,
         );
+    });
+});
+
+describe('canonical commerce store', () => {
+    it('records a payment event idempotently through the service RPC', async () => {
+        const rpc = async (name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('record_payment_event_v1');
+            expect(params).toEqual({
+                p_event_id: 'evt_1',
+                p_idempotency_key: 'delivery_1',
+                p_event_type: 'payment.completed',
+                p_payment_id: 'merchant_1',
+                p_payload_hash: 'a'.repeat(64),
+                p_amount_krw: 14900,
+            });
+            return {
+                data: { status: 'recorded', duplicate: false },
+                error: null,
+            };
+        };
+        const store = createCanonicalCommerceStore({ rpc });
+
+        await expect(store.recordPaymentEvent({
+            eventId: 'evt_1',
+            idempotencyKey: 'delivery_1',
+            eventType: 'payment.completed',
+            paymentId: 'merchant_1',
+            payloadHash: 'a'.repeat(64),
+            amountKrw: 14900,
+        })).resolves.toEqual({ status: 'recorded', duplicate: false });
+    });
+
+    it('queues a bounded maintenance marker when a canonical write fails', async () => {
+        const calls: string[] = [];
+        const store = createCanonicalCommerceStore({
+            rpc: async name => {
+                calls.push(name);
+                return { data: null, error: new Error('canonical unavailable') };
+            },
+        });
+
+        await expect(recordPaymentEventWithMaintenance(store, {
+            eventId: 'evt_2',
+            idempotencyKey: 'delivery_2',
+            eventType: 'payment.completed',
+            paymentId: 'merchant_2',
+            payloadHash: 'b'.repeat(64),
+            amountKrw: 14900,
+        }, async input => {
+            calls.push(`maintenance:${input.kind}`);
+        })).resolves.toEqual({ status: 'maintenance_queued' });
+        expect(calls).toEqual(['record_payment_event_v1', 'maintenance:payment_event']);
     });
 });

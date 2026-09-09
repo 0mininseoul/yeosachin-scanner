@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -27,6 +28,15 @@ import {
     parseGroblePaymentRefundedEvent,
     verifyGrobleWebhookSignature,
 } from '@/lib/services/groble/webhook';
+import {
+    canonicalCommerceStore,
+    recordPaymentEventWithMaintenance,
+    type PaymentEventInput,
+} from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    isCanonicalDualWriteEnabled,
+    queueCanonicalMaintenanceJob,
+} from '@/lib/services/operations/canonical-operations-store';
 import {
     observeRoute,
     type OperationalRequestContext,
@@ -80,6 +90,27 @@ interface WebhookLogState {
     orderId?: string | null;
     planId?: PaidEarlybirdPlanId;
     amountKrw?: number;
+}
+
+async function mirrorCanonicalPaymentEvent(
+    input: PaymentEventInput | null,
+): Promise<void> {
+    if (!input || !isCanonicalDualWriteEnabled()) return;
+    await recordPaymentEventWithMaintenance(
+        canonicalCommerceStore,
+        input,
+        async marker => {
+            try {
+                await queueCanonicalMaintenanceJob({
+                    kind: 'replay',
+                    targetKeyHash: marker.targetKeyHash,
+                    contentHash: marker.contentHash,
+                });
+            } catch {
+                // The legacy finalization is authoritative if both queues fail.
+            }
+        },
+    );
 }
 
 function safeWebhookEventType(value: string): WebhookEventType {
@@ -233,6 +264,7 @@ async function handlePOST(
 
     let persistence;
     let state: WebhookLogState = { webhookEventType };
+    let canonicalPaymentEvent: PaymentEventInput | null = null;
     let autoAdmissionEligible = false;
     if (envelope.type === 'payment.completed') {
         let payment;
@@ -284,6 +316,14 @@ async function handlePOST(
             payment.paidAt,
             autoAdmissionConfig,
         );
+        canonicalPaymentEvent = {
+            eventId: payment.eventId,
+            idempotencyKey,
+            eventType: 'payment.completed',
+            paymentId: payment.paymentId,
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            amountKrw: payment.amountKrw,
+        };
         const buyerPhoneNormalized = normalizeKoreanMobileNumber(payment.buyerPhoneNumber);
         try {
             const params = {
@@ -342,6 +382,14 @@ async function handlePOST(
             planId: planForProduct(cancellation.productId, config),
             amountKrw: cancellation.amountKrw,
         };
+        canonicalPaymentEvent = {
+            eventId: cancellation.eventId,
+            idempotencyKey,
+            eventType: 'payment.cancel_requested',
+            paymentId: cancellation.paymentId,
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
+            amountKrw: cancellation.amountKrw,
+        };
         try {
             persistence = await supabaseAdmin.rpc(
                 'finalize_earlybird_groble_cancel_request',
@@ -379,6 +427,14 @@ async function handlePOST(
         state = {
             ...state,
             planId: planForProduct(refund.productId, config),
+            amountKrw: refund.amountKrw,
+        };
+        canonicalPaymentEvent = {
+            eventId: refund.eventId,
+            idempotencyKey,
+            eventType: 'payment.refunded',
+            paymentId: refund.paymentId,
+            payloadHash: createHash('sha256').update(rawBody, 'utf8').digest('hex'),
             amountKrw: refund.amountKrw,
         };
         try {
@@ -428,6 +484,7 @@ async function handlePOST(
 
     const finalization = parsed.data[0];
     const orderId = finalization.order_id;
+    await mirrorCanonicalPaymentEvent(canonicalPaymentEvent);
     const shouldAdmit = envelope.type === 'payment.completed'
         && autoAdmissionEligible
         && orderId !== null

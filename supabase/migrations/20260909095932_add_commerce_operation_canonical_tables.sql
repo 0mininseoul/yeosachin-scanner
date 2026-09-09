@@ -491,6 +491,26 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION public.list_notification_outbox_v1(
+    p_limit INTEGER DEFAULT 10
+)
+RETURNS SETOF public.notification_outbox
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100 THEN
+        RAISE EXCEPTION USING MESSAGE = 'NOTIFICATION_READ_LIMIT_INVALID', ERRCODE = 'P0001';
+    END IF;
+    RETURN QUERY
+    SELECT notification.*
+    FROM public.notification_outbox AS notification
+    ORDER BY notification.created_at
+    LIMIT p_limit;
+END;
+$$;
+
 REVOKE EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, TEXT, INTEGER) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, TIMESTAMPTZ, TIMESTAMPTZ, TEXT) FROM PUBLIC, anon, authenticated;
@@ -503,6 +523,8 @@ REVOKE EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTE
 GRANT EXECUTE ON FUNCTION public.acquire_system_lease_v1(TEXT, TEXT, TEXT, INTEGER) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.enqueue_maintenance_job_v1(TEXT, TEXT, TEXT) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.list_notification_outbox_v1(INTEGER) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.list_notification_outbox_v1(INTEGER) TO service_role;
 
 -- PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED: this additive migration never
 -- changes an order status. The existing no-sale reconciliation RPC remains the

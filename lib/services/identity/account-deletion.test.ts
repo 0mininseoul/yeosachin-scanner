@@ -68,4 +68,33 @@ describe('deleteAccountPermanently', () => {
         expect(deleteObject).not.toHaveBeenCalled();
         expect(deleteAuthUser).toHaveBeenCalledOnce();
     });
+
+    it('appends lifecycle evidence before each irreversible deletion phase', async () => {
+        const lifecycle: string[] = [];
+        const rpc = vi.fn(async (name: string) => ({
+            data: name === 'begin_account_deletion_v1'
+                ? { state: 'requested', objectKeys: ['v1/a.webp'] }
+                : name === 'complete_account_deletion_v1'
+                    ? true
+                    : { state: 'database_purged' },
+            error: null,
+        }));
+
+        await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            deleteObject: vi.fn(async () => undefined),
+            deleteAuthUser: vi.fn(async () => undefined),
+            dualWrite: true,
+            appendLifecycle: vi.fn(async input => {
+                lifecycle.push(input.eventKind);
+            }),
+        });
+
+        expect(lifecycle).toEqual([
+            'deletion_requested',
+            'objects_purged',
+            'database_purged',
+            'retired',
+        ]);
+    });
 });

@@ -141,6 +141,36 @@ describe('earlybird fulfillment store', () => {
         }));
     });
 
+    it('dual-writes a bounded fulfillment snapshot without changing the legacy result', async () => {
+        const upsertFulfillmentJob = vi.fn(async () => ({
+            status: 'recorded',
+        }));
+        const enqueueMaintenanceJob = vi.fn(async () => ({
+            status: 'queued',
+        }));
+        const rpc = vi.fn(() => rpcResult([{
+            order_id: ORDER,
+            fulfillment_status: 'admission_pending',
+            preflight_id: PREFLIGHT,
+            user_id: USER,
+            plan_id: 'basic',
+            request_id: null,
+        }]));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({
+            rpc,
+            randomUuid: () => CLAIM,
+            dualWrite: true,
+            canonicalStore: { upsertFulfillmentJob, enqueueMaintenanceJob },
+        });
+
+        await expect(fulfillmentStore.admit(ORDER)).resolves.toEqual(identity());
+        expect(upsertFulfillmentJob).toHaveBeenCalledWith(expect.objectContaining({
+            orderId: ORDER,
+            state: 'admission_pending',
+        }));
+        expect(enqueueMaintenanceJob).not.toHaveBeenCalled();
+    });
+
     it.each([
         'analysis_in_progress',
         'completed',
