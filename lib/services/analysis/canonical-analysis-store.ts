@@ -449,8 +449,12 @@ export function createAnalysisCanonicalStore(
                 if (result.error) throw new Error(errorMessage(result.error));
                 return { status: 'appended', usageUnknown: input.usageUnknown };
             } catch {
-                const retry = await enqueueRetry(input.requestId, 'cost');
-                return { ...retry, usageUnknown: input.usageUnknown };
+                await enqueueRetry(input.requestId, 'cost');
+                return {
+                    status: 'retry_queued',
+                    family: 'cost',
+                    usageUnknown: input.usageUnknown,
+                };
             }
         },
 

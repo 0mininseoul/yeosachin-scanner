@@ -317,16 +317,18 @@ export function createAnalysisV2ProgressReporter(input: {
         claim: ClaimedAnalysisV2Job,
         projected: AnalysisV2ProjectedProgress,
     ): Promise<void> {
+        const event = projected.event;
+        if (!event) return;
         try {
             await canonicalStore.appendEvent({
                 requestId: claim.requestId,
                 kind: 'progress',
-                state: projected.event.state,
+                state: event.state,
                 payload: {
                     jobKey: claim.jobKey,
-                    eventCode: projected.event.eventCode,
-                    copyCode: projected.event.copyCode,
-                    aggregateCount: projected.event.aggregateCount,
+                    eventCode: event.eventCode,
+                    copyCode: event.copyCode,
+                    aggregateCount: event.aggregateCount,
                     tracks: projected.tracks,
                 },
             });
