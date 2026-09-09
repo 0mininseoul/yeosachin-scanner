@@ -72,6 +72,11 @@ describe('landing lead journey database contract', () => {
         expect(duplicate.rows[0]).toEqual({ create_or_replay_landing_lead_exclusion: true });
         const count = await db.query<{ count: number }>(`SELECT COUNT(*)::INTEGER AS count FROM public.landing_leads`);
         expect(count.rows[0]?.count).toBe(2);
+
+        const targetProjection = await db.query<{ payload: { rows: Array<{ rowCountInJourney: number }> } }>(
+            `SELECT public.load_landing_lead_admin_projection('target', NULL, NULL, NULL, NULL, NULL, NULL, 25) AS payload`,
+        );
+        expect(targetProjection.rows[0]?.payload.rows[0]?.rowCountInJourney).toBe(2);
     }, 30_000);
 
     it('claims monotonically, rejects a different owner, and fences deleted journeys permanently', async () => {

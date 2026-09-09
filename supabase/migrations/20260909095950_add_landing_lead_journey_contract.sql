@@ -243,16 +243,24 @@ BEGIN
        OR (p_instagram_id IS NOT NULL AND p_instagram_id !~ '^[a-z0-9._]{1,30}$') THEN
         RAISE EXCEPTION 'LANDING_LEAD_FILTER_INVALID';
     END IF;
-    WITH filtered AS (
+    WITH journey_stats AS (
+        SELECT lead.journey_id,
+               pg_catalog.count(*)::INTEGER AS journey_count,
+               pg_catalog.min(lead.created_at) AS first_seen_at,
+               pg_catalog.max(lead.created_at) AS last_seen_at
+        FROM public.landing_leads AS lead
+        GROUP BY lead.journey_id
+    ), filtered AS (
         SELECT lead.instagram_id,
                lead.input_context,
                lead.mapping_status,
                lead.created_at,
                lead.id,
-               pg_catalog.count(*) OVER (PARTITION BY lead.journey_id)::INTEGER AS journey_count,
-               pg_catalog.min(lead.created_at) OVER (PARTITION BY lead.journey_id) AS first_seen_at,
-               pg_catalog.max(lead.created_at) OVER (PARTITION BY lead.journey_id) AS last_seen_at
+               stats.journey_count,
+               stats.first_seen_at,
+               stats.last_seen_at
         FROM public.landing_leads AS lead
+        INNER JOIN journey_stats AS stats ON stats.journey_id = lead.journey_id
         WHERE (p_input_context IS NULL OR lead.input_context = p_input_context)
           AND (p_mapping_status IS NULL OR lead.mapping_status = p_mapping_status)
           AND (p_instagram_id IS NULL OR lead.instagram_id = p_instagram_id)
