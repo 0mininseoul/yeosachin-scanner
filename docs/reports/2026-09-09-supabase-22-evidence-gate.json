@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "supabase-22-evidence-v1",
+  "publicTableCount": 174,
+  "canonicalTables": [],
+  "unexpectedTables": [],
+  "missingTables": [],
+  "dependencyClean": false,
+  "migrationHistoryClean": false,
+  "genuineCompletedBundleCount": 0,
+  "parityStatus": "blocked",
+  "archiveManifest": {
+    "verified": false,
+    "aggregateChecksum": null,
+    "restoreStatus": "blocked"
+  },
+  "rollbackEvidenceVerified": false,
+  "observationWindowClosed": false,
+  "ownerApprovalRecorded": false,
+  "destructiveOperations": "refused",
+  "missingGates": [
+    "genuine-completed-bundle",
+    "per-order-parity",
+    "archive-manifest",
+    "restore-drill",
+    "dependency-inventory",
+    "rollback-evidence",
+    "observation-window",
+    "separate-approval"
+  ]
+}
