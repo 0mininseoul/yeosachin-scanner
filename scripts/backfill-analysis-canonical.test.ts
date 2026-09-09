@@ -5,7 +5,9 @@ import {
     backfillAnalysisCanonical,
     buildBackfillBatch,
     compareBackfillFamilyRows,
+    compareNormalizedBackfillFamilyRows,
     encodeBackfillCursor,
+    normalizeBackfillFamilyRows,
     parseBackfillCliArgs,
     type AnalysisBackfillSourceRow,
 } from './backfill-analysis-canonical';
@@ -64,7 +66,7 @@ describe('bounded analysis canonical backfill tooling', () => {
             expect(tables).toEqual(expect.arrayContaining([...family.legacyTables]));
         }
         expect(chain.limit).toHaveBeenCalled();
-        expect(chain.limit.mock.calls.every(([value]) => value === 100)).toBe(true);
+        expect(chain.limit.mock.calls.every(([value]) => value === 101)).toBe(true);
     });
 
     it('orders source rows and never builds a batch larger than 100', () => {
@@ -97,10 +99,12 @@ describe('bounded analysis canonical backfill tooling', () => {
         const emptyChain = {
             select: vi.fn(),
             order: vi.fn(),
+            in: vi.fn(),
             limit: vi.fn(),
         };
         emptyChain.select.mockReturnValue(emptyChain);
         emptyChain.order.mockReturnValue(emptyChain);
+        emptyChain.in = vi.fn().mockReturnValue(emptyChain);
         emptyChain.limit.mockResolvedValue({ data: [], error: null });
         const client = {
             from: vi.fn((table: string) => table === 'analysis_requests' ? chain : emptyChain),
@@ -113,16 +117,16 @@ describe('bounded analysis canonical backfill tooling', () => {
         });
 
         expect(report).toMatchObject({
-            status: 'report_only',
+            status: 'blocked',
             scanned: 2,
             complete: 2,
-            blocked: 0,
+            blocked: 2,
         });
         expect(report).not.toHaveProperty('requestIds');
         expect(JSON.stringify(report)).not.toContain(sourceRows[0]!.id);
         expect(chain.order).toHaveBeenNthCalledWith(1, 'created_at', { ascending: true });
         expect(chain.order).toHaveBeenNthCalledWith(2, 'id', { ascending: true });
-        expect(chain.limit).toHaveBeenCalledWith(100);
+        expect(chain.limit).toHaveBeenCalledWith(101);
     });
 
     it('fails closed when the source query is unavailable', async () => {
@@ -203,8 +207,8 @@ describe('bounded analysis canonical backfill tooling', () => {
             reportOnly: true,
         });
 
-        expect(first).toMatchObject({ status: 'report_only', scanned: 100, complete: 100 });
-        expect(second).toMatchObject({ status: 'report_only', scanned: 100, complete: 100 });
+        expect(first).toMatchObject({ status: 'blocked', scanned: 100, complete: 100 });
+        expect(second).toMatchObject({ status: 'blocked', scanned: 100, complete: 100 });
         expect(second.nextCursor).not.toBe(first.nextCursor);
         expect(boundaryCalls).toHaveLength(1);
         expect(boundaryCalls[0]).toContain('created_at.gt.');
@@ -212,7 +216,7 @@ describe('bounded analysis canonical backfill tooling', () => {
     });
 
     it('advances a legacy family page with its own bounded keyset boundary', async () => {
-        const jobs = Array.from({ length: 100 }, (_, index) => ({
+        const jobs = Array.from({ length: 101 }, (_, index) => ({
             request_id: sourceRows[0]!.id,
             job_key: `job:${String(index).padStart(3, '0')}`,
             kind: 'collection',
@@ -229,6 +233,7 @@ describe('bounded analysis canonical backfill tooling', () => {
                 const data = table === 'analysis_pipeline_jobs' && jobsRead++ === 0 ? jobs : [];
                 const chain = {
                     select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
                     or: vi.fn((expression: string) => {
                         if (table === 'analysis_pipeline_jobs') boundaries.push(expression);
                         return chain;
@@ -291,6 +296,30 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(from).not.toHaveBeenCalled();
     });
 
+    it('rejects a cursor position outside the bounded family allowlist', async () => {
+        const cursor = Buffer.from(JSON.stringify({
+            version: 2,
+            positions: {
+                'untrusted_table:created_at:id': {
+                    createdAt: '2026-09-01T00:00:00.000Z',
+                    key: 'row:1',
+                    rowHash: 'a'.repeat(64),
+                },
+            },
+            requestIds: [],
+            sourceHasMore: false,
+            completed: [],
+        }), 'utf8').toString('base64url');
+        const from = vi.fn();
+        await expect(backfillAnalysisCanonical({
+            client: { from },
+            limit: 100,
+            cursor,
+            reportOnly: true,
+        })).resolves.toMatchObject({ status: 'blocked', blocked: 1, complete: 0 });
+        expect(from).not.toHaveBeenCalled();
+    });
+
     it('rejects destructive and apply CLI options', () => {
         for (const option of ['--apply', '--drop', '--truncate', '--delete', '--mutate']) {
             expect(() => parseBackfillCliArgs([option])).toThrow('report-only');
@@ -304,5 +333,102 @@ describe('bounded analysis canonical backfill tooling', () => {
             .toEqual({ limit: 100, reportOnly: true, cursor });
         expect(() => parseBackfillCliArgs(['--report-only', '--cursor=unknown']))
             .toThrow('cursor is unknown');
+    });
+
+    it('constrains every family query to the selected request ids and includes live target manifests', async () => {
+        const selected = sourceRows;
+        const calls: Array<{ table: string; column: string; values: string[] }> = [];
+        const client = {
+            from: vi.fn((table: string) => {
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn((column: string, values: string[]) => {
+                        calls.push({ table, column, values });
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({
+                        data: table === 'analysis_requests' ? selected : [],
+                        error: null,
+                    }),
+                };
+                return chain;
+            }),
+        };
+
+        await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+
+        expect(calls.length).toBeGreaterThan(0);
+        expect(calls.every(call => call.column === 'request_id')).toBe(true);
+        expect(calls.every(call => (
+            call.values.length === selected.length
+            && call.values.every(id => selected.some(row => row.id === id))
+        ))).toBe(true);
+        const artifact = ANALYSIS_CANONICAL_BACKFILL_FAMILIES.find(family => family.family === 'artifacts');
+        expect(artifact?.legacyTables).toContain('analysis_v2_target_evidence_manifests');
+        expect(artifact?.legacy.some(table => table.columns.includes('result_hash'))).toBe(true);
+    });
+
+    it('fails closed for ambiguous page limits and duplicate composite cursor ties', async () => {
+        const limit = 2;
+        const tied = [
+            { id: sourceRows[0]!.id, created_at: '2026-09-01T00:00:00.000Z', status: 'completed' },
+            { id: sourceRows[1]!.id, created_at: '2026-09-01T00:00:00.000Z', status: 'completed' },
+            { id: '123e4567-e89b-42d3-a456-426614174002', created_at: '2026-09-01T00:00:00.000Z', status: 'completed' },
+        ];
+        const client = {
+            from: vi.fn(() => ({
+                select: vi.fn().mockReturnThis(),
+                order: vi.fn().mockReturnThis(),
+                limit: vi.fn().mockResolvedValue({ data: tied, error: null }),
+            })),
+        };
+        const report = await backfillAnalysisCanonical({ client, limit, reportOnly: true });
+        expect(report.status).toBe('blocked');
+        expect(report.nextCursor).toBeTruthy();
+    });
+
+    it('normalizes live target manifests and interactions into bidirectional logical evidence', () => {
+        const request = sourceRows[0]!.id;
+        const manifest = {
+            request_id: request,
+            job_key: 'track:target-evidence:collect',
+            input_hash: 'a'.repeat(64),
+            liker_source_hash: 'b'.repeat(64),
+            comment_source_hash: 'c'.repeat(64),
+            result_hash: 'd'.repeat(64),
+            interactor_count: 1,
+            liker_count: 1,
+            comment_count: 0,
+            created_at: '2026-09-01T00:00:00.000Z',
+        };
+        const interaction = {
+            request_id: request,
+            job_key: 'track:target-evidence:collect',
+            ordinal: 1,
+            signal: 'target_post_like',
+            source_interaction_id: 'like:1',
+            occurred_at: '2026-09-01T00:00:01.000Z',
+            created_at: '2026-09-01T00:00:01.000Z',
+        };
+        const normalized = normalizeBackfillFamilyRows(
+            'artifacts',
+            [manifest, interaction],
+            [request],
+        );
+        expect(normalized).toHaveLength(2);
+        expect(normalized.find(row => row.evidence.targetManifest)?.evidence.targetManifest).toBe(true);
+        expect(normalized.find(row => row.evidence.targetInteractions.length > 0)?.evidence.targetInteractions).toEqual([{
+            key: 'like:1',
+            signal: 'target_post_like',
+            occurredAt: '2026-09-01T00:00:01.000Z',
+            evidenceId: 'like:1',
+        }]);
+        expect(compareNormalizedBackfillFamilyRows(
+            'artifacts',
+            [manifest, interaction],
+            [manifest, interaction],
+            [request],
+        )).toEqual({ status: 'match', mismatchPaths: [] });
     });
 });

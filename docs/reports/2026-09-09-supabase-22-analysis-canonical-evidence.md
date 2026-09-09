@@ -4,6 +4,8 @@ Status: **BLOCKED for production parity and cutover**
 
 Date: 2026-09-09 (Asia/Seoul)
 
+The canonical migration is amended locally but remains unapplied; production parity evidence and cutover approval are intentionally absent.
+
 This report records local contract evidence only. No production query, remote migration, provider call, admission activation, payment mutation, destructive source operation, or real canary was performed in this worktree.
 
 ## Local implementation evidence
@@ -13,18 +15,19 @@ This report records local contract evidence only. No production query, remote mi
 - Every canonical table enables and forces RLS, revokes table privileges from `PUBLIC`, `anon`, `authenticated`, and `service_role`, and exposes writes/reads only through service-role RPCs.
 - Event, cost, and audit rows are append-only. Audit uniqueness is `(request_id, version, kind, content_hash)`, and all persisted hashes are lower-case SHA-256 values.
 - Unknown cost semantics remain fail-closed: `usage_unknown = true` requires `amount_known IS NULL`; a later known usage observation appends a new cost row and can allocate a new immutable audit version.
-- The typed server adapter rejects forbidden payload keys before an RPC, computes stable JSON SHA-256 hashes when a source hash is not supplied, defaults all write flags to disabled, and reports `blocked` if a bounded retry marker cannot be durably persisted; it never claims `retry_queued` without a successful marker RPC.
-- The service-only family loader includes the cache family and applies a SQL `LIMIT 100` to every returned collection; the adapter rejects unknown, malformed, or oversized collection payloads before callers receive them.
-- Shadow parity requires a complete normalized schema and compares candidate, interaction, order, counts, ownership/state, ordering/hash, cost, retention, unknown-source, and every required canonical family-row collection. Unknown-source projections cannot match each other, and canonical read/comparison errors and mismatches emit sanitized diagnostics while retaining the legacy response. The server-only result-page reader now exercises this shadow path, while the audit read flag remains disabled by default.
-- The report-only backfill reads `analysis_requests`, every listed legacy family table, and each canonical family table with hard-bounded `(time,key)` keyset pages; its local fixtures cover two 100-row source pages and bidirectional count/field/order parity. Cursor timestamps are restricted to safe ISO forms so the boundary cannot become a filter expression. Late provider-cost reconciliation now uses one service-only SQL RPC that locks the request row, allocates `MAX(version)+1`, and appends cost plus audit evidence atomically.
-- Any late-cost atomic read/append failure enters the typed retry-marker path; the adapter validates the durable operational event's request, family, retry key, hash, retention, id, and timestamp before returning `retry_queued`. An invalid or unavailable marker remains `blocked`, while the legacy settlement remains authoritative.
+- The typed server adapter rejects forbidden or extra payload keys before an RPC, enforces bounded version-1 JSON envelopes, computes stable JSON SHA-256 hashes when a source hash is not supplied, defaults all write flags to disabled, and reports `blocked` if a bounded retry marker cannot be durably persisted; it never claims `retry_queued` without a successful marker RPC.
+- The service-only family loader includes the request-scoped cache family and applies a SQL `LIMIT 100` to every returned collection; the adapter rejects unknown, malformed, source-sensitive, synthetic, or oversized collection/projection payloads before callers receive them.
+- Shadow parity requires a complete normalized schema and compares candidate, interaction, order, counts, ownership/state, ordering/hash, cost, retention, target evidence manifests/interactions, unknown-source, and every required canonical family-row collection. Unknown-source projections cannot match each other, and canonical read/comparison errors and mismatches emit sanitized diagnostics while retaining the legacy response. The server-only result-page reader now exercises this shadow path, while the audit read flag remains disabled by default.
+- The report-only backfill reads `analysis_requests`, every listed legacy family table (including live target-evidence manifests), and each canonical family table with hard-bounded unique `(time,key)` keyset pages constrained to selected request IDs. It compares bidirectional normalized logical rows and required evidence/count/candidate/interaction/order/retention/cost fields, never reports `match` or `report_only` while a sentinel page is outstanding, and fails closed for cursor/limit ambiguity.
+- Late provider-cost reconciliation now uses one service-only SQL RPC that locks the request row, reconciles a durable source/audit idempotency key before allocating a version, and appends cost plus audit evidence atomically. A repeated call after response loss therefore reuses the original cost/audit rows and version rather than allocating another version.
+- Any late-cost atomic read/append failure enters the typed retry-marker path; the adapter validates the durable operational event's exact keys, request, family, retry key, hash, retention, id, and strict millisecond UTC timestamp grammar before returning `retry_queued`. An invalid or unavailable marker remains `blocked`, while the legacy settlement remains authoritative.
 - Worker completion, progress checkpoints, provider cost reconciliation, and result finalization dual-write only after the existing legacy operation succeeds. Canonical failures do not roll back a user-visible legacy success.
 
 ## Test and command evidence
 
-- Focused canonical migration, PGlite, adapter, worker, provider-cost, progress, result, read, and backfill tests passed locally: 8 files and 157 tests in the review-fix suite, including multi-page legacy-family keyset traversal and concurrent late-cost version allocation under PGlite.
+- Focused canonical migration, PGlite, adapter, worker, provider-cost, progress, result, read, and backfill tests passed locally: 8 files and 170 tests in the review-fix suite, including cross-request cache isolation, repeated late-cost reconciliation, multi-page/tied keyset traversal, exact payload rejection, and concurrent late-cost version allocation under PGlite.
 - The report-only command ran successfully and emitted only aggregate output: `status=blocked`, `scanned=0`, `complete=0`, `blocked=1`, with all six family reports blocked as `source.missing`. The source was unavailable, so no request identifiers or user data were emitted.
-- `npx tsc --noEmit --pretty false --incremental false` passed.
+- `npm exec tsc -- --noEmit` passed.
 - `npm run lint` completed with zero errors and 27 existing warnings outside this change.
 - `git diff --check` passed.
 - `npm run build` compiled successfully and completed its TypeScript phase, but static prerendering was blocked by missing Supabase URL/API-key environment variables for `/betatest` and `/_not-found` in this isolated worktree.

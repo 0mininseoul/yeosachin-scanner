@@ -13,6 +13,7 @@ function canonicalMigrationPath(): URL {
 }
 
 const requestId = '70000000-0000-4000-8000-000000000001';
+const secondRequestId = '70000000-0000-4000-8000-000000000002';
 const hashA = 'a'.repeat(64);
 const hashB = 'b'.repeat(64);
 
@@ -27,6 +28,7 @@ CREATE TABLE public.analysis_requests (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 INSERT INTO public.analysis_requests(id) VALUES ('${requestId}');
+INSERT INTO public.analysis_requests(id) VALUES ('${secondRequestId}');
 `;
 
 describe('analysis canonical tables PGlite contract', () => {
@@ -77,9 +79,9 @@ describe('analysis canonical tables PGlite contract', () => {
 
     it('returns the cache family from the bounded service loader', async () => {
         await db.query(
-            `INSERT INTO public.analysis_cache(scope, cache_key_hash, state, expires_at, payload)
-             VALUES ('ai', $1, 'ready', clock_timestamp() + INTERVAL '1 hour', '{"ok":true}'::jsonb)`,
-            [hashB],
+            `INSERT INTO public.analysis_cache(request_id, scope, cache_key_hash, state, expires_at, payload)
+             VALUES ($1, 'ai', $2, 'ready', clock_timestamp() + INTERVAL '1 hour', '{"schemaVersion":1}'::jsonb)`,
+            [requestId, hashB],
         );
         const result = await db.query<{ payload: Record<string, unknown> }>(
             `SELECT public.load_analysis_canonical_family($1, 'cache') AS payload`,
@@ -106,6 +108,32 @@ describe('analysis canonical tables PGlite contract', () => {
                  request_id, version, kind, state, content_hash
              ) VALUES ($1, 1, 'bundle', 'partial', $2)`,
             [requestId, hashA],
+        )).rejects.toThrow();
+    });
+
+    it('rejects extra and synthetic JSONB payload keys at the database boundary', async () => {
+        await expect(db.query(
+            `INSERT INTO public.analysis_jobs(request_id, job_key, kind, state, payload)
+             VALUES ($1, 'schema:extra', 'coordinator', 'queued', '{"schemaVersion":1,"extra":true}'::jsonb)`,
+            [requestId],
+        )).rejects.toThrow();
+        await expect(db.query(
+            `INSERT INTO public.analysis_events(request_id, kind, state, content_hash, payload)
+             VALUES ($1, 'progress', 'partial', $2, '{"schemaVersion":1,"synthetic":true}'::jsonb)`,
+            [requestId, 'c'.repeat(64)],
+        )).rejects.toThrow();
+        await expect(db.query(
+            `INSERT INTO public.analysis_events(request_id, kind, state, content_hash, payload)
+             VALUES ($1, 'progress', 'partial', $2,
+                 '{"schemaVersion":1,"evidence":{"targetManifests":[],"targetInteractions":[],"extra":true}}'::jsonb)`,
+            [requestId, 'd'.repeat(64)],
+        )).rejects.toThrow();
+        await expect(db.query(
+            `INSERT INTO public.analysis_artifacts(
+                 request_id, kind, artifact_key, state, content_hash, retention_class, payload
+             ) VALUES ($1, 'evidence', 'target-manifest-extra', 'retained', $2, 'standard',
+                 '{"schemaVersion":1,"targetManifest":{"key":"manifest:1","inputHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","likerSourceHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commentSourceHash":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","resultHash":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","interactorCount":1,"likerCount":1,"commentCount":0,"retention":"standard","extra":true}}'::jsonb)`,
+            [requestId, 'e'.repeat(64)],
         )).rejects.toThrow();
     });
 
@@ -136,8 +164,8 @@ describe('analysis canonical tables PGlite contract', () => {
         const call = (sourceHash: string) => db.query<{ version: number }>(
             `SELECT (public.append_analysis_canonical_late_cost_audit(
                 $1, 'vertex', 'provider-run:late', 'provider_cost', 'USD',
-                0.01, 0.01, FALSE, $2, '{}'::jsonb, 'permanent', $3,
-                '{"lateCost":true}'::jsonb, 'permanent'
+                0.01, 0.01, FALSE, $2, 'concurrent-' || $2, '{"schemaVersion":1}'::jsonb, 'permanent', $3,
+                '{"schemaVersion":1,"lateCost":true}'::jsonb, 'permanent'
             )->>'version')::int AS version`,
             [requestId, sourceHash, hashB],
         );
@@ -153,5 +181,46 @@ describe('analysis canonical tables PGlite contract', () => {
             [requestId],
         );
         expect(auditRows.rows[0]?.count).toBe(3);
+    });
+
+    it('keeps cache rows request-scoped and returns only the selected request', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_cache(request_id, scope, cache_key_hash, state, expires_at, payload)
+             VALUES ($1, 'ai', $2, 'ready', clock_timestamp() + INTERVAL '1 hour', '{"schemaVersion":1,"requestId":"${requestId}"}'::jsonb)`,
+            [requestId, 'e'.repeat(64)],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_cache(request_id, scope, cache_key_hash, state, expires_at, payload)
+             VALUES ($1, 'ai', $2, 'ready', clock_timestamp() + INTERVAL '1 hour', '{"schemaVersion":1,"requestId":"${secondRequestId}"}'::jsonb)`,
+            [secondRequestId, 'f'.repeat(64)],
+        );
+        const result = await db.query<{ payload: Record<string, unknown> }>(
+            `SELECT public.load_analysis_canonical_family($1, 'cache') AS payload`,
+            [requestId],
+        );
+        expect(result.rows[0]?.payload.caches).toHaveLength(2);
+        expect(JSON.stringify(result.rows[0]?.payload.caches)).toContain(requestId);
+        expect(JSON.stringify(result.rows[0]?.payload.caches)).not.toContain(secondRequestId);
+    });
+
+    it('reconciles a repeated late-cost call to one cost and one audit version', async () => {
+        const call = () => db.query<{ version: number }>(
+            `SELECT (public.append_analysis_canonical_late_cost_audit(
+                $1, 'vertex', 'provider-run:idempotent', 'provider_cost', 'USD',
+                0.02, 0.02, FALSE, $2, 'idempotency-key-1', '{"schemaVersion":1}'::jsonb, 'permanent', $3,
+                '{"schemaVersion":1,"lateCost":true}'::jsonb, 'permanent'
+            )->>'version')::int AS version`,
+            [requestId, '1'.repeat(64), '2'.repeat(64)],
+        );
+        const first = await call();
+        const second = await call();
+        expect(first.rows[0]?.version).toBe(second.rows[0]?.version);
+        const rows = await db.query<{ costs: number; audits: number }>(
+            `SELECT
+                 (SELECT count(*)::int FROM public.analysis_costs WHERE request_id = $1 AND operation_key = 'provider-run:idempotent') AS costs,
+                 (SELECT count(*)::int FROM public.analysis_audit_bundles WHERE request_id = $1 AND content_hash = $2) AS audits`,
+            [requestId, '2'.repeat(64)],
+        );
+        expect(rows.rows[0]).toEqual({ costs: 1, audits: 1 });
     });
 });

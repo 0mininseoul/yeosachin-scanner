@@ -179,6 +179,53 @@ describe('analysis canonical server adapter', () => {
         expect(rpc).not.toHaveBeenCalled();
     });
 
+    it('rejects source-sensitive identity fields before crossing the RPC boundary', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_WRITE', 'true');
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendArtifact({
+            requestId,
+            kind: 'evidence',
+            artifactKey: 'evidence:source-sensitive',
+            state: 'retained',
+            contentHash: hash,
+            retentionClass: 'standard',
+            payload: { targetUsername: 'sensitive' },
+        })).rejects.toThrow('forbidden payload key');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
+    it('rejects extra keys inside a typed evidence payload', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_WRITE', 'true');
+        const rpc = vi.fn();
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendArtifact({
+            requestId,
+            kind: 'manifest',
+            artifactKey: 'evidence:typed',
+            state: 'retained',
+            contentHash: hash,
+            retentionClass: 'standard',
+            payload: {
+                targetManifest: {
+                    key: 'manifest:1',
+                    inputHash: hash,
+                    likerSourceHash: hash,
+                    commentSourceHash: hash,
+                    resultHash: hash,
+                    interactorCount: 1,
+                    likerCount: 1,
+                    commentCount: 0,
+                    retention: 'permanent',
+                    extra: true,
+                },
+            },
+        })).rejects.toThrow('unknown nested payload key');
+        expect(rpc).not.toHaveBeenCalled();
+    });
+
     it('queues one bounded retry marker after a one-sided canonical write', async () => {
         vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
         const rpc = vi.fn()
@@ -224,13 +271,17 @@ describe('analysis canonical server adapter', () => {
         const store = createAnalysisCanonicalStore(rpcClient(rpc));
 
         await expect(store.upsertCache({
+            requestId,
             scope: 'ai',
             cacheKeyHash: hash,
             state: 'ready',
             expiresAt: '2026-09-10T00:00:00.000Z',
         })).resolves.toEqual({ status: 'blocked', family: 'cache' });
-        expect(rpc).toHaveBeenCalledTimes(1);
-        expect(rpc).not.toHaveBeenCalledWith('enqueue_analysis_canonical_retry', expect.anything());
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc).toHaveBeenCalledWith('enqueue_analysis_canonical_retry', {
+            p_request_id: requestId,
+            p_family: 'cache',
+        });
     });
 
     it('does not claim retry_queued when the retry marker RPC itself fails', async () => {
@@ -295,5 +346,78 @@ describe('analysis canonical server adapter', () => {
             state: 'complete',
             contentHash: hash,
         })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('rejects a retry marker with extra payload keys or non-canonical timestamps', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: {
+                        family: 'audit',
+                        retryKey: `${requestId}:audit`,
+                        extra: 'must-not-cross-boundary',
+                    },
+                    content_hash: createHash('sha256')
+                        .update(`${requestId}:audit`)
+                        .digest('hex'),
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00Z',
+                },
+                error: null,
+            });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('requires a request-safe identity for canonical cache writes', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_WRITE', 'true');
+        const store = createAnalysisCanonicalStore(rpcClient(vi.fn(async () => ({ data: {}, error: null }))));
+
+        await expect(store.upsertCache({
+            requestId,
+            scope: 'ai',
+            cacheKeyHash: hash,
+            state: 'ready',
+            expiresAt: '2026-09-10T00:00:00.000Z',
+        })).resolves.toEqual({ status: 'appended' });
+    });
+
+    it('sends a durable late-cost idempotency key', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: { version: 1 },
+            error: null,
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendLateCostAudit({
+            requestId,
+            provider: 'vertex',
+            operationKey: 'provider-run:late',
+            stage: 'provider_cost',
+            amountKnown: 0.01,
+            amountConservative: 0.01,
+            usageUnknown: false,
+            sourceHash: hash,
+            idempotencyKey: 'late-cost:source-1',
+            auditPayload: { lateCost: true },
+        })).resolves.toEqual({ status: 'appended', usageUnknown: false, version: 1 });
+        expect(rpc).toHaveBeenCalledWith('append_analysis_canonical_late_cost_audit', expect.objectContaining({
+            p_idempotency_key: 'late-cost:source-1',
+        }));
     });
 });

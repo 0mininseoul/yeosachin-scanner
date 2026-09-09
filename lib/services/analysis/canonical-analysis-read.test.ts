@@ -27,13 +27,22 @@ describe('analysis canonical shadow reads', () => {
 
     it('compares candidate, interaction, order, cost, retention, unknown-source, and every family row', () => {
         const projection = {
+            schemaVersion: 1,
+            requestId,
             requestStatus: 'completed',
             ownership: 'owned',
             state: 'completed',
-            counts: { candidates: 1, interactions: 1 },
-            candidate: [{ key: 'candidate:1', rank: 1, score: 8.2 }],
-            interaction: [{ key: 'interaction:1', count: 2 }],
-            order: [{ key: 'candidate:1', ordinal: 1 }],
+            counts: {
+                detectedMutuals: 1,
+                publicMutuals: 1,
+                privateMutuals: 0,
+                screenedMutuals: 1,
+                candidates: 1,
+                interactions: 1,
+            },
+            candidate: [{ key: 'candidate:1', ordinal: 1, rank: 1, score: 8.2, state: 'included', contentHash: 'd'.repeat(64) }],
+            interaction: [{ key: 'interaction:1', candidateKey: 'candidate:1', signal: 'comment', occurredAt: null, evidenceId: 'evidence:1', contentHash: 'e'.repeat(64) }],
+            order: [{ key: 'candidate:1', list: 'female', ordinal: 1, rank: 1 }],
             orderHash: 'b'.repeat(64),
             contentHash: 'c'.repeat(64),
             progress: null,
@@ -48,18 +57,39 @@ describe('analysis canonical shadow reads', () => {
             retention: 'permanent',
             auditRetention: 'permanent',
             unknownSource: false,
+            evidence: {
+                targetManifests: [{
+                    key: 'manifest:1',
+                    inputHash: 'a'.repeat(64),
+                    likerSourceHash: 'b'.repeat(64),
+                    commentSourceHash: 'c'.repeat(64),
+                    resultHash: 'f'.repeat(64),
+                    interactorCount: 1,
+                    likerCount: 1,
+                    commentCount: 0,
+                    retention: 'permanent',
+                }],
+                targetInteractions: [],
+            },
             familyRows: {
-                jobs: [{ key: 'job:1' }],
-                events: [{ key: 'event:1' }],
-                artifacts: [{ key: 'artifact:1' }],
-                costs: [{ key: 'cost:1' }],
+                jobs: [],
+                events: [],
+                artifacts: [],
+                costs: [],
                 caches: [],
-                audits: [{ key: 'audit:1' }],
+                audits: [],
             },
         };
         expect(compareAnalysisCanonicalProjection(projection, projection)).toEqual({
             status: 'match',
             mismatchPaths: [],
+        });
+        expect(compareAnalysisCanonicalProjection(
+            { ...projection, candidate: [] },
+            { ...projection, candidate: [] },
+        )).toEqual({
+            status: 'blocked',
+            mismatchPaths: ['comparison.required'],
         });
         expect(compareAnalysisCanonicalProjection(
             { ...projection, unknownSource: true },
@@ -80,20 +110,25 @@ describe('analysis canonical shadow reads', () => {
                 unknownSource: true,
                 familyRows: {
                     ...projection.familyRows,
-                    audits: [{ key: 'audit:2' }],
+                    audits: [{
+                        id: '123e4567-e89b-42d3-a456-426614174010',
+                        request_id: requestId,
+                        version: 1,
+                        kind: 'bundle',
+                        candidate_key: null,
+                        ordinal: null,
+                        state: 'complete',
+                        content_hash: 'a'.repeat(64),
+                        idempotency_key: null,
+                        retention_class: 'permanent',
+                        payload: { schemaVersion: 1 },
+                        created_at: '2026-09-09T20:00:00.000Z',
+                    }],
                 },
             },
         )).toEqual({
-            status: 'mismatch',
-            mismatchPaths: [
-                'candidate',
-                'interaction',
-                'order',
-                'cost',
-                'retention',
-                'unknownSource',
-                'familyRows',
-            ],
+            status: 'blocked',
+            mismatchPaths: ['unknownSource'],
         });
     });
 
@@ -185,12 +220,13 @@ describe('analysis canonical shadow reads', () => {
                     costs: [],
                     caches: [{
                         id: '123e4567-e89b-42d3-a456-426614174003',
+                        request_id: requestId,
                         scope: 'ai',
                         cache_key_hash: 'a'.repeat(64),
                         state: 'ready',
                         expires_at: '2026-09-10T00:00:00.000Z',
                         single_flight_token_hash: null,
-                        payload: {},
+                        payload: { schemaVersion: 1 },
                         created_at: '2026-09-09T20:00:00.000Z',
                         updated_at: '2026-09-09T20:00:00.000Z',
                     }],
@@ -291,6 +327,35 @@ describe('analysis canonical shadow reads', () => {
             .rejects.toThrow('invalid or missing required canonical events field');
     });
 
+    it('rejects an unversioned empty canonical JSON payload', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_READ', 'true');
+        const store = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({
+                data: {
+                    jobs: [],
+                    events: [{
+                        id: 1,
+                        request_id: requestId,
+                        job_id: null,
+                        kind: 'progress',
+                        state: 'completed',
+                        payload: {},
+                        content_hash: 'a'.repeat(64),
+                        retention_class: 'standard',
+                        created_at: '2026-09-09T20:00:00.000Z',
+                    }],
+                    artifacts: [],
+                    costs: [],
+                    caches: [],
+                    audits: [],
+                },
+                error: null,
+            })),
+        });
+        await expect(store.loadRequest(requestId, 'evidence'))
+            .rejects.toThrow('invalid or missing required canonical events field');
+    });
+
     it('falls back to the legacy projection on a normalized shadow mismatch', async () => {
         vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
         const client = {
@@ -299,13 +364,15 @@ describe('analysis canonical shadow reads', () => {
         const onMismatch = vi.fn();
         const store = createAnalysisCanonicalReadStore(client, { onMismatch });
         const legacy = {
+            schemaVersion: 1,
+            requestId,
             requestStatus: 'completed',
             ownership: 'owned',
             state: 'completed',
-            counts: { candidates: 1, interactions: 1 },
-            candidate: [{ key: 'candidate:1', rank: 1, score: 8.2 }],
-            interaction: [{ key: 'interaction:1', count: 2 }],
-            order: [{ key: 'candidate:1', ordinal: 1 }],
+            counts: { detectedMutuals: 1, publicMutuals: 1, privateMutuals: 0, screenedMutuals: 1, candidates: 1, interactions: 1 },
+            candidate: [{ key: 'candidate:1', ordinal: 1, rank: 1, score: 8.2, state: 'included', contentHash: 'd'.repeat(64) }],
+            interaction: [{ key: 'interaction:1', candidateKey: 'candidate:1', signal: 'comment', occurredAt: null, evidenceId: 'evidence:1', contentHash: 'e'.repeat(64) }],
+            order: [{ key: 'candidate:1', list: 'female', ordinal: 1, rank: 1 }],
             orderHash: 'b'.repeat(64),
             contentHash: 'c'.repeat(64),
             progress: null,
@@ -320,6 +387,7 @@ describe('analysis canonical shadow reads', () => {
             retention: 'permanent',
             auditRetention: 'permanent',
             unknownSource: false,
+            evidence: { targetManifests: [], targetInteractions: [] },
             familyRows: { jobs: [], events: [], artifacts: [], costs: [], caches: [], audits: [] },
         };
         const canonical = { ...legacy, result: { rank: 1, score: 8.1 } };

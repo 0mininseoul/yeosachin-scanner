@@ -44,9 +44,11 @@ import {
     type AnalysisCanonicalStore,
 } from './canonical-analysis-store';
 import {
+    ANALYSIS_CANONICAL_SCHEMA_VERSION,
     analysisCanonicalReadStore,
     compareAnalysisCanonicalProjection,
     type AnalysisCanonicalNormalizedProjection,
+    type AnalysisCanonicalProjectionCounts,
     type AnalysisCanonicalReadBundle,
     type AnalysisCanonicalReadStore,
 } from './canonical-analysis-read';
@@ -1223,35 +1225,48 @@ type ResultShadowSummary = Pick<
     'planId' | 'detectedMutuals' | 'publicMutuals' | 'privateMutuals' | 'screenedMutuals'
 >;
 
-function resultShadowCounts(summary: ResultShadowSummary): Readonly<Record<string, number>> {
+function resultShadowCounts(
+    summary: ResultShadowSummary,
+    snapshot?: AnalysisV2FinalizedSnapshot | null,
+): AnalysisCanonicalProjectionCounts {
     return Object.freeze({
         detectedMutuals: summary.detectedMutuals,
         publicMutuals: summary.publicMutuals,
         privateMutuals: summary.privateMutuals,
         screenedMutuals: summary.screenedMutuals,
+        candidates: snapshot ? snapshot.femaleAccounts.length + snapshot.privateAccounts.length : 0,
+        interactions: 0,
     });
 }
 
 function resultShadowProjection(
+    requestId: string,
     summary: ResultShadowSummary,
     requestStatus: 'completed' = 'completed',
     snapshot?: AnalysisV2FinalizedSnapshot | null,
 ): AnalysisCanonicalNormalizedProjection {
-    const counts = resultShadowCounts(summary);
+    const counts = resultShadowCounts(summary, snapshot);
     const contentHash = hashAnalysisCanonicalValue({
         requestStatus,
         planId: summary.planId,
         counts,
     });
     return {
+        schemaVersion: ANALYSIS_CANONICAL_SCHEMA_VERSION,
+        requestId,
         requestStatus,
         state: requestStatus,
         ownership: 'unknown',
         counts,
         candidate: snapshot
             ? [...snapshot.femaleAccounts, ...snapshot.privateAccounts].map(entry => ({
-                candidateId: entry.candidateId,
+                key: entry.candidateId,
                 ordinal: entry.sortOrdinal,
+                rank: entry.sortOrdinal,
+                score: 'displayScore' in entry.row && typeof entry.row.displayScore === 'number'
+                    ? entry.row.displayScore : null,
+                state: snapshot.femaleAccounts.some(item => item.candidateId === entry.candidateId)
+                    ? 'included' : 'private',
                 contentHash: hashAnalysisCanonicalValue(entry.row),
             }))
             : [],
@@ -1259,14 +1274,16 @@ function resultShadowProjection(
         order: snapshot
             ? [
                 ...snapshot.femaleAccounts.map(entry => ({
-                    list: 'female',
-                    candidateId: entry.candidateId,
+                    list: 'female' as const,
+                    key: entry.candidateId,
                     ordinal: entry.sortOrdinal,
+                    rank: entry.sortOrdinal,
                 })),
                 ...snapshot.privateAccounts.map(entry => ({
-                    list: 'private',
-                    candidateId: entry.candidateId,
+                    list: 'private' as const,
+                    key: entry.candidateId,
                     ordinal: entry.sortOrdinal,
+                    rank: entry.sortOrdinal,
                 })),
             ]
             : [],
@@ -1284,6 +1301,10 @@ function resultShadowProjection(
         retention: 'permanent',
         auditRetention: 'permanent',
         unknownSource: true,
+        evidence: {
+            targetManifests: [],
+            targetInteractions: [],
+        },
         familyRows: {
             jobs: [],
             events: [],
@@ -1745,6 +1766,7 @@ export function createSupabaseAnalysisV2ResultStore(
             }
             await postTerminalBetaCredit(claim.requestId);
             const shadowProjection = resultShadowProjection(
+                claim.requestId,
                 parsed.data.summary,
                 parsed.data.requestStatus,
             );
@@ -1858,7 +1880,7 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!snapshot) return null;
             await canonicalReadStore.shadowRead({
                 family: 'audit',
-                legacy: async () => resultShadowProjection(snapshot.summary, 'completed', snapshot),
+                legacy: async () => resultShadowProjection(snapshot.requestId, snapshot.summary, 'completed', snapshot),
                 canonical: async () => canonicalAuditProjection(
                     await canonicalReadStore.loadRequest(input.requestId, 'audit'),
                 ),

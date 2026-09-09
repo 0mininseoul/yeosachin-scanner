@@ -195,6 +195,7 @@ export async function reconcileSettledAnalysisProviderCosts(
                         amountConservative: usageTotalUsd,
                         usageUnknown: false,
                         sourceHash,
+                        idempotencyKey: `provider-cost:${stored.runId}`,
                         costPayload,
                         costRetentionClass: 'permanent',
                         auditPayload,

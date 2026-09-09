@@ -6,6 +6,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
+const CANONICAL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const SHA256_DOMAIN = 'analysis-canonical:v1\0';
 
 export type AnalysisCanonicalWriteFamily = 'jobs' | 'evidence' | 'cost' | 'cache' | 'audit';
@@ -141,11 +142,13 @@ export interface AppendAnalysisCanonicalCostInput {
     amountConservative: number | null;
     usageUnknown: boolean;
     sourceHash?: string;
+    idempotencyKey?: string;
     payload?: AnalysisCanonicalPayload;
     retentionClass?: string;
 }
 
 export interface UpsertAnalysisCanonicalCacheInput {
+    requestId: string;
     scope: 'ai' | 'profile' | 'anonymous' | 'blite';
     cacheKeyHash: string;
     state: 'pending' | 'ready' | 'failed' | 'expired';
@@ -162,6 +165,7 @@ export interface AppendAnalysisCanonicalAuditInput {
     ordinal?: number | null;
     state: 'complete' | 'partial' | 'inconsistent' | 'failed';
     contentHash?: string;
+    idempotencyKey?: string | null;
     retentionClass?: string;
     payload?: AnalysisCanonicalPayload;
 }
@@ -176,6 +180,7 @@ export interface AppendAnalysisCanonicalLateCostAuditInput {
     amountConservative: number | null;
     usageUnknown: boolean;
     sourceHash?: string;
+    idempotencyKey?: string;
     costPayload?: AnalysisCanonicalPayload;
     costRetentionClass?: string;
     auditPayload?: AnalysisCanonicalPayload;
@@ -213,10 +218,233 @@ const FORBIDDEN_PAYLOAD_KEYS = new Set([
     'raw_provider_payload',
     'authorization',
     'secret',
+    'raw',
+    'rawSource',
+    'raw_source',
+    'sourceSensitive',
+    'source_sensitive',
+    'synthetic',
+    'placeholder',
+    'partialEvidence',
+    'partial_evidence',
+    'targetUsername',
+    'target_username',
+    'likerSource',
+    'liker_source',
+    'commentSource',
+    'comment_source',
 ]);
+
+const CANONICAL_PAYLOAD_KEYS: Readonly<Record<AnalysisCanonicalWriteFamily, readonly string[]>> = {
+    jobs: [
+        'schemaVersion', 'successorCount', 'track', 'batch', 'jobKey', 'generation',
+        'attemptCount', 'dependencyCount', 'completionHash', 'requestStatus', 'state', 'counts',
+    ],
+    evidence: [
+        'schemaVersion', 'jobKey', 'generation', 'successorCount', 'eventCode', 'copyCode',
+        'aggregateCount', 'tracks', 'artifactKey', 'kind', 'state', 'source', 'resultHash',
+        'targetManifest', 'candidate', 'interaction', 'order', 'retention', 'counts', 'evidence',
+        'inputHash', 'likerSourceHash', 'commentSourceHash', 'interactorCount', 'likerCount',
+        'commentCount', 'frozenAt',
+    ],
+    cost: [
+        'schemaVersion', 'runId', 'status', 'maxChargeUsd', 'credentialSlot', 'usageUnknown',
+        'amountKnown', 'amountConservative', 'sourceHash', 'operationKey', 'provider',
+    ],
+    cache: [
+        'schemaVersion', 'requestId', 'scope', 'cacheKeyHash', 'state', 'expiresAt',
+        'singleFlightTokenHash',
+    ],
+    audit: [
+        'schemaVersion', 'finalized', 'requestStatus', 'resultStatus', 'projection', 'lateCost', 'provider',
+        'operationKey', 'cost', 'retention', 'unknownSource', 'candidate', 'interaction', 'order', 'state',
+    ],
+};
+
+const CANONICAL_NESTED_PAYLOAD_KEYS = new Set([
+    'schemaVersion', 'successorCount', 'track', 'batch', 'jobKey', 'generation',
+    'attemptCount', 'dependencyCount', 'completionHash', 'requestStatus', 'state', 'counts',
+    'eventCode', 'copyCode', 'aggregateCount', 'tracks', 'artifactKey', 'kind', 'source',
+    'resultHash', 'targetManifest', 'candidate', 'interaction', 'order', 'retention', 'evidence',
+    'runId', 'status', 'maxChargeUsd', 'credentialSlot', 'usageUnknown', 'amountKnown',
+    'amountConservative', 'sourceHash', 'operationKey', 'provider', 'requestId', 'scope',
+    'cacheKeyHash', 'expiresAt', 'singleFlightTokenHash', 'finalized', 'resultStatus',
+    'projection', 'lateCost', 'unknownSource', 'targetManifests', 'targetInteractions',
+    'orderHash', 'contentHash', 'progress', 'result', 'providerOperation', 'auditRetention',
+    'familyRows', 'jobs', 'events', 'artifacts', 'costs', 'caches', 'audits', 'id', 'request_id',
+    'job_id', 'job_key', 'attempt_count', 'dependency_count', 'next_attempt_at',
+    'lease_expires_at', 'completion_hash', 'payload', 'retention_class', 'created_at',
+    'updated_at', 'artifact_key', 'cache_key_hash', 'expires_at', 'single_flight_token_hash',
+    'version', 'candidate_key', 'ordinal', 'content_hash', 'idempotency_key', 'recorded_at',
+    'currency', 'provider_operation', 'stage', 'key', 'candidateKey', 'signal', 'occurredAt',
+    'evidenceId', 'list', 'rank', 'score', 'interactorCount', 'likerCount', 'commentCount',
+    'inputHash', 'likerSourceHash', 'commentSourceHash', 'frozenAt', 'relationshipAi',
+    'interactions', 'finalization', 'stageCode', 'done', 'total', 'completed', 'lowSeconds',
+    'highSeconds', 'amountKnown', 'amountConservative', 'sourceHash',
+    'detectedMutuals', 'publicMutuals', 'privateMutuals', 'screenedMutuals', 'candidates',
+    'inputHash', 'likerSourceHash', 'commentSourceHash', 'frozenAt',
+]);
+
+const CANONICAL_EXACT_NESTED_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+    counts: [
+        'detectedMutuals', 'publicMutuals', 'privateMutuals', 'screenedMutuals',
+        'candidates', 'interactions',
+    ],
+    candidate: ['key', 'ordinal', 'rank', 'score', 'state', 'contentHash'],
+    interaction: ['key', 'candidateKey', 'signal', 'occurredAt', 'evidenceId', 'contentHash'],
+    order: ['key', 'list', 'ordinal', 'rank'],
+    cost: ['amountKnown', 'amountConservative', 'usageUnknown', 'sourceHash'],
+    tracks: ['relationshipAi', 'interactions', 'finalization'],
+    relationshipAi: ['state', 'stageCode', 'done', 'total'],
+    interactions: ['state', 'stageCode', 'done', 'total'],
+    finalization: ['state', 'stageCode', 'done', 'total'],
+    progress: ['state', 'completed', 'total'],
+    result: ['rank', 'score'],
+    evidence: ['targetManifests', 'targetInteractions'],
+    targetManifest: [
+        'key', 'inputHash', 'likerSourceHash', 'commentSourceHash', 'resultHash',
+        'interactorCount', 'likerCount', 'commentCount', 'retention',
+    ],
+    targetInteractions: ['key', 'signal', 'occurredAt', 'evidenceId'],
+    projection: [
+        'schemaVersion', 'requestId', 'requestStatus', 'ownership', 'state', 'counts',
+        'candidate', 'interaction', 'order', 'orderHash', 'contentHash', 'progress', 'result',
+        'providerOperation', 'cost', 'retention', 'auditRetention', 'unknownSource', 'evidence',
+        'familyRows',
+    ],
+    targetManifests: [
+        'key', 'inputHash', 'likerSourceHash', 'commentSourceHash', 'resultHash',
+        'interactorCount', 'likerCount', 'commentCount', 'retention',
+    ],
+    jobs: [
+        'id', 'request_id', 'job_key', 'kind', 'state', 'generation', 'attempt_count',
+        'dependency_count', 'next_attempt_at', 'lease_expires_at', 'completion_hash',
+        'payload', 'retention_class', 'created_at', 'updated_at',
+    ],
+    events: ['id', 'request_id', 'job_id', 'kind', 'state', 'payload', 'content_hash', 'retention_class', 'created_at'],
+    artifacts: [
+        'id', 'request_id', 'job_id', 'kind', 'artifact_key', 'state', 'content_hash',
+        'payload', 'retention_class', 'created_at', 'updated_at',
+    ],
+    costs: [
+        'id', 'request_id', 'provider', 'operation_key', 'stage', 'currency', 'amount_known',
+        'amount_conservative', 'usage_unknown', 'source_hash', 'idempotency_key', 'payload',
+        'retention_class', 'recorded_at',
+    ],
+    caches: [
+        'id', 'request_id', 'scope', 'cache_key_hash', 'state', 'expires_at',
+        'single_flight_token_hash', 'payload', 'created_at', 'updated_at',
+    ],
+    audits: [
+        'id', 'request_id', 'version', 'kind', 'candidate_key', 'ordinal', 'state',
+        'content_hash', 'idempotency_key', 'retention_class', 'payload', 'created_at',
+    ],
+    familyRows: ['jobs', 'events', 'artifacts', 'costs', 'caches', 'audits'],
+});
+
+function assertExactNestedKeys(
+    value: Record<string, unknown>,
+    parentKey: string | null,
+): void {
+    if (!parentKey) return;
+    const allowed = CANONICAL_EXACT_NESTED_KEYS[parentKey];
+    if (!allowed) return;
+    if (
+        Object.keys(value).length !== allowed.length
+        || Object.keys(value).some(key => !allowed.includes(key))
+    ) {
+        throw new Error(`ANALYSIS_CANONICAL_VALIDATION_ERROR: unknown nested payload key in ${parentKey}.`);
+    }
+}
+
+function assertTypedNestedPayload(
+    value: Record<string, unknown>,
+    parentKey: string | null,
+): void {
+    const hasString = (key: string, max = 512): boolean => isBoundedString(value[key], max);
+    const hasNullableString = (key: string, max = 512): boolean => (
+        value[key] === null || isBoundedString(value[key], max)
+    );
+    const hasNullableNumber = (key: string): boolean => (
+        value[key] === null || (typeof value[key] === 'number' && Number.isFinite(value[key]))
+    );
+    const hasCount = (key: string, max = 1_000_000): boolean => (
+        typeof value[key] === 'number'
+        && Number.isSafeInteger(value[key])
+        && (value[key] as number) >= 0
+        && (value[key] as number) <= max
+    );
+    const hasHash = (key: string): boolean => value[key] === null
+        || (typeof value[key] === 'string' && HASH_PATTERN.test(value[key]));
+    if (parentKey === 'counts') {
+        if (!['detectedMutuals', 'publicMutuals', 'privateMutuals', 'screenedMutuals', 'candidates', 'interactions']
+            .every(key => hasCount(key))) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed counts payload.');
+        }
+    } else if (parentKey === 'candidate') {
+        if (!hasString('key', 256) || !hasCount('ordinal', 1_200)
+            || !hasNullableNumber('rank') || !hasNullableNumber('score')
+            || !hasString('state', 64) || typeof value.contentHash !== 'string'
+            || !HASH_PATTERN.test(value.contentHash)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed candidate payload.');
+        }
+    } else if (parentKey === 'interaction') {
+        if (!hasString('key', 256) || !hasNullableString('candidateKey', 256)
+            || !hasString('signal', 64)
+            || (value.occurredAt !== null && !isCanonicalTimestamp(value.occurredAt))
+            || !hasString('evidenceId', 256) || typeof value.contentHash !== 'string'
+            || !HASH_PATTERN.test(value.contentHash)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed interaction payload.');
+        }
+    } else if (parentKey === 'order') {
+        if (!hasString('key', 256)
+            || !['female', 'private', 'public'].includes(String(value.list))
+            || !hasCount('ordinal', 1_200) || !hasNullableNumber('rank')) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed order payload.');
+        }
+    } else if (parentKey === 'cost') {
+        if (!hasNullableNumber('amountKnown') || !hasNullableNumber('amountConservative')
+            || typeof value.usageUnknown !== 'boolean' || !hasHash('sourceHash')
+            || (value.usageUnknown && value.amountKnown !== null)
+            || (value.amountKnown !== null && value.amountConservative !== null
+                && (value.amountConservative as number) < (value.amountKnown as number))) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed cost payload.');
+        }
+    } else if (parentKey === 'targetManifest' || parentKey === 'targetManifests') {
+        if (!hasString('key', 256)
+            || typeof value.inputHash !== 'string' || !HASH_PATTERN.test(value.inputHash)
+            || typeof value.likerSourceHash !== 'string' || !HASH_PATTERN.test(value.likerSourceHash)
+            || typeof value.commentSourceHash !== 'string' || !HASH_PATTERN.test(value.commentSourceHash)
+            || typeof value.resultHash !== 'string' || !HASH_PATTERN.test(value.resultHash)
+            || !hasCount('interactorCount', 690) || !hasCount('likerCount', 600)
+            || !hasCount('commentCount', 90) || !hasString('retention', 64)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed target manifest payload.');
+        }
+    } else if (parentKey === 'targetInteractions') {
+        if (!hasString('key', 256)
+            || !['target_post_like', 'target_post_comment'].includes(String(value.signal))
+            || (value.occurredAt !== null && !isCanonicalTimestamp(value.occurredAt))
+            || !hasString('evidenceId', 256)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed target interaction payload.');
+        }
+    } else if (parentKey === 'progress') {
+        if (!hasString('state', 64) || !hasCount('completed') || !hasCount('total')
+            || (value.completed as number) > (value.total as number)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed progress payload.');
+        }
+    } else if (parentKey === 'result') {
+        if (!hasNullableNumber('rank') || !hasNullableNumber('score')) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid typed result payload.');
+        }
+    }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isBoundedString(value: unknown, max = 512): value is string {
+    return typeof value === 'string' && value.length > 0 && value.length <= max;
 }
 
 function assertUuid(value: string, label: string): void {
@@ -231,26 +459,87 @@ function assertHash(value: string, label: string): void {
     }
 }
 
-function assertPayload(value: AnalysisCanonicalPayload | undefined, path = 'payload'): AnalysisCanonicalPayload {
+function isCanonicalTimestamp(value: unknown): value is string {
+    return typeof value === 'string'
+        && value.length <= 128
+        && CANONICAL_TIMESTAMP_PATTERN.test(value)
+        && Number.isFinite(Date.parse(value));
+}
+
+function assertPayload(
+    value: AnalysisCanonicalPayload | undefined,
+    path = 'payload',
+    allowedKeys?: readonly string[],
+): AnalysisCanonicalPayload {
     const payload = value ?? {};
     if (!isRecord(payload)) {
         throw new Error(`ANALYSIS_CANONICAL_VALIDATION_ERROR: ${path} must be an object.`);
     }
-    const visit = (candidate: unknown, location: string): void => {
+    if (
+        Object.prototype.hasOwnProperty.call(payload, 'schemaVersion')
+        && payload.schemaVersion !== 1
+    ) {
+        throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: unsupported payload schema version.');
+    }
+    const visit = (
+        candidate: unknown,
+        location: string,
+        depth: number,
+        parentKey: string | null = null,
+    ): void => {
+        if (depth > 8) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload nesting is too deep.');
+        }
         if (Array.isArray(candidate)) {
-            candidate.forEach((item, index) => visit(item, `${location}[${index}]`));
+            if (candidate.length > 100) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload array is too large.');
+            }
+            candidate.forEach((item, index) => visit(item, `${location}[${index}]`, depth + 1, parentKey));
             return;
         }
-        if (!isRecord(candidate)) return;
+        if (candidate === null || typeof candidate === 'boolean') return;
+        if (typeof candidate === 'string') {
+            if (candidate.length > 8_192) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload string is too large.');
+            }
+            return;
+        }
+        if (typeof candidate === 'number') {
+            if (!Number.isFinite(candidate)) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload number is not finite.');
+            }
+            return;
+        }
+        if (!isRecord(candidate)) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload contains an unsupported value.');
+        }
+        if (Object.keys(candidate).length > 64) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload object is too large.');
+        }
+        assertExactNestedKeys(candidate, parentKey);
+        assertTypedNestedPayload(candidate, parentKey);
+        if (location !== path && Object.keys(candidate).some(key => !CANONICAL_NESTED_PAYLOAD_KEYS.has(key))) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: unknown nested payload key.');
+        }
+        const stableCandidate = stableAnalysisCanonicalJson(candidate);
+        if (Buffer.byteLength(stableCandidate, 'utf8') > 32_768) {
+            throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: payload is too large.');
+        }
         for (const [key, child] of Object.entries(candidate)) {
-            if (FORBIDDEN_PAYLOAD_KEYS.has(key)) {
+            if (key === 'schemaVersion' && child !== 1) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: unsupported payload schema version.');
+            }
+            if (FORBIDDEN_PAYLOAD_KEYS.has(key) || FORBIDDEN_PAYLOAD_KEYS.has(key.toLowerCase())) {
                 throw new Error(`ANALYSIS_CANONICAL_VALIDATION_ERROR: forbidden payload key ${key}.`);
             }
-            visit(child, `${location}.${key}`);
+            if (location === path && allowedKeys && !allowedKeys.includes(key)) {
+                throw new Error(`ANALYSIS_CANONICAL_VALIDATION_ERROR: unknown payload key ${key}.`);
+            }
+            visit(child, `${location}.${key}`, depth + 1, key);
         }
     };
-    visit(payload, path);
-    return payload;
+    visit(payload, path, 0);
+    return Object.freeze({ schemaVersion: 1, ...payload });
 }
 
 function stableValue(value: unknown): unknown {
@@ -349,20 +638,26 @@ function parseRetryMarker(
 ): AnalysisCanonicalRetryMarker {
     if (!isRecord(value)) throw new Error('invalid retry marker');
     const payload = value.payload;
+    const valueKeys = Object.keys(value).sort().join(',');
+    const payloadKeys = isRecord(payload) ? Object.keys(payload).sort().join(',') : '';
     if (
-        typeof value.id !== 'number'
+        valueKeys !== 'content_hash,created_at,id,kind,payload,request_id,retention_class,state'
+        || typeof value.id !== 'number'
         || !Number.isSafeInteger(value.id)
         || value.id < 1
         || value.request_id !== requestId
         || value.kind !== 'operational'
         || value.state !== 'canonical_retry'
         || !isRecord(payload)
+        || payloadKeys !== 'family,retryKey'
         || payload.family !== family
         || payload.retryKey !== `${requestId}:${family}`
         || value.content_hash !== expectedRetryMarkerHash(requestId, family)
         || value.retention_class !== 'standard'
         || typeof value.created_at !== 'string'
+        || !CANONICAL_TIMESTAMP_PATTERN.test(value.created_at)
         || !Number.isFinite(Date.parse(value.created_at))
+        || new Date(value.created_at).toISOString() !== value.created_at
     ) {
         throw new Error('invalid retry marker');
     }
@@ -454,12 +749,33 @@ export function createAnalysisCanonicalStore(
                 }
                 for (const field of [
                     'id', 'request_id', 'version', 'kind', 'candidate_key', 'ordinal', 'state',
-                    'content_hash', 'retention_class', 'payload', 'created_at',
+                    'content_hash', 'idempotency_key', 'retention_class', 'payload', 'created_at',
                 ]) {
                     if (!Object.prototype.hasOwnProperty.call(row, field)) {
                         throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
                     }
                 }
+                if (Object.keys(row).length !== 12) {
+                    throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
+                }
+                if (
+                    row.request_id !== requestId
+                    || typeof row.id !== 'string' || !UUID_PATTERN.test(row.id)
+                    || !['bundle', 'candidate', 'interaction'].includes(String(row.kind))
+                    || (row.candidate_key !== null && typeof row.candidate_key !== 'string')
+                    || (row.ordinal !== null && !Number.isSafeInteger(row.ordinal))
+                    || !['complete', 'partial', 'inconsistent', 'failed'].includes(String(row.state))
+                    || typeof row.content_hash !== 'string' || !HASH_PATTERN.test(row.content_hash)
+                    || (row.idempotency_key !== null && !isBoundedString(row.idempotency_key, 256))
+                    || typeof row.retention_class !== 'string'
+                    || row.retention_class.length < 1 || row.retention_class.length > 64
+                    || !isRecord(row.payload)
+                    || row.payload.schemaVersion !== 1
+                    || !isCanonicalTimestamp(row.created_at)
+                ) {
+                    throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
+                }
+                assertPayload(row.payload as AnalysisCanonicalPayload, 'audit payload', CANONICAL_PAYLOAD_KEYS.audit);
                 return ensureInteger(
                     typeof row.version === 'number' ? row.version : undefined,
                     'audit version',
@@ -475,7 +791,7 @@ export function createAnalysisCanonicalStore(
             if (!JOB_KEY_PATTERN.test(input.jobKey)) {
                 throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid job key.');
             }
-            const payload = assertPayload(input.payload);
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.jobs);
             const generation = ensureInteger(input.generation, 'generation', 0, 9_000_000_000);
             const attemptCount = ensureInteger(input.attemptCount, 'attempt count', 0, 1_000);
             const dependencyCount = ensureInteger(input.dependencyCount, 'dependency count', 0, 9_000_000_000);
@@ -501,7 +817,7 @@ export function createAnalysisCanonicalStore(
         async appendEvent(input) {
             assertUuid(input.requestId, 'request id');
             if (input.jobId !== undefined && input.jobId !== null) assertUuid(input.jobId, 'job id');
-            const payload = assertPayload(input.payload);
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.evidence);
             const contentHash = input.contentHash ?? hashAnalysisCanonicalValue({
                 requestId: input.requestId,
                 jobId: input.jobId ?? null,
@@ -527,7 +843,7 @@ export function createAnalysisCanonicalStore(
             if (input.artifactKey.length < 1 || input.artifactKey.length > 512) {
                 throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid artifact key.');
             }
-            const payload = assertPayload(input.payload);
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.evidence);
             const contentHash = input.contentHash ?? hashAnalysisCanonicalValue({
                 requestId: input.requestId,
                 artifactKey: input.artifactKey,
@@ -564,7 +880,7 @@ export function createAnalysisCanonicalStore(
             ) {
                 throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: conservative amount is below known amount.');
             }
-            const payload = assertPayload(input.payload);
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.cost);
             const sourceHash = input.sourceHash ?? hashAnalysisCanonicalValue({
                 requestId: input.requestId,
                 provider: input.provider,
@@ -576,6 +892,14 @@ export function createAnalysisCanonicalStore(
                 payload,
             });
             assertHash(sourceHash, 'source hash');
+            const idempotencyKey = input.idempotencyKey ?? `cost:${sourceHash}`;
+            if (
+                typeof idempotencyKey !== 'string'
+                || idempotencyKey.length < 1
+                || idempotencyKey.length > 256
+            ) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid idempotency key.');
+            }
             if (!analysisCanonicalWriteEnabled('cost', env)) {
                 return { status: 'disabled', usageUnknown: input.usageUnknown };
             }
@@ -590,6 +914,7 @@ export function createAnalysisCanonicalStore(
                     p_amount_conservative: input.amountConservative,
                     p_usage_unknown: input.usageUnknown,
                     p_source_hash: sourceHash,
+                    p_idempotency_key: idempotencyKey,
                     p_payload: payload,
                     p_retention_class: input.retentionClass ?? 'permanent',
                 });
@@ -622,8 +947,16 @@ export function createAnalysisCanonicalStore(
             ) {
                 throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: conservative amount is below known amount.');
             }
-            const costPayload = assertPayload(input.costPayload, 'costPayload');
-            const auditPayload = assertPayload(input.auditPayload, 'auditPayload');
+            const costPayload = assertPayload(
+                input.costPayload,
+                'costPayload',
+                CANONICAL_PAYLOAD_KEYS.cost,
+            );
+            const auditPayload = assertPayload(
+                input.auditPayload,
+                'auditPayload',
+                CANONICAL_PAYLOAD_KEYS.audit,
+            );
             const sourceHash = input.sourceHash ?? hashAnalysisCanonicalValue({
                 requestId: input.requestId,
                 provider: input.provider,
@@ -635,6 +968,14 @@ export function createAnalysisCanonicalStore(
                 payload: costPayload,
             });
             assertHash(sourceHash, 'source hash');
+            const idempotencyKey = input.idempotencyKey ?? `late-cost:${sourceHash}`;
+            if (
+                typeof idempotencyKey !== 'string'
+                || idempotencyKey.length < 1
+                || idempotencyKey.length > 256
+            ) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid idempotency key.');
+            }
             if (
                 !analysisCanonicalWriteEnabled('cost', env)
                 || !analysisCanonicalWriteEnabled('audit', env)
@@ -658,6 +999,7 @@ export function createAnalysisCanonicalStore(
                     p_amount_conservative: input.amountConservative,
                     p_usage_unknown: input.usageUnknown,
                     p_source_hash: sourceHash,
+                    p_idempotency_key: idempotencyKey,
                     p_cost_payload: costPayload,
                     p_cost_retention_class: input.costRetentionClass ?? 'permanent',
                     p_audit_content_hash: auditContentHash,
@@ -678,15 +1020,17 @@ export function createAnalysisCanonicalStore(
         },
 
         async upsertCache(input) {
-            const payload = assertPayload(input.payload);
+            assertUuid(input.requestId, 'request id');
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.cache);
             assertHash(input.cacheKeyHash, 'cache key hash');
             if (input.singleFlightTokenHash !== undefined && input.singleFlightTokenHash !== null) {
                 assertHash(input.singleFlightTokenHash, 'single-flight token hash');
             }
             const expiresAt = asRpcDate(input.expiresAt);
             if (!expiresAt) throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid expiry.');
-            return write('cache', null, 'upsert_analysis_canonical_cache', {
+            return write('cache', input.requestId, 'upsert_analysis_canonical_cache', {
                 p_scope: input.scope,
+                p_request_id: input.requestId,
                 p_cache_key_hash: input.cacheKeyHash,
                 p_state: input.state,
                 p_expires_at: expiresAt,
@@ -698,7 +1042,7 @@ export function createAnalysisCanonicalStore(
         async appendAuditRow(input) {
             assertUuid(input.requestId, 'request id');
             const version = ensureInteger(input.version, 'audit version', 1, 100_000);
-            const payload = assertPayload(input.payload);
+            const payload = assertPayload(input.payload, 'payload', CANONICAL_PAYLOAD_KEYS.audit);
             const contentHash = input.contentHash ?? hashAnalysisCanonicalValue({
                 requestId: input.requestId,
                 version,
@@ -717,6 +1061,7 @@ export function createAnalysisCanonicalStore(
                 p_ordinal: input.ordinal ?? null,
                 p_state: input.state,
                 p_content_hash: contentHash,
+                p_idempotency_key: input.idempotencyKey ?? null,
                 p_retention_class: input.retentionClass ?? 'permanent',
                 p_payload: payload,
             });

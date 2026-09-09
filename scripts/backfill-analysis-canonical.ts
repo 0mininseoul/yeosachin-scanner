@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 export const BACKFILL_MAX_LIMIT = 100;
 const SOURCE_TABLE = 'analysis_requests';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/;
 const TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -29,6 +30,7 @@ interface BackfillRpcError {
 interface BackfillQuery {
     select(columns: string): BackfillQuery;
     eq?(column: string, value: string): BackfillQuery;
+    in?(column: string, values: readonly string[]): BackfillQuery;
     or?(expression: string): BackfillQuery;
     order(column: string, options: { ascending: boolean }): BackfillQuery;
     limit(limit: number): PromiseLike<{
@@ -55,6 +57,23 @@ export interface BackfillFamilyReport {
     source: { count: number; checksum: string | null; complete: boolean };
     canonical: { count: number; checksum: string | null; complete: boolean };
     parity: AnalysisBackfillParitySummary;
+    logical: {
+        sourceCount: number;
+        canonicalCount: number;
+        sourceChecksum: string | null;
+        canonicalChecksum: string | null;
+    };
+    requiredFields: readonly string[];
+    targetEvidence: {
+        sourceCount: number;
+        canonicalCount: number;
+        sourceChecksum: string | null;
+        canonicalChecksum: string | null;
+        sourceInteractionCount: number;
+        canonicalInteractionCount: number;
+        sourceInteractionChecksum: string | null;
+        canonicalInteractionChecksum: string | null;
+    };
 }
 
 export interface BackfillReport {
@@ -78,6 +97,8 @@ interface BackfillTableSpec {
     columns: string;
     timeColumn: string;
     keyColumn: string;
+    /** Null means that this legacy table has no request-safe request identity. */
+    requestIdColumn?: string | null;
 }
 
 export interface AnalysisCanonicalBackfillFamilySpec {
@@ -138,7 +159,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_jobs',
         canonical: {
             table: 'analysis_jobs',
-            columns: 'id, request_id, job_key, kind, state, generation, attempt_count, dependency_count, completion_hash, retention_class, created_at, updated_at',
+            columns: 'id, request_id, job_key, kind, state, generation, attempt_count, dependency_count, next_attempt_at, lease_expires_at, completion_hash, payload, retention_class, created_at, updated_at',
             timeColumn: 'created_at',
             keyColumn: 'id',
         },
@@ -169,7 +190,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_events',
         canonical: {
             table: 'analysis_events',
-            columns: 'id, request_id, job_id, kind, state, content_hash, retention_class, created_at',
+            columns: 'id, request_id, job_id, kind, state, payload, content_hash, retention_class, created_at',
             timeColumn: 'created_at',
             keyColumn: 'id',
         },
@@ -180,6 +201,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
             'analysis_v2_relationship_sides',
             'analysis_v2_relationship_rows',
             'analysis_v2_relationship_manifests',
+            'analysis_v2_target_evidence_manifests',
             'analysis_target_interactors',
             'analysis_v2_candidate_feature_manifests',
             'analysis_v2_candidate_feature_rows',
@@ -207,10 +229,16 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 keyColumn: 'job_key',
             },
             {
-                table: 'analysis_target_interactors',
-                columns: 'request_id, job_key, created_at',
+                table: 'analysis_v2_target_evidence_manifests',
+                columns: 'request_id, job_key, revision, input_hash, liker_source_hash, comment_source_hash, result_hash, interactor_count, liker_count, comment_count, frozen_at, created_at, updated_at',
                 timeColumn: 'created_at',
                 keyColumn: 'job_key',
+            },
+            {
+                table: 'analysis_target_interactors',
+                columns: 'request_id, job_key, ordinal, post_id, signal, source_interaction_id, occurred_at, created_at',
+                timeColumn: 'created_at',
+                keyColumn: 'ordinal',
             },
             {
                 table: 'analysis_v2_candidate_feature_manifests',
@@ -246,7 +274,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_artifacts',
         canonical: {
             table: 'analysis_artifacts',
-            columns: 'id, request_id, job_id, kind, artifact_key, state, content_hash, retention_class, created_at, updated_at',
+            columns: 'id, request_id, job_id, kind, artifact_key, state, content_hash, payload, retention_class, created_at, updated_at',
             timeColumn: 'created_at',
             keyColumn: 'id',
         },
@@ -281,7 +309,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_costs',
         canonical: {
             table: 'analysis_costs',
-            columns: 'id, request_id, provider, operation_key, stage, currency, amount_known, amount_conservative, usage_unknown, source_hash, retention_class, recorded_at',
+            columns: 'id, request_id, provider, operation_key, stage, currency, amount_known, amount_conservative, usage_unknown, source_hash, idempotency_key, payload, retention_class, recorded_at',
             timeColumn: 'recorded_at',
             keyColumn: 'id',
         },
@@ -295,18 +323,20 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'id, created_at, updated_at',
                 timeColumn: 'updated_at',
                 keyColumn: 'id',
+                requestIdColumn: null,
             },
             {
                 table: 'analysis_v2_ai_global_result_cache',
                 columns: 'cache_key, stage, result_hash, created_at, expires_at',
                 timeColumn: 'created_at',
                 keyColumn: 'cache_key',
+                requestIdColumn: null,
             },
         ]),
         canonicalTable: 'analysis_cache',
         canonical: {
             table: 'analysis_cache',
-            columns: 'id, scope, cache_key_hash, state, expires_at, created_at, updated_at',
+            columns: 'id, request_id, scope, cache_key_hash, state, expires_at, single_flight_token_hash, payload, created_at, updated_at',
             timeColumn: 'updated_at',
             keyColumn: 'id',
         },
@@ -348,7 +378,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_audit_bundles',
         canonical: {
             table: 'analysis_audit_bundles',
-            columns: 'id, request_id, version, kind, candidate_key, ordinal, state, content_hash, retention_class, created_at',
+            columns: 'id, request_id, version, kind, candidate_key, ordinal, state, content_hash, idempotency_key, retention_class, payload, created_at',
             timeColumn: 'created_at',
             keyColumn: 'id',
         },
@@ -357,13 +387,23 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
 
 interface AnalysisBackfillCursorPosition {
     createdAt: string;
+    requestId: string;
     key: string;
     rowHash: string;
 }
 
+interface BoundedBackfillPage {
+    rows: readonly Record<string, unknown>[];
+    next: AnalysisBackfillCursorPosition | null;
+    hasMore: boolean;
+}
+
 interface AnalysisBackfillCursorV2 {
-    version: 2;
+    version: 3;
     positions: Record<string, AnalysisBackfillCursorPosition>;
+    requestIds: readonly string[];
+    sourceHasMore: boolean;
+    completed: readonly string[];
 }
 
 interface AnalysisBackfillCursorV1 {
@@ -459,6 +499,8 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
     const row = parsed as Record<string, unknown>;
     if (row.version === 1) {
         if (
+            Object.keys(row).length !== 5
+            ||
             typeof row.id !== 'string'
             || typeof row.createdAt !== 'string'
             || typeof row.status !== 'string'
@@ -487,17 +529,52 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
             sourceHash: row.sourceHash,
         };
     }
-    if (row.version !== 2 || !row.positions || typeof row.positions !== 'object' || Array.isArray(row.positions)) {
+    if (
+        row.version !== 3
+        || !row.positions
+        || typeof row.positions !== 'object'
+        || Array.isArray(row.positions)
+        || (row.requestIds !== undefined && (!Array.isArray(row.requestIds) || row.requestIds.length > BACKFILL_MAX_LIMIT))
+        || (row.sourceHasMore !== undefined && typeof row.sourceHasMore !== 'boolean')
+        || (row.completed !== undefined && (!Array.isArray(row.completed) || row.completed.length > 512))
+        || Object.keys(row).some(key => !['version', 'positions', 'requestIds', 'sourceHasMore', 'completed'].includes(key))
+    ) {
+        throw new Error('Analysis canonical backfill cursor is unknown.');
+    }
+    const requestIds = (Array.isArray(row.requestIds) ? row.requestIds : []) as unknown[];
+    if (
+        requestIds.some(id => typeof id !== 'string' || !UUID_PATTERN.test(id))
+        || new Set(requestIds).size !== requestIds.length
+    ) {
+        throw new Error('Analysis canonical backfill cursor is unknown.');
+    }
+    const completed = (Array.isArray(row.completed) ? row.completed : []) as unknown[];
+    if (
+        completed.some(table => (
+            typeof table !== 'string'
+            || table.length < 1
+            || table.length > 256
+            || !isKnownBackfillPositionKey(table)
+        ))
+        || new Set(completed).size !== completed.length
+    ) {
         throw new Error('Analysis canonical backfill cursor is unknown.');
     }
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
     for (const [table, value] of Object.entries(row.positions as Record<string, unknown>)) {
+        if (table.length < 1 || table.length > 256 || !isKnownBackfillPositionKey(table)) {
+            throw new Error('Analysis canonical backfill cursor is unknown.');
+        }
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
             throw new Error('Analysis canonical backfill cursor is unknown.');
         }
         const position = value as Record<string, unknown>;
         if (
+            Object.keys(position).length !== 4
+            ||
             !isSafeTimestamp(position.createdAt)
+            || typeof position.requestId !== 'string'
+            || (position.requestId !== '' && !UUID_PATTERN.test(position.requestId))
             || typeof position.key !== 'string'
             || !KEY_PATTERN.test(position.key)
             || typeof position.rowHash !== 'string'
@@ -505,13 +582,34 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         ) {
             throw new Error('Analysis canonical backfill cursor is unknown.');
         }
+        const sourcePosition = table === `${SOURCE_TABLE}:created_at:id`;
+        if ((position.requestId === '') !== sourcePosition) {
+            throw new Error('Analysis canonical backfill cursor is unknown.');
+        }
         positions[table] = {
             createdAt: position.createdAt,
+            requestId: position.requestId,
             key: position.key,
             rowHash: position.rowHash,
         };
     }
-    return { version: 2, positions };
+    if (row.sourceHasMore === true && !positions[`${SOURCE_TABLE}:created_at:id`]) {
+        throw new Error('Analysis canonical backfill cursor is unknown.');
+    }
+    return {
+        version: 3,
+        positions,
+        requestIds: Object.freeze([...(requestIds as string[])]),
+        sourceHasMore: row.sourceHasMore ?? false,
+        completed: Object.freeze([...(completed as string[])]),
+    };
+}
+
+function isKnownBackfillPositionKey(value: string): boolean {
+    if (value === `${SOURCE_TABLE}:created_at:id`) return true;
+    return ANALYSIS_CANONICAL_BACKFILL_FAMILIES.some(spec => (
+        [...spec.legacy, spec.canonical].some(table => tablePositionKey(table) === value)
+    ));
 }
 
 function compareRows(left: AnalysisBackfillSourceRow, right: AnalysisBackfillSourceRow): number {
@@ -555,6 +653,467 @@ export function compareBackfillFamilyRows(
         return { status: 'mismatch', mismatchPaths: ['row.order'] };
     }
     return { status: 'mismatch', mismatchPaths: ['row.fields'] };
+}
+
+/**
+ * A single family has many physical source tables.  Raw row hashes therefore
+ * cannot establish parity: a relationship manifest and a canonical artifact
+ * are different physical records for the same logical evidence.  Normalize
+ * both sides to this bounded, PII-free logical record before comparing them.
+ */
+export interface AnalysisBackfillLogicalRow {
+    schemaVersion: 1;
+    requestId: string;
+    logicalKey: string;
+    state: string | null;
+    counts: Readonly<{
+        declared: number | null;
+        collected: number | null;
+    }>;
+    candidate: Readonly<{
+        key: string | null;
+        ordinal: number | null;
+        rank: number | null;
+        score: number | null;
+        inclusionState: string | null;
+        contentHash: string | null;
+    }> | null;
+    interaction: Readonly<{
+        key: string | null;
+        signal: string | null;
+        occurredAt: string | null;
+        evidenceId: string | null;
+        contentHash: string | null;
+    }> | null;
+    order: Readonly<{
+        ordinal: number | null;
+        key: string | null;
+        rank: number | null;
+    }> | null;
+    retention: string | null;
+    cost: Readonly<{
+        amountKnown: number | null;
+        amountConservative: number | null;
+        usageUnknown: boolean | null;
+        sourceHash: string | null;
+    }> | null;
+    evidence: Readonly<{
+        targetManifest: boolean;
+        inputHash: string | null;
+        likerSourceHash: string | null;
+        commentSourceHash: string | null;
+        resultHash: string | null;
+        sourceHash: string | null;
+        interactorCount: number | null;
+        likerCount: number | null;
+        commentCount: number | null;
+        retention: string | null;
+        targetInteractions: readonly Readonly<{
+            key: string;
+            signal: string;
+            occurredAt: string | null;
+            evidenceId: string;
+        }>[];
+    }>;
+}
+
+const SYNTHETIC_EVIDENCE_KEYS = new Set([
+    'synthetic', 'placeholder', 'partialEvidence', 'partial_evidence',
+    'sourceSensitive', 'source_sensitive', 'rawProviderPayload', 'raw_provider_payload',
+    'targetUsername', 'target_username', 'likerSource', 'liker_source',
+    'commentSource', 'comment_source',
+]);
+const SYNTHETIC_EVIDENCE_KEYS_LOWER = new Set(
+    [...SYNTHETIC_EVIDENCE_KEYS].map(key => key.toLowerCase()),
+);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function textField(row: Record<string, unknown>, ...keys: string[]): string | null {
+    for (const key of keys) {
+        const value = row[key];
+        if (typeof value === 'string' && value.length > 0) return value;
+    }
+    return null;
+}
+
+function hasSyntheticEvidence(value: unknown): boolean {
+    if (Array.isArray(value)) return value.some(hasSyntheticEvidence);
+    if (!value || typeof value !== 'object') return false;
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) => (
+        SYNTHETIC_EVIDENCE_KEYS.has(key)
+        || SYNTHETIC_EVIDENCE_KEYS_LOWER.has(key.toLowerCase())
+        || hasSyntheticEvidence(child)
+    ));
+}
+
+function keyField(row: Record<string, unknown>, ...keys: string[]): string | null {
+    for (const key of keys) {
+        const value = row[key];
+        if (typeof value === 'string' && value.length > 0) return value;
+        if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+    }
+    return null;
+}
+
+function nestedRecord(row: Record<string, unknown>, key: string): Record<string, unknown> {
+    return isRecord(row[key]) ? row[key] : {};
+}
+
+function fieldValue(row: Record<string, unknown>, payload: Record<string, unknown>, ...keys: string[]): unknown {
+    for (const key of keys) {
+        if (row[key] !== undefined) return row[key];
+        if (payload[key] !== undefined) return payload[key];
+    }
+    return undefined;
+}
+
+function numericFieldFrom(
+    row: Record<string, unknown>,
+    payload: Record<string, unknown>,
+    ...keys: string[]
+): number | null {
+    const value = fieldValue(row, payload, ...keys);
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+        return Number(value);
+    }
+    return null;
+}
+
+function textFieldFrom(
+    row: Record<string, unknown>,
+    payload: Record<string, unknown>,
+    ...keys: string[]
+): string | null {
+    const value = fieldValue(row, payload, ...keys);
+    return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function normalizedCount(value: number | null): number | null {
+    return value !== null && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function targetInteractionRows(value: unknown): readonly Readonly<{
+    key: string;
+    signal: string;
+    occurredAt: string | null;
+    evidenceId: string;
+}>[] | null {
+    if (value === undefined) return Object.freeze([]);
+    if (!Array.isArray(value) || value.length > BACKFILL_MAX_LIMIT) return null;
+    const rows: Array<Readonly<{
+        key: string;
+        signal: string;
+        occurredAt: string | null;
+        evidenceId: string;
+    }>> = [];
+    for (const candidate of value) {
+        if (!isRecord(candidate)) return null;
+        const key = keyField(candidate, 'key', 'interactionKey', 'interaction_key', 'source_interaction_id', 'id');
+        const signal = textField(candidate, 'signal', 'eventCode', 'event_code', 'eventType');
+        const occurredAt = textField(candidate, 'occurredAt', 'occurred_at', 'created_at');
+        const evidenceId = textField(candidate, 'evidenceId', 'evidence_id', 'source_interaction_id', 'content_hash');
+        if (
+            !key
+            || (signal !== 'target_post_like' && signal !== 'target_post_comment')
+            || (occurredAt !== null && (!TIMESTAMP_PATTERN.test(occurredAt) || !Number.isFinite(Date.parse(occurredAt))))
+            || !evidenceId
+        ) return null;
+        rows.push(Object.freeze({
+            key,
+            signal,
+            occurredAt,
+            evidenceId,
+        }));
+    }
+    return Object.freeze(rows);
+}
+
+function normalizeBackfillRow(
+    family: AnalysisCanonicalBackfillFamily,
+    row: Record<string, unknown>,
+    selectedRequestIds: ReadonlySet<string>,
+): AnalysisBackfillLogicalRow | null {
+    const requestId = textField(row, 'request_id', 'requestId');
+    if (!requestId || !UUID_PATTERN.test(requestId) || !selectedRequestIds.has(requestId)) return null;
+    if (hasSyntheticEvidence(row)) return null;
+    const payload = nestedRecord(row, 'payload');
+    const targetManifest = Object.keys(nestedRecord(row, 'targetManifest')).length > 0
+        ? nestedRecord(row, 'targetManifest')
+        : nestedRecord(payload, 'targetManifest');
+    const candidatePayload = Object.keys(nestedRecord(row, 'candidate')).length > 0
+        ? nestedRecord(row, 'candidate') : nestedRecord(payload, 'candidate');
+    const interactionPayload = Object.keys(nestedRecord(row, 'interaction')).length > 0
+        ? nestedRecord(row, 'interaction') : nestedRecord(payload, 'interaction');
+    const orderPayload = Object.keys(nestedRecord(row, 'order')).length > 0
+        ? nestedRecord(row, 'order') : nestedRecord(payload, 'order');
+    const logicalKey = keyField(
+        row,
+        'logicalKey', 'logical_key', 'source_interaction_id', 'candidate_id', 'candidate_key',
+        'artifact_key', 'operation_key', 'source_operation_key', 'job_key', 'version', 'id', 'request_id',
+    );
+    if (!logicalKey) return null;
+    const declared = numericFieldFrom(
+        row, payload, 'declared_count', 'declared', 'interactor_count', 'aggregate_count',
+        'candidate_declared', 'interaction_declared', 'usage_declared',
+    );
+    const collected = numericFieldFrom(
+        row, payload, 'collected_count', 'collected', 'liker_count', 'comment_count',
+        'candidate_collected', 'interaction_collected', 'aggregate_count',
+    );
+    const candidateKey = keyField(row, 'candidate_id', 'candidate_key')
+        ?? keyField(candidatePayload, 'key', 'candidateId', 'candidate_id', 'candidateKey');
+    const interactionKey = keyField(row, 'source_interaction_id', 'interaction_key')
+        ?? keyField(interactionPayload, 'key', 'interactionKey', 'interaction_key', 'id');
+    const sourceHash = textFieldFrom(row, payload, 'source_hash', 'source_identity_hash');
+    const occurredAt = textFieldFrom(
+        row,
+        interactionPayload,
+        'occurred_at', 'occurredAt', 'created_at', 'recorded_at',
+    );
+    const interactionSignal = textFieldFrom(
+        row,
+        interactionPayload,
+        'signal', 'event_code', 'eventCode', 'event_type', 'eventType',
+    );
+    const interactionContentHash = textFieldFrom(
+        row,
+        interactionPayload,
+        'content_hash', 'contentHash', 'result_hash', 'resultHash',
+    );
+    const candidateOrdinal = numericFieldFrom(
+        row,
+        candidatePayload,
+        'ordinal', 'final_rank', 'featured_rank', 'sort_ordinal',
+    );
+    const candidateScore = numericFieldFrom(
+        row,
+        candidatePayload,
+        'final_score', 'display_score', 'public_score', 'raw_score', 'score',
+    );
+    const candidateRank = numericFieldFrom(
+        row,
+        candidatePayload,
+        'rank', 'final_rank', 'featured_rank', 'sort_ordinal', 'ordinal',
+    );
+    const candidateContentHash = textFieldFrom(
+        row,
+        candidatePayload,
+        'content_hash', 'contentHash', 'result_hash', 'resultHash',
+    );
+    const inclusionState = textFieldFrom(
+        row,
+        candidatePayload,
+        'final_inclusion_state', 'inclusionState', 'state',
+    );
+    const targetSource = Object.keys(nestedRecord(row, 'targetEvidence')).length > 0
+        ? nestedRecord(row, 'targetEvidence') : nestedRecord(payload, 'targetEvidence');
+    const targetManifestValue = family === 'artifacts' && (
+        Object.keys(targetManifest).length > 0
+        || row.input_hash !== undefined
+        || row.liker_source_hash !== undefined
+        || row.comment_source_hash !== undefined
+        || row.interactor_count !== undefined
+    );
+    const targetResultHash = textFieldFrom(
+        row,
+        targetManifest,
+        'result_hash', 'resultHash', 'content_hash', 'bundle_hash',
+    );
+    const targetInputHash = textFieldFrom(row, targetManifest, 'input_hash', 'inputHash');
+    const targetLikerSourceHash = textFieldFrom(
+        row,
+        targetManifest,
+        'liker_source_hash', 'likerSourceHash',
+    );
+    const targetCommentSourceHash = textFieldFrom(
+        row,
+        targetManifest,
+        'comment_source_hash', 'commentSourceHash',
+    );
+    const targetRetention = textFieldFrom(row, targetManifest, 'retention_class', 'retention');
+    const directTargetInteraction = (
+        (row.signal === 'target_post_like' || row.signal === 'target_post_comment')
+        && row.source_interaction_id !== undefined
+    ) ? [row] : undefined;
+    const targetInteractions = targetInteractionRows(
+        row.targetInteractions
+            ?? payload.targetInteractions
+            ?? targetManifest.targetInteractions
+            ?? directTargetInteraction,
+    );
+    if (targetInteractions === null) return null;
+    if (targetManifestValue) {
+        const targetInteractors = normalizedCount(numericFieldFrom(
+            row,
+            targetSource,
+            'interactor_count', 'interactorCount',
+        ) ?? numericFieldFrom(row, targetManifest, 'interactor_count', 'interactorCount'));
+        const targetLikers = normalizedCount(numericFieldFrom(
+            row,
+            targetSource,
+            'liker_count', 'likerCount',
+        ) ?? numericFieldFrom(row, targetManifest, 'liker_count', 'likerCount'));
+        const targetComments = normalizedCount(numericFieldFrom(
+            row,
+            targetSource,
+            'comment_count', 'commentCount',
+        ) ?? numericFieldFrom(row, targetManifest, 'comment_count', 'commentCount'));
+        if (
+            targetInputHash === null
+            || targetLikerSourceHash === null
+            || targetCommentSourceHash === null
+            || targetResultHash === null
+            || !HASH_PATTERN.test(targetInputHash)
+            || !HASH_PATTERN.test(targetLikerSourceHash)
+            || !HASH_PATTERN.test(targetCommentSourceHash)
+            || !HASH_PATTERN.test(targetResultHash)
+            || targetInteractors === null
+            || targetLikers === null
+            || targetComments === null
+        ) return null;
+    }
+    return {
+        schemaVersion: 1,
+        requestId,
+        logicalKey,
+        state: textFieldFrom(
+            row,
+            payload,
+            'state', 'status', 'event_state', 'completeness_status', 'final_inclusion_state',
+        ),
+        counts: { declared: normalizedCount(declared), collected: normalizedCount(collected) },
+        candidate: candidateKey || family === 'audit'
+            ? {
+                key: candidateKey,
+                ordinal: candidateOrdinal,
+                rank: candidateRank,
+                score: candidateScore,
+                inclusionState,
+                contentHash: candidateContentHash,
+            }
+            : null,
+        interaction: interactionKey || family === 'events'
+            ? {
+                key: interactionKey ?? `${logicalKey}:${occurredAt ?? 'unknown'}`,
+                signal: interactionSignal,
+                occurredAt,
+                evidenceId: textFieldFrom(row, interactionPayload, 'source_interaction_id', 'evidenceId', 'content_hash'),
+                contentHash: interactionContentHash,
+            }
+            : null,
+        order: family === 'audit' || row.ordinal !== undefined || row.version !== undefined
+            ? {
+                ordinal: numericFieldFrom(row, orderPayload, 'ordinal', 'final_rank', 'featured_rank', 'sort_ordinal'),
+                key: keyField(row, 'candidate_id', 'candidate_key')
+                    ?? keyField(orderPayload, 'key', 'candidateKey', 'candidate_id')
+                    ?? logicalKey,
+                rank: numericFieldFrom(
+                    row,
+                    orderPayload,
+                    'rank', 'final_rank', 'featured_rank', 'sort_ordinal', 'ordinal',
+                ),
+            }
+            : null,
+        retention: textFieldFrom(row, payload, 'retention_class', 'retention')
+            ?? (targetManifestValue ? targetRetention : null),
+        cost: family === 'costs' || row.amount_known !== undefined || row.usage_unknown !== undefined
+            ? {
+                amountKnown: numericFieldFrom(row, payload, 'amount_known', 'cost_known_usd', 'usage_total_usd', 'amountKnown'),
+                amountConservative: numericFieldFrom(row, payload, 'amount_conservative', 'cost_conservative_usd', 'amountConservative'),
+                usageUnknown: typeof row.usage_unknown === 'boolean' ? row.usage_unknown : null,
+                sourceHash,
+            }
+            : null,
+        evidence: {
+            targetManifest: targetManifestValue,
+            inputHash: targetManifestValue ? targetInputHash : textFieldFrom(row, payload, 'input_hash', 'inputHash'),
+            likerSourceHash: targetManifestValue
+                ? targetLikerSourceHash : textFieldFrom(row, payload, 'liker_source_hash', 'likerSourceHash'),
+            commentSourceHash: targetManifestValue
+                ? targetCommentSourceHash : textFieldFrom(row, payload, 'comment_source_hash', 'commentSourceHash'),
+            resultHash: targetManifestValue ? targetResultHash : textFieldFrom(row, payload, 'result_hash', 'content_hash', 'bundle_hash'),
+            sourceHash,
+            interactorCount: normalizedCount(numericFieldFrom(
+                row,
+                targetSource,
+                'interactor_count', 'interactorCount',
+            ) ?? numericFieldFrom(row, targetManifest, 'interactor_count', 'interactorCount')),
+            likerCount: normalizedCount(numericFieldFrom(
+                row,
+                targetSource,
+                'liker_count', 'likerCount',
+            ) ?? numericFieldFrom(row, targetManifest, 'liker_count', 'likerCount')),
+            commentCount: normalizedCount(numericFieldFrom(
+                row,
+                targetSource,
+                'comment_count', 'commentCount',
+            ) ?? numericFieldFrom(row, targetManifest, 'comment_count', 'commentCount')),
+            retention: targetRetention,
+            targetInteractions,
+        },
+    };
+}
+
+export function normalizeBackfillFamilyRows(
+    family: AnalysisCanonicalBackfillFamily,
+    rows: readonly Record<string, unknown>[],
+    selectedRequestIds: readonly string[],
+): readonly AnalysisBackfillLogicalRow[] {
+    if (selectedRequestIds.length > BACKFILL_MAX_LIMIT
+        || selectedRequestIds.some(id => !UUID_PATTERN.test(id))) {
+        return Object.freeze([]);
+    }
+    const selected = new Set(selectedRequestIds);
+    const normalized: AnalysisBackfillLogicalRow[] = [];
+    for (const row of rows) {
+        const value = normalizeBackfillRow(family, row, selected);
+        if (!value) return Object.freeze([]);
+        normalized.push(value);
+    }
+    const sorted = normalized.sort((left, right) => (
+        left.requestId.localeCompare(right.requestId)
+        || left.logicalKey.localeCompare(right.logicalKey)
+    ));
+    for (let index = 1; index < sorted.length; index += 1) {
+        const previous = sorted[index - 1]!;
+        const current = sorted[index]!;
+        if (previous.requestId === current.requestId && previous.logicalKey === current.logicalKey) {
+            return Object.freeze([]);
+        }
+    }
+    return Object.freeze(sorted);
+}
+
+export function compareNormalizedBackfillFamilyRows(
+    family: AnalysisCanonicalBackfillFamily,
+    sourceRows: readonly Record<string, unknown>[],
+    canonicalRows: readonly Record<string, unknown>[],
+    selectedRequestIds: readonly string[],
+): AnalysisBackfillParitySummary {
+    const source = normalizeBackfillFamilyRows(family, sourceRows, selectedRequestIds);
+    const canonical = normalizeBackfillFamilyRows(family, canonicalRows, selectedRequestIds);
+    if (sourceRows.length > 0 && source.length === 0) {
+        return { status: 'blocked', mismatchPaths: ['source.evidence'] };
+    }
+    if (canonicalRows.length > 0 && canonical.length === 0) {
+        return { status: 'blocked', mismatchPaths: ['canonical.evidence'] };
+    }
+    if (source.length !== canonical.length) {
+        return { status: 'mismatch', mismatchPaths: ['logical.row.count'] };
+    }
+    if (stableHash(source) === stableHash(canonical)) {
+        return { status: 'match', mismatchPaths: [] };
+    }
+    const sourceKeys = source.map(row => `${row.requestId}:${row.logicalKey}`);
+    const canonicalKeys = canonical.map(row => `${row.requestId}:${row.logicalKey}`);
+    if (JSON.stringify(sourceKeys) !== JSON.stringify(canonicalKeys)) {
+        return { status: 'mismatch', mismatchPaths: ['logical.row.identity'] };
+    }
+    return { status: 'mismatch', mismatchPaths: ['logical.row.fields'] };
 }
 
 export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs {
@@ -611,6 +1170,23 @@ function emptyFamilyReport(): BackfillFamilyReport {
         source: { count: 0, checksum: null, complete: false },
         canonical: { count: 0, checksum: null, complete: false },
         parity: { status: 'blocked', mismatchPaths: ['source.missing'] },
+        logical: {
+            sourceCount: 0,
+            canonicalCount: 0,
+            sourceChecksum: null,
+            canonicalChecksum: null,
+        },
+        requiredFields: [],
+        targetEvidence: {
+            sourceCount: 0,
+            canonicalCount: 0,
+            sourceChecksum: null,
+            canonicalChecksum: null,
+            sourceInteractionCount: 0,
+            canonicalInteractionCount: 0,
+            sourceInteractionChecksum: null,
+            canonicalInteractionChecksum: null,
+        },
     };
 }
 
@@ -623,16 +1199,22 @@ function rowCursorPosition(row: unknown, spec: BackfillTableSpec): AnalysisBackf
     const value = row as Record<string, unknown>;
     const rawCreatedAt = value[spec.timeColumn] ?? value.created_at;
     const rawKey = value[spec.keyColumn] ?? value.id;
+    const requestId = spec.requestIdColumn === null
+        ? ''
+        : value[spec.requestIdColumn ?? 'request_id'] ?? value.request_id;
     const normalizedKey = typeof rawKey === 'number' && Number.isSafeInteger(rawKey)
         ? String(rawKey)
         : rawKey;
     if (
         !isSafeTimestamp(rawCreatedAt)
+        || typeof requestId !== 'string'
+        || (requestId !== '' && !UUID_PATTERN.test(requestId))
         || typeof normalizedKey !== 'string'
         || !KEY_PATTERN.test(normalizedKey)
     ) return null;
     return {
         createdAt: rawCreatedAt,
+        requestId,
         key: normalizedKey,
         rowHash: stableHash(value),
     };
@@ -642,8 +1224,16 @@ function cursorPosition(
     cursor: ParsedBackfillCursor | null,
     spec: BackfillTableSpec,
 ): AnalysisBackfillCursorPosition | null {
-    if (!cursor || cursor.version !== 2) return null;
+    if (!cursor || cursor.version !== 3) return null;
     return cursor.positions[tablePositionKey(spec)] ?? null;
+}
+
+function cursorTableCompleted(
+    cursor: ParsedBackfillCursor | null,
+    table: BackfillTableSpec,
+): boolean {
+    return cursor?.version === 3
+        && cursor.completed.includes(tablePositionKey(table));
 }
 
 async function readBoundedTable(
@@ -651,34 +1241,129 @@ async function readBoundedTable(
     spec: BackfillTableSpec,
     limit: number,
     position: AnalysisBackfillCursorPosition | null,
-): Promise<{
-    rows: readonly Record<string, unknown>[];
-    next: AnalysisBackfillCursorPosition | null;
-}> {
+    selectedRequestIds: readonly string[],
+): Promise<BoundedBackfillPage> {
     let query = client.from(spec.table).select(spec.columns);
+    const requestIdColumn = spec.requestIdColumn === undefined
+        ? 'request_id'
+        : spec.requestIdColumn;
+    if (requestIdColumn === null) {
+        // A legacy table without a request identity cannot be safely included in
+        // a request-scoped parity report. Never read it globally or infer
+        // ownership from an untrusted cache key.
+        throw new Error('request-safe identity unavailable');
+    }
+    if (selectedRequestIds.length > 0) {
+        if (query.in) {
+            query = query.in(requestIdColumn, selectedRequestIds);
+        } else if (query.or) {
+            // Lightweight adapters used by the regression suite may expose
+            // only PostgREST's OR builder.  Keep the selected UUID set in the
+            // expression; production clients use `in` above.
+            query = query.or(`${requestIdColumn}.in.(${selectedRequestIds.join(',')})`);
+        } else {
+            throw new Error('request selection filter unavailable');
+        }
+    } else if (!position) {
+        // Never issue an unscoped family read.  Adapters without an `in`
+        // method are still called in tests, but production Supabase clients
+        // must provide a request-safe predicate.
+        if (query.in) {
+            query = query.in(requestIdColumn, []);
+        } else if (query.eq) {
+            query = query.eq(requestIdColumn, '00000000-0000-4000-8000-000000000000');
+        } else if (query.or) {
+            // The fallback is still request-constrained and only contains
+            // no selected IDs, so it cannot match a real request row.
+            query = query.or(`${requestIdColumn}.eq.00000000-0000-4000-8000-000000000000`);
+        } else {
+            throw new Error('request selection filter unavailable');
+        }
+    } else {
+        // A family-only continuation can legitimately carry no selected IDs
+        // when the source page was empty. Keep that continuation request-safe
+        // by applying an impossible request predicate before its keyset
+        // boundary; never turn a cursor into an unscoped family read.
+        if (query.in) {
+            query = query.in(requestIdColumn, []);
+        } else if (query.eq) {
+            query = query.eq(requestIdColumn, '00000000-0000-4000-8000-000000000000');
+        } else if (query.or) {
+            query = query.or(`${requestIdColumn}.eq.00000000-0000-4000-8000-000000000000`);
+        } else {
+            throw new Error('request selection filter unavailable');
+        }
+    }
     if (position) {
         if (!query.or) throw new Error('keyset boundary filter unavailable');
         query = query.or(
-            `${spec.timeColumn}.gt.${position.createdAt},and(${spec.timeColumn}.eq.${position.createdAt},${spec.keyColumn}.gt.${position.key})`,
+            `${spec.timeColumn}.gt.${position.createdAt},and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.gt.${position.requestId}),and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.eq.${position.requestId},${spec.keyColumn}.gt.${position.key})`,
         );
     }
-    const result = await query
-        .order(spec.timeColumn, { ascending: true })
-        .order(spec.keyColumn, { ascending: true })
-        .limit(limit);
-    if (result.error || !Array.isArray(result.data) || result.data.length > limit) {
+    // Read one sentinel row. A page with exactly `limit` rows is complete
+    // because the query asked for `limit + 1`; a page with the sentinel is
+    // explicitly incomplete and must never report parity.
+    query = query.order(spec.timeColumn, { ascending: true });
+    query = query.order(requestIdColumn, { ascending: true });
+    query = query.order(spec.keyColumn, { ascending: true });
+    const result = await query.limit(limit + 1);
+    if (result.error || !Array.isArray(result.data) || result.data.length > limit + 1) {
         throw new Error('bounded analysis canonical backfill query failed');
     }
+    const hasMore = result.data.length > limit;
+    const pageData = hasMore ? result.data.slice(0, limit) : result.data;
     const rows: Record<string, unknown>[] = [];
-    for (const value of result.data) {
+    for (const value of pageData) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) {
             throw new Error('invalid analysis canonical backfill row');
         }
         rows.push(value as Record<string, unknown>);
     }
-    const next = rows.length > 0 ? rowCursorPosition(rows[rows.length - 1], spec) : position;
-    if (rows.length > 0 && !next) throw new Error('invalid analysis canonical backfill cursor row');
-    return { rows, next };
+    const positionsOnPage = rows
+        .map(row => rowCursorPosition(row, spec))
+        .filter((value): value is AnalysisBackfillCursorPosition => value !== null);
+    if (positionsOnPage.length !== rows.length) {
+        throw new Error('invalid analysis canonical backfill cursor row');
+    }
+    for (let index = 1; index < positionsOnPage.length; index += 1) {
+        const previous = positionsOnPage[index - 1]!;
+        const current = positionsOnPage[index]!;
+        if (
+            current.createdAt < previous.createdAt
+            || (current.createdAt === previous.createdAt && current.requestId < previous.requestId)
+            || (current.createdAt === previous.createdAt
+                && current.requestId === previous.requestId
+                && current.key <= previous.key)
+        ) {
+            throw new Error('ambiguous analysis canonical backfill cursor order');
+        }
+    }
+    // A `(time,request,key)` tie without a unique physical key cannot be safely
+    // resumed by a PostgREST boundary. Refuse the page rather than silently
+    // skipping or duplicating evidence.  The sentinel is intentionally
+    // inspected before it is discarded.
+    const seenComposite = new Set<string>();
+    for (const positionOnPage of positionsOnPage) {
+        const composite = `${positionOnPage.createdAt}\0${positionOnPage.requestId}\0${positionOnPage.key}`;
+        if (seenComposite.has(composite)) {
+            throw new Error('ambiguous analysis canonical backfill cursor tie');
+        }
+        seenComposite.add(composite);
+    }
+    if (hasMore) {
+        const sentinel = rowCursorPosition(result.data[limit], spec);
+        const last = positionsOnPage.at(-1);
+        if (!sentinel || !last) throw new Error('invalid analysis canonical backfill sentinel');
+        if (
+            sentinel.createdAt === last.createdAt
+            && sentinel.requestId === last.requestId
+            && sentinel.key === last.key
+        ) {
+            throw new Error('ambiguous analysis canonical backfill cursor tie');
+        }
+    }
+    const next = rows.length > 0 ? positionsOnPage[positionsOnPage.length - 1]! : position;
+    return { rows, next, hasMore };
 }
 
 function aggregateRows(rows: readonly unknown[], complete: boolean) {
@@ -694,43 +1379,132 @@ async function readFamily(
     spec: AnalysisCanonicalBackfillFamilySpec,
     limit: number,
     cursor: ParsedBackfillCursor | null,
+    selectedRequestIds: readonly string[],
 ): Promise<{
     report: BackfillFamilyReport;
     positions: Record<string, AnalysisBackfillCursorPosition>;
+    completed: readonly string[];
     blocked: number;
+    hasMore: boolean;
 }> {
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
+    const completed: string[] = [];
     const legacyRows: Record<string, unknown>[] = [];
     const canonicalRows: Record<string, unknown>[] = [];
     let sourceComplete = true;
     let canonicalComplete = true;
+    let sourceHasMore = false;
+    let canonicalHasMore = false;
     let blocked = 0;
     for (const table of spec.legacy) {
+        const tableKey = tablePositionKey(table);
+        if (cursorTableCompleted(cursor, table)) {
+            completed.push(tableKey);
+            continue;
+        }
+        const priorPosition = cursorPosition(cursor, table);
         try {
-            const page = await readBoundedTable(client, table, limit, cursorPosition(cursor, table));
+            const page = await readBoundedTable(
+                client,
+                table,
+                limit,
+                cursorPosition(cursor, table),
+                selectedRequestIds,
+            );
             legacyRows.push(...page.rows);
-            if (page.next) positions[tablePositionKey(table)] = page.next;
+            sourceHasMore ||= page.hasMore;
+            if (page.hasMore && page.next) positions[tableKey] = page.next;
+            if (!page.hasMore) completed.push(tableKey);
         } catch {
             sourceComplete = false;
             blocked += 1;
+            if (priorPosition) positions[tableKey] = priorPosition;
         }
     }
+    const canonicalTableKey = tablePositionKey(spec.canonical);
+    if (cursorTableCompleted(cursor, spec.canonical)) {
+        completed.push(canonicalTableKey);
+    } else {
+    const canonicalPriorPosition = cursorPosition(cursor, spec.canonical);
     try {
-        const page = await readBoundedTable(client, spec.canonical, limit, cursorPosition(cursor, spec.canonical));
+        const page = await readBoundedTable(
+            client,
+            spec.canonical,
+            limit,
+            cursorPosition(cursor, spec.canonical),
+            selectedRequestIds,
+        );
         canonicalRows.push(...page.rows);
-        if (page.next) positions[tablePositionKey(spec.canonical)] = page.next;
+        canonicalHasMore = page.hasMore;
+        if (page.hasMore && page.next) positions[canonicalTableKey] = page.next;
+        if (!page.hasMore) completed.push(canonicalTableKey);
     } catch {
         canonicalComplete = false;
         blocked += 1;
+        if (canonicalPriorPosition) positions[canonicalTableKey] = canonicalPriorPosition;
     }
-    const source = aggregateRows(legacyRows, sourceComplete);
-    const canonical = aggregateRows(canonicalRows, canonicalComplete);
-    const parity: AnalysisBackfillParitySummary = !sourceComplete
+    }
+    const source = aggregateRows(legacyRows, sourceComplete && !sourceHasMore);
+    const canonical = aggregateRows(canonicalRows, canonicalComplete && !canonicalHasMore);
+    const logicalSource = normalizeBackfillFamilyRows(spec.family, legacyRows, selectedRequestIds);
+    const logicalCanonical = normalizeBackfillFamilyRows(spec.family, canonicalRows, selectedRequestIds);
+    const parity: AnalysisBackfillParitySummary = !sourceComplete || sourceHasMore
         ? { status: 'blocked', mismatchPaths: ['source.missing'] }
-        : !canonicalComplete
+        : !canonicalComplete || canonicalHasMore
             ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
-            : compareBackfillFamilyRows(legacyRows, canonicalRows);
-    return { report: { source, canonical, parity }, positions, blocked };
+            : compareNormalizedBackfillFamilyRows(
+                spec.family,
+                legacyRows,
+                canonicalRows,
+                selectedRequestIds,
+            );
+    const targetSource = logicalSource.filter(row => row.evidence.targetManifest);
+    const targetCanonical = logicalCanonical.filter(row => row.evidence.targetManifest);
+    const targetSourceInteractions = logicalSource.flatMap(row => row.evidence.targetInteractions);
+    const targetCanonicalInteractions = logicalCanonical.flatMap(row => row.evidence.targetInteractions);
+    const requiredFields = [
+        'request_id', 'schemaVersion', 'state', 'counts', 'candidate', 'interaction',
+        'candidate.key', 'candidate.ordinal', 'candidate.rank', 'candidate.score',
+        'candidate.inclusionState', 'candidate.contentHash', 'interaction.key',
+        'interaction.signal', 'interaction.occurredAt', 'interaction.evidenceId',
+        'interaction.contentHash', 'order', 'order.key', 'order.ordinal', 'order.rank',
+        'retention', 'cost', 'evidence.targetManifest', 'evidence.inputHash',
+        'evidence.likerSourceHash', 'evidence.commentSourceHash', 'evidence.resultHash',
+        'evidence.interactorCount', 'evidence.likerCount', 'evidence.commentCount',
+        'evidence.targetInteractions', 'evidence.targetInteractions.key',
+        'evidence.targetInteractions.signal', 'evidence.targetInteractions.occurredAt',
+        'evidence.targetInteractions.evidenceId',
+    ] as const;
+    return {
+        report: {
+            source,
+            canonical,
+            parity,
+            logical: {
+                sourceCount: logicalSource.length,
+                canonicalCount: logicalCanonical.length,
+                sourceChecksum: logicalSource.length > 0 ? stableHash(logicalSource) : null,
+                canonicalChecksum: logicalCanonical.length > 0 ? stableHash(logicalCanonical) : null,
+            },
+            requiredFields,
+            targetEvidence: {
+                sourceCount: targetSource.length,
+                canonicalCount: targetCanonical.length,
+                sourceChecksum: targetSource.length > 0 ? stableHash(targetSource) : null,
+                canonicalChecksum: targetCanonical.length > 0 ? stableHash(targetCanonical) : null,
+                sourceInteractionCount: targetSourceInteractions.length,
+                canonicalInteractionCount: targetCanonicalInteractions.length,
+                sourceInteractionChecksum: targetSourceInteractions.length > 0
+                    ? stableHash(targetSourceInteractions) : null,
+                canonicalInteractionChecksum: targetCanonicalInteractions.length > 0
+                    ? stableHash(targetCanonicalInteractions) : null,
+            },
+        },
+        positions,
+        completed,
+        blocked,
+        hasMore: sourceHasMore || canonicalHasMore,
+    };
 }
 
 function invalidReport(): BackfillReport {
@@ -764,65 +1538,123 @@ export async function backfillAnalysisCanonical(input: {
             return invalidReport();
         }
     }
-    let sourceResult: { data: unknown; error: BackfillRpcError | null };
-    try {
-        let sourceQuery = client.from(SOURCE_TABLE).select('id, created_at, status');
-        if (cursor?.version === 1) {
-            if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
-            sourceQuery = sourceQuery.or(
-                `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`,
-            );
-        } else if (cursor?.version === 2) {
-            const position = cursor.positions[`${SOURCE_TABLE}:created_at:id`];
-            if (position) {
+    const sourcePositionKey = `${SOURCE_TABLE}:created_at:id`;
+    const continuingFamilyPage = cursor?.version === 3
+        && Object.keys(cursor.positions).some(key => key !== sourcePositionKey);
+    const familyCursor = continuingFamilyPage && cursor?.version === 3 ? cursor : null;
+    let sourceHasMore = false;
+    let sourcePage: unknown[] = [];
+    let sourceBlocked = 0;
+    let selectedRequestIds: string[] = [];
+    const positions: Record<string, AnalysisBackfillCursorPosition> = {};
+    if (continuingFamilyPage) {
+        selectedRequestIds = [...familyCursor!.requestIds];
+        sourceHasMore = familyCursor!.sourceHasMore;
+        const sourcePosition = familyCursor!.positions[sourcePositionKey];
+        if (sourcePosition) positions[sourcePositionKey] = sourcePosition;
+    } else {
+        let sourceResult: { data: unknown; error: BackfillRpcError | null };
+        try {
+            let sourceQuery = client.from(SOURCE_TABLE).select('id, created_at, status');
+            if (cursor?.version === 1) {
                 if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
                 sourceQuery = sourceQuery.or(
-                    `created_at.gt.${position.createdAt},and(created_at.eq.${position.createdAt},id.gt.${position.key})`,
+                    `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`,
                 );
+            } else if (cursor?.version === 3) {
+                const position = cursor.positions[sourcePositionKey];
+                if (position) {
+                    if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
+                    sourceQuery = sourceQuery.or(
+                        `created_at.gt.${position.createdAt},and(created_at.eq.${position.createdAt},id.gt.${position.key})`,
+                    );
+                }
             }
+            sourceResult = await sourceQuery
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true })
+                .limit(limit + 1);
+        } catch {
+            return invalidReport();
         }
-        sourceResult = await sourceQuery
-            .order('created_at', { ascending: true })
-            .order('id', { ascending: true })
-            .limit(limit);
-    } catch {
-        return invalidReport();
-    }
-    if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit) {
-        return invalidReport();
-    }
-    const validRows = sourceResult.data.filter(isSourceRow);
-    const sourceBlocked = sourceResult.data.length - validRows.length;
-    const batch = buildBackfillBatch(validRows, limit);
-    const positions: Record<string, AnalysisBackfillCursorPosition> = {};
-    if (batch.rows.length > 0) {
-        const row = batch.rows[batch.rows.length - 1]!;
-        positions[`${SOURCE_TABLE}:created_at:id`] = {
-            createdAt: row.created_at,
-            key: row.id,
-            rowHash: stableHash(row),
-        };
+        if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit + 1) {
+            return invalidReport();
+        }
+        sourceHasMore = sourceResult.data.length > limit;
+        sourcePage = sourceHasMore ? sourceResult.data.slice(0, limit) : sourceResult.data;
+        const validRows = sourcePage.filter(isSourceRow);
+        sourceBlocked = sourcePage.length - validRows.length;
+        selectedRequestIds = validRows.map(row => row.id);
+        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) return invalidReport();
+        if (validRows.length > 0 && sourceHasMore) {
+            const row = validRows.at(-1)!;
+            positions[sourcePositionKey] = {
+                createdAt: row.created_at,
+                requestId: '',
+                key: row.id,
+                rowHash: stableHash(row),
+            };
+        }
     }
     const familyReports = {} as Record<AnalysisCanonicalBackfillFamily, BackfillFamilyReport>;
     let familyBlocked = 0;
+    let familyHasMore = false;
+    const completedTables = new Set<string>(
+        familyCursor ? familyCursor.completed : [],
+    );
     for (const spec of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
-        const family = await readFamily(client, spec, limit, cursor);
+        const family = await readFamily(
+            client,
+            spec,
+            limit,
+            familyCursor,
+            selectedRequestIds,
+        );
         familyReports[spec.family] = family.report;
         familyBlocked += family.blocked;
+        familyHasMore ||= family.hasMore;
+        family.completed.forEach(table => completedTables.add(table));
         Object.assign(positions, family.positions);
     }
-    const nextCursor = Object.keys(positions).length > 0
-        ? Buffer.from(JSON.stringify({ version: 2, positions } satisfies AnalysisBackfillCursorV2), 'utf8')
+    const sourceRows = sourcePage.filter(isSourceRow);
+    if (familyHasMore && selectedRequestIds.length > 0 && !positions[sourcePositionKey]) {
+        const row = sourceRows.at(-1);
+        if (row) {
+            positions[sourcePositionKey] = {
+                createdAt: row.created_at,
+                requestId: '',
+                key: row.id,
+                rowHash: stableHash(row),
+            };
+        }
+    }
+    const hasContinuation = familyHasMore || sourceHasMore;
+    const nextCursor = hasContinuation && Object.keys(positions).length > 0
+        ? Buffer.from(JSON.stringify({
+            version: 3,
+            positions,
+            requestIds: familyHasMore ? selectedRequestIds : [],
+            sourceHasMore,
+            completed: [...completedTables],
+        } satisfies AnalysisBackfillCursorV2), 'utf8')
             .toString('base64url')
         : null;
+    const reportComplete = continuingFamilyPage
+        ? selectedRequestIds.length
+        : sourceRows.length;
+    const reportChecksum = continuingFamilyPage
+        ? null
+        : sourceBlocked > 0 || sourceRows.length === 0
+            ? null
+            : stableHash(sourceRows.map(sourceBackfillIdempotency));
     return {
-        status: sourceBlocked > 0 || familyBlocked > 0 || Object.values(familyReports).some(
+        status: hasContinuation || sourceBlocked > 0 || familyBlocked > 0 || Object.values(familyReports).some(
             report => report.parity.status !== 'match',
         ) ? 'blocked' : 'report_only',
-        scanned: sourceResult.data.length,
-        complete: batch.rows.length,
+        scanned: continuingFamilyPage ? selectedRequestIds.length : sourcePage.length,
+        complete: reportComplete,
         blocked: sourceBlocked + familyBlocked,
-        checksum: sourceBlocked > 0 || batch.rows.length === 0 ? null : batch.checksum,
+        checksum: reportChecksum,
         nextCursor,
         families: familyReports,
     };
