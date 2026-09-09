@@ -29,7 +29,8 @@ const CATALOG_METADATA_KEYS = [
 const CATALOG_EVIDENCE_KEYS = [
     'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
     'missingTables', 'dependencyClean', 'migrationHistoryClean', 'rlsClean',
-    'routinesClean', 'aclClean', 'triggersClean', 'foreignKeysClean', 'viewsClean',
+    'routinesClean', 'canonicalRelationsAclClean', 'privateRoutinesAclClean',
+    'serviceRpcsAclClean', 'aclClean', 'triggersClean', 'foreignKeysClean', 'viewsClean',
     'publicationsClean', 'sequencesClean', 'partitionsClean', 'legacyWritersClean',
     'metadataAvailability', 'clean', 'destructiveOperations',
 ] as const;
@@ -114,6 +115,9 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         || typeof manifest.migrationHistoryClean !== 'boolean'
         || typeof manifest.rlsClean !== 'boolean'
         || typeof manifest.routinesClean !== 'boolean'
+        || typeof manifest.canonicalRelationsAclClean !== 'boolean'
+        || typeof manifest.privateRoutinesAclClean !== 'boolean'
+        || typeof manifest.serviceRpcsAclClean !== 'boolean'
         || typeof manifest.aclClean !== 'boolean'
         || typeof manifest.triggersClean !== 'boolean'
         || typeof manifest.foreignKeysClean !== 'boolean'
@@ -146,6 +150,9 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         && manifest.migrationHistoryClean
         && manifest.rlsClean
         && manifest.routinesClean
+        && manifest.canonicalRelationsAclClean
+        && manifest.privateRoutinesAclClean
+        && manifest.serviceRpcsAclClean
         && manifest.aclClean
         && manifest.triggersClean
         && manifest.foreignKeysClean
@@ -177,6 +184,9 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         migrationHistoryClean: manifest.migrationHistoryClean,
         rlsClean: manifest.rlsClean,
         routinesClean: manifest.routinesClean,
+        canonicalRelationsAclClean: manifest.canonicalRelationsAclClean,
+        privateRoutinesAclClean: manifest.privateRoutinesAclClean,
+        serviceRpcsAclClean: manifest.serviceRpcsAclClean,
         aclClean: manifest.aclClean,
         triggersClean: manifest.triggersClean,
         foreignKeysClean: manifest.foreignKeysClean,

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { deleteAccountPermanently } from './account-deletion';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 
 describe('deleteAccountPermanently', () => {
     it('purges every result object before database and Auth deletion', async () => {
@@ -158,5 +159,54 @@ describe('deleteAccountPermanently', () => {
 
         expect(rpc).not.toHaveBeenCalled();
         expect(deleteObject).not.toHaveBeenCalled();
+    });
+
+    it('bounds a never-settling lifecycle append before any irreversible step', async () => {
+        vi.useFakeTimers();
+        try {
+            const rpc = vi.fn();
+            const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                rpc,
+                dualWrite: true,
+                appendLifecycle: vi.fn(() => new Promise<never>(() => undefined)),
+                deleteObject: vi.fn(),
+                deleteAuthUser: vi.fn(),
+            });
+            const outcome = expect(pending).rejects.toMatchObject({
+                code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE',
+            });
+            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
+            await outcome;
+            expect(rpc).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('bounds a never-settling lifecycle recovery enqueue after append failure', async () => {
+        vi.useFakeTimers();
+        try {
+            const rpc = vi.fn();
+            const queueMaintenanceJob = vi.fn(() => new Promise<never>(() => undefined));
+            const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                rpc,
+                dualWrite: true,
+                appendLifecycle: vi.fn(async () => {
+                    throw new Error('canonical lifecycle unavailable');
+                }),
+                queueMaintenanceJob,
+                deleteObject: vi.fn(),
+                deleteAuthUser: vi.fn(),
+            });
+            const outcome = expect(pending).rejects.toMatchObject({
+                code: 'ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE',
+            });
+            await vi.runAllTimersAsync();
+            await outcome;
+            expect(rpc).not.toHaveBeenCalled();
+            expect(queueMaintenanceJob).toHaveBeenCalledOnce();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

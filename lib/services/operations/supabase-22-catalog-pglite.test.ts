@@ -6,7 +6,9 @@ import {
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
+    SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
     SUPABASE_22_CANONICAL_ROUTINE_NAMES,
+    SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
     SUPABASE_22_CATALOG_QUERY,
     SUPABASE_22_CATALOG_QUERIES,
 } from './supabase-22-evidence';
@@ -251,6 +253,163 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(evidence.aclClean).toBe(false);
         expect(evidence.routinesClean).toBe(false);
         expect(evidence.clean).toBe(false);
+    });
+
+    it('distinguishes relation, private-helper, and service-RPC ACL contracts', () => {
+        const relationAcl = (objectName: string) => ({
+            objectName,
+            objectKind: 'relation' as const,
+            resolved: true,
+            publicAllowed: false,
+            anonAllowed: false,
+            authenticatedAllowed: false,
+            serviceRoleAllowed: false,
+        });
+        const privateRoutine = (name: string) => ({
+            name,
+            identityArguments: '',
+            securityDefiner: true,
+            searchPathEmpty: true,
+            executePublic: false,
+            executeAnon: false,
+            executeAuthenticated: false,
+            executeServiceRole: false,
+        });
+        const serviceRpc = (name: string) => ({
+            name,
+            identityArguments: '',
+            securityDefiner: true,
+            searchPathEmpty: true,
+            executePublic: false,
+            executeAnon: false,
+            executeAuthenticated: false,
+            executeServiceRole: true,
+        });
+        const snapshot = {
+            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+                name,
+                relkind: 'r' as const,
+                rlsEnabled: true,
+                forceRls: true,
+            })),
+            acls: [
+                ...SUPABASE_22_CANONICAL_TABLES.map(relationAcl),
+                ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.map(name => ({
+                    ...relationAcl(name),
+                    objectKind: 'routine' as const,
+                })),
+                ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.map(name => ({
+                    ...relationAcl(name),
+                    objectKind: 'routine' as const,
+                    serviceRoleAllowed: true,
+                })),
+            ],
+            dependencies: [
+                ...SUPABASE_22_CANONICAL_TABLES,
+                ...SUPABASE_22_CANONICAL_ROUTINE_NAMES,
+            ].map(objectName => ({
+                objectName,
+                resolved: true,
+                allowed: true,
+                details: [],
+            })),
+            foreignKeys: [],
+            securityDefinerFunctions: [
+                ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.map(privateRoutine),
+                ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.map(serviceRpc),
+            ],
+            migrationHistory: [{ version: '20260905000000', pending: false }],
+            legacyWriters: SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+                objectName,
+                active: false,
+            })),
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            triggers: [],
+            policies: SUPABASE_22_CANONICAL_TABLES.map(tableName => ({
+                tableName,
+                enabled: true,
+                details: [],
+            })),
+            metadataAvailability: {
+                catalog: true,
+                acl: true,
+                routine: true,
+                trigger: true,
+                dependency: true,
+                migration: true,
+                rls: true,
+                view: true,
+                publication: true,
+                sequence: true,
+                partition: true,
+                foreignKey: true,
+                legacyWriter: true,
+            },
+        };
+
+        const evidence = evaluateSupabase22Catalog(snapshot as never);
+        expect(evidence.canonicalRelationsAclClean).toBe(true);
+        expect(evidence.privateRoutinesAclClean).toBe(true);
+        expect(evidence.serviceRpcsAclClean).toBe(true);
+        expect(evidence.aclClean).toBe(true);
+        expect(evidence.routinesClean).toBe(true);
+
+        const relationGrant = evaluateSupabase22Catalog({
+            ...snapshot,
+            acls: snapshot.acls.map(acl => acl.objectName === 'users'
+                ? { ...acl, serviceRoleAllowed: true }
+                : acl),
+        } as never);
+        expect(relationGrant.canonicalRelationsAclClean).toBe(false);
+        expect(relationGrant.aclClean).toBe(false);
+
+        const privateGrant = evaluateSupabase22Catalog({
+            ...snapshot,
+            acls: snapshot.acls.map(acl => acl.objectName === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES[0]
+                ? { ...acl, serviceRoleAllowed: true }
+                : acl),
+            securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine => routine.name
+                === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES[0]
+                ? { ...routine, executeServiceRole: true }
+                : routine),
+        } as never);
+        expect(privateGrant.privateRoutinesAclClean).toBe(false);
+        expect(privateGrant.aclClean).toBe(false);
+
+        const serviceRpcRevoked = evaluateSupabase22Catalog({
+            ...snapshot,
+            acls: snapshot.acls.map(acl => acl.objectName === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES[0]
+                ? { ...acl, serviceRoleAllowed: false }
+                : acl),
+            securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine => routine.name
+                === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES[0]
+                ? { ...routine, executeServiceRole: false }
+                : routine),
+        } as never);
+        expect(serviceRpcRevoked.serviceRpcsAclClean).toBe(false);
+        expect(serviceRpcRevoked.aclClean).toBe(false);
+
+        const extraRoutine = evaluateSupabase22Catalog({
+            ...snapshot,
+            securityDefinerFunctions: [
+                ...snapshot.securityDefinerFunctions,
+                serviceRpc('unexpected_rpc'),
+            ],
+            acls: [
+                ...snapshot.acls,
+                {
+                    ...relationAcl('unexpected_rpc'),
+                    objectKind: 'routine' as const,
+                    serviceRoleAllowed: true,
+                },
+            ],
+        } as never);
+        expect(extraRoutine.privateRoutinesAclClean).toBe(false);
+        expect(extraRoutine.serviceRpcsAclClean).toBe(false);
+        expect(extraRoutine.aclClean).toBe(false);
     });
 
     it('aggregates policy and pg_depend rows into deterministic one-row-per-object evidence', () => {

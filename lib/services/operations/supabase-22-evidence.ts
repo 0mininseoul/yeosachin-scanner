@@ -22,13 +22,26 @@ export const SUPABASE_22_CANONICAL_TABLES = [
 ] as const;
 
 /**
- * Every security-definer helper introduced by the analysis and commerce
- * canonical migrations must be present in the catalog before the evidence can
- * report routine or ACL readiness. Additional pre-existing service routines
- * may be present, but this allowlist is never inferred from the observed rows.
+ * The ACL contract is deliberately split by capability. These sets mirror the
+ * canonical migrations' explicit REVOKE/GRANT statements; they are never
+ * inferred from observed catalog rows. Any missing, extra, or cross-classified
+ * object keeps catalog readiness blocked.
  */
-export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
+export const SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES = [
+    'analysis_canonical_json_object_has_exact_keys',
+    'analysis_canonical_json_value_valid',
+    'analysis_canonical_payload_valid',
+    'analysis_canonical_payload_has_only_keys',
     'reject_analysis_canonical_mutation',
+    'reject_commerce_append_only_mutation',
+    'canonical_json_string_v1',
+    'canonical_json_number_v1',
+    'canonical_json_v1',
+    'canonical_json_hash_v1',
+    'create_or_replay_landing_lead_exclusion',
+] as const;
+
+export const SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES = [
     'record_analysis_canonical_job',
     'append_analysis_canonical_event',
     'append_analysis_canonical_artifact',
@@ -38,11 +51,6 @@ export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
     'append_analysis_canonical_late_cost_audit',
     'enqueue_analysis_canonical_retry',
     'load_analysis_canonical_family',
-    'reject_commerce_append_only_mutation',
-    'canonical_json_string_v1',
-    'canonical_json_number_v1',
-    'canonical_json_v1',
-    'canonical_json_hash_v1',
     'canonical_system_configuration_json',
     'record_payment_event_v1',
     'upsert_fulfillment_job_v1',
@@ -59,9 +67,23 @@ export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
     'reconcile_stale_maintenance_jobs_v1',
     'list_notification_legacy_outbox_v1',
     'list_notification_outbox_v1',
+    'create_or_replay_landing_lead_capture',
+    'bind_landing_lead_journey_to_preflight',
+    'claim_landing_lead_journey',
+    'unlink_landing_lead_journey_after_deletion',
+    'load_landing_lead_admin_projection',
+    'fence_landing_leads_on_account_retirement',
+] as const;
+
+/** Backwards-compatible union for callers that only need routine coverage. */
+export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
+    ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
+    ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
 ] as const;
 
 const canonicalTableSet = new Set<string>(SUPABASE_22_CANONICAL_TABLES);
+const canonicalPrivateRoutineSet = new Set<string>(SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES);
+const canonicalServiceRpcSet = new Set<string>(SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES);
 
 export type Supabase22GateStatus = 'ready' | 'mismatch' | 'blocked';
 export type Supabase22ArchiveRestoreStatus = 'verified' | 'mismatch' | 'blocked' | 'not_run';
@@ -366,9 +388,13 @@ export type Supabase22CatalogRoutine = Readonly<{
 
 export type Supabase22CatalogAcl = Readonly<{
     objectName: string;
+    objectKind: 'relation' | 'routine';
     resolved: boolean;
-    /** Explicitly parsed from pg_class/pg_proc ACLs, never inferred from routine flags. */
-    serviceRoleOnly: boolean;
+    /** One direct ACL/EXECUTE observation per role; never inferred from routine flags. */
+    publicAllowed: boolean;
+    anonAllowed: boolean;
+    authenticatedAllowed: boolean;
+    serviceRoleAllowed: boolean;
 }>;
 
 export type Supabase22CatalogDependency = Readonly<{
@@ -454,6 +480,9 @@ export type Supabase22CatalogEvidence = Readonly<{
     migrationHistoryClean: boolean;
     rlsClean: boolean;
     routinesClean: boolean;
+    canonicalRelationsAclClean: boolean;
+    privateRoutinesAclClean: boolean;
+    serviceRpcsAclClean: boolean;
     aclClean: boolean;
     triggersClean: boolean;
     foreignKeysClean: boolean;
@@ -469,11 +498,24 @@ export type Supabase22CatalogEvidence = Readonly<{
 
 export function isSafeSecurityDefinerRoutine(routine: Supabase22CatalogRoutine): boolean {
     return routine.securityDefiner === true
-        && routine.searchPathEmpty
-        && !routine.executePublic
-        && !routine.executeAnon
-        && !routine.executeAuthenticated
-        && routine.executeServiceRole;
+        && routine.searchPathEmpty === true
+        && routine.executePublic === false
+        && routine.executeAnon === false
+        && routine.executeAuthenticated === false;
+}
+
+export function isSafePrivateSecurityDefinerRoutine(
+    routine: Supabase22CatalogRoutine,
+): boolean {
+    return isSafeSecurityDefinerRoutine(routine)
+        && routine.executeServiceRole === false;
+}
+
+export function isSafeServiceRpcRoutine(
+    routine: Supabase22CatalogRoutine,
+): boolean {
+    return isSafeSecurityDefinerRoutine(routine)
+        && routine.executeServiceRole === true;
 }
 
 function catalogObjectsClean(
@@ -543,6 +585,12 @@ function comparableCatalogObjectName(value: unknown): string {
         .toLowerCase();
 }
 
+function comparableCatalogRoutineName(value: unknown): string {
+    const normalized = comparableCatalogObjectName(value);
+    const signatureStart = normalized.indexOf('(');
+    return signatureStart < 0 ? normalized : normalized.slice(0, signatureStart);
+}
+
 function completeObjectCoverage(
     values: readonly Readonly<{ objectName: string }>[],
     expectedObjectNames: readonly string[],
@@ -562,12 +610,62 @@ function completeRoutineCoverage(
     values: readonly Supabase22CatalogRoutine[],
 ): boolean {
     if (values.length === 0) return false;
-    const observed = values.map(value => comparableCatalogObjectName(value.name));
-    const expected = SUPABASE_22_CANONICAL_ROUTINE_NAMES.map(comparableCatalogObjectName);
-    return observed.every(name => name.length > 0)
+    const observed = values.map(value => comparableCatalogRoutineName(value.name));
+    const expected = SUPABASE_22_CANONICAL_ROUTINE_NAMES.map(comparableCatalogRoutineName);
+    return values.every(value => typeof value.identityArguments === 'string')
+        && observed.every(name => name.length > 0)
         && new Set(observed).size === observed.length
         && new Set(expected).size === expected.length
+        && observed.length === expected.length
         && expected.every(name => observed.includes(name));
+}
+
+function exactAclCoverage(
+    values: readonly Supabase22CatalogAcl[],
+    expectedObjectNames: readonly string[],
+    objectKind: Supabase22CatalogAcl['objectKind'],
+    predicate: (acl: Supabase22CatalogAcl) => boolean,
+): boolean {
+    if (values.length === 0 || expectedObjectNames.length === 0) return false;
+    const expected = expectedObjectNames.map(comparableCatalogRoutineName);
+    const observed = values.map(value => comparableCatalogRoutineName(value.objectName));
+    return values.length === expected.length
+        && values.every(value => value.objectKind === objectKind)
+        && observed.every(name => name.length > 0)
+        && new Set(observed).size === observed.length
+        && new Set(expected).size === expected.length
+        && expected.every(name => observed.includes(name))
+        && values.every(predicate);
+}
+
+function privateRoutineConfigurationClean(
+    routines: readonly Supabase22CatalogRoutine[],
+): boolean {
+    const category = routines.filter(routine =>
+        canonicalPrivateRoutineSet.has(comparableCatalogRoutineName(routine.name)));
+    return category.length === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.length
+        && new Set(category.map(routine => comparableCatalogRoutineName(routine.name))).size
+            === category.length
+        && category.every(routine => {
+            const name = comparableCatalogRoutineName(routine.name);
+            return canonicalPrivateRoutineSet.has(name)
+                && isSafePrivateSecurityDefinerRoutine(routine);
+        });
+}
+
+function serviceRpcConfigurationClean(
+    routines: readonly Supabase22CatalogRoutine[],
+): boolean {
+    const category = routines.filter(routine =>
+        canonicalServiceRpcSet.has(comparableCatalogRoutineName(routine.name)));
+    return category.length === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.length
+        && new Set(category.map(routine => comparableCatalogRoutineName(routine.name))).size
+            === category.length
+        && category.every(routine => {
+            const name = comparableCatalogRoutineName(routine.name);
+            return canonicalServiceRpcSet.has(name)
+                && isSafeServiceRpcRoutine(routine);
+        });
 }
 
 /** Evaluate normalized PostgreSQL catalog rows. This function never repairs the catalog. */
@@ -636,28 +734,79 @@ export function evaluateSupabase22Catalog(
             .filter(table => table.relkind === 'r' || table.relkind === 'p')
             .every(table => table.rlsEnabled === true && table.forceRls === true);
     const canonicalRoutineCoverage = routines !== null && completeRoutineCoverage(routines);
+    const privateRoutineConfigClean = routines !== null
+        && canonicalRoutineCoverage
+        && privateRoutineConfigurationClean(routines);
+    const serviceRpcConfigClean = routines !== null
+        && canonicalRoutineCoverage
+        && serviceRpcConfigurationClean(routines);
+    const relationAclRows = acls?.filter(acl => acl.objectKind === 'relation') ?? null;
+    const routineAclRows = acls?.filter(acl => acl.objectKind === 'routine') ?? null;
+    const routineAclCoverage = routineAclRows !== null
+        && exactAclCoverage(
+            routineAclRows,
+            SUPABASE_22_CANONICAL_ROUTINE_NAMES,
+            'routine',
+            acl => acl.resolved === true,
+        );
+    const canonicalRelationsAclClean = metadataAvailability.acl
+        && acls !== null
+        && relationAclRows !== null
+        && exactAclCoverage(
+            relationAclRows,
+            SUPABASE_22_CANONICAL_TABLES,
+            'relation',
+            acl => acl.resolved === true
+                && acl.publicAllowed === false
+                && acl.anonAllowed === false
+                && acl.authenticatedAllowed === false
+                && acl.serviceRoleAllowed === false,
+        );
+    const privateRoutinesAclClean = metadataAvailability.acl
+        && metadataAvailability.routine
+        && acls !== null
+        && routineAclRows !== null
+        && routineAclCoverage
+        && privateRoutineConfigClean
+        && exactAclCoverage(
+            routineAclRows.filter(acl => canonicalPrivateRoutineSet.has(
+                comparableCatalogRoutineName(acl.objectName),
+            )),
+            SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
+            'routine',
+            acl => acl.resolved === true
+                && acl.publicAllowed === false
+                && acl.anonAllowed === false
+                && acl.authenticatedAllowed === false
+                && acl.serviceRoleAllowed === false,
+        );
+    const serviceRpcsAclClean = metadataAvailability.acl
+        && metadataAvailability.routine
+        && acls !== null
+        && routineAclRows !== null
+        && routineAclCoverage
+        && serviceRpcConfigClean
+        && exactAclCoverage(
+            routineAclRows.filter(acl => canonicalServiceRpcSet.has(
+                comparableCatalogRoutineName(acl.objectName),
+            )),
+            SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
+            'routine',
+            acl => acl.resolved === true
+                && acl.publicAllowed === false
+                && acl.anonAllowed === false
+                && acl.authenticatedAllowed === false
+                && acl.serviceRoleAllowed === true,
+        );
     const routinesClean = metadataAvailability.routine
         && routines !== null
         && routines.length > 0
         && canonicalRoutineCoverage
-        && routines.every(isSafeSecurityDefinerRoutine);
-    const expectedAclObjectNames = new Set([
-        ...publicTables,
-        ...(routines ?? []).map(routine => routine.identityArguments !== undefined
-            ? `${routine.name}(${routine.identityArguments})`
-            : routine.name),
-    ]);
-    const observedAclObjectNames = acls === null
-        ? new Set<string>()
-        : new Set(acls.map(acl => acl.objectName));
-    const aclClean = metadataAvailability.acl
-        && acls !== null
-        && expectedAclObjectNames.size > 0
-        && canonicalRoutineCoverage
-        && acls.length === expectedAclObjectNames.size
-        && observedAclObjectNames.size === expectedAclObjectNames.size
-        && [...expectedAclObjectNames].every(name => observedAclObjectNames.has(name))
-        && acls.every(acl => acl.resolved === true && acl.serviceRoleOnly === true);
+        && privateRoutineConfigClean
+        && serviceRpcConfigClean;
+    const aclClean = canonicalRelationsAclClean
+        && privateRoutinesAclClean
+        && serviceRpcsAclClean;
     const relevantDependencyObjects = [
         ...publicTables,
         ...(routines ?? []).map(routine => routine.identityArguments !== undefined
@@ -731,6 +880,9 @@ export function evaluateSupabase22Catalog(
         migrationHistoryClean,
         rlsClean,
         routinesClean,
+        canonicalRelationsAclClean,
+        privateRoutinesAclClean,
+        serviceRpcsAclClean,
         aclClean,
         triggersClean,
         foreignKeysClean,
@@ -813,10 +965,10 @@ LIMIT ${SUPABASE_22_CATALOG_SENTINEL_LIMIT}
     acls: `
 SELECT c.relname AS object_name,
        'relation' AS object_kind,
-       pg_catalog.has_table_privilege('public', c.oid, 'SELECT') AS public_allowed,
-       pg_catalog.has_table_privilege('anon', c.oid, 'SELECT') AS anon_allowed,
-       pg_catalog.has_table_privilege('authenticated', c.oid, 'SELECT') AS authenticated_allowed,
-       pg_catalog.has_table_privilege('service_role', c.oid, 'SELECT') AS service_allowed
+       pg_catalog.has_table_privilege('public', c.oid, 'ALL') AS public_allowed,
+       pg_catalog.has_table_privilege('anon', c.oid, 'ALL') AS anon_allowed,
+       pg_catalog.has_table_privilege('authenticated', c.oid, 'ALL') AS authenticated_allowed,
+       pg_catalog.has_table_privilege('service_role', c.oid, 'ALL') AS service_allowed
 FROM pg_catalog.pg_class AS c
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
@@ -1234,16 +1386,27 @@ export function parseSupabase22CatalogSnapshot(value: unknown): Supabase22Catalo
     const acls: Supabase22CatalogAcl[] = [];
     for (const raw of value.acls as unknown[]) {
         if (!isRecord(raw)
-            || !hasOnlyKeys(raw, ['objectName', 'resolved', 'serviceRoleOnly'])
+            || !hasOnlyKeys(raw, [
+                'objectName', 'objectKind', 'resolved', 'publicAllowed', 'anonAllowed',
+                'authenticatedAllowed', 'serviceRoleAllowed',
+            ])
             || !safeCatalogName(raw.objectName)
+            || (raw.objectKind !== 'relation' && raw.objectKind !== 'routine')
             || typeof raw.resolved !== 'boolean'
-            || typeof raw.serviceRoleOnly !== 'boolean') {
+            || typeof raw.publicAllowed !== 'boolean'
+            || typeof raw.anonAllowed !== 'boolean'
+            || typeof raw.authenticatedAllowed !== 'boolean'
+            || typeof raw.serviceRoleAllowed !== 'boolean') {
             throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
         }
         acls.push({
             objectName: raw.objectName,
+            objectKind: raw.objectKind,
             resolved: raw.resolved,
-            serviceRoleOnly: raw.serviceRoleOnly,
+            publicAllowed: raw.publicAllowed,
+            anonAllowed: raw.anonAllowed,
+            authenticatedAllowed: raw.authenticatedAllowed,
+            serviceRoleAllowed: raw.serviceRoleAllowed,
         });
     }
     const routines: Supabase22CatalogRoutine[] = [];
@@ -1629,11 +1792,12 @@ export function adaptSupabase22CatalogRows(
         }
         return {
             objectName: row.object_name,
+            objectKind: row.object_kind as 'relation' | 'routine',
             resolved: true,
-            serviceRoleOnly: row.service_allowed
-                && !row.public_allowed
-                && !row.anon_allowed
-                && !row.authenticated_allowed,
+            publicAllowed: row.public_allowed,
+            anonAllowed: row.anon_allowed,
+            authenticatedAllowed: row.authenticated_allowed,
+            serviceRoleAllowed: row.service_allowed,
         };
     });
 

@@ -6,6 +6,7 @@ import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
     type AccountLifecycleInput,
 } from '@/lib/services/operations/canonical-operations-store';
 import {
@@ -25,6 +26,7 @@ type Dependencies = {
     deleteAuthUser?: (accountId: string) => Promise<void>;
     dualWrite?: boolean;
     appendLifecycle?: (input: AccountLifecycleInput) => Promise<unknown>;
+    queueMaintenanceJob?: (input: Parameters<typeof queueCanonicalMaintenanceJob>[0]) => Promise<unknown>;
 };
 
 export class AccountDeletionError extends Error {
@@ -50,6 +52,7 @@ export async function deleteAccountPermanently(
     const dualWrite = dependencies.dualWrite ?? isCanonicalFamilyWriteEnabled('account');
     const appendLifecycle = dependencies.appendLifecycle
         ?? canonicalOperationsStore.appendAccountLifecycle;
+    const queueMaintenanceJob = dependencies.queueMaintenanceJob ?? queueCanonicalMaintenanceJob;
     const recordLifecycle = async (
         eventKind: AccountLifecycleInput['eventKind'],
         state: string,
@@ -68,12 +71,12 @@ export async function deleteAccountPermanently(
             }),
         };
         try {
-            await appendLifecycle(input);
+            await withCanonicalMirrorTimeout(() => appendLifecycle(input));
         } catch {
             try {
-                await queueCanonicalMaintenanceJob(
+                await withCanonicalMirrorTimeout(() => queueMaintenanceJob(
                     maintenanceMarker('recovery', id, `account:${eventKind}`),
-                );
+                ));
             } catch {
                 // The recovery marker is best effort; no irreversible action may
                 // proceed until the lifecycle evidence write itself succeeds.
