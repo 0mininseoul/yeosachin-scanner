@@ -286,4 +286,3 @@ blocked until its own real parity, traffic, archive, and restore gates pass.
 - `landing_leads` maps all new target/excluded inputs by same-device anonymous
   journey and verified user claim; historical uncertainty remains explicit.
 - No admission activation or real `0_min._.00` canary occurred.
-
