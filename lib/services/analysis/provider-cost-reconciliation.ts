@@ -13,7 +13,6 @@ import {
     hashAnalysisCanonicalValue,
     type AnalysisCanonicalStore,
 } from './canonical-analysis-store';
-import { nextAnalysisCanonicalAuditVersion } from './canonical-analysis-read';
 
 const SETTLEMENT_DELAY_MS = 30_000;
 const MAX_RECONCILIATION_ROWS = 64;
@@ -154,58 +153,73 @@ export async function reconcileSettledAnalysisProviderCosts(
                 throw new Error('provider cost finalization failed');
             }
             try {
-                const canonicalCost = await canonicalStore.appendCost({
-                    requestId: stored.requestId ?? '',
+                const requestIdForCanonical = stored.requestId ?? '';
+                const sourceHash = hashAnalysisCanonicalValue({
+                    requestId: stored.requestId ?? null,
+                    runId: stored.runId,
+                    status: stored.status,
+                    usageTotalUsd,
+                    maxChargeUsd: stored.maxChargeUsd,
+                    credentialSlot: stored.credentialSlot,
+                });
+                const costPayload = {
+                    runId: stored.runId,
+                    status: stored.status,
+                    maxChargeUsd: stored.maxChargeUsd,
+                    credentialSlot: stored.credentialSlot,
+                };
+                const auditPayload = {
+                    lateCost: true,
+                    state: 'completed',
                     provider: stored.logicalProvider,
                     operationKey: `provider-run:${stored.runId}`,
-                    stage: 'provider_cost',
-                    amountKnown: usageTotalUsd,
-                    amountConservative: usageTotalUsd,
-                    usageUnknown: false,
-                    sourceHash: hashAnalysisCanonicalValue({
-                        requestId: stored.requestId ?? null,
-                        runId: stored.runId,
-                        status: stored.status,
-                        usageTotalUsd,
-                        maxChargeUsd: stored.maxChargeUsd,
-                        credentialSlot: stored.credentialSlot,
-                    }),
-                    payload: {
-                        runId: stored.runId,
-                        status: stored.status,
-                        maxChargeUsd: stored.maxChargeUsd,
-                        credentialSlot: stored.credentialSlot,
+                    cost: {
+                        amountKnown: usageTotalUsd,
+                        amountConservative: usageTotalUsd,
+                        usageUnknown: false,
                     },
-                });
+                    retention: 'permanent',
+                    unknownSource: false,
+                };
                 if (
-                    canonicalCost.status === 'appended'
-                    && stored.requestId
+                    stored.requestId
+                    && analysisCanonicalWriteEnabled('cost', deps.env ?? process.env)
                     && analysisCanonicalWriteEnabled('audit', deps.env ?? process.env)
                 ) {
-                    const existingVersions = await canonicalStore.loadAuditVersions(stored.requestId);
-                    const version = nextAnalysisCanonicalAuditVersion(existingVersions, true);
-                    await canonicalStore.appendAuditRow({
-                        requestId: stored.requestId,
-                        version,
-                        kind: 'bundle',
-                        state: 'complete',
-                        retentionClass: 'permanent',
-                        payload: {
-                            lateCost: true,
-                            state: 'completed',
-                            provider: stored.logicalProvider,
-                            operationKey: `provider-run:${stored.runId}`,
-                            cost: {
-                                amountKnown: usageTotalUsd,
-                                amountConservative: usageTotalUsd,
-                                usageUnknown: false,
-                            },
-                            retention: 'permanent',
-                            unknownSource: false,
-                        },
+                    const lateAudit = await canonicalStore.appendLateCostAudit({
+                        requestId: requestIdForCanonical,
+                        provider: stored.logicalProvider,
+                        operationKey: `provider-run:${stored.runId}`,
+                        stage: 'provider_cost',
+                        amountKnown: usageTotalUsd,
+                        amountConservative: usageTotalUsd,
+                        usageUnknown: false,
+                        sourceHash,
+                        costPayload,
+                        costRetentionClass: 'permanent',
+                        auditPayload,
+                        auditRetentionClass: 'permanent',
+                    });
+                    if (lateAudit.status === 'blocked') {
+                        await ensureLateAuditRetryMarker(canonicalStore, requestIdForCanonical);
+                    }
+                } else {
+                    await canonicalStore.appendCost({
+                        requestId: requestIdForCanonical,
+                        provider: stored.logicalProvider,
+                        operationKey: `provider-run:${stored.runId}`,
+                        stage: 'provider_cost',
+                        amountKnown: usageTotalUsd,
+                        amountConservative: usageTotalUsd,
+                        usageUnknown: false,
+                        sourceHash,
+                        payload: costPayload,
                     });
                 }
             } catch {
+                if (stored.requestId && analysisCanonicalWriteEnabled('audit', deps.env ?? process.env)) {
+                    await ensureLateAuditRetryMarker(canonicalStore, stored.requestId);
+                }
                 // The legacy cost ledger has committed; canonical evidence is fail-open during
                 // the observation window and will be retried by its bounded maintenance marker.
             }
@@ -228,6 +242,18 @@ export async function reconcileSettledAnalysisProviderCosts(
         failed,
         hasMore: data.length > MAX_RECONCILIATION_ROWS,
     };
+}
+
+async function ensureLateAuditRetryMarker(
+    canonicalStore: AnalysisCanonicalStore,
+    requestId: string,
+): Promise<void> {
+    try {
+        await canonicalStore.enqueueRetry(requestId, 'audit');
+    } catch {
+        // The business settlement remains authoritative; the evidence result is
+        // deliberately not reported as queued unless the marker RPC verifies it.
+    }
 }
 
 async function runWithConcurrency<T, R>(

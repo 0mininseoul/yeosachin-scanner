@@ -131,4 +131,27 @@ describe('analysis canonical tables PGlite contract', () => {
         );
         expect(costs.rows[0]?.count).toBe(1);
     });
+
+    it('allocates concurrent late-cost audit versions atomically under the request lock', async () => {
+        const call = (sourceHash: string) => db.query<{ version: number }>(
+            `SELECT (public.append_analysis_canonical_late_cost_audit(
+                $1, 'vertex', 'provider-run:late', 'provider_cost', 'USD',
+                0.01, 0.01, FALSE, $2, '{}'::jsonb, 'permanent', $3,
+                '{"lateCost":true}'::jsonb, 'permanent'
+            )->>'version')::int AS version`,
+            [requestId, sourceHash, hashB],
+        );
+        const results = await Promise.all([
+            call('c'.repeat(64)),
+            call('d'.repeat(64)),
+        ]);
+        const versions = results.map(result => result.rows[0]?.version).sort();
+        expect(versions).toEqual([2, 3]);
+        const auditRows = await db.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM public.analysis_audit_bundles
+             WHERE request_id = $1`,
+            [requestId],
+        );
+        expect(auditRows.rows[0]?.count).toBe(3);
+    });
 });

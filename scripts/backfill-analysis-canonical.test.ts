@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    ANALYSIS_CANONICAL_BACKFILL_FAMILIES,
     BACKFILL_MAX_LIMIT,
     backfillAnalysisCanonical,
     buildBackfillBatch,
+    compareBackfillFamilyRows,
     encodeBackfillCursor,
     parseBackfillCliArgs,
     type AnalysisBackfillSourceRow,
@@ -22,6 +24,49 @@ const sourceRows: AnalysisBackfillSourceRow[] = [
 ];
 
 describe('bounded analysis canonical backfill tooling', () => {
+    it('compares rows in both directions instead of treating matching counts as parity', () => {
+        expect(compareBackfillFamilyRows(
+            [{ key: 'candidate:1', score: 8.2 }],
+            [{ key: 'candidate:1', score: 8.2 }],
+        )).toEqual({ status: 'match', mismatchPaths: [] });
+        expect(compareBackfillFamilyRows(
+            [{ key: 'candidate:1', score: 8.2 }],
+            [{ key: 'candidate:1', score: 8.3 }],
+        )).toEqual({ status: 'mismatch', mismatchPaths: ['row.fields'] });
+        expect(compareBackfillFamilyRows(
+            [{ key: 'candidate:1', score: 8.2 }],
+            [],
+        )).toEqual({ status: 'mismatch', mismatchPaths: ['row.count'] });
+        expect(compareBackfillFamilyRows(
+            [],
+            [{ key: 'candidate:1', score: 8.2 }],
+        )).toEqual({ status: 'mismatch', mismatchPaths: ['row.count'] });
+    });
+
+    it('reads every legacy source and canonical family through bounded keyset pages', async () => {
+        const tables: string[] = [];
+        const chain = {
+            select: vi.fn().mockReturnThis(),
+            order: vi.fn().mockReturnThis(),
+            limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+        };
+        const client = {
+            from: vi.fn((table: string) => {
+                tables.push(table);
+                return chain;
+            }),
+        };
+
+        await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+
+        for (const family of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
+            expect(tables).toContain(family.canonicalTable);
+            expect(tables).toEqual(expect.arrayContaining([...family.legacyTables]));
+        }
+        expect(chain.limit).toHaveBeenCalled();
+        expect(chain.limit.mock.calls.every(([value]) => value === 100)).toBe(true);
+    });
+
     it('orders source rows and never builds a batch larger than 100', () => {
         const rows = Array.from({ length: BACKFILL_MAX_LIMIT + 20 }, (_, index) => ({
             id: `123e4567-e89b-42d3-a456-42661417${String(index).padStart(4, '0')}`,
@@ -49,7 +94,17 @@ describe('bounded analysis canonical backfill tooling', () => {
         chain.select.mockReturnValue(chain);
         chain.order.mockReturnValue(chain);
         chain.limit.mockResolvedValue({ data: sourceRows, error: null });
-        const client = { from: vi.fn(() => chain) };
+        const emptyChain = {
+            select: vi.fn(),
+            order: vi.fn(),
+            limit: vi.fn(),
+        };
+        emptyChain.select.mockReturnValue(emptyChain);
+        emptyChain.order.mockReturnValue(emptyChain);
+        emptyChain.limit.mockResolvedValue({ data: [], error: null });
+        const client = {
+            from: vi.fn((table: string) => table === 'analysis_requests' ? chain : emptyChain),
+        };
 
         const report = await backfillAnalysisCanonical({
             client,
@@ -91,7 +146,14 @@ describe('bounded analysis canonical backfill tooling', () => {
         const boundaryCalls: string[] = [];
         let cursorBoundary: AnalysisBackfillSourceRow | null = null;
         const client = {
-            from: vi.fn(() => {
+            from: vi.fn((table: string) => {
+                if (table !== 'analysis_requests') {
+                    return {
+                        select: vi.fn().mockReturnThis(),
+                        order: vi.fn().mockReturnThis(),
+                        limit: vi.fn().mockResolvedValue({ data: [], error: null }),
+                    };
+                }
                 let exactId: string | null = null;
                 let exactCreatedAt: string | null = null;
                 const chain = {
@@ -149,6 +211,49 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(boundaryCalls[0]).toContain('id.gt.');
     });
 
+    it('advances a legacy family page with its own bounded keyset boundary', async () => {
+        const jobs = Array.from({ length: 100 }, (_, index) => ({
+            request_id: sourceRows[0]!.id,
+            job_key: `job:${String(index).padStart(3, '0')}`,
+            kind: 'collection',
+            status: 'completed',
+            dispatch_generation: 0,
+            attempt_count: 1,
+            created_at: `2026-09-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+            updated_at: `2026-09-01T01:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+        }));
+        let jobsRead = 0;
+        const boundaries: string[] = [];
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_pipeline_jobs' && jobsRead++ === 0 ? jobs : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    or: vi.fn((expression: string) => {
+                        if (table === 'analysis_pipeline_jobs') boundaries.push(expression);
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({ data, error: null }),
+                };
+                return chain;
+            }),
+        };
+
+        const first = await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+        await backfillAnalysisCanonical({
+            client,
+            limit: 100,
+            cursor: first.nextCursor,
+            reportOnly: true,
+        });
+
+        expect(first.nextCursor).toBeTruthy();
+        expect(boundaries).toHaveLength(1);
+        expect(boundaries[0]).toContain('created_at.gt.');
+        expect(boundaries[0]).toContain('job_key.gt.');
+    });
+
     it('rejects an unknown cursor before querying the source boundary', async () => {
         const from = vi.fn();
         await expect(backfillAnalysisCanonical({
@@ -168,6 +273,11 @@ describe('bounded analysis canonical backfill tooling', () => {
             created_at: sourceRows[0]!.created_at,
             status: sourceRows[0]!.status,
         })).not.toThrow();
+        expect(() => encodeBackfillCursor({
+            id: sourceRows[0]!.id,
+            created_at: '2026-09-01T00:00:00.000Z,or(id.eq.injected)',
+            status: sourceRows[0]!.status,
+        })).toThrow('cursor row is invalid');
 
         await expect(backfillAnalysisCanonical({
             client: { from },

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -72,6 +73,7 @@ describe('analysis canonical table migration contract', () => {
             'append_analysis_canonical_cost',
             'upsert_analysis_canonical_cache',
             'append_analysis_canonical_audit',
+            'append_analysis_canonical_late_cost_audit',
             'enqueue_analysis_canonical_retry',
             'load_analysis_canonical_family',
         ]) {
@@ -85,6 +87,8 @@ describe('analysis canonical table migration contract', () => {
         expect(sql).not.toMatch(/provider_token|access_token|cookie|raw_provider_payload/i);
         expect(sql).toContain('CREATE TRIGGER analysis_events_append_only');
         expect(sql).toContain('CREATE TRIGGER analysis_audit_bundles_append_only');
+        expect(sql).toContain('FOR UPDATE');
+        expect(sql).toContain('late_cost_audit');
     });
 
     it('loads the cache family with an explicit bounded query', () => {
@@ -179,7 +183,21 @@ describe('analysis canonical server adapter', () => {
         vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
         const rpc = vi.fn()
             .mockResolvedValueOnce({ data: null, error: { message: 'temporary write failure' } })
-            .mockResolvedValueOnce({ data: { status: 'queued' }, error: null });
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: { family: 'audit', retryKey: `${requestId}:audit` },
+                    content_hash: createHash('sha256')
+                        .update(`${requestId}:audit`)
+                        .digest('hex'),
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00.000Z',
+                },
+                error: null,
+            });
         const store = createAnalysisCanonicalStore(rpcClient(rpc));
 
         await expect(store.appendAuditRow({
@@ -248,6 +266,34 @@ describe('analysis canonical server adapter', () => {
             state: 'complete',
             contentHash: hash,
             retentionClass: 'permanent',
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+    });
+
+    it('requires a typed durable retry marker payload before claiming retry_queued', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({
+                data: {
+                    id: 1,
+                    request_id: requestId,
+                    kind: 'operational',
+                    state: 'canonical_retry',
+                    payload: { family: 'audit' },
+                    content_hash: hash,
+                    retention_class: 'standard',
+                    created_at: '2026-09-09T20:00:00.000Z',
+                },
+                error: null,
+            });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
         })).resolves.toEqual({ status: 'blocked', family: 'audit' });
     });
 });

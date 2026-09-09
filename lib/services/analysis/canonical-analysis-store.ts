@@ -50,6 +50,20 @@ export type AnalysisCanonicalCostResult =
         usageUnknown: boolean;
     }>;
 
+export type AnalysisCanonicalLateCostAuditResult =
+    | Readonly<{ status: 'disabled'; usageUnknown: boolean }>
+    | Readonly<{ status: 'appended'; usageUnknown: boolean; version: number }>
+    | Readonly<{
+        status: 'retry_queued';
+        family: 'audit';
+        usageUnknown: boolean;
+    }>
+    | Readonly<{
+        status: 'blocked';
+        family: 'audit';
+        usageUnknown: boolean;
+    }>;
+
 export type AnalysisCanonicalPayload = Record<string, unknown>;
 
 interface RpcError {
@@ -152,11 +166,30 @@ export interface AppendAnalysisCanonicalAuditInput {
     payload?: AnalysisCanonicalPayload;
 }
 
+export interface AppendAnalysisCanonicalLateCostAuditInput {
+    requestId: string;
+    provider: string;
+    operationKey: string;
+    stage: string;
+    currency?: string;
+    amountKnown: number | null;
+    amountConservative: number | null;
+    usageUnknown: boolean;
+    sourceHash?: string;
+    costPayload?: AnalysisCanonicalPayload;
+    costRetentionClass?: string;
+    auditPayload?: AnalysisCanonicalPayload;
+    auditRetentionClass?: string;
+}
+
 export interface AnalysisCanonicalStore {
     recordJob(input: RecordAnalysisCanonicalJobInput): Promise<AnalysisCanonicalWriteResult>;
     appendEvent(input: AppendAnalysisCanonicalEventInput): Promise<AnalysisCanonicalWriteResult>;
     appendArtifact(input: AppendAnalysisCanonicalArtifactInput): Promise<AnalysisCanonicalWriteResult>;
     appendCost(input: AppendAnalysisCanonicalCostInput): Promise<AnalysisCanonicalCostResult>;
+    appendLateCostAudit(
+        input: AppendAnalysisCanonicalLateCostAuditInput,
+    ): Promise<AnalysisCanonicalLateCostAuditResult>;
     upsertCache(input: UpsertAnalysisCanonicalCacheInput): Promise<AnalysisCanonicalWriteResult>;
     appendAuditRow(input: AppendAnalysisCanonicalAuditInput): Promise<AnalysisCanonicalWriteResult>;
     loadAuditVersions(requestId: string): Promise<readonly number[]>;
@@ -291,6 +324,69 @@ function errorMessage(error: RpcError | null): string {
     return error?.message || error?.code || 'canonical RPC failed';
 }
 
+interface AnalysisCanonicalRetryMarker {
+    id: number;
+    request_id: string;
+    kind: 'operational';
+    state: 'canonical_retry';
+    payload: {
+        family: AnalysisCanonicalWriteFamily;
+        retryKey: string;
+    };
+    content_hash: string;
+    retention_class: 'standard';
+    created_at: string;
+}
+
+function expectedRetryMarkerHash(requestId: string, family: AnalysisCanonicalWriteFamily): string {
+    return createHash('sha256').update(`${requestId}:${family}`, 'utf8').digest('hex');
+}
+
+function parseRetryMarker(
+    value: unknown,
+    requestId: string,
+    family: AnalysisCanonicalWriteFamily,
+): AnalysisCanonicalRetryMarker {
+    if (!isRecord(value)) throw new Error('invalid retry marker');
+    const payload = value.payload;
+    if (
+        typeof value.id !== 'number'
+        || !Number.isSafeInteger(value.id)
+        || value.id < 1
+        || value.request_id !== requestId
+        || value.kind !== 'operational'
+        || value.state !== 'canonical_retry'
+        || !isRecord(payload)
+        || payload.family !== family
+        || payload.retryKey !== `${requestId}:${family}`
+        || value.content_hash !== expectedRetryMarkerHash(requestId, family)
+        || value.retention_class !== 'standard'
+        || typeof value.created_at !== 'string'
+        || !Number.isFinite(Date.parse(value.created_at))
+    ) {
+        throw new Error('invalid retry marker');
+    }
+    return {
+        id: value.id,
+        request_id: value.request_id,
+        kind: 'operational',
+        state: 'canonical_retry',
+        payload: { family, retryKey: `${requestId}:${family}` },
+        content_hash: value.content_hash,
+        retention_class: 'standard',
+        created_at: value.created_at,
+    };
+}
+
+function parseLateCostAuditVersion(value: unknown): number {
+    if (!isRecord(value)) throw new Error('invalid late cost audit response');
+    const version = value.version;
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1 || version > 100_000) {
+        throw new Error('invalid late cost audit version');
+    }
+    return version;
+}
+
 export function createAnalysisCanonicalStore(
     client: AnalysisCanonicalSupabaseClient = supabaseAdmin,
     options: { env?: Record<string, string | undefined> } = {},
@@ -310,9 +406,8 @@ export function createAnalysisCanonicalStore(
                 p_request_id: requestId,
                 p_family: family,
             });
-            if (result.error || !isRecord(result.data) || Object.keys(result.data).length === 0) {
-                return { status: 'blocked', family };
-            }
+            if (result.error) return { status: 'blocked', family };
+            parseRetryMarker(result.data, requestId, family);
             return { status: 'retry_queued', family };
         } catch {
             return { status: 'blocked', family };
@@ -356,6 +451,14 @@ export function createAnalysisCanonicalStore(
             const versions = rows.map(row => {
                 if (!isRecord(row)) {
                     throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
+                }
+                for (const field of [
+                    'id', 'request_id', 'version', 'kind', 'candidate_key', 'ordinal', 'state',
+                    'content_hash', 'retention_class', 'payload', 'created_at',
+                ]) {
+                    if (!Object.prototype.hasOwnProperty.call(row, field)) {
+                        throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
+                    }
                 }
                 return ensureInteger(
                     typeof row.version === 'number' ? row.version : undefined,
@@ -497,6 +600,78 @@ export function createAnalysisCanonicalStore(
                 return {
                     status: retry.status,
                     family: 'cost',
+                    usageUnknown: input.usageUnknown,
+                };
+            }
+        },
+
+        async appendLateCostAudit(input) {
+            assertUuid(input.requestId, 'request id');
+            if (!input.provider || input.provider.length > 128 || !input.operationKey || input.operationKey.length > 512) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: invalid cost identity.');
+            }
+            ensureFiniteNonNegative(input.amountKnown, 'known amount');
+            ensureFiniteNonNegative(input.amountConservative, 'conservative amount');
+            if (input.usageUnknown && input.amountKnown !== null) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: unknown usage must not have a known amount.');
+            }
+            if (
+                input.amountKnown !== null
+                && input.amountConservative !== null
+                && input.amountConservative < input.amountKnown
+            ) {
+                throw new Error('ANALYSIS_CANONICAL_VALIDATION_ERROR: conservative amount is below known amount.');
+            }
+            const costPayload = assertPayload(input.costPayload, 'costPayload');
+            const auditPayload = assertPayload(input.auditPayload, 'auditPayload');
+            const sourceHash = input.sourceHash ?? hashAnalysisCanonicalValue({
+                requestId: input.requestId,
+                provider: input.provider,
+                operationKey: input.operationKey,
+                stage: input.stage,
+                amountKnown: input.amountKnown,
+                amountConservative: input.amountConservative,
+                usageUnknown: input.usageUnknown,
+                payload: costPayload,
+            });
+            assertHash(sourceHash, 'source hash');
+            if (
+                !analysisCanonicalWriteEnabled('cost', env)
+                || !analysisCanonicalWriteEnabled('audit', env)
+            ) {
+                return { status: 'disabled', usageUnknown: input.usageUnknown };
+            }
+            const auditContentHash = hashAnalysisCanonicalValue({
+                requestId: input.requestId,
+                kind: 'bundle',
+                state: 'complete',
+                payload: auditPayload,
+            });
+            try {
+                const result = await client.rpc('append_analysis_canonical_late_cost_audit', {
+                    p_request_id: input.requestId,
+                    p_provider: input.provider,
+                    p_operation_key: input.operationKey,
+                    p_stage: input.stage,
+                    p_currency: input.currency ?? 'USD',
+                    p_amount_known: input.amountKnown,
+                    p_amount_conservative: input.amountConservative,
+                    p_usage_unknown: input.usageUnknown,
+                    p_source_hash: sourceHash,
+                    p_cost_payload: costPayload,
+                    p_cost_retention_class: input.costRetentionClass ?? 'permanent',
+                    p_audit_content_hash: auditContentHash,
+                    p_audit_payload: auditPayload,
+                    p_audit_retention_class: input.auditRetentionClass ?? 'permanent',
+                });
+                if (result.error) throw new Error(errorMessage(result.error));
+                const version = parseLateCostAuditVersion(result.data);
+                return { status: 'appended', usageUnknown: input.usageUnknown, version };
+            } catch {
+                const retry = await enqueueRetry(input.requestId, 'audit');
+                return {
+                    status: retry.status,
+                    family: 'audit',
                     usageUnknown: input.usageUnknown,
                 };
             }

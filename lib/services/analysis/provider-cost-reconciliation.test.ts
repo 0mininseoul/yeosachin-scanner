@@ -197,6 +197,10 @@ describe('provider cost reconciliation', () => {
             appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
             loadAuditVersions: vi.fn(async () => [1, 4]),
             appendAuditRow: vi.fn(async () => ({ status: 'appended' })),
+            appendLateCostAudit: vi.fn(async () => ({
+                status: 'appended', usageUnknown: false, version: 5,
+            })),
+            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
         };
 
         await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
@@ -208,12 +212,71 @@ describe('provider cost reconciliation', () => {
             }),
         })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
 
-        expect(canonicalStore.loadAuditVersions).toHaveBeenCalledWith(requestScopedSettledRow.request_id);
-        expect(canonicalStore.appendAuditRow).toHaveBeenCalledWith(expect.objectContaining({
+        expect(canonicalStore.appendLateCostAudit).toHaveBeenCalledWith(expect.objectContaining({
             requestId: requestScopedSettledRow.request_id,
-            version: 5,
-            kind: 'bundle',
-            payload: expect.objectContaining({ lateCost: true }),
+            amountKnown: 0.0754,
         }));
+        expect(canonicalStore.loadAuditVersions).not.toHaveBeenCalled();
+        expect(canonicalStore.appendAuditRow).not.toHaveBeenCalled();
+    });
+
+    it('uses one atomic late-cost RPC instead of a read-then-append version race', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const db = database([requestScopedSettledRow]);
+        const canonicalStore = {
+            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
+            loadAuditVersions: vi.fn(async () => [1, 4]),
+            appendAuditRow: vi.fn(async () => ({ status: 'appended' })),
+            appendLateCostAudit: vi.fn(async () => ({
+                status: 'appended', usageUnknown: false, version: 5,
+            })),
+            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
+        };
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            canonicalStore: canonicalStore as never,
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
+                }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(canonicalStore.appendLateCostAudit).toHaveBeenCalledWith(expect.objectContaining({
+            requestId: requestScopedSettledRow.request_id,
+            amountKnown: 0.0754,
+        }));
+        expect(canonicalStore.loadAuditVersions).not.toHaveBeenCalled();
+        expect(canonicalStore.appendAuditRow).not.toHaveBeenCalled();
+    });
+
+    it('durably marks a late audit failure before keeping legacy settlement successful', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const db = database([requestScopedSettledRow]);
+        const canonicalStore = {
+            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
+            loadAuditVersions: vi.fn(async () => { throw new Error('audit read unavailable'); }),
+            appendAuditRow: vi.fn(),
+            appendLateCostAudit: vi.fn(async () => ({
+                status: 'blocked', family: 'audit', usageUnknown: false,
+            })),
+            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
+        };
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            canonicalStore: canonicalStore as never,
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
+                }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(canonicalStore.enqueueRetry).toHaveBeenCalledWith(
+            requestScopedSettledRow.request_id,
+            'audit',
+        );
     });
 });

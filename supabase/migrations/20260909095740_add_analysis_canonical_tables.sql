@@ -374,6 +374,13 @@ BEGIN
     IF p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object' THEN
         RAISE EXCEPTION 'ANALYSIS_CANONICAL_INVALID_PAYLOAD' USING ERRCODE = '22023';
     END IF;
+    -- Serialize every audit writer on the request aggregate. A version is a
+    -- bundle-level fence, so a max(version)+1 read must share the same lock as
+    -- an ordinary append to prevent a late-cost writer from racing it.
+    PERFORM 1
+    FROM public.analysis_requests
+    WHERE id = p_request_id
+    FOR UPDATE;
     INSERT INTO public.analysis_audit_bundles(
         request_id, version, kind, candidate_key, ordinal, state,
         content_hash, retention_class, payload
@@ -382,6 +389,72 @@ BEGIN
         p_content_hash, p_retention_class, p_payload
     ) RETURNING * INTO v_row;
     RETURN pg_catalog.to_jsonb(v_row);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.append_analysis_canonical_late_cost_audit(
+    p_request_id UUID,
+    p_provider TEXT,
+    p_operation_key TEXT,
+    p_stage TEXT,
+    p_currency CHAR(3),
+    p_amount_known NUMERIC,
+    p_amount_conservative NUMERIC,
+    p_usage_unknown BOOLEAN,
+    p_source_hash TEXT,
+    p_cost_payload JSONB,
+    p_cost_retention_class TEXT,
+    p_audit_content_hash TEXT,
+    p_audit_payload JSONB,
+    p_audit_retention_class TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_version INTEGER;
+    v_cost public.analysis_costs;
+    v_audit public.analysis_audit_bundles;
+BEGIN
+    IF p_cost_payload IS NULL OR pg_catalog.jsonb_typeof(p_cost_payload) <> 'object'
+       OR p_audit_payload IS NULL OR pg_catalog.jsonb_typeof(p_audit_payload) <> 'object' THEN
+        RAISE EXCEPTION 'ANALYSIS_CANONICAL_INVALID_PAYLOAD' USING ERRCODE = '22023';
+    END IF;
+    -- The parent aggregate row exists for every canonical cost/audit row and
+    -- provides a stable lock even when this request has no audit rows yet.
+    PERFORM 1
+    FROM public.analysis_requests
+    WHERE id = p_request_id
+    FOR UPDATE;
+    SELECT COALESCE(pg_catalog.max(version), 0) + 1
+      INTO v_version
+      FROM public.analysis_audit_bundles
+     WHERE request_id = p_request_id;
+    IF v_version > 100000 THEN
+        RAISE EXCEPTION 'ANALYSIS_CANONICAL_AUDIT_VERSION_EXHAUSTED' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO public.analysis_costs(
+        request_id, provider, operation_key, stage, currency, amount_known,
+        amount_conservative, usage_unknown, source_hash, payload, retention_class
+    ) VALUES (
+        p_request_id, p_provider, p_operation_key, p_stage,
+        COALESCE(p_currency, 'USD'), p_amount_known,
+        p_amount_conservative, p_usage_unknown, p_source_hash,
+        p_cost_payload, p_cost_retention_class
+    ) RETURNING * INTO v_cost;
+    INSERT INTO public.analysis_audit_bundles(
+        request_id, version, kind, state, content_hash, retention_class, payload
+    ) VALUES (
+        p_request_id, v_version, 'bundle', 'complete', p_audit_content_hash,
+        p_audit_retention_class, p_audit_payload
+    ) RETURNING * INTO v_audit;
+    RETURN pg_catalog.jsonb_build_object(
+        'version', v_version,
+        'cost', pg_catalog.to_jsonb(v_cost),
+        'audit', pg_catalog.to_jsonb(v_audit)
+    );
 END;
 $$;
 
@@ -510,6 +583,7 @@ REVOKE ALL ON FUNCTION public.append_analysis_canonical_artifact(UUID, UUID, TEX
 REVOKE ALL ON FUNCTION public.append_analysis_canonical_cost(UUID, TEXT, TEXT, TEXT, CHAR, NUMERIC, NUMERIC, BOOLEAN, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.upsert_analysis_canonical_cache(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.append_analysis_canonical_late_cost_audit(UUID, TEXT, TEXT, TEXT, CHAR, NUMERIC, NUMERIC, BOOLEAN, TEXT, JSONB, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.load_analysis_canonical_family(UUID, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 
@@ -519,5 +593,6 @@ GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_artifact(UUID, UUID, 
 GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_cost(UUID, TEXT, TEXT, TEXT, CHAR, NUMERIC, NUMERIC, BOOLEAN, TEXT, JSONB, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_analysis_canonical_cache(TEXT, TEXT, TEXT, TIMESTAMPTZ, TEXT, JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_late_cost_audit(UUID, TEXT, TEXT, TEXT, CHAR, NUMERIC, NUMERIC, BOOLEAN, TEXT, JSONB, TEXT, TEXT, JSONB, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.enqueue_analysis_canonical_retry(UUID, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION public.load_analysis_canonical_family(UUID, TEXT) TO service_role;

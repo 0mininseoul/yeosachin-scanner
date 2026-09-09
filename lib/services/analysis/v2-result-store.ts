@@ -1235,6 +1235,7 @@ function resultShadowCounts(summary: ResultShadowSummary): Readonly<Record<strin
 function resultShadowProjection(
     summary: ResultShadowSummary,
     requestStatus: 'completed' = 'completed',
+    snapshot?: AnalysisV2FinalizedSnapshot | null,
 ): AnalysisCanonicalNormalizedProjection {
     const counts = resultShadowCounts(summary);
     const contentHash = hashAnalysisCanonicalValue({
@@ -1247,6 +1248,28 @@ function resultShadowProjection(
         state: requestStatus,
         ownership: 'unknown',
         counts,
+        candidate: snapshot
+            ? [...snapshot.femaleAccounts, ...snapshot.privateAccounts].map(entry => ({
+                candidateId: entry.candidateId,
+                ordinal: entry.sortOrdinal,
+                contentHash: hashAnalysisCanonicalValue(entry.row),
+            }))
+            : [],
+        interaction: [],
+        order: snapshot
+            ? [
+                ...snapshot.femaleAccounts.map(entry => ({
+                    list: 'female',
+                    candidateId: entry.candidateId,
+                    ordinal: entry.sortOrdinal,
+                })),
+                ...snapshot.privateAccounts.map(entry => ({
+                    list: 'private',
+                    candidateId: entry.candidateId,
+                    ordinal: entry.sortOrdinal,
+                })),
+            ]
+            : [],
         orderHash: null,
         contentHash,
         progress: null,
@@ -1261,6 +1284,14 @@ function resultShadowProjection(
         retention: 'permanent',
         auditRetention: 'permanent',
         unknownSource: true,
+        familyRows: {
+            jobs: [],
+            events: [],
+            artifacts: [],
+            costs: [],
+            caches: [],
+            audits: [],
+        },
     };
 }
 
@@ -1274,12 +1305,14 @@ function canonicalAuditProjection(
     if (!bundle) return null;
     const row = [...bundle.audits].reverse().find(candidate => {
         if (!isRecord(candidate) || !isRecord(candidate.payload)) return false;
-        return isRecord(candidate.payload.projection);
+        return candidate.kind === 'bundle'
+            && candidate.state === 'complete'
+            && isRecord(candidate.payload.projection);
     });
     if (!isRecord(row) || !isRecord(row.payload) || !isRecord(row.payload.projection)) {
         return null;
     }
-    return row.payload.projection as AnalysisCanonicalNormalizedProjection;
+    return row.payload.projection as unknown as AnalysisCanonicalNormalizedProjection;
 }
 
 function publicFemaleEnvelope(
@@ -1825,7 +1858,7 @@ export function createSupabaseAnalysisV2ResultStore(
             if (!snapshot) return null;
             await canonicalReadStore.shadowRead({
                 family: 'audit',
-                legacy: async () => resultShadowProjection(snapshot.summary),
+                legacy: async () => resultShadowProjection(snapshot.summary, 'completed', snapshot),
                 canonical: async () => canonicalAuditProjection(
                     await canonicalReadStore.loadRequest(input.requestId, 'audit'),
                 ),
