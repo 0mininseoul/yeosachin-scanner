@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly node_bin="$(command -v node)"
 readonly gate="$repo_dir/scripts/check-analysis-v2-release-readiness.sh"
 readonly temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/analysis-v2-release-readiness.XXXXXX")"
 readonly bin_dir="$temp_dir/bin"
@@ -135,6 +136,15 @@ printf 'npx' >>"${FAKE_COMMAND_LOG:?}"
 printf ' %q' "$@" >>"${FAKE_COMMAND_LOG:?}"
 printf '\n' >>"${FAKE_COMMAND_LOG:?}"
 
+if [[ "$*" == *'validate-analysis-public-readiness.ts'* && "$*" == *'--shape-only'* ]]; then
+  readiness_script=''
+  for arg in "$@"; do
+    [[ "$arg" == *'validate-analysis-public-readiness.ts' ]] && readiness_script="$arg"
+  done
+  [[ -n "$readiness_script" && -x "${FAKE_NODE_BIN:?}" && -x "${FAKE_TSX_BIN:?}" ]] || exit 90
+  exec "$FAKE_NODE_BIN" "$FAKE_TSX_BIN" "$readiness_script" --shape-only
+fi
+
 case "${FAKE_IMAGE_PROXY_PROBE_RESULT:-pass}" in
   pass)
     printf 'PASS: image-proxy-signing compatibility signature_accepted_503_retryable\n'
@@ -156,12 +166,14 @@ EOF
 chmod +x "$bin_dir/gcloud" "$bin_dir/curl" "$bin_dir/supabase" "$bin_dir/npx"
 
 export FAKE_COMMAND_LOG="$command_log"
+export FAKE_TSX_BIN="$repo_dir/node_modules/.bin/tsx"
+export FAKE_NODE_BIN="$node_bin"
 export FAKE_SERVICE_JSON='{"status":{"traffic":[{"revisionName":"analysis-worker-active","percent":100}]}}'
 export FAKE_REVISION_JSON="{\"metadata\":{\"name\":\"analysis-worker-active\",\"labels\":{\"analysis-v2-source-commit\":\"$expected_sha\"}},\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\"}]}}"
 export FAKE_VERCEL_DEPLOYMENT_ID='dpl_selected'
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"yeosachin.com\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_VERCEL_ALIASES_JSON='{"aliases":[]}'
-export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v2\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"paidProducerConfigFingerprintVersion\":\"paid-producer-config-v1\",\"paidProducerConfigFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"paidProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}}}"
+export FAKE_PUBLIC_FREEZE_JSON="{\"schemaVersion\":\"analysis-public-freeze-readiness-v3\",\"ready\":true,\"stage\":\"initial\",\"freezeMode\":\"drain-and-block\",\"publicFreezeEnabled\":true,\"sourceSha\":\"$expected_sha\",\"legacyTargetResource\":\"vercel:production:analysis-v1\",\"preflightProducerConfigFingerprintVersion\":\"preflight-producer-config-v1\",\"preflightProducerConfigFingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"preflightProducerConfigReady\":true,\"paidProducerConfigFingerprintVersion\":\"paid-producer-config-v1\",\"paidProducerConfigFingerprint\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"paidProducerConfigReady\":true,\"routes\":{\"/api/analysis/start\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/step\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true},\"/api/analysis/run\":{\"gateState\":\"frozen\",\"expectedStatus\":410,\"gateBeforeRuntime\":true}},\"analysisV2AdmissionEnabled\":false,\"earlybirdWebhookAutoAdmissionEnabled\":false}"
 export FAKE_SUPABASE_JSON='[{"version":"20260829120000","name":"add_analysis_v2_progress_signals_history"}]'
 export VERCEL_TOKEN="$vercel_token"
 export IMAGE_PROXY_SIGNING_SECRET="$image_proxy_secret"
@@ -183,6 +195,8 @@ run_gate() (
   export ANALYSIS_CAPACITY_PUBLIC_FREEZE_READINESS_URL
   export ANALYSIS_CAPACITY_LEGACY_TARGET_URL
   export ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE
+  export ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED='false'
+  export ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED='false'
   export ANALYSIS_V2_RELEASE_SUPABASE_WORKDIR="$repo_dir"
   export FAKE_COMMAND_LOG
   export FAKE_SERVICE_JSON
@@ -196,6 +210,7 @@ run_gate() (
   export FAKE_LEGACY_FREEZE_CODE
   export FAKE_LEGACY_FREEZE_STATUS
   export FAKE_LEGACY_FREEZE_BODY
+  export FAKE_TSX_BIN
   bash "$gate"
 )
 
@@ -217,6 +232,8 @@ assert_public_readiness_rejected() {
   local scenario="$1"
   local candidate="$2"
   local original="$FAKE_PUBLIC_FREEZE_JSON"
+  local mutation_before mutation_after
+  mutation_before="$(grep -Ec 'run deploy|set-iam-policy|tasks .* (pause|resume|create|delete)|scheduler jobs (pause|resume)' "$command_log" || true)"
   FAKE_PUBLIC_FREEZE_JSON="$candidate"
   if output="$(run_gate 2>&1)"; then
     printf '%s\n' "$output" >&2
@@ -224,6 +241,8 @@ assert_public_readiness_rejected() {
   fi
   assert_no_token "$output"
   assert_no_sensitive_probe_value "$output"
+  mutation_after="$(grep -Ec 'run deploy|set-iam-policy|tasks .* (pause|resume|create|delete)|scheduler jobs (pause|resume)' "$command_log" || true)"
+  [[ "$mutation_after" == "$mutation_before" ]] || fail "$scenario triggered a downstream mutation"
   FAKE_PUBLIC_FREEZE_JSON="$original"
 }
 
@@ -265,6 +284,18 @@ assert_public_readiness_rejected \
 assert_public_readiness_rejected \
   'malformed paid fingerprint ready' \
   "$(jq -c '.paidProducerConfigReady = "true"' <<<"$FAKE_PUBLIC_FREEZE_JSON")"
+
+duplicate_top="${FAKE_PUBLIC_FREEZE_JSON/\"ready\":true,/\"ready\":true,\"ready\":true,}"
+route_entry='"/api/analysis/run":{"gateState":"frozen","expectedStatus":410,"gateBeforeRuntime":true}'
+duplicate_route="${FAKE_PUBLIC_FREEZE_JSON/$route_entry/$route_entry,$route_entry}"
+assert_public_readiness_rejected 'duplicate top-level readiness key' "$duplicate_top"
+assert_public_readiness_rejected 'duplicate nested route key' "$duplicate_route"
+assert_public_readiness_rejected \
+  'malformed readiness JSON' \
+  '{'
+assert_public_readiness_rejected \
+  'trailing readiness JSON' \
+  "${FAKE_PUBLIC_FREEZE_JSON} trailing"
 
 export FAKE_VERCEL_JSON="{\"deployments\":[{\"target\":\"production\",\"readyState\":\"READY\",\"uid\":\"$FAKE_VERCEL_DEPLOYMENT_ID\",\"url\":\"vercel-preview.example\",\"meta\":{\"githubCommitSha\":\"$expected_sha\"}}]}"
 export FAKE_VERCEL_ALIASES_JSON='{"aliases":[{"uid":"alias_selected","alias":"yeosachin.com","created":"2026-08-01T00:00:00.000Z"}]}'

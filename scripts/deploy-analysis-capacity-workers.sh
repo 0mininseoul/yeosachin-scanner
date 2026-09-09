@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 # Split-capacity Cloud Run deployment. The runtime manifest is the sole
 # non-secret environment source; build inputs and runtime secrets are supplied
 # through separate, externally-resolved files/Secret Manager references.
@@ -22,7 +26,7 @@ readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 # scheduler must therefore have been paused for longer than the deployed Cloud
 # Run request timeout (600s) plus grace before an empty queue proves anything.
 readonly PREFLIGHT_RECOVERY_QUIESCENCE_SECONDS=660
-readonly PUBLIC_READINESS_SCHEMA_VERSION="analysis-public-freeze-readiness-v2"
+readonly PUBLIC_READINESS_SCHEMA_VERSION="analysis-public-freeze-readiness-v3"
 readonly PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION="preflight-producer-config-v1"
 readonly PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION="paid-producer-config-v1"
 
@@ -332,7 +336,7 @@ worker_memory="${ANALYSIS_CAPACITY_WORKER_MEMORY:-2Gi}"
 [[ "$project" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]] || die "invalid project"
 [[ "$location" == "$DEFAULT_LOCATION" ]] || die "location must be $DEFAULT_LOCATION"
 [[ "$region" == "$DEFAULT_LOCATION" ]] || die "Cloud Run region must be $DEFAULT_LOCATION"
-[[ "$queue" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] || die "invalid queue"
+[[ "$queue" =~ ^[A-Za-z0-9-]{1,100}$ ]] || die "invalid queue"
 [[ "$service" =~ ^[a-z]([a-z0-9-]{0,47}[a-z0-9])?$ ]] || die "invalid Cloud Run service"
 [[ "$service" == *"$role"* ]] || die "Cloud Run service must contain its workload role"
 service_account_pattern='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$'
@@ -383,7 +387,7 @@ if [[ "$stage" != "bootstrap" ]]; then
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE_PROJECT is invalid"
   [[ "$legacy_queue_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE_LOCATION is invalid"
-  [[ "$legacy_queue" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] \
+  [[ "$legacy_queue" =~ ^[A-Za-z0-9-]{1,100}$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_QUEUE is invalid"
   [[ "$legacy_target_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/api/analysis/(start|step|run)$ ]] \
     || die "ANALYSIS_CAPACITY_LEGACY_TARGET_URL must be one exact public V1 route"
@@ -589,10 +593,10 @@ if [[ "$allow_initial_identity_roll_forward" == "true" ]]; then
   # validated here, before any gcloud command can receive them.
   recovery_scheduler_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
   recovery_scheduler_location="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
-  # Bounded repetition above 255 is not portable in this regex engine, so the
+  # Bounded repetition above 255 is not portable in Bash 3.2, so the
   # documented 500-character Scheduler job-id limit is checked separately.
-  [[ "$recovery_scheduler_job" =~ ^[A-Za-z][A-Za-z0-9_-]*$ \
-     && ${#recovery_scheduler_job} -le 500 ]] \
+  [[ "$recovery_scheduler_job" =~ ^[A-Za-z0-9_-]+$ \
+    && ${#recovery_scheduler_job} -le 500 ]] \
     || die "initial identity roll-forward recovery scheduler job name is invalid"
   [[ "$recovery_scheduler_location" =~ ^[a-z]+-[a-z]+[0-9]$ ]] \
     || die "initial identity roll-forward recovery scheduler location is invalid"
@@ -760,6 +764,16 @@ call_public_freeze_readiness() {
     --url "$public_freeze_readiness_url"
 }
 
+validate_public_readiness_v3_wire() {
+  local payload="$1"
+  local result
+  result="$(printf '%s' "$payload" \
+    | npx --no-install tsx "$SCRIPT_DIR/validate-analysis-public-readiness.ts" --shape-only 2>/dev/null)" \
+    || die "public freeze readiness failed strict v3 wire validation"
+  [[ "$result" == 'PASS' ]] \
+    || die "public freeze readiness failed strict v3 wire validation"
+}
+
 verify_legacy_quiescence() {
   [[ "$stage" != "bootstrap" ]] || return 0
   local queue_json
@@ -785,12 +799,13 @@ verify_legacy_quiescence() {
     || die "legacy Cloud Tasks queue is not empty"
   public_json="$(call_public_freeze_readiness)" \
     || die "public freeze readiness observation failed"
+  validate_public_readiness_v3_wire "$public_json"
   jq -e --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
     --arg source_sha "$source_sha" \
     --arg target_resource "$legacy_target_resource" \
     --arg preflight_version "$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
     --arg paid_version "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" '
-    (keys | sort) == ["freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
+    (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
     and .schemaVersion == $schema_version
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
@@ -804,6 +819,8 @@ verify_legacy_quiescence() {
     and .paidProducerConfigFingerprintVersion == $paid_version
     and .paidProducerConfigReady == true
     and (.paidProducerConfigFingerprint | type == "string" and test("^[0-9a-f]{64}$"))
+    and (.analysisV2AdmissionEnabled | type == "boolean")
+    and (.earlybirdWebhookAutoAdmissionEnabled | type == "boolean")
     and ((.routes | keys | sort) == ["/api/analysis/run", "/api/analysis/start", "/api/analysis/step"])
     and ([.routes[] | select(.gateState == "frozen" and .expectedStatus == 410 and .gateBeforeRuntime == true)] | length) == 3
   ' <<<"$public_json" >/dev/null \
@@ -1132,6 +1149,7 @@ verify_role_runtime_fingerprint() {
   local public_json
   public_json="$(call_public_freeze_readiness)" \
     || die "active Vercel $role_label producer readiness observation failed"
+  validate_public_readiness_v3_wire "$public_json"
   jq -e \
     --arg schema_version "$PUBLIC_READINESS_SCHEMA_VERSION" \
     --arg source_sha "$source_sha" \
@@ -1146,6 +1164,8 @@ verify_role_runtime_fingerprint() {
     '
       type == "object"
       and ((keys | sort) == [
+        "analysisV2AdmissionEnabled",
+        "earlybirdWebhookAutoAdmissionEnabled",
         "freezeMode",
         "legacyTargetResource",
         "paidProducerConfigFingerprint",
@@ -1183,6 +1203,8 @@ verify_role_runtime_fingerprint() {
       and (.[ $producer_fingerprint_field ] | type == "string")
       and (.[ $producer_fingerprint_field ] | test("^[0-9a-f]{64}$"))
       and .[$producer_fingerprint_field] == $expected
+      and (.analysisV2AdmissionEnabled | type == "boolean")
+      and (.earlybirdWebhookAutoAdmissionEnabled | type == "boolean")
     ' <<<"$public_json" >/dev/null 2>&1 \
     || die "active Vercel $role_label producer fingerprint does not match the reviewed contract"
   if [[ "$role" == 'preflight' ]]; then
@@ -2607,7 +2629,10 @@ if [[ "$mode" == "check" ]]; then
 fi
 
 if [[ "$mode" == "apply" ]]; then
-  acquire_deploy_lock
+  capacity_exclusion_start role-deployer "$role" "${original_args[@]}"
+  if [[ -z "${ANALYSIS_CAPACITY_EXCLUSION_CONTROL_WRITE_FD:-}" ]]; then
+    acquire_deploy_lock
+  fi
 fi
 
 # Existing services are checked against their observed stage before any

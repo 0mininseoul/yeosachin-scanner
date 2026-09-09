@@ -36,6 +36,10 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx tsc --noEmit
+      - name: Run coordinated identity epoch contract suites
+        run: npm run test:identity-epoch
+      - name: Run readiness v3 shell harness
+        run: bash scripts/test-analysis-v2-release-readiness.sh
       - run: npm test
       - run: npm run build
       - name: Run npm audit with bounded retries

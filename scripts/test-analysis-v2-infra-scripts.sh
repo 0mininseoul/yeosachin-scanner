@@ -1987,11 +1987,54 @@ common_env=(
   'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION=7'
   'ANALYSIS_V2_WORKER_ENABLED=false'
   'ANALYSIS_V2_RECOVERY_ENABLED=false'
+  'ANALYSIS_V2_RECOVERY_SCHEDULER_JOB=analysis-v2-recovery'
+  'ANALYSIS_V2_RETENTION_SCHEDULER_JOB=analysis-v2-preflight-retention'
   'GITHUB_TOKEN=GITHUB_TOKEN_SENTINEL'
   'ANALYSIS_V2_DEPLOY_REVISION_NONCE=abc12'
   "FAKE_GCLOUD_SOURCE_COMMIT=$repo_source_commit"
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml"
 )
+
+# Scheduler job IDs are provider-owned selectors and must be rejected before
+# this wrapper can compose any Cloud Run, queue, or Scheduler operation. Keep
+# the mutation log attached so this remains a no-mutation regression rather
+# than only an error-message check.
+invalid_scheduler_job_501="$(printf '%*s' 501 '' | tr ' ' J)"
+for invalid_scheduler_job in 'bad.job' 'job/name' 'job$bad' "$invalid_scheduler_job_501"; do
+  scheduler_case="${#invalid_scheduler_job}"
+  scheduler_events="$temp_dir/deploy-v2-invalid-recovery-scheduler-${scheduler_case}.events"
+  scheduler_output="$temp_dir/deploy-v2-invalid-recovery-scheduler-${scheduler_case}.out"
+  : >"$scheduler_events"
+  if env "${common_env[@]}" \
+    "ANALYSIS_V2_RECOVERY_SCHEDULER_JOB=$invalid_scheduler_job" \
+    'FAKE_GCLOUD_STATE=ready' \
+    "FAKE_GCLOUD_EVENT_LOG=$scheduler_events" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$scheduler_output" 2>&1; then
+    fail "invalid recovery Scheduler job ID was accepted: length=$scheduler_case"
+  fi
+  assert_contains "$scheduler_output" \
+    'ANALYSIS_V2_RECOVERY_SCHEDULER_JOB is invalid'
+  [[ ! -s "$scheduler_events" ]] \
+    || fail "invalid recovery Scheduler job ID reached a mutation: length=$scheduler_case"
+done
+
+invalid_scheduler_job='retention.job'
+scheduler_events="$temp_dir/deploy-v2-invalid-retention-scheduler.events"
+scheduler_output="$temp_dir/deploy-v2-invalid-retention-scheduler.out"
+: >"$scheduler_events"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_RETENTION_SCHEDULER_JOB=$invalid_scheduler_job" \
+  'FAKE_GCLOUD_STATE=ready' \
+  "FAKE_GCLOUD_EVENT_LOG=$scheduler_events" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$scheduler_output" 2>&1; then
+  fail 'invalid retention Scheduler job ID was accepted'
+fi
+assert_contains "$scheduler_output" \
+  'ANALYSIS_V2_RETENTION_SCHEDULER_JOB is invalid'
+[[ ! -s "$scheduler_events" ]] \
+  || fail 'invalid retention Scheduler job ID reached a mutation'
 
 for invalid_preflight_pool in \
   '' \

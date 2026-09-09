@@ -108,6 +108,122 @@ score audit 보존 정리의 FK invariant는 `analysis_v2_score_audit_runs` chil
 
 ## Rollout, rollback, privacy·secret 경계
 
+### Coordinated epoch zero-work evidence
+
+The coordinated capacity epoch must not infer task creation absence from Cloud
+Audit Logs: Cloud Tasks `CreateTask` and `BufferTask` do not emit the audit
+method entries that would make an empty audit query proof of zero work. The
+task-creation evidence source is the complete, queue-scoped Cloud Tasks
+TaskActivityLog stream, with an independently observed sampling ratio of 1.0,
+the full baseline-to-verification interval, required logging permissions, and
+all pagination pages drained. Missing sampling, queue scope, interval
+coverage, permissions, ingestion-lag coverage, or any ambiguous page is
+`EVIDENCE_UNAVAILABLE`, never zero.
+
+The collector must not change logging configuration or create a synthetic task
+to test coverage. It records only a bounded digest and safe evidence status;
+the coordinator combines this source with provider, billing/work-ledger, and
+receiver-log evidence before `VERIFIED`.
+
+### Protected operator path: check, apply through VERIFIED, and independent read-back
+
+The supported operator path uses two owner-only inherited descriptors: one
+contains the complete reviewed packet and the other contains the private live
+bootstrap descriptor. They are passed as inherited file descriptors only; the
+operator must not put their contents in argv, dotenv, stdout/stderr, a journal,
+an ordinary temporary file, or git. The descriptor must carry the complete old
+observations and separately reviewed desired identities, source/build context,
+digest-pinned image/runtime environment, pinned secret references, exact queue
+and scheduler targets, IAM/provider scope, zero-work selectors, and the private
+authenticated observation boundary. Missing or stale evidence is a stop, not a
+value to fill from process defaults.
+
+The live graph performs authenticated read-only transport preflight, validates
+the packet-bound selectors and Cloud Run bodies, then re-observes the complete
+old graph before deriving only deterministic packet/revision digests. The
+supported `apply` invocation below is a single process: it consumes each
+inherited descriptor exactly once, keeps the exact packet/bootstrap objects in
+memory, performs that read-only admission, and then applies through `VERIFIED`
+without reconstruction or a second descriptor read. An optional standalone
+check is read-only:
+
+```text
+node --import tsx scripts/run-capacity-identity-epoch.ts check --packet-fd FD --bootstrap-fd FD
+```
+
+The bounded apply path runs that read-only preparation on the same in-memory
+packet and then runs the coordinator only through `VERIFIED`; `--through
+VERIFIED` is mandatory and there is no activation mode:
+
+```text
+node --import tsx scripts/run-capacity-identity-epoch.ts apply --packet-fd FD --bootstrap-fd FD --through VERIFIED
+```
+
+After the apply process has stopped, the independent verifier re-reads the
+journal, current lock, exact desired source/build/runtime/revision and IAM
+facts, both closed readiness gates, both PAUSED empty queues, both PAUSED aged
+schedulers with correlated pause provenance, enabled retention, and the
+zero-work ledgers. It proves the epoch fence stayed unchanged throughout the
+read pass and that the exact shared-reservation family is fully released after
+the coordinator's `VERIFIED` cleanup; a held or partial reservation fails
+closed. It rejects any `ACTIVATED`/resume/gate-open marker or mutable resource
+drift and emits only `VERIFIED_OK` (or one fixed error code):
+
+```text
+node --import tsx scripts/verify-capacity-identity-epoch.ts --packet-fd FD --bootstrap-fd FD
+```
+
+The verifier is read-only and does not create tasks, call paid providers, send
+work, rotate credentials/secrets, resume queues or schedulers, mutate Cloud
+Run/Vercel/IAM, or run the real canary. Before an operator can use this path,
+the coordinator must receive approved protected descriptors and permissions for
+the authenticated source/build, Cloud Tasks TaskActivityLog and Cloud Logging
+proof, Supabase PostgREST Date/count/pagination proof where reviewed, exact
+malformed receiver routes, GCS journal, Cloud Run, IAM, Scheduler, retention,
+and readiness resources; this repository intentionally does not discover or
+invent any of those protected values.
+
+### Ordinary mutation identity-epoch bridge (local candidate)
+
+The seven reviewed ordinary mutation entry points use the same generation-fenced
+resource atoms as the coordinator. A role-owned apply enters the fixed launcher
+with the original argv preserved; the launcher starts the supervisor with direct
+`node --import tsx`, keeps the supervisor streams private to the parent, and
+proxies the child through low descriptors 4 (parent-to-child responses) and 5
+(child-to-parent requests). One parent dispatcher owns the supervisor response
+reader for READY, child IPC, heartbeat errors, and final release. The launcher
+waits for the detached child process group, so release cannot race a still-live
+descendant.
+If the supervisor loses renewal authority, it emits a bounded fatal event and
+the dispatcher terminates the entire detached child group before attempting
+final release; a child cannot continue under a stale lease.
+
+The generic `configure-analysis-tasks-queue.sh` path remains valid without
+`ANALYSIS_CAPACITY_ROLE`; it enters the exclusion bridge only when an explicit
+`preflight` or `paid` role is present. Maintenance selectors intentionally do
+not require a queue, while paid maintenance includes the retention scheduler.
+Nested preflight maintenance is admitted only when its scheduler and all other
+selector atoms are present in the role-deployer descriptor. These checks are
+provider-free local evidence and do not authorize production observation,
+mutation, activation, or deployment.
+
+The local acceptance replay for this bridge is
+`npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot`;
+the current candidate passes all 319 actual-adapter/subprocess tests. Its
+provider-free in-memory reservation/raw-lock storage is reachable only when
+Vitest and the explicit test-storage marker are both set by the test harness;
+ordinary launches continue to construct authenticated GCS storage. The full
+repository test command is not a bridge acceptance gate because parallel
+PGlite startup and subprocess contention can exceed unrelated test deadlines;
+record its final summary in the non-secret candidate review instead of treating
+those unrelated failures as production evidence.
+
+If a local run fails after a partial reservation renewal, the bridge removes
+only members still matching the owner, scope, epoch, and fence that it owns;
+foreign takeover generations are never deleted. The coordinator renews this
+shared reservation whenever the live journal lease renews and releases it on
+normal VERIFIED/abort/failure cleanup.
+
 - **Fresh provenance activation gate (통과):** 격리된 disposable PostgreSQL 17에서 exact predecessor chain과 two-session barrier를 사용한 23/23 concurrency 검증이 통과했다. fresh admission/record/bind/checkpoint와 dispatch-guard/scheduler wrapper 교차 실행이 bounded lock timeout 안에서 deadlock과 잔류 lock wait 없이 끝났다. production Supabase나 paid provider call은 사용하지 않았다. PGlite contract와 이 실제 PostgreSQL 증거를 함께 rollout 근거로 사용한다.
 - rollout은 reviewed migration history 확인 → exact migration allowlist dry-run → DB migration/ACL 검증 → Vercel gate-off 배포 → canonical worker 3개 preflight pool 및 recovery 배포 → queue를 두 번 확인 → 고정 future webhook cutoff 설정 → 신규 결제 gate 활성화 순서다. dirty/mixed worktree에서 `supabase db push --include-all`은 사용하지 않는다.
 - **Exact-SHA GitHub CI release gate:** `scripts/deploy-analysis-v2-worker.sh`의 `apply`만 source SHA를 확인한 직후 고정된 GitHub REST API의 `0mininseoul/yeosachin-scanner` `.github/workflows/ci.yml` 실행을 `event=push`, `branch=main`, `head_sha` 필터로 조회한다. 실행의 path는 정확한 `.github/workflows/ci.yml` base path와 선택적인 `@ref` suffix만 정규화하며, validated selection은 exact lowercase SHA, `event=push`, `head_branch=main`을 모두 요구한다. 응답은 `per_page=100`으로 bounded하고 `total_count`가 반환된 `workflow_runs` 배열 길이와 정확히 같을 때만 분류한다. 100개 초과 결과처럼 잘린 응답이나 count/array mismatch는 고정된 sanitized error로 fail closed한다. 최소 한 개의 matching main-push run이 있고 모든 matching run이 `status=completed`, `conclusion=success`일 때만 통과하며, absent·pending·failure·다른 SHA·wrong path/branch/event·malformed/API/auth 오류는 모두 fail closed한다. `GITHUB_TOKEN` 또는 `GH_TOKEN`(GitHub Actions read 권한)은 **apply 전용 배포 prerequisite**이며 token/API 응답은 출력하지 않고, 우회 옵션은 없다. `--dry-run`과 `--check`는 기존 read-only preflight를 유지하기 위해 이 release gate를 호출하지 않는다.

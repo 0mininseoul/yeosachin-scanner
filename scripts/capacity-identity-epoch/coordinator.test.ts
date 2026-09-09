@@ -1,0 +1,326 @@
+import { describe, expect, it } from 'vitest';
+import { EpochError, canonicalDigest, type EpochHeader, type State } from './contracts';
+import { EpochJournal, type JournalLease, type JournalStorage, type StoredObject } from './journal';
+import { EpochCoordinator, sharedReservationResources, type EpochControlPlane, type OperationEvidence } from './coordinator';
+import { deriveEntryPointResources } from './exclusion-bridge';
+import { createFixturePacket } from './fixtures';
+import { issueCoordinatorCapability } from './packet';
+
+class MemoryStorage implements JournalStorage {
+    private readonly values = new Map<string, StoredObject>();
+    private generation = 0;
+
+    async get(key: string): Promise<StoredObject | null> { return this.values.get(key) ?? null; }
+    async put(key: string, value: unknown, options: { ifGenerationMatch: '0' | string }): Promise<StoredObject> {
+        const current = this.values.get(key);
+        if (options.ifGenerationMatch === '0' ? current !== undefined : current?.generation !== options.ifGenerationMatch) throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        const stored = { generation: String(++this.generation), value };
+        this.values.set(key, stored);
+        return stored;
+    }
+    async list(prefix: string): Promise<ReadonlyArray<StoredObject & { key: string }>> {
+        return [...this.values.entries()].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, ...value }));
+    }
+    async delete(key: string, options: { ifGenerationMatch: string }): Promise<void> {
+        const current = this.values.get(key);
+        if (!current || current.generation !== options.ifGenerationMatch) throw new EpochError('GENERATION_PRECONDITION_FAILED');
+        this.values.delete(key);
+    }
+}
+
+function evidence(state: string, sequence: number): OperationEvidence {
+    return {
+        precondition: { state, sequence }, mutation: { state }, postcondition: { state, sequence },
+        proof: { state, sequence }, nativeConcurrencyToken: { sequence }, resourceObservation: { state, sequence },
+    };
+}
+
+class FixtureControlPlane implements EpochControlPlane {
+    readonly calls: string[] = [];
+    verifyCalls = 0;
+    failAt: string | undefined;
+
+    private run(state: string): OperationEvidence {
+        this.calls.push(state);
+        if (this.failAt === state) throw new EpochError('PROBE_FAILED');
+        return evidence(state, this.calls.length);
+    }
+    async prepare(): Promise<OperationEvidence> { return this.run('PREPARED'); }
+    async stage(): Promise<OperationEvidence> { return this.run('STAGED'); }
+    async closeAndAlignProducers(): Promise<OperationEvidence> { return this.run('PRODUCERS_CLOSED_ALIGNED'); }
+    async alignQueues(): Promise<OperationEvidence> { return this.run('QUEUES_ALIGNED'); }
+    async rotateInvokers(): Promise<OperationEvidence> { return this.run('INVOKERS_ROTATED'); }
+    async promote(): Promise<OperationEvidence> { return this.run('SERVICES_PROMOTED'); }
+    async verify(): Promise<OperationEvidence> { this.verifyCalls += 1; return this.run('VERIFIED'); }
+    async reconcile(input: { state: State }): Promise<OperationEvidence> {
+        return input.state === 'VERIFIED' ? this.verify() : this.run(`RECONCILE_${input.state}`);
+    }
+    async compensateActivation(): Promise<OperationEvidence> { return this.run('COMPENSATED'); }
+    async activate(): Promise<OperationEvidence> { return this.run('ACTIVATED'); }
+}
+
+class ResumeFailControlPlane extends FixtureControlPlane {
+    async resume(): Promise<void> { throw new EpochError('PROBE_FAILED'); }
+}
+
+class AdmissionOrderControlPlane extends FixtureControlPlane {
+    reservationSeen = false;
+
+    constructor(private readonly storage: MemoryStorage) {
+        super();
+    }
+
+    async admit(): Promise<void> {
+        this.reservationSeen = (await this.storage.list('epoch-reservation/')).length > 0;
+    }
+}
+
+class RenewalControlPlane implements EpochControlPlane {
+    readonly calls: string[] = [];
+    private leaseUpdated?: (lease: JournalLease) => Promise<void> | void;
+
+    constructor(private readonly journal: EpochJournal, private readonly now: { value: number }) {}
+
+    bindLeaseUpdated(callback: (lease: JournalLease) => Promise<void> | void): void {
+        this.leaseUpdated = callback;
+    }
+
+    private async operation(state: string, input: { lease: JournalLease }): Promise<OperationEvidence> {
+        this.calls.push(state);
+        this.now.value += 7_000;
+        const renewed = await this.journal.renew(input.lease);
+        await this.leaseUpdated?.(renewed);
+        return evidence(state, this.calls.length);
+    }
+
+    async prepare(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('PREPARED', input); }
+    async stage(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('STAGED', input); }
+    async closeAndAlignProducers(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('PRODUCERS_CLOSED_ALIGNED', input); }
+    async alignQueues(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('QUEUES_ALIGNED', input); }
+    async rotateInvokers(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('INVOKERS_ROTATED', input); }
+    async promote(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('SERVICES_PROMOTED', input); }
+    async verify(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('VERIFIED', input); }
+    async reconcile(): Promise<OperationEvidence> { return evidence('RECONCILE', 0); }
+    async compensateActivation(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('COMPENSATED', input); }
+    async activate(input: { lease: JournalLease }): Promise<OperationEvidence> { return this.operation('ACTIVATED', input); }
+}
+
+function setup(now = 1_000) {
+    const packet = createFixturePacket();
+    const header: EpochHeader = {
+        epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+        oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+        roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+        createdAt: '2026-09-07T00:00:00.000Z',
+    };
+    const storage = new MemoryStorage();
+    const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 10_000 });
+    const controlPlane = new FixtureControlPlane();
+    const coordinator = new EpochCoordinator({ packet, journal, controlPlane, ownerDigest: canonicalDigest('fixture-owner'), now: () => now });
+    return { packet, storage, journal, controlPlane, coordinator };
+}
+
+describe('ordered coordinator', () => {
+    it('acquires the common reservation before admission captures any baseline', async () => {
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => 1_000, leaseMs: 10_000 });
+        const controlPlane = new AdmissionOrderControlPlane(storage);
+        const coordinator = new EpochCoordinator({
+            packet,
+            journal,
+            controlPlane,
+            ownerDigest: canonicalDigest('admission-order-owner'),
+            now: () => 1_000,
+        });
+
+        await coordinator.runThroughVerified();
+        expect(controlPlane.reservationSeen).toBe(true);
+    });
+
+    it('releases the shared reservation when resume fails after acquisition', async () => {
+        const { packet, storage, journal } = setup();
+        const coordinator = new EpochCoordinator({
+            packet,
+            journal,
+            controlPlane: new ResumeFailControlPlane(),
+            ownerDigest: canonicalDigest('resume-failure-owner'),
+            now: () => 1_000,
+        });
+        await expect(coordinator.runThroughVerified()).rejects.toThrow('PROBE_FAILED');
+        expect(await storage.list('epoch-reservation/')).toHaveLength(0);
+    });
+
+    it('releases the shared reservation when activation preconditions fail', async () => {
+        const { storage, coordinator, controlPlane } = setup();
+        await coordinator.runThroughVerified();
+        const authorization = coordinator.issueActivationAuthorization();
+        const optionalActivation = controlPlane as unknown as { activate?: unknown };
+        optionalActivation.activate = undefined;
+        await expect(coordinator.activate(authorization)).rejects.toThrow('ACTIVATION_AUTH_REQUIRED');
+        expect(await storage.list('epoch-reservation/')).toHaveLength(0);
+    });
+
+    it('renews the shared reservation on every renewed journal lease across the whole interval', async () => {
+        const now = { value: 1_000 };
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const journal = new EpochJournal(new MemoryStorage(), { header, now: () => now.value, leaseMs: 10_000 });
+        const controlPlane = new RenewalControlPlane(journal, now);
+        const coordinator = new EpochCoordinator({ packet, journal, controlPlane, ownerDigest: canonicalDigest('renewing-owner'), now: () => now.value });
+        await expect(coordinator.runThroughVerified()).resolves.toMatchObject({ state: 'VERIFIED' });
+        expect(controlPlane.calls).toHaveLength(7);
+    });
+
+    it('runs concrete operation barriers exactly through VERIFIED and keeps gates closed', async () => {
+        const { coordinator, controlPlane, journal } = setup();
+        const result = await coordinator.runThroughVerified();
+        expect(result.state).toBe('VERIFIED');
+        expect(controlPlane.calls).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED']);
+        const state = await journal.readValidatedState(result.lease);
+        expect(state.state).toBe('VERIFIED');
+        expect(state.transitions).toHaveLength(7);
+        expect(state.transitions.map(transition => transition.toState)).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED']);
+    });
+
+    it('resumes idempotently at VERIFIED without any operation or activation', async () => {
+        const first = setup();
+        await first.coordinator.runThroughVerified();
+        const resumed = await first.coordinator.runThroughVerified();
+        expect(resumed.state).toBe('VERIFIED');
+        expect(first.controlPlane.calls).toEqual(['PREPARED', 'STAGED', 'PRODUCERS_CLOSED_ALIGNED', 'QUEUES_ALIGNED', 'INVOKERS_ROTATED', 'SERVICES_PROMOTED', 'VERIFIED', 'VERIFIED']);
+    });
+
+    it('activates after a resumed fresh proof while retaining the durable VERIFIED anchor', async () => {
+        const first = setup();
+        const initial = await first.coordinator.runThroughVerified();
+        const resumed = await first.coordinator.runThroughVerified();
+        expect(resumed.proofDigest).not.toBe(initial.proofDigest);
+        const authorization = first.coordinator.issueActivationAuthorization();
+        await expect(first.coordinator.activate(authorization)).resolves.toMatchObject({ state: 'ACTIVATED' });
+    });
+
+    it('requires opaque fresh authorization for offline activation and rejects copied tokens', async () => {
+        const { coordinator, controlPlane } = setup();
+        const result = await coordinator.runThroughVerified();
+        const authorization = coordinator.issueActivationAuthorization();
+        await expect(coordinator.activate(Object.create(authorization))).rejects.toThrow('ACTIVATION_AUTH_REQUIRED');
+        const activated = await coordinator.activate(authorization);
+        expect(activated.state).toBe('ACTIVATED');
+        expect(controlPlane.calls.at(-1)).toBe('ACTIVATED');
+        expect(result.proofDigest).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('persists an abort marker retaining the last state and blocks continuation', async () => {
+        const { coordinator, journal } = setup();
+        await coordinator.runThroughVerified();
+        const aborted = await coordinator.abort('OPERATOR_ABORT');
+        expect(aborted).toMatchObject({ state: 'VERIFIED', aborted: true });
+        await expect(coordinator.runThroughVerified()).rejects.toThrow('ABORTED_EPOCH');
+        const state = await journal.readValidatedState((await journal.acquire(canonicalDigest('fixture-owner'))));
+        expect(state).toMatchObject({ state: 'VERIFIED', aborted: true });
+    });
+
+    it('does not append a state when an operation fails before its postcondition', async () => {
+        const { coordinator, controlPlane, journal } = setup();
+        controlPlane.failAt = 'QUEUES_ALIGNED';
+        await expect(coordinator.runThroughVerified()).rejects.toThrow('PROBE_FAILED');
+        const lease = await journal.acquire(canonicalDigest('fixture-owner'));
+        const state = await journal.readValidatedState(lease);
+        expect(state.state).toBe('PRODUCERS_CLOSED_ALIGNED');
+        expect(state.transitions).toHaveLength(3);
+    });
+
+    it('runs one fresh VERIFIED proof when a new owner reconciles an expired lease', async () => {
+        let now = 1_000;
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const storage = new MemoryStorage();
+        const journal = new EpochJournal(storage, { header, now: () => now, leaseMs: 10_000 });
+        const firstPlane = new FixtureControlPlane();
+        const first = new EpochCoordinator({ packet, journal, controlPlane: firstPlane, ownerDigest: canonicalDigest('owner-a'), now: () => now });
+        await first.runThroughVerified();
+        expect(firstPlane.verifyCalls).toBe(1);
+        now = 12_000;
+        const secondPlane = new FixtureControlPlane();
+        const second = new EpochCoordinator({ packet, journal, controlPlane: secondPlane, ownerDigest: canonicalDigest('owner-b'), now: () => now });
+        await second.runThroughVerified();
+        expect(secondPlane.verifyCalls).toBe(1);
+    });
+
+    it('rejects a capability bound to a different owner before journal work', () => {
+        const packet = createFixturePacket();
+        const header: EpochHeader = {
+            epochIdDigest: canonicalDigest(packet.epochId), capabilityDigest: packet.capabilityDigest,
+            oldManifestDigest: packet.oldManifestDigest, desiredManifestDigest: packet.desiredManifestDigest,
+            roleSetDigest: packet.roleSetDigest, sourcePlanDigest: packet.sourcePlanDigest,
+            createdAt: '2026-09-07T00:00:00.000Z',
+        };
+        const journal = new EpochJournal(new MemoryStorage(), { header, now: () => 1_000, leaseMs: 10_000 });
+        const capability = issueCoordinatorCapability(packet, canonicalDigest('owner-a'));
+        expect(() => new EpochCoordinator({ packet, journal, controlPlane: new FixtureControlPlane(), ownerDigest: canonicalDigest('owner-b'), capability })).toThrow('CAPABILITY_BINDING_MISMATCH');
+    });
+
+    it('freezes nested protected packet input after bootstrap', () => {
+        const { packet } = setup();
+        expect(Object.isFrozen(packet)).toBe(true);
+        expect(Object.isFrozen(packet.protectedInputs.desired.runtime.preflight.environment)).toBe(true);
+        expect(() => {
+            (packet.protectedInputs.desired.runtime.preflight.environment as Record<string, string>).MUTATED = 'true';
+        }).toThrow();
+    });
+
+    it('uses the same individual resource atoms as ordinary entry-point selectors', () => {
+        const packet = createFixturePacket();
+        const runtime = packet.protectedInputs.desired.runtime.preflight;
+        const queue = packet.protectedInputs.desired.queues.preflight;
+        const scheduler = packet.protectedInputs.desired.schedulers.preflight;
+        const iam = packet.protectedInputs.desired.iam.preflight.run;
+        const serviceResource = `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
+        const shared = new Set(sharedReservationResources(packet));
+        const selectors = [
+            deriveEntryPointResources({
+                entryPoint: 'epoch',
+                resources: [
+                    { kind: 'service' as const, resource: serviceResource },
+                    { kind: 'queue' as const, resource: queue.resource },
+                    { kind: 'scheduler' as const, resource: scheduler.resource },
+                    { kind: 'iam' as const, resource: iam.resource },
+                ],
+            }),
+            deriveEntryPointResources({ entryPoint: 'role-deployer', resources: [{ kind: 'service' as const, resource: serviceResource }] }),
+            deriveEntryPointResources({
+                entryPoint: 'capacity-queue',
+                role: 'preflight',
+                resources: [
+                    { kind: 'service' as const, resource: serviceResource },
+                    { kind: 'queue' as const, resource: queue.resource },
+                ],
+            }),
+        ];
+        for (const selector of selectors) for (const atom of selector) expect(shared.has(atom)).toBe(true);
+        expect(shared.has(`service:${serviceResource}`)).toBe(true);
+        expect(shared.has(`queue:${queue.resource}`)).toBe(true);
+        expect(shared.has(`scheduler:${scheduler.resource}`)).toBe(true);
+        expect(shared.has(`iam:${iam.resource}`)).toBe(true);
+        expect([...shared].some(atom => atom.startsWith('gcs-bucket:'))).toBe(false);
+        expect([...shared].some(atom => atom.startsWith('google-project:'))).toBe(false);
+        expect([...shared].some(atom => atom.startsWith('cloud-run-identity:'))).toBe(false);
+    });
+});

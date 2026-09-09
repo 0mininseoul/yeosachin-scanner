@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CAPACITY_EXCLUSION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 readonly CLOUD_TASKS_API="cloudtasks.googleapis.com"
 readonly QUEUE_MAX_DISPATCHES_PER_SECOND="${ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND:-2}"
 readonly QUEUE_MAX_CONCURRENT_DISPATCHES="${ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES:-2}"
@@ -41,6 +45,7 @@ Optional private Cloud Run target variables (set both or neither):
     maintenance identity explicitly.
 
 Optional bounded queue overrides:
+  ANALYSIS_CAPACITY_ROLE                     preflight or paid when --apply owns capacity resources.
   ANALYSIS_TASKS_MAX_DISPATCHES_PER_SECOND      Integer 1..100. Defaults to 2.
   ANALYSIS_TASKS_MAX_CONCURRENT_DISPATCHES     Integer 1..100. Defaults to 2.
   ANALYSIS_TASKS_IAM_SCOPE                     project (default) or queue.
@@ -107,7 +112,7 @@ validate_location() {
 }
 
 validate_queue() {
-  [[ "$1" =~ ^[a-z]([a-z0-9-]{0,98}[a-z0-9])?$ ]] \
+  [[ "$1" =~ ^[A-Za-z0-9-]{1,100}$ ]] \
     || die "ANALYSIS_TASKS_QUEUE is invalid"
 }
 
@@ -727,6 +732,10 @@ validate_project "$ANALYSIS_TASKS_PROJECT"
 validate_location "$ANALYSIS_TASKS_LOCATION"
 validate_queue "$ANALYSIS_TASKS_QUEUE"
 validate_queue_capacity
+if [[ -n "${ANALYSIS_CAPACITY_ROLE:-}" ]]; then
+  [[ "$ANALYSIS_CAPACITY_ROLE" == "preflight" || "$ANALYSIS_CAPACITY_ROLE" == "paid" ]] \
+    || die "ANALYSIS_CAPACITY_ROLE must be preflight or paid when capacity ownership is requested"
+fi
 validate_iam_scope
 validate_exact_iam_mode
 [[ "$EXPECTED_QUEUE_STATE" == "RUNNING" || "$EXPECTED_QUEUE_STATE" == "PAUSED" ]] \
@@ -767,6 +776,10 @@ task_account_project="$(service_account_project "$ANALYSIS_TASKS_SERVICE_ACCOUNT
 [[ "$ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL" \
   != "$ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL" ]] \
   || die "task invoker and enqueuer service accounts must be distinct"
+
+if [[ "$mode" == "apply" && ("${ANALYSIS_CAPACITY_ROLE:-}" == "preflight" || "${ANALYSIS_CAPACITY_ROLE:-}" == "paid") ]]; then
+  capacity_exclusion_start capacity-queue "$ANALYSIS_CAPACITY_ROLE" "${original_args[@]}"
+fi
 
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI is required"
 if [[ "$ENQUEUER_IAM_SCOPE" == "queue" ]]; then

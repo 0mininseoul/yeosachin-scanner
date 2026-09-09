@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+readonly CAPACITY_EXCLUSION_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervisor.sh"
+original_args=("$@")
+
 mode="apply"
 show_help="false"
 for argument in "$@"; do
@@ -83,6 +87,7 @@ readonly email_pattern='^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-
   || die "ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL is invalid"
 
 export ANALYSIS_TASKS_PROJECT="$ANALYSIS_V2_TASKS_PROJECT"
+export ANALYSIS_CAPACITY_ROLE="paid"
 export ANALYSIS_TASKS_LOCATION="$ANALYSIS_V2_TASKS_LOCATION"
 export ANALYSIS_TASKS_QUEUE="$ANALYSIS_V2_TASKS_QUEUE"
 export ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL"
@@ -97,6 +102,10 @@ export ANALYSIS_TASKS_EXACT_IAM="true"
 export ANALYSIS_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL="$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL"
 export ANALYSIS_TASKS_RUNTIME_QUEUE_ACCESS="enqueue-view"
 export ANALYSIS_TASKS_CLOUD_RUN_ALLOWED_INVOKER_MEMBERS="serviceAccount:$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,serviceAccount:$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
+
+if [[ "$mode" == "apply" ]]; then
+  capacity_exclusion_start capacity-queue paid "${original_args[@]}"
+fi
 
 bash "$(dirname "$0")/configure-analysis-tasks-queue.sh" "$@"
 

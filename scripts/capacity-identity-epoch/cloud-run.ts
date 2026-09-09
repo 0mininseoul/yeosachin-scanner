@@ -1,0 +1,454 @@
+import {
+    EpochError,
+    canonicalDigest,
+    canonicalRuntimeInputDigest,
+    epochFail,
+    hasExactKeys,
+    isObject,
+    type ProtectedIdentity,
+    type ProtectedRuntimeInput,
+    type RuntimeSettings,
+} from './contracts';
+import { AuthenticatedProtectedTransport } from './platform';
+import { requireLeaseCheck, type LeaseCheck } from './lease-capability';
+
+export type { LeaseCheck } from './lease-capability';
+
+const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
+const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,62}$/;
+const REVISION = /^[a-z][a-z0-9-]{0,62}$/;
+const DECIMAL = /^[1-9][0-9]*$/;
+const IMAGE_REFERENCE = /^[^\s\u0000-\u001f\u007f]{1,2048}$/;
+const IMAGE_DIGEST = /^.+@sha256:[0-9a-f]{64}$/;
+
+function fail(code: 'RESOURCE_INVALID' | 'PROJECT_MISMATCH' | 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_TIMEOUT' | 'OBSERVATION_RACE' | 'EVIDENCE_UNAVAILABLE' | 'RUNTIME_MISMATCH' | 'LOCK_LOST'): never {
+    epochFail(code);
+}
+
+function object(value: unknown): Record<string, unknown> {
+    if (!isObject(value)) fail('ADAPTER_RESPONSE_INVALID');
+    return value;
+}
+
+function assertProject(value: string): void {
+    if (!PROJECT.test(value)) fail('PROJECT_MISMATCH');
+}
+
+function parseResource(resource: string): { project: string; location: string; service: string } {
+    const match = resource.match(/^projects\/([^/]+)\/locations\/([^/]+)\/services\/([^/]+)$/);
+    if (!match || !PROJECT.test(match[1]!) || !LOCATION.test(match[2]!) || !RESOURCE_NAME.test(match[3]!)) fail('RESOURCE_INVALID');
+    return { project: match[1]!, location: match[2]!, service: match[3]! };
+}
+
+function generation(value: unknown): string {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+    if (typeof value === 'string' && DECIMAL.test(value)) return value;
+    fail('ADAPTER_RESPONSE_INVALID');
+}
+
+function assertRevision(value: unknown): asserts value is string {
+    if (typeof value !== 'string' || !REVISION.test(value) || value === 'latest') fail('ADAPTER_RESPONSE_INVALID');
+}
+
+function numberValue(value: unknown): number {
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value;
+    if (typeof value === 'string' && DECIMAL.test(value)) {
+        const parsed = Number(value);
+        if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+    }
+    fail('ADAPTER_RESPONSE_INVALID');
+}
+
+function trafficProjection(value: readonly CloudRunTraffic[]): readonly CloudRunTraffic[] {
+    return [...value].sort((left, right) => `${left.revisionName ?? ''}:${left.tag ?? ''}`.localeCompare(`${right.revisionName ?? ''}:${right.tag ?? ''}`));
+}
+
+export type CloudRunTraffic = Readonly<{ revisionName: string | null; percent: number; tag: string | null }>;
+
+export type CloudRunServiceObservation = Readonly<{
+    resource: string;
+    project: string;
+    location: string;
+    service: string;
+    /** Provider-reported service URL; never copied from the reviewed target. */
+    url: string;
+    generation: string;
+    resourceVersion: string;
+    observedGeneration: string;
+    ready: boolean;
+    latestCreatedRevision: string | null;
+    latestReadyRevision: string | null;
+    traffic: readonly CloudRunTraffic[];
+    identity: ProtectedIdentity;
+    environment: Readonly<Record<string, string>>;
+    secretReferences: Readonly<Record<string, string>>;
+    settings: RuntimeSettings;
+    image: string;
+    runtimeDigest: string;
+    buildDigest: string;
+    /** Source SHA is intentionally empty: Cloud Run labels are not source proof. */
+    sourceSha: '';
+    noTraffic: boolean;
+    rawDigest: string;
+    raw: Readonly<Record<string, unknown>>;
+}>;
+
+export type CloudRunRevisionObservation = Readonly<{
+    project: string;
+    location: string;
+    revision: string;
+    generation: string;
+    resourceVersion: string;
+    ready: boolean;
+    identity: ProtectedIdentity;
+    environment: Readonly<Record<string, string>>;
+    secretReferences: Readonly<Record<string, string>>;
+    settings: RuntimeSettings;
+    image: string;
+    runtimeDigest: string;
+    buildDigest: string;
+    raw: Readonly<Record<string, unknown>>;
+}>;
+
+function parseEnvironment(container: Record<string, unknown>): { environment: Record<string, string>; secretReferences: Record<string, string> } {
+    if (!Array.isArray(container.env)) fail('ADAPTER_RESPONSE_INVALID');
+    const environment: Record<string, string> = {};
+    const secretReferences: Record<string, string> = {};
+    const names = new Set<string>();
+    for (const item of container.env as unknown[]) {
+        const env = object(item);
+        if (typeof env.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(env.name) || names.has(env.name)) fail('ADAPTER_RESPONSE_INVALID');
+        names.add(env.name);
+        if (typeof env.value === 'string') {
+            if (!hasExactKeys(env, ['name', 'value'])) fail('ADAPTER_RESPONSE_INVALID');
+            environment[env.name] = env.value;
+            continue;
+        }
+        if (!hasExactKeys(env, ['name', 'valueFrom'])) fail('ADAPTER_RESPONSE_INVALID');
+        const valueFrom = object(env.valueFrom);
+        if (!hasExactKeys(valueFrom, ['secretKeyRef'])) fail('ADAPTER_RESPONSE_INVALID');
+        const ref = object(valueFrom.secretKeyRef);
+        if (!hasExactKeys(ref, ['name', 'key'])) fail('ADAPTER_RESPONSE_INVALID');
+        if (typeof ref.name !== 'string' || typeof ref.key !== 'string' || !/^[A-Za-z0-9._-]{1,240}$/.test(ref.name) || !/^[1-9][0-9]*$/.test(ref.key)) fail('ADAPTER_RESPONSE_INVALID');
+        secretReferences[env.name] = `${ref.name}:${ref.key}`;
+    }
+    return { environment, secretReferences };
+}
+
+function parseHttpsOrigin(value: unknown): string {
+    if (typeof value !== 'string' || value.length > 2048) fail('ADAPTER_RESPONSE_INVALID');
+    let parsed: URL;
+    try { parsed = new URL(value); } catch { fail('ADAPTER_RESPONSE_INVALID'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') fail('ADAPTER_RESPONSE_INVALID');
+    return parsed.toString();
+}
+
+function parseService(resource: string, body: Record<string, unknown>): CloudRunServiceObservation {
+    const { project, location, service } = parseResource(resource);
+    const metadata = object(body.metadata);
+    const spec = object(body.spec);
+    const status = object(body.status);
+    const url = parseHttpsOrigin(status.url);
+    const template = object(spec.template);
+    const templateMetadata = object(template.metadata ?? {});
+    const templateSpec = object(template.spec);
+    const containers = templateSpec.containers;
+    if (!Array.isArray(containers) || containers.length !== 1) fail('ADAPTER_RESPONSE_INVALID');
+    const container = object(containers[0]);
+    const image = container.image;
+    if (typeof image !== 'string' || !IMAGE_REFERENCE.test(image)) fail('ADAPTER_RESPONSE_INVALID');
+    const serviceAccountName = templateSpec.serviceAccountName;
+    if (typeof serviceAccountName !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(serviceAccountName)) fail('ADAPTER_RESPONSE_INVALID');
+    const identity = { identity: serviceAccountName, project: serviceAccountName.split('@')[1]!.replace(/\.iam\.gserviceaccount\.com$/, '') };
+    if (identity.project !== project) fail('PROJECT_MISMATCH');
+    const parsedEnv = parseEnvironment(container);
+    const resources = object(container.resources);
+    const limits = object(resources.limits);
+    if (typeof limits.cpu !== 'string' || typeof limits.memory !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+    const annotations = object(templateMetadata.annotations ?? {});
+    const settings: RuntimeSettings = {
+        cpu: limits.cpu,
+        memory: limits.memory,
+        concurrency: numberValue(templateSpec.containerConcurrency),
+        timeoutSeconds: numberValue(templateSpec.timeoutSeconds),
+        maxInstances: numberValue(annotations['autoscaling.knative.dev/maxScale']),
+    };
+    const generation = metadata.generation;
+    const resourceVersion = metadata.resourceVersion;
+    const generationValue = generationValueOrFail(generation);
+    if (typeof resourceVersion !== 'string' || resourceVersion.length === 0 || resourceVersion.length > 512 || /[\u0000-\u001f\u007f]/.test(resourceVersion)) fail('ADAPTER_RESPONSE_INVALID');
+    const observedGeneration = generationValueOrFail(status.observedGeneration);
+    const conditions = status.conditions;
+    if (!Array.isArray(conditions)) fail('ADAPTER_RESPONSE_INVALID');
+    const ready = conditions.some(condition => {
+        if (!isObject(condition)) return false;
+        return condition.type === 'Ready' && condition.status === 'True';
+    });
+    const latestCreatedRevision = status.latestCreatedRevisionName ?? null;
+    const latestReadyRevision = status.latestReadyRevisionName ?? null;
+    if (latestCreatedRevision !== null) assertRevision(latestCreatedRevision);
+    if (latestReadyRevision !== null) assertRevision(latestReadyRevision);
+    // Serving traffic is an independent status fact.  Falling back to the
+    // requested spec would let a stale or incomplete provider response
+    // masquerade as an observed serving/no-traffic proof.
+    const rawTraffic = status.traffic;
+    if (!Array.isArray(rawTraffic)) fail('ADAPTER_RESPONSE_INVALID');
+    const traffic = rawTraffic.map(entry => {
+        const item = object(entry);
+        const revisionName = item.revisionName ?? null;
+        if (revisionName !== null) assertRevision(revisionName);
+        if (!Number.isSafeInteger(item.percent) || (item.percent as number) < 0 || (item.percent as number) > 100) fail('ADAPTER_RESPONSE_INVALID');
+        const tag = item.tag ?? null;
+        if (tag !== null && (typeof tag !== 'string' || !REVISION.test(tag))) fail('ADAPTER_RESPONSE_INVALID');
+        return { revisionName, percent: item.percent as number, tag };
+    });
+    const runtimeDigest = canonicalRuntimeInputDigest({ identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings });
+    const buildDigest = canonicalDigest({ image });
+    return {
+        resource, project, location, service, url, generation: generationValue, resourceVersion, observedGeneration, ready, latestCreatedRevision, latestReadyRevision,
+        traffic, identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings, image,
+        runtimeDigest, buildDigest, sourceSha: '', noTraffic: traffic.length === 0 || traffic.every(entry => entry.percent === 0),
+        rawDigest: canonicalDigest(body), raw: body,
+    };
+}
+
+function generationValueOrFail(value: unknown): string {
+    return generation(value);
+}
+
+function parseRevisionObservation(project: string, location: string, revision: string, body: Record<string, unknown>): CloudRunRevisionObservation {
+    const metadata = object(body.metadata);
+    const spec = object(body.spec);
+    const status = object(body.status);
+    if (metadata.name !== revision) fail('ADAPTER_RESPONSE_INVALID');
+    const generation = generationValueOrFail(metadata.generation);
+    const resourceVersion = metadata.resourceVersion;
+    if (typeof resourceVersion !== 'string' || resourceVersion.length === 0 || resourceVersion.length > 512 || /[\u0000-\u001f\u007f]/.test(resourceVersion)) fail('ADAPTER_RESPONSE_INVALID');
+    const serviceAccountName = spec.serviceAccountName;
+    if (typeof serviceAccountName !== 'string' || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(serviceAccountName)) fail('ADAPTER_RESPONSE_INVALID');
+    const identity = { identity: serviceAccountName, project: serviceAccountName.split('@')[1]!.replace(/\.iam\.gserviceaccount\.com$/, '') };
+    if (identity.project !== project) fail('PROJECT_MISMATCH');
+    const containers = spec.containers;
+    if (!Array.isArray(containers) || containers.length !== 1) fail('ADAPTER_RESPONSE_INVALID');
+    const container = object(containers[0]);
+    const image = container.image;
+    if (typeof image !== 'string' || !IMAGE_REFERENCE.test(image)) fail('ADAPTER_RESPONSE_INVALID');
+    const parsedEnv = parseEnvironment(container);
+    const resources = object(container.resources);
+    const limits = object(resources.limits);
+    if (typeof limits.cpu !== 'string' || typeof limits.memory !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+    const annotations = object(metadata.annotations ?? {});
+    const settings: RuntimeSettings = {
+        cpu: limits.cpu,
+        memory: limits.memory,
+        concurrency: numberValue(spec.containerConcurrency),
+        timeoutSeconds: numberValue(spec.timeoutSeconds),
+        maxInstances: numberValue(annotations['autoscaling.knative.dev/maxScale']),
+    };
+    const conditions = status.conditions;
+    if (!Array.isArray(conditions)) fail('ADAPTER_RESPONSE_INVALID');
+    const ready = conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'True');
+    if (typeof status.imageDigest !== 'string' || !IMAGE_DIGEST.test(status.imageDigest)) fail('ADAPTER_RESPONSE_INVALID');
+    return {
+        project, location, revision, generation, resourceVersion, ready, identity,
+        environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings, image,
+        runtimeDigest: canonicalRuntimeInputDigest({ identity, environment: parsedEnv.environment, secretReferences: parsedEnv.secretReferences, settings }),
+        buildDigest: canonicalDigest({ image }), raw: body,
+    };
+}
+
+export type CloudRunAdapterOptions = Readonly<{
+    transport: AuthenticatedProtectedTransport;
+    now?: () => number;
+    sleep?: (milliseconds: number) => Promise<void>;
+    pollTimeoutMs?: number;
+    pollIntervalMs?: number;
+}>;
+
+/** Cloud Run v1 regional adapter: GET/PUT Service and independent GET read-back. */
+export class CloudRunAdapter {
+    private readonly transport: AuthenticatedProtectedTransport;
+    private readonly now: () => number;
+    private readonly sleep: (milliseconds: number) => Promise<void>;
+    private readonly pollTimeoutMs: number;
+    private readonly pollIntervalMs: number;
+
+    constructor(options: CloudRunAdapterOptions) {
+        this.transport = options.transport;
+        this.now = options.now ?? (() => Date.now());
+        this.sleep = options.sleep ?? ((milliseconds) => new Promise(resolve => setTimeout(resolve, milliseconds)));
+        this.pollTimeoutMs = options.pollTimeoutMs ?? 120_000;
+        this.pollIntervalMs = options.pollIntervalMs ?? 250;
+        if (!Number.isSafeInteger(this.pollTimeoutMs) || this.pollTimeoutMs <= 0
+            || !Number.isSafeInteger(this.pollIntervalMs) || this.pollIntervalMs < 0) fail('ADAPTER_REQUEST_INVALID');
+    }
+
+    async getService(resource: string): Promise<CloudRunServiceObservation> {
+        const parsed = parseResource(resource);
+        const path = this.servicePath(parsed.project, parsed.service);
+        const { value } = await this.transport.json({
+            method: 'GET', url: `https://${parsed.location}-run.googleapis.com${path}`,
+            allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['GET'],
+            allowedQueryKeys: [], acceptedStatuses: [200],
+        });
+        return parseService(resource, object(value));
+    }
+
+    async getRevision(project: string, location: string, revision: string): Promise<Record<string, unknown>> {
+        assertProject(project);
+        if (!LOCATION.test(location) || !REVISION.test(revision) || revision === 'latest') fail('RESOURCE_INVALID');
+        const path = `/apis/serving.knative.dev/v1/namespaces/${project}/revisions/${revision}`;
+        const { value } = await this.transport.json({
+            method: 'GET', url: `https://${location}-run.googleapis.com${path}`,
+            allowedHosts: new Set([`${location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['GET'],
+            allowedQueryKeys: [], acceptedStatuses: [200],
+        });
+        const revisionObject = object(value);
+        this.validateRevisionWire(revisionObject, revision);
+        return revisionObject;
+    }
+
+    /** Independent immutable revision read used for STAGED evidence. */
+    async observeRevision(project: string, location: string, revision: string): Promise<CloudRunRevisionObservation> {
+        const body = await this.getRevision(project, location, revision);
+        return parseRevisionObservation(project, location, revision, body);
+    }
+
+    async applyService(options: Readonly<{
+        resource: string;
+        expectedGeneration: string;
+        body: Readonly<Record<string, unknown>>;
+        operation: 'cloud-run.stage' | 'cloud-run.promote';
+        /** Required operation-local owner/fence capability. */
+        leaseCheck?: LeaseCheck;
+        /** Retained for source compatibility; v1 uses PUT, not updateMask. */
+        updateMask?: 'template' | 'template,traffic' | 'traffic';
+    }>): Promise<CloudRunServiceObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: options.operation, resource: options.resource });
+        await leaseCheck();
+        const before = await this.getService(options.resource);
+        if (!DECIMAL.test(options.expectedGeneration)) fail('ADAPTER_REQUEST_INVALID');
+        if (before.generation !== options.expectedGeneration) fail('OBSERVATION_RACE');
+        const parsed = parseResource(options.resource);
+        const path = this.servicePath(parsed.project, parsed.service);
+        const body = object(options.body);
+        const metadata = object(body.metadata ?? {});
+        const requestBody = { ...body, metadata: { ...metadata, resourceVersion: before.resourceVersion } };
+        // Fence immediately before the actual mutation.  The check above
+        // protects the read; this one closes the read/modify/write gap.
+        await leaseCheck();
+        await this.transport.json({
+            method: 'PUT', url: `https://${parsed.location}-run.googleapis.com${path}`,
+            allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['PUT'],
+            allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200], beforeDispatch: leaseCheck,
+        });
+        const requestedSpec = object(body.spec);
+        return this.waitForServicePostcondition(options.resource, requestedSpec, leaseCheck);
+    }
+
+    private async waitForServicePostcondition(resource: string, requestedSpec: Record<string, unknown>, leaseCheck: LeaseCheck): Promise<CloudRunServiceObservation> {
+        const startedAt = this.now();
+        if (!Number.isSafeInteger(startedAt) || startedAt < 0) fail('ADAPTER_REQUEST_INVALID');
+        const deadline = startedAt + this.pollTimeoutMs;
+        for (;;) {
+            // Capture the initiating operation's closure for every poll and
+            // read-back; no mutable adapter-level callback is consulted.
+            await leaseCheck();
+            const after = await this.getService(resource);
+            const observedSpec = object(after.raw.spec);
+            const exactPostcondition = canonicalDigest(observedSpec) === canonicalDigest(requestedSpec);
+            if (after.observedGeneration === after.generation && after.ready && exactPostcondition) return after;
+            const status = object(after.raw.status);
+            if (Array.isArray(status.conditions) && status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'False')) fail('OBSERVATION_RACE');
+            const now = this.now();
+            if (!Number.isSafeInteger(now) || now < startedAt || now >= deadline) fail('ADAPTER_TIMEOUT');
+            await leaseCheck();
+            await this.sleep(Math.min(this.pollIntervalMs, deadline - now));
+        }
+    }
+
+    async stageRevision(options: Readonly<{
+        runtime: ProtectedRuntimeInput;
+        revision: string;
+        expectedGeneration: string;
+        serviceBody: Readonly<Record<string, unknown>>;
+        leaseCheck?: LeaseCheck;
+    }>): Promise<CloudRunServiceObservation> {
+        const resource = `projects/${options.runtime.project}/locations/${options.runtime.location}/services/${options.runtime.service}`;
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'cloud-run.stage', resource });
+        await leaseCheck();
+        if (options.runtime.project !== options.runtime.identity.project) fail('PROJECT_MISMATCH');
+        if (!REVISION.test(options.revision) || options.revision === 'latest') fail('RESOURCE_INVALID');
+        const body = object(options.serviceBody);
+        const spec = object(body.spec);
+        const template = object(spec.template);
+        const metadata = object(template.metadata);
+        if (metadata.name !== options.revision) fail('RESOURCE_INVALID');
+        await leaseCheck();
+        const before = await this.getService(resource);
+        const after = await this.applyService({ resource, expectedGeneration: options.expectedGeneration, body, operation: 'cloud-run.stage', leaseCheck });
+        const beforeTraffic = new Map(before.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
+        const afterTraffic = new Map(after.traffic.map(entry => [`${entry.revisionName ?? ''}:${entry.tag ?? ''}`, entry.percent]));
+        for (const [key, percent] of beforeTraffic) if (afterTraffic.get(key) !== percent) fail('OBSERVATION_RACE');
+        for (const [key, percent] of afterTraffic) if (!beforeTraffic.has(key) && percent !== 0) fail('OBSERVATION_RACE');
+        const stagedTraffic = after.traffic.find(entry => entry.revisionName === options.revision);
+        if (stagedTraffic && stagedTraffic.percent !== 0) fail('OBSERVATION_RACE');
+        await leaseCheck();
+        const revisionObject = await this.getRevision(options.runtime.project, options.runtime.location, options.revision);
+        this.assertRevisionMatches(revisionObject, options.runtime, options.revision);
+        if (after.latestCreatedRevision !== options.revision && after.latestReadyRevision !== options.revision) fail('OBSERVATION_RACE');
+        return after;
+    }
+
+    async setTraffic(options: Readonly<{
+        resource: string;
+        expectedGeneration: string;
+        traffic: readonly Readonly<Record<string, unknown>>[];
+        expectedRevision: string;
+        expectedPercent: number;
+        leaseCheck?: LeaseCheck;
+    }>): Promise<CloudRunServiceObservation> {
+        const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: 'cloud-run.promote', resource: options.resource });
+        if (!REVISION.test(options.expectedRevision) || options.expectedRevision === 'latest'
+            || !Number.isSafeInteger(options.expectedPercent) || options.expectedPercent < 0 || options.expectedPercent > 100) fail('RESOURCE_INVALID');
+        await leaseCheck();
+        const before = await this.getService(options.resource);
+        const body = object(before.raw);
+        const spec = object(body.spec);
+        const after = await this.applyService({
+            resource: options.resource, expectedGeneration: options.expectedGeneration,
+            body: { ...body, spec: { ...spec, traffic: options.traffic.map(entry => ({ ...entry })) } },
+            operation: 'cloud-run.promote',
+            leaseCheck,
+        });
+        const match = after.traffic.find(item => item.revisionName === options.expectedRevision);
+        if (!match || match.percent !== options.expectedPercent) fail('OBSERVATION_RACE');
+        if (options.expectedPercent === 100 && after.traffic.some(item => item.revisionName !== options.expectedRevision && item.percent !== 0)) fail('OBSERVATION_RACE');
+        return after;
+    }
+
+    private servicePath(project: string, service: string): string {
+        return `/apis/serving.knative.dev/v1/namespaces/${project}/services/${service}`;
+    }
+
+    private assertRevisionMatches(body: Record<string, unknown>, runtime: ProtectedRuntimeInput, revision: string): void {
+        const observed = parseRevisionObservation(runtime.project, runtime.location, revision, body);
+        if (observed.identity.identity !== runtime.identity.identity
+            || canonicalDigest(observed.environment) !== canonicalDigest(runtime.environment)
+            || canonicalDigest(observed.secretReferences) !== canonicalDigest(runtime.secretReferences)
+            || canonicalDigest(observed.settings) !== canonicalDigest(runtime.settings)) fail('RUNTIME_MISMATCH');
+        if (!observed.ready) fail('OBSERVATION_RACE');
+    }
+
+    private validateRevisionWire(body: Record<string, unknown>, revision: string): void {
+        const metadata = object(body.metadata);
+        if (metadata.name !== revision || !Number.isSafeInteger(metadata.generation) || (metadata.generation as number) <= 0) fail('ADAPTER_RESPONSE_INVALID');
+        const status = object(body.status);
+        if (!Number.isSafeInteger(status.observedGeneration) || status.observedGeneration !== metadata.generation || !Array.isArray(status.conditions)
+            || !status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'True')
+            || typeof status.imageDigest !== 'string' || !IMAGE_DIGEST.test(status.imageDigest)) fail('ADAPTER_RESPONSE_INVALID');
+    }
+}
+
+export { EpochError, RuntimeSettings };
