@@ -4,7 +4,7 @@ Date: 2026-09-09 (Asia/Seoul)
 
 ## Decision
 
-**BLOCKED / report-only.** The additive schema and bounded adapters are ready for review, but production parity, provider evidence, archive/restore evidence, ownership approval, and a disposable native PostgreSQL concurrency run are not available in this worktree. No remote migration, analysis admission activation, provider call, or real canary was performed.
+**BLOCKED / report-only.** The additive schema and bounded adapters are ready for review, but production parity, provider evidence, archive/restore evidence, ownership/traffic approval, and a disposable native PostgreSQL concurrency run are not available in this worktree. No remote migration, analysis admission activation, provider call, or real canary was performed.
 
 ## Implemented commits
 
@@ -12,14 +12,17 @@ Date: 2026-09-09 (Asia/Seoul)
 - `be4115a8` — typed payment, fulfillment, notification, account lifecycle, lease, maintenance adapters and notification shadow-read hook.
 - `3d6d0e64` — report-only bounded backfill, aggregate parity checksums, and fail-closed read-flag rollback.
 - `13148d21` — typed immutable system-configuration adapter and service-only configuration RPC.
+- `6cbf0657` — review fixes for payment evidence, fenced operation claims, notification producers, lifecycle gates, and bounded parity.
 
 ## Schema and security evidence
 
 - Seven additive tables are present: `payment_events`, `fulfillment_jobs`, `notification_outbox`, `account_lifecycle`, `system_configuration`, `system_leases`, and `maintenance_jobs`.
 - Each table has RLS enabled and forced; direct `PUBLIC`, `anon`, `authenticated`, and `service_role` table access is revoked. Write/read entry points are service-role-only RPCs with `SECURITY DEFINER SET search_path = ''` and explicit `REVOKE EXECUTE`/`GRANT EXECUTE` ACLs.
-- Payment events, account lifecycle entries, and configuration versions have immutable update/delete triggers. Idempotency, dedupe, lease generation, fence token, attempt, hash, and JSON-object checks are bounded in SQL.
-- A disposable PGlite replay with only `users`, `earlybird_orders`, and `analysis_requests` stubs executed the migration SQL after removing role ACL statements and verified all seven relations have `relforcerowsecurity = true`.
-- Supabase guidance was checked against the current changelog and Data API security documentation. The migration keeps the new public-schema objects inaccessible to browser roles, consistent with explicit-grant plus RLS guidance.
+- Payment events, account lifecycle entries, and configuration versions have immutable update/delete triggers. Idempotency, dedupe content, lease generation, fence token, attempt, hash, and JSON-object checks are bounded in SQL; zero-valued payment amounts are allowed while negative amounts are rejected.
+- Payment evidence retains nullable order linkage, provider, disposition, redacted JSON payload, payload fingerprint, and provider `occurred_at`; event-id and idempotency-key content conflicts have distinct SQL error markers.
+- Fulfillment upserts are generation-fenced and monotonic, preserving existing request and lease fields when a legacy snapshot omits them. Notification and maintenance families expose bounded `SKIP LOCKED` claim, lease, finish, stale-reconciliation, retry, and terminal contracts without replacing legacy delivery authority.
+- A disposable PGlite replay with only `users`, `earlybird_orders`, and `analysis_requests` stubs executed the migration SQL after removing role ACL statements and verified all seven relations have `relforcerowsecurity = true`; a second PGlite case exercised payment dedupe, zero amount, fulfillment monotonic rejection, and notification/maintenance claim-finish paths.
+- All canonical tables remain inaccessible to browser roles through explicit table revocation, forced RLS, and service-role-only `SECURITY DEFINER SET search_path = ''` RPC ACLs.
 
 ## Backfill, parity, and rollback evidence
 
@@ -31,7 +34,7 @@ npx tsx --conditions=react-server scripts/backfill-commerce-operations-canonical
 
 returned `status: blocked`, `mode: report_only`, `processed: 0`, `batchSize: 100`, `unknownEvidenceCount: 0`, and `blockedReasons: ["SOURCE_NOT_CONFIGURED"]`. The report emitted only family-level checksums; it emitted no user, contact, provider, order, or raw payload values.
 
-The report-only implementation caps every source batch at 100 and rejects `--apply`, `--delete`, `--cutover`, and `--activate`. `payment_pending` without independent no-sale evidence returns `PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED`; independently witnessed no-sale evidence is only `eligible_for_separate_reconciliation` and never mutates an order.
+The report-only implementation caps every source batch and field comparison at 100 and rejects `--apply`, `--delete`, `--cutover`, and `--activate`. `payment_pending` without independent no-sale evidence returns `PAYMENT_PENDING_PROVIDER_EVIDENCE_REQUIRED`; malformed no-sale evidence returns `PAYMENT_PENDING_PROVIDER_EVIDENCE_INVALID`; independently witnessed no-sale evidence is only `eligible_for_separate_reconciliation` and never mutates an order. Parity reports expose counts, checksums, compared counts, truncation, and mismatch field names only; no source/canonical record values are returned.
 
 All seven read flags are false by default:
 
@@ -45,7 +48,7 @@ COMMERCE_CANONICAL_LEASE_READ=false
 COMMERCE_CANONICAL_MAINTENANCE_READ=false
 ```
 
-`rollbackCanonicalReadFlags()` forces all seven values to `false`. The explicit dual-write flag also defaults closed; existing payment finalization and fulfillment/outbox delivery remain authoritative until separately enabled.
+The corresponding independent writer flags are `COMMERCE_CANONICAL_{PAYMENT,FULFILLMENT,NOTIFICATION,ACCOUNT,CONFIG,LEASE,MAINTENANCE}_WRITE`, all defaulting closed. `rollbackCanonicalFlags()` forces all read and writer flags to `false`; the legacy global dual-write flag is no longer used by producers. Existing payment finalization, fulfillment, account classification/deletion, and notification delivery remain authoritative until each family is separately enabled.
 
 ## Aggregate checksum baseline
 
@@ -64,16 +67,18 @@ These are the deterministic empty-source baseline checksums emitted by the guard
 ## Payment and lease safety proof
 
 - The new migration contains no order-status update and does not add a payment state transition. The only `payment_pending -> payment_failed` path remains the existing evidence-gated no-sale reconciliation RPC.
-- Canonical payment recording is append-only and happens after legacy signed finalization. A canonical write failure can only produce a bounded maintenance marker; it cannot fabricate paid evidence or alter the legacy order.
-- Fulfillment snapshots carry lease generation and fence values. The canonical lease RPC increments both under a row lock and returns `acquired`, generation, fence token, and bounded expiry. The native disposable PostgreSQL concurrency harness was not run because the local Docker daemon is unavailable (`supabase status` could not inspect container health).
+- Canonical payment recording is append-only and happens after legacy signed finalization. It carries the finalized order/disposition and provider event time, stores only bounded redacted payload fields plus a raw-body fingerprint, and maps idempotency conflicts to an explicit application error; a mirror failure cannot fabricate paid evidence or alter the legacy order. If both canonical and maintenance writes fail, the adapter returns `CANONICAL_MAINTENANCE_UNAVAILABLE` rather than claiming a queued marker.
+- Kakao signup, Sentry alert, and payment Discord producers have notification-family dual-writes with bounded sanitized payloads, content hashes, dedupe keys, and legacy-first fail-open behavior. A notification mirror remains non-cutover; its failure is observable and cannot block the legacy producer.
+- Account deletion records durable `started`, `prepared`, and completion lifecycle evidence around the begin, each object deletion, database purge, Auth deletion, and completion RPC. When the account canonical writer is enabled, missing lifecycle evidence stops before the next irreversible step.
+- The native disposable PostgreSQL concurrency harness was not run; no native target or independent production-parity evidence was supplied. Native PostgreSQL, production source/archive/restore/owner/traffic/provider gates therefore remain explicitly blocked.
 
 ## Verification
 
-- Focused Vitest suite: **PASS**, 121 tests including the disposable migration replay assertion and all touched payment/fulfillment/notification/account routes.
+- Focused Vitest suite: **PASS**, 187 tests across canonical commerce/operations, disposable PGlite migration and claim-contract checks, Groble payment, fulfillment, payment Discord, Kakao signup, Sentry, account lifecycle, account principal, and report-only backfill tests.
 - Full `npm test` was started for finishing verification; the suite remained in a long-running capacity identity epoch fixture launcher after more than 11 minutes, so it was interrupted without a test failure. The focused suite is the completion gate for this isolated lane.
 - `npx tsc --noEmit --pretty false`: **PASS**.
 - `npm run lint`: **PASS**, 0 errors and 27 existing warnings outside this change.
 - `npm run build`: webpack and TypeScript compilation **PASS**; page-data/static generation is blocked because this environment has no configured Supabase URL/API key while prerendering `/betatest` and `/_not-found`.
 - `git diff --check`: **PASS**.
 
-Production evidence remains blocked until the owning operator supplies the source/archive/restore/ownership gates and a disposable native PostgreSQL target. Until then, destructive backfill, cutover, admission activation, and canary operations must remain disabled.
+Production evidence remains blocked until the owning operator supplies source/archive/restore/ownership/traffic/provider gates and a disposable native PostgreSQL target. No remote apply, destructive operation, provider call, activation, `payment_pending` mutation, notification cutover, or canary operation was performed; those operations must remain disabled.
