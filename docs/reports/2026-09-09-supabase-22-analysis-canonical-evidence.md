@@ -13,12 +13,15 @@ This report records local contract evidence only. No production query, remote mi
 - Every canonical table enables and forces RLS, revokes table privileges from `PUBLIC`, `anon`, `authenticated`, and `service_role`, and exposes writes/reads only through service-role RPCs.
 - Event, cost, and audit rows are append-only. Audit uniqueness is `(request_id, version, kind, content_hash)`, and all persisted hashes are lower-case SHA-256 values.
 - Unknown cost semantics remain fail-closed: `usage_unknown = true` requires `amount_known IS NULL`; a later known usage observation appends a new cost row and can allocate a new immutable audit version.
-- The typed server adapter rejects forbidden payload keys before an RPC, computes stable JSON SHA-256 hashes when a source hash is not supplied, defaults all write flags to disabled, and queues a bounded retry marker after a one-sided write.
+- The typed server adapter rejects forbidden payload keys before an RPC, computes stable JSON SHA-256 hashes when a source hash is not supplied, defaults all write flags to disabled, and reports `blocked` if a bounded retry marker cannot be durably persisted; it never claims `retry_queued` without a successful marker RPC.
+- The service-only family loader includes the cache family and applies a SQL `LIMIT 100` to every returned collection; the adapter rejects unknown, malformed, or oversized collection payloads before callers receive them.
+- Shadow parity compares counts, ownership, state, ordering/hash, cost, retention, and unknown-source dimensions. Canonical comparison is mandatory when a family reader is enabled; canonical read/comparison errors and mismatches emit sanitized diagnostics and retain the legacy response. The server-only result-page reader now exercises this shadow path, while the audit read flag remains disabled by default.
+- The report-only backfill accepts a validated deterministic keyset cursor, passes its `(created_at,id)` boundary to the source query, and has a local fixture covering two 100-row pages. Late provider-cost reconciliation selects the next immutable audit version in the actual write path before appending late-cost evidence.
 - Worker completion, progress checkpoints, provider cost reconciliation, and result finalization dual-write only after the existing legacy operation succeeds. Canonical failures do not roll back a user-visible legacy success.
 
 ## Test and command evidence
 
-- Focused canonical migration, PGlite, adapter, worker, provider-cost, progress, result, read, and backfill tests passed locally.
+- Focused canonical migration, PGlite, adapter, worker, provider-cost, progress, result, read, and backfill tests passed locally: 8 files and 146 tests in the review-fix suite.
 - The report-only command ran successfully and emitted only aggregate output: `{"status":"blocked","scanned":0,"complete":0,"blocked":1,"checksum":null,"nextCursor":null}`. The source was unavailable, so no request identifiers or user data were emitted.
 - `npx tsc --noEmit --pretty false` passed.
 - `npm run lint` completed with zero errors and 27 existing warnings outside this change.

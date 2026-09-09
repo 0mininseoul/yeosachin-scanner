@@ -8,10 +8,12 @@ import {
     enqueueFinalizedAnalysisOrderAuditBundle,
 } from './order-audit-bundle';
 import {
+    analysisCanonicalWriteEnabled,
     createAnalysisCanonicalStore,
     hashAnalysisCanonicalValue,
     type AnalysisCanonicalStore,
 } from './canonical-analysis-store';
+import { nextAnalysisCanonicalAuditVersion } from './canonical-analysis-read';
 
 const SETTLEMENT_DELAY_MS = 30_000;
 const MAX_RECONCILIATION_ROWS = 64;
@@ -122,6 +124,7 @@ export async function reconcileSettledAnalysisProviderCosts(
         return { eligible: 0, finalized: 0, failed: 1, hasMore: false };
     }
 
+    const canonicalStore = deps.canonicalStore ?? createAnalysisCanonicalStore(client);
     const rows = data.slice(0, MAX_RECONCILIATION_ROWS);
     const outcomes = await runWithConcurrency(rows, RECONCILIATION_CONCURRENCY, async (value) => {
         try {
@@ -151,10 +154,7 @@ export async function reconcileSettledAnalysisProviderCosts(
                 throw new Error('provider cost finalization failed');
             }
             try {
-                await (
-                    deps.canonicalStore
-                    ?? createAnalysisCanonicalStore(client)
-                ).appendCost({
+                const canonicalCost = await canonicalStore.appendCost({
                     requestId: stored.requestId ?? '',
                     provider: stored.logicalProvider,
                     operationKey: `provider-run:${stored.runId}`,
@@ -177,6 +177,34 @@ export async function reconcileSettledAnalysisProviderCosts(
                         credentialSlot: stored.credentialSlot,
                     },
                 });
+                if (
+                    canonicalCost.status === 'appended'
+                    && stored.requestId
+                    && analysisCanonicalWriteEnabled('audit', deps.env ?? process.env)
+                ) {
+                    const existingVersions = await canonicalStore.loadAuditVersions(stored.requestId);
+                    const version = nextAnalysisCanonicalAuditVersion(existingVersions, true);
+                    await canonicalStore.appendAuditRow({
+                        requestId: stored.requestId,
+                        version,
+                        kind: 'bundle',
+                        state: 'complete',
+                        retentionClass: 'permanent',
+                        payload: {
+                            lateCost: true,
+                            state: 'completed',
+                            provider: stored.logicalProvider,
+                            operationKey: `provider-run:${stored.runId}`,
+                            cost: {
+                                amountKnown: usageTotalUsd,
+                                amountConservative: usageTotalUsd,
+                                usageUnknown: false,
+                            },
+                            retention: 'permanent',
+                            unknownSource: false,
+                        },
+                    });
+                }
             } catch {
                 // The legacy cost ledger has committed; canonical evidence is fail-open during
                 // the observation window and will be retried by its bounded maintenance marker.

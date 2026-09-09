@@ -992,6 +992,34 @@ describe('analysis V2 result finalization and loading', () => {
         expect(second?.femaleNextCursor).toBeNull();
     });
 
+    it('hooks the server-only result reader into the default-off canonical shadow path', async () => {
+        const fake = rpcClient({ data: rawSnapshot(1), error: null });
+        const legacyProjection = { requestStatus: 'completed' };
+        const canonicalReadStore = {
+            shadowRead: vi.fn(async (input: {
+                family: string;
+                legacy: () => Promise<unknown>;
+                canonical: () => Promise<unknown>;
+            }) => {
+                expect(input.family).toBe('audit');
+                await input.legacy();
+                await input.canonical();
+                return legacyProjection;
+            }),
+            loadRequest: vi.fn(),
+        };
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+            canonicalReadStore: canonicalReadStore as never,
+        });
+
+        await expect(store.loadPage({ requestId, userId, pageSize: 1 }))
+            .resolves.toMatchObject({ requestId });
+        expect(canonicalReadStore.shadowRead).toHaveBeenCalledOnce();
+        expect(canonicalReadStore.loadRequest).toHaveBeenCalledWith(requestId, 'audit');
+        expect(JSON.stringify(canonicalReadStore.shadowRead.mock.calls)).not.toContain(userId);
+    });
+
     it('fails from any exact live job claim without a finalizer-only restriction', async () => {
         const fake = rpcClient({
             data: { finalized: true, requestStatus: 'failed' }, error: null,

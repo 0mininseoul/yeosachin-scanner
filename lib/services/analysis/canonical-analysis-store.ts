@@ -27,18 +27,25 @@ export const ANALYSIS_CANONICAL_WRITE_FLAGS: Readonly<
 export type AnalysisCanonicalWriteStatus =
     | 'disabled'
     | 'appended'
-    | 'retry_queued';
+    | 'retry_queued'
+    | 'blocked';
 
 export type AnalysisCanonicalWriteResult =
     | Readonly<{ status: 'disabled' }>
     | Readonly<{ status: 'appended' }>
-    | Readonly<{ status: 'retry_queued'; family: AnalysisCanonicalWriteFamily }>;
+    | Readonly<{ status: 'retry_queued'; family: AnalysisCanonicalWriteFamily }>
+    | Readonly<{ status: 'blocked'; family: AnalysisCanonicalWriteFamily }>;
 
 export type AnalysisCanonicalCostResult =
     | Readonly<{ status: 'disabled'; usageUnknown: boolean }>
     | Readonly<{ status: 'appended'; usageUnknown: boolean }>
     | Readonly<{
         status: 'retry_queued';
+        family: 'cost';
+        usageUnknown: boolean;
+    }>
+    | Readonly<{
+        status: 'blocked';
         family: 'cost';
         usageUnknown: boolean;
     }>;
@@ -152,10 +159,14 @@ export interface AnalysisCanonicalStore {
     appendCost(input: AppendAnalysisCanonicalCostInput): Promise<AnalysisCanonicalCostResult>;
     upsertCache(input: UpsertAnalysisCanonicalCacheInput): Promise<AnalysisCanonicalWriteResult>;
     appendAuditRow(input: AppendAnalysisCanonicalAuditInput): Promise<AnalysisCanonicalWriteResult>;
+    loadAuditVersions(requestId: string): Promise<readonly number[]>;
     enqueueRetry(
         requestId: string,
         family: AnalysisCanonicalWriteFamily,
-    ): Promise<Readonly<{ status: 'retry_queued'; family: AnalysisCanonicalWriteFamily }>>;
+    ): Promise<Readonly<{
+        status: 'retry_queued' | 'blocked';
+        family: AnalysisCanonicalWriteFamily;
+    }>>;
 }
 
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
@@ -289,18 +300,23 @@ export function createAnalysisCanonicalStore(
     async function enqueueRetry(
         requestId: string,
         family: AnalysisCanonicalWriteFamily,
-    ): Promise<Readonly<{ status: 'retry_queued'; family: AnalysisCanonicalWriteFamily }>> {
+    ): Promise<Readonly<{
+        status: 'retry_queued' | 'blocked';
+        family: AnalysisCanonicalWriteFamily;
+    }>> {
         assertUuid(requestId, 'request id');
         try {
-            await client.rpc('enqueue_analysis_canonical_retry', {
+            const result = await client.rpc('enqueue_analysis_canonical_retry', {
                 p_request_id: requestId,
                 p_family: family,
             });
+            if (result.error || !isRecord(result.data) || Object.keys(result.data).length === 0) {
+                return { status: 'blocked', family };
+            }
+            return { status: 'retry_queued', family };
         } catch {
-            // Retry enqueue is deliberately best effort. The caller's legacy source remains
-            // authoritative and the next bounded maintenance pass can retry the family.
+            return { status: 'blocked', family };
         }
-        return { status: 'retry_queued', family };
     }
 
     async function write(
@@ -317,12 +333,40 @@ export function createAnalysisCanonicalStore(
             return { status: 'appended' };
         } catch {
             return requestId === null
-                ? { status: 'retry_queued', family }
+                ? { status: 'blocked', family }
                 : enqueueRetry(requestId, family);
         }
     }
 
     return {
+        async loadAuditVersions(requestId) {
+            assertUuid(requestId, 'request id');
+            const result = await client.rpc('load_analysis_canonical_family', {
+                p_request_id: requestId,
+                p_family: 'audit',
+            });
+            if (result.error) throw new Error(errorMessage(result.error));
+            if (!isRecord(result.data)) {
+                throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit load.');
+            }
+            const rows = result.data.audits;
+            if (!Array.isArray(rows) || rows.length > 100) {
+                throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit load.');
+            }
+            const versions = rows.map(row => {
+                if (!isRecord(row)) {
+                    throw new Error('ANALYSIS_CANONICAL_PERSISTENCE_ERROR: invalid audit row.');
+                }
+                return ensureInteger(
+                    typeof row.version === 'number' ? row.version : undefined,
+                    'audit version',
+                    1,
+                    100_000,
+                );
+            });
+            return Object.freeze(versions);
+        },
+
         async recordJob(input) {
             assertUuid(input.requestId, 'request id');
             if (!JOB_KEY_PATTERN.test(input.jobKey)) {
@@ -449,9 +493,9 @@ export function createAnalysisCanonicalStore(
                 if (result.error) throw new Error(errorMessage(result.error));
                 return { status: 'appended', usageUnknown: input.usageUnknown };
             } catch {
-                await enqueueRetry(input.requestId, 'cost');
+                const retry = await enqueueRetry(input.requestId, 'cost');
                 return {
-                    status: 'retry_queued',
+                    status: retry.status,
                     family: 'cost',
                     usageUnknown: input.usageUnknown,
                 };

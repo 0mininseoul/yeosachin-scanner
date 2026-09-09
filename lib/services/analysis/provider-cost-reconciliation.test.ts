@@ -188,4 +188,32 @@ describe('provider cost reconciliation', () => {
             p_usage_unknown: false,
         }));
     });
+
+    it('selects the next immutable audit version for a late cost in reconciliation', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const db = database([requestScopedSettledRow]);
+        const canonicalStore = {
+            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
+            loadAuditVersions: vi.fn(async () => [1, 4]),
+            appendAuditRow: vi.fn(async () => ({ status: 'appended' })),
+        };
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            canonicalStore: canonicalStore as never,
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
+                }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(canonicalStore.loadAuditVersions).toHaveBeenCalledWith(requestScopedSettledRow.request_id);
+        expect(canonicalStore.appendAuditRow).toHaveBeenCalledWith(expect.objectContaining({
+            requestId: requestScopedSettledRow.request_id,
+            version: 5,
+            kind: 'bundle',
+            payload: expect.objectContaining({ lateCost: true }),
+        }));
+    });
 });

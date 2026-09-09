@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    CANONICAL_READ_MAX_ROWS,
     analysisCanonicalReadEnabled,
     buildAnalysisParity,
     compareAnalysisCanonicalProjection,
@@ -19,6 +20,54 @@ describe('analysis canonical shadow reads', () => {
             source: { count: 2, checksum: 'a'.repeat(64), complete: true },
             canonical: { count: 2, checksum: 'b'.repeat(64), complete: true },
         })).toEqual({ status: 'mismatch', mismatchPaths: ['checksum'] });
+    });
+
+    it('compares ownership, state, counts, ordering, hashes, cost, retention, and unknown-source dimensions', () => {
+        const source = {
+            count: 2,
+            checksum: 'a'.repeat(64),
+            complete: true,
+            ownership: 'owned',
+            state: 'succeeded',
+            counts: { completed: 2, blocked: 0 },
+            orderHash: 'b'.repeat(64),
+            contentHash: 'c'.repeat(64),
+            cost: { amountKnown: 0.12, amountConservative: 0.12, usageUnknown: false },
+            retention: 'permanent',
+            unknownSource: false,
+        };
+        const canonical = { ...source };
+        expect(buildAnalysisParity({ source, canonical })).toEqual({
+            status: 'match',
+            mismatchPaths: [],
+        });
+
+        expect(buildAnalysisParity({
+            source,
+            canonical: {
+                ...canonical,
+                ownership: 'unowned',
+                state: 'blocked',
+                counts: { completed: 1, blocked: 1 },
+                orderHash: 'd'.repeat(64),
+                contentHash: 'e'.repeat(64),
+                cost: { amountKnown: null, amountConservative: 0.12, usageUnknown: true },
+                retention: 'fenced',
+                unknownSource: true,
+            },
+        })).toEqual({
+            status: 'mismatch',
+            mismatchPaths: [
+                'ownership',
+                'state',
+                'counts',
+                'orderHash',
+                'contentHash',
+                'cost',
+                'retention',
+                'unknownSource',
+            ],
+        });
     });
 
     it('blocks a missing legacy source rather than treating an empty canonical set as equal', () => {
@@ -41,6 +90,65 @@ describe('analysis canonical shadow reads', () => {
     it('allocates a new immutable audit version for a late cost observation', () => {
         expect(nextAnalysisCanonicalAuditVersion([1], true)).toBe(2);
         expect(nextAnalysisCanonicalAuditVersion([1, 2, 4], true)).toBe(5);
+    });
+
+    it('exposes the cache family as a bounded typed collection', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_READ', 'true');
+        const client = {
+            rpc: vi.fn(async () => ({
+                data: {
+                    jobs: [],
+                    events: [],
+                    artifacts: [],
+                    costs: [],
+                    caches: [{ scope: 'ai', state: 'ready' }],
+                    audits: [],
+                },
+                error: null,
+            })),
+        };
+        const store = createAnalysisCanonicalReadStore(client);
+
+        await expect(store.loadRequest(requestId, 'cache')).resolves.toMatchObject({
+            caches: [{ scope: 'ai', state: 'ready' }],
+        });
+        expect(client.rpc).toHaveBeenCalledWith('load_analysis_canonical_family', {
+            p_request_id: requestId,
+            p_family: 'cache',
+        });
+    });
+
+    it('rejects unknown or oversized family arrays before they reach callers', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+        const oversized = {
+            jobs: Array.from({ length: CANONICAL_READ_MAX_ROWS + 1 }, () => ({ state: 'succeeded' })),
+            events: [],
+            artifacts: [],
+            costs: [],
+            caches: [],
+            audits: [],
+        };
+        const oversizedStore = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({ data: oversized, error: null })),
+        });
+        await expect(oversizedStore.loadRequest(requestId, 'jobs'))
+            .rejects.toThrow('oversized canonical jobs collection');
+
+        const unknownStore = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({
+                data: {
+                    jobs: [],
+                    events: [],
+                    artifacts: [],
+                    costs: [],
+                    caches: 'not-an-array',
+                    audits: [],
+                },
+                error: null,
+            })),
+        });
+        await expect(unknownStore.loadRequest(requestId, 'jobs'))
+            .rejects.toThrow('invalid canonical caches collection');
     });
 
     it('falls back to the legacy projection on a normalized shadow mismatch', async () => {
@@ -68,6 +176,68 @@ describe('analysis canonical shadow reads', () => {
         expect(onMismatch).toHaveBeenCalledWith({
             family: 'jobs',
             summary: { status: 'mismatch', mismatchPaths: ['result'] },
+        });
+        expect(JSON.stringify(onMismatch.mock.calls)).not.toContain(requestId);
+    });
+
+    it('fails open to legacy when canonical is enabled without a comparator', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+        const onMismatch = vi.fn();
+        const store = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({ data: {}, error: null })),
+        }, { onMismatch });
+        const legacy = { requestStatus: 'completed' };
+
+        await expect(store.shadowRead({
+            family: 'jobs',
+            legacy: async () => legacy,
+            canonical: async () => ({ requestStatus: 'wrong' }),
+        } as never)).resolves.toEqual(legacy);
+        expect(onMismatch).toHaveBeenCalledWith({
+            family: 'jobs',
+            summary: { status: 'blocked', mismatchPaths: ['comparison.missing'] },
+        });
+    });
+
+    it('fails open to legacy when the canonical comparator throws', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+        const onMismatch = vi.fn();
+        const store = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({ data: {}, error: null })),
+        }, { onMismatch });
+        const legacy = { requestStatus: 'completed' };
+
+        await expect(store.shadowRead({
+            family: 'jobs',
+            legacy: async () => legacy,
+            canonical: async () => ({ requestStatus: 'completed' }),
+            compare: () => { throw new Error('bad comparator'); },
+        })).resolves.toEqual(legacy);
+        expect(onMismatch).toHaveBeenCalledWith({
+            family: 'jobs',
+            summary: { status: 'blocked', mismatchPaths: ['comparison.error'] },
+        });
+    });
+
+    it('sanitizes comparator paths before reporting a mismatch', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+        const onMismatch = vi.fn();
+        const store = createAnalysisCanonicalReadStore({
+            rpc: vi.fn(async () => ({ data: {}, error: null })),
+        }, { onMismatch });
+
+        await expect(store.shadowRead({
+            family: 'jobs',
+            legacy: async () => ({ requestStatus: 'completed' }),
+            canonical: async () => ({ requestStatus: 'completed' }),
+            compare: () => ({
+                status: 'mismatch',
+                mismatchPaths: [requestId],
+            }),
+        })).resolves.toEqual({ requestStatus: 'completed' });
+        expect(onMismatch).toHaveBeenCalledWith({
+            family: 'jobs',
+            summary: { status: 'blocked', mismatchPaths: ['comparison.error'] },
         });
         expect(JSON.stringify(onMismatch.mock.calls)).not.toContain(requestId);
     });

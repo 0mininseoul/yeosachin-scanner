@@ -443,28 +443,62 @@ BEGIN
     RETURN pg_catalog.jsonb_build_object(
         'jobs', CASE WHEN p_family = 'jobs' THEN COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
-            FROM public.analysis_jobs AS row
-            WHERE row.request_id = p_request_id
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_jobs AS source_row
+                WHERE source_row.request_id = p_request_id
+                ORDER BY source_row.created_at, source_row.id
+                LIMIT 100
+            ) AS row
         ), '[]'::JSONB) ELSE '[]'::JSONB END,
         'events', CASE WHEN p_family = 'evidence' THEN COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
-            FROM public.analysis_events AS row
-            WHERE row.request_id = p_request_id
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_events AS source_row
+                WHERE source_row.request_id = p_request_id
+                ORDER BY source_row.created_at, source_row.id
+                LIMIT 100
+            ) AS row
         ), '[]'::JSONB) ELSE '[]'::JSONB END,
         'artifacts', CASE WHEN p_family = 'evidence' THEN COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
-            FROM public.analysis_artifacts AS row
-            WHERE row.request_id = p_request_id
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_artifacts AS source_row
+                WHERE source_row.request_id = p_request_id
+                ORDER BY source_row.created_at, source_row.id
+                LIMIT 100
+            ) AS row
         ), '[]'::JSONB) ELSE '[]'::JSONB END,
         'costs', CASE WHEN p_family = 'cost' THEN COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.recorded_at, row.id)
-            FROM public.analysis_costs AS row
-            WHERE row.request_id = p_request_id
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_costs AS source_row
+                WHERE source_row.request_id = p_request_id
+                ORDER BY source_row.recorded_at, source_row.id
+                LIMIT 100
+            ) AS row
+        ), '[]'::JSONB) ELSE '[]'::JSONB END,
+        'caches', CASE WHEN p_family = 'cache' THEN COALESCE((
+            SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.updated_at, row.id)
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_cache AS source_row
+                ORDER BY source_row.updated_at, source_row.id
+                LIMIT 100
+            ) AS row
         ), '[]'::JSONB) ELSE '[]'::JSONB END,
         'audits', CASE WHEN p_family = 'audit' THEN COALESCE((
             SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(row) ORDER BY row.created_at, row.id)
-            FROM public.analysis_audit_bundles AS row
-            WHERE row.request_id = p_request_id
+            FROM (
+                SELECT source_row.*
+                FROM public.analysis_audit_bundles AS source_row
+                WHERE source_row.request_id = p_request_id
+                ORDER BY source_row.created_at, source_row.id
+                LIMIT 100
+            ) AS row
         ), '[]'::JSONB) ELSE '[]'::JSONB END
     );
 END;

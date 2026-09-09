@@ -3,6 +3,7 @@ import {
     BACKFILL_MAX_LIMIT,
     backfillAnalysisCanonical,
     buildBackfillBatch,
+    encodeBackfillCursor,
     parseBackfillCliArgs,
     type AnalysisBackfillSourceRow,
 } from './backfill-analysis-canonical';
@@ -81,6 +82,105 @@ describe('bounded analysis canonical backfill tooling', () => {
             .resolves.toMatchObject({ status: 'blocked', blocked: 1, scanned: 0 });
     });
 
+    it('advances across multiple bounded pages at the deterministic source keyset boundary', async () => {
+        const rows: AnalysisBackfillSourceRow[] = Array.from({ length: 205 }, (_, index) => ({
+            id: `123e4567-e89b-42d3-a456-42661417${String(index).padStart(4, '0')}`,
+            created_at: `2026-09-01T${String(Math.floor(index / 3600)).padStart(2, '0')}:${String(Math.floor(index / 60) % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+            status: 'completed',
+        }));
+        const boundaryCalls: string[] = [];
+        let cursorBoundary: AnalysisBackfillSourceRow | null = null;
+        const client = {
+            from: vi.fn(() => {
+                let exactId: string | null = null;
+                let exactCreatedAt: string | null = null;
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    eq: vi.fn((column: string, value: string) => {
+                        if (column === 'id') exactId = value;
+                        if (column === 'created_at') exactCreatedAt = value;
+                        return chain;
+                    }),
+                    or: vi.fn((expression: string) => {
+                        boundaryCalls.push(expression);
+                        const match = expression.match(/created_at\.eq\.([^,]+),id\.gt\.([^\)]+)/);
+                        if (match) {
+                            cursorBoundary = rows.find(row => (
+                                row.created_at === match[1]
+                                && row.id === match[2]
+                            )) ?? null;
+                        }
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn(async (limit: number) => {
+                        if (exactId && exactCreatedAt) {
+                            return {
+                                data: rows.filter(row => (
+                                    row.id === exactId && row.created_at === exactCreatedAt
+                                )),
+                                error: null,
+                            };
+                        }
+                        if (cursorBoundary) {
+                            const cursorIndex = rows.findIndex(row => row.id === cursorBoundary!.id);
+                            return { data: rows.slice(cursorIndex + 1, cursorIndex + 1 + limit), error: null };
+                        }
+                        return { data: rows.slice(0, limit), error: null };
+                    }),
+                };
+                return chain;
+            }),
+        };
+
+        const first = await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+        const second = await backfillAnalysisCanonical({
+            client,
+            limit: 100,
+            cursor: first.nextCursor,
+            reportOnly: true,
+        });
+
+        expect(first).toMatchObject({ status: 'report_only', scanned: 100, complete: 100 });
+        expect(second).toMatchObject({ status: 'report_only', scanned: 100, complete: 100 });
+        expect(second.nextCursor).not.toBe(first.nextCursor);
+        expect(boundaryCalls).toHaveLength(1);
+        expect(boundaryCalls[0]).toContain('created_at.gt.');
+        expect(boundaryCalls[0]).toContain('id.gt.');
+    });
+
+    it('rejects an unknown cursor before querying the source boundary', async () => {
+        const from = vi.fn();
+        await expect(backfillAnalysisCanonical({
+            client: { from },
+            limit: 100,
+            cursor: 'unknown-cursor',
+            reportOnly: true,
+        })).resolves.toMatchObject({
+            status: 'blocked',
+            blocked: 1,
+            complete: 0,
+        });
+        expect(from).not.toHaveBeenCalled();
+
+        expect(() => encodeBackfillCursor({
+            id: sourceRows[0]!.id,
+            created_at: sourceRows[0]!.created_at,
+            status: sourceRows[0]!.status,
+        })).not.toThrow();
+
+        await expect(backfillAnalysisCanonical({
+            client: { from },
+            limit: 100,
+            cursor: '',
+            reportOnly: true,
+        })).resolves.toMatchObject({
+            status: 'blocked',
+            blocked: 1,
+        });
+        expect(from).not.toHaveBeenCalled();
+    });
+
     it('rejects destructive and apply CLI options', () => {
         for (const option of ['--apply', '--drop', '--truncate', '--delete', '--mutate']) {
             expect(() => parseBackfillCliArgs([option])).toThrow('report-only');
@@ -89,5 +189,10 @@ describe('bounded analysis canonical backfill tooling', () => {
             limit: 100,
             reportOnly: true,
         });
+        const cursor = encodeBackfillCursor(sourceRows[0]!);
+        expect(parseBackfillCliArgs(['--limit=100', '--report-only', `--cursor=${cursor}`]))
+            .toEqual({ limit: 100, reportOnly: true, cursor });
+        expect(() => parseBackfillCliArgs(['--report-only', '--cursor=unknown']))
+            .toThrow('cursor is unknown');
     });
 });

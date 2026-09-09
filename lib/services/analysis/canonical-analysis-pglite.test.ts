@@ -75,6 +75,26 @@ describe('analysis canonical tables PGlite contract', () => {
         expect(counts.rows[0]).toEqual({ jobs: 1, events: 1, costs: 1 });
     });
 
+    it('returns the cache family from the bounded service loader', async () => {
+        await db.query(
+            `INSERT INTO public.analysis_cache(scope, cache_key_hash, state, expires_at, payload)
+             VALUES ('ai', $1, 'ready', clock_timestamp() + INTERVAL '1 hour', '{"ok":true}'::jsonb)`,
+            [hashB],
+        );
+        const result = await db.query<{ payload: Record<string, unknown> }>(
+            `SELECT public.load_analysis_canonical_family($1, 'cache') AS payload`,
+            [requestId],
+        );
+        expect(result.rows[0]?.payload).toMatchObject({
+            jobs: [],
+            events: [],
+            artifacts: [],
+            costs: [],
+            caches: [expect.objectContaining({ scope: 'ai', state: 'ready' })],
+            audits: [],
+        });
+    });
+
     it('rejects duplicate job keys and duplicate audit hashes', async () => {
         await expect(db.query(
             `INSERT INTO public.analysis_jobs(request_id, job_key, kind, state)

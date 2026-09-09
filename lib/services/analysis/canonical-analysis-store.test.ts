@@ -86,6 +86,18 @@ describe('analysis canonical table migration contract', () => {
         expect(sql).toContain('CREATE TRIGGER analysis_events_append_only');
         expect(sql).toContain('CREATE TRIGGER analysis_audit_bundles_append_only');
     });
+
+    it('loads the cache family with an explicit bounded query', () => {
+        const sql = migrationSql();
+        expect(sql).toContain("p_family = 'cache'");
+        expect(sql).toContain("'caches'");
+        expect(sql).toMatch(/FROM public\.analysis_cache[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_jobs[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_events[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_artifacts[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_costs[\s\S]*?LIMIT 100/);
+        expect(sql).toMatch(/FROM public\.analysis_audit_bundles[\s\S]*?LIMIT 100/);
+    });
 });
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
@@ -183,5 +195,59 @@ describe('analysis canonical server adapter', () => {
             p_request_id: requestId,
             p_family: 'audit',
         });
+    });
+
+    it('reports a cache write as blocked when no durable retry marker can be persisted', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { message: 'cache unavailable' },
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.upsertCache({
+            scope: 'ai',
+            cacheKeyHash: hash,
+            state: 'ready',
+            expiresAt: '2026-09-10T00:00:00.000Z',
+        })).resolves.toEqual({ status: 'blocked', family: 'cache' });
+        expect(rpc).toHaveBeenCalledTimes(1);
+        expect(rpc).not.toHaveBeenCalledWith('enqueue_analysis_canonical_retry', expect.anything());
+    });
+
+    it('does not claim retry_queued when the retry marker RPC itself fails', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn(async () => ({
+            data: null,
+            error: { message: 'database unavailable' },
+        }));
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+            retentionClass: 'permanent',
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+    });
+
+    it('requires a non-empty retry marker response before claiming retry_queued', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { message: 'database unavailable' } })
+            .mockResolvedValueOnce({ data: {}, error: null });
+        const store = createAnalysisCanonicalStore(rpcClient(rpc));
+
+        await expect(store.appendAuditRow({
+            requestId,
+            version: 1,
+            kind: 'bundle',
+            state: 'complete',
+            contentHash: hash,
+            retentionClass: 'permanent',
+        })).resolves.toEqual({ status: 'blocked', family: 'audit' });
     });
 });

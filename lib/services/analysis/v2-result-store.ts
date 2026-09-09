@@ -1,3 +1,5 @@
+import 'server-only';
+
 import { z } from 'zod';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -38,8 +40,16 @@ import {
 } from './beta-apify-credit-settlement-runtime';
 import {
     createAnalysisCanonicalStore,
+    hashAnalysisCanonicalValue,
     type AnalysisCanonicalStore,
 } from './canonical-analysis-store';
+import {
+    analysisCanonicalReadStore,
+    compareAnalysisCanonicalProjection,
+    type AnalysisCanonicalNormalizedProjection,
+    type AnalysisCanonicalReadBundle,
+    type AnalysisCanonicalReadStore,
+} from './canonical-analysis-read';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -1208,6 +1218,70 @@ function publicSummary(
     });
 }
 
+type ResultShadowSummary = Pick<
+    AnalysisResultSummaryV1,
+    'planId' | 'detectedMutuals' | 'publicMutuals' | 'privateMutuals' | 'screenedMutuals'
+>;
+
+function resultShadowCounts(summary: ResultShadowSummary): Readonly<Record<string, number>> {
+    return Object.freeze({
+        detectedMutuals: summary.detectedMutuals,
+        publicMutuals: summary.publicMutuals,
+        privateMutuals: summary.privateMutuals,
+        screenedMutuals: summary.screenedMutuals,
+    });
+}
+
+function resultShadowProjection(
+    summary: ResultShadowSummary,
+    requestStatus: 'completed' = 'completed',
+): AnalysisCanonicalNormalizedProjection {
+    const counts = resultShadowCounts(summary);
+    const contentHash = hashAnalysisCanonicalValue({
+        requestStatus,
+        planId: summary.planId,
+        counts,
+    });
+    return {
+        requestStatus,
+        state: requestStatus,
+        ownership: 'unknown',
+        counts,
+        orderHash: null,
+        contentHash,
+        progress: null,
+        result: { rank: null, score: null },
+        providerOperation: null,
+        cost: {
+            amountKnown: null,
+            amountConservative: null,
+            usageUnknown: true,
+            sourceHash: null,
+        },
+        retention: 'permanent',
+        auditRetention: 'permanent',
+        unknownSource: true,
+    };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function canonicalAuditProjection(
+    bundle: AnalysisCanonicalReadBundle | null,
+): AnalysisCanonicalNormalizedProjection | null {
+    if (!bundle) return null;
+    const row = [...bundle.audits].reverse().find(candidate => {
+        if (!isRecord(candidate) || !isRecord(candidate.payload)) return false;
+        return isRecord(candidate.payload.projection);
+    });
+    if (!isRecord(row) || !isRecord(row.payload) || !isRecord(row.payload.projection)) {
+        return null;
+    }
+    return row.payload.projection as AnalysisCanonicalNormalizedProjection;
+}
+
 function publicFemaleEnvelope(
     entry: z.infer<typeof finalizedFemaleEnvelopeSchema>,
     requestId: string,
@@ -1355,11 +1429,13 @@ export function createSupabaseAnalysisV2ResultStore(
         settleBetaRequest?: (requestId: string) => Promise<boolean>;
         refreshBetaCredit?: () => Promise<void>;
         canonicalStore?: AnalysisCanonicalStore;
+        canonicalReadStore?: AnalysisCanonicalReadStore;
     } = {}
 ): AnalysisV2ResultStore {
     const imageProxySigner: ImageProxySigner = options.imageProxySigner
         ?? ((_rawUrl, locator) => createAnalysisV2ResultImageProxyPath(locator) ?? null);
     const canonicalStore = options.canonicalStore ?? createAnalysisCanonicalStore(client);
+    const canonicalReadStore = options.canonicalReadStore ?? analysisCanonicalReadStore;
     const postTerminalBetaCredit = async (requestId: string): Promise<void> => {
         let processed = false;
         let settlementFailed = false;
@@ -1635,6 +1711,10 @@ export function createSupabaseAnalysisV2ResultStore(
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid finalization result.');
             }
             await postTerminalBetaCredit(claim.requestId);
+            const shadowProjection = resultShadowProjection(
+                parsed.data.summary,
+                parsed.data.requestStatus,
+            );
             try {
                 await canonicalStore.appendAuditRow({
                     requestId: claim.requestId,
@@ -1646,6 +1726,7 @@ export function createSupabaseAnalysisV2ResultStore(
                         finalized: parsed.data.finalized,
                         requestStatus: parsed.data.requestStatus,
                         schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                        projection: shadowProjection,
                     },
                 });
             } catch {
@@ -1742,6 +1823,14 @@ export function createSupabaseAnalysisV2ResultStore(
             if (error) throwRpcError(error, 'result page load');
             const snapshot = parsePageSnapshot(data, imageProxySigner);
             if (!snapshot) return null;
+            await canonicalReadStore.shadowRead({
+                family: 'audit',
+                legacy: async () => resultShadowProjection(snapshot.summary),
+                canonical: async () => canonicalAuditProjection(
+                    await canonicalReadStore.loadRequest(input.requestId, 'audit'),
+                ),
+                compare: (legacy, canonical) => compareAnalysisCanonicalProjection(legacy, canonical),
+            });
             return paginateAnalysisV2FinalizedSnapshot({
                 snapshot,
                 femaleCursor: input.femaleCursor,
