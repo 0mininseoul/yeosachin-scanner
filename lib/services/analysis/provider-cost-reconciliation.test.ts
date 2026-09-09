@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { reconcileSettledAnalysisProviderCosts } from './provider-cost-reconciliation';
 
 function database(rows: unknown[]) {
@@ -40,6 +40,10 @@ const requestScopedSettledRow = {
     ...settledRow,
     request_id: '123e4567-e89b-42d3-a456-426614174000',
 };
+
+afterEach(() => {
+    vi.unstubAllEnvs();
+});
 
 describe('provider cost reconciliation', () => {
     it('finalizes the authenticated stable usage after the settlement cutoff', async () => {
@@ -162,5 +166,26 @@ describe('provider cost reconciliation', () => {
         expect(db.rpc).toHaveBeenCalledWith('enqueue_analysis_order_audit_bundle', {
             p_request_id: requestScopedSettledRow.request_id,
         });
+    });
+
+    it('appends a canonical cost after the legacy settlement commits', async () => {
+        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
+        const db = database([requestScopedSettledRow]);
+
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            clientForSlot: () => ({
+                run: () => ({
+                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
+                }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
+
+        expect(db.rpc).toHaveBeenCalledWith('append_analysis_canonical_cost', expect.objectContaining({
+            p_request_id: requestScopedSettledRow.request_id,
+            p_provider: 'apify',
+            p_amount_known: 0.0754,
+            p_amount_conservative: 0.0754,
+            p_usage_unknown: false,
+        }));
     });
 });

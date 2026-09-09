@@ -7,6 +7,11 @@ import {
     enqueueAnalysisOrderAuditBundle,
     enqueueFinalizedAnalysisOrderAuditBundle,
 } from './order-audit-bundle';
+import {
+    createAnalysisCanonicalStore,
+    hashAnalysisCanonicalValue,
+    type AnalysisCanonicalStore,
+} from './canonical-analysis-store';
 
 const SETTLEMENT_DELAY_MS = 30_000;
 const MAX_RECONCILIATION_ROWS = 64;
@@ -95,6 +100,7 @@ export async function reconcileSettledAnalysisProviderCosts(
         now?: Date;
         clientForSlot?: (slot: ProviderCostCredentialSlot) => ReconciliationApifyClient;
         env?: Record<string, string | undefined>;
+        canonicalStore?: AnalysisCanonicalStore;
     } = {}
 ): Promise<ProviderCostReconciliationResult> {
     const cutoff = new Date(
@@ -143,6 +149,37 @@ export async function reconcileSettledAnalysisProviderCosts(
             });
             if (result.error || result.data !== true) {
                 throw new Error('provider cost finalization failed');
+            }
+            try {
+                await (
+                    deps.canonicalStore
+                    ?? createAnalysisCanonicalStore(client)
+                ).appendCost({
+                    requestId: stored.requestId ?? '',
+                    provider: stored.logicalProvider,
+                    operationKey: `provider-run:${stored.runId}`,
+                    stage: 'provider_cost',
+                    amountKnown: usageTotalUsd,
+                    amountConservative: usageTotalUsd,
+                    usageUnknown: false,
+                    sourceHash: hashAnalysisCanonicalValue({
+                        requestId: stored.requestId ?? null,
+                        runId: stored.runId,
+                        status: stored.status,
+                        usageTotalUsd,
+                        maxChargeUsd: stored.maxChargeUsd,
+                        credentialSlot: stored.credentialSlot,
+                    }),
+                    payload: {
+                        runId: stored.runId,
+                        status: stored.status,
+                        maxChargeUsd: stored.maxChargeUsd,
+                        credentialSlot: stored.credentialSlot,
+                    },
+                });
+            } catch {
+                // The legacy cost ledger has committed; canonical evidence is fail-open during
+                // the observation window and will be retried by its bounded maintenance marker.
             }
             await enqueueFinalizedAnalysisOrderAuditBundle(
                 stored.requestId

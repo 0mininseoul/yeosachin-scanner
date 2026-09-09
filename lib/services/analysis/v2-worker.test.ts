@@ -251,6 +251,33 @@ describe('analysis V2 progress failure isolation', () => {
         expect(jobStore.completeAndFanout).toHaveBeenCalledOnce();
     });
 
+    it('records canonical job and lifecycle event after the legacy commit', async () => {
+        const jobStore = store(bootstrapClaim);
+        const canonicalStore = {
+            recordJob: vi.fn(async () => ({ status: 'appended' })),
+            appendEvent: vi.fn(async () => ({ status: 'appended' })),
+        };
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            stateStore: stateStore(baseState()),
+            progressReporter: progressReporter(),
+            canonicalStore: canonicalStore as never,
+        } as never)).resolves.toMatchObject({ status: 'completed' });
+
+        expect(jobStore.completeAndFanout).toHaveBeenCalledOnce();
+        expect(canonicalStore.recordJob).toHaveBeenCalledWith(expect.objectContaining({
+            requestId,
+            jobKey: bootstrapClaim.jobKey,
+            state: 'succeeded',
+        }));
+        expect(canonicalStore.appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+            requestId,
+            kind: 'lifecycle',
+            state: 'succeeded',
+        }));
+    });
+
     it('keeps a true progress fence fatal so a stale claim cannot advance', async () => {
         const progress = progressReporter();
         progress.initialize = vi.fn(async () => {

@@ -89,6 +89,11 @@ import {
     AnalysisProviderAdmissionPersistenceError,
     AnalysisProviderAdmissionResolutionPendingError,
 } from './provider-admission-store';
+import {
+    analysisCanonicalStore,
+    type AnalysisCanonicalJobKind,
+    type AnalysisCanonicalStore,
+} from './canonical-analysis-store';
 
 const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
 const PROFILE_AI_JOB_PATTERN = /^track:profile-ai:batch:\d+$/;
@@ -103,6 +108,51 @@ const AI_ADMISSION_FAILURE_CODES: ReadonlySet<AnalysisV2AiAdmissionErrorCode> =
     ]);
 export const ANALYSIS_V2_JOB_MAX_ATTEMPTS = 7;
 export const ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS = 20;
+
+function canonicalJobKind(claim: ClaimedAnalysisV2Job): AnalysisCanonicalJobKind {
+    if (claim.track === 'coordinator') return 'coordinator';
+    if (claim.kind === 'collection') return 'collection';
+    if (claim.kind === 'ai') return 'ai';
+    if (claim.kind === 'finalize') return 'finalize';
+    return 'recovery';
+}
+
+async function recordCanonicalWorkerCompletion(
+    claim: ClaimedAnalysisV2Job,
+    successorCount: number,
+    store: AnalysisCanonicalStore,
+): Promise<void> {
+    try {
+        await store.recordJob({
+            requestId: claim.requestId,
+            jobKey: claim.jobKey,
+            kind: canonicalJobKind(claim),
+            state: 'succeeded',
+            generation: claim.generation,
+            attemptCount: claim.attemptCount,
+            completionHash: claim.inputHash,
+            payload: {
+                successorCount,
+                track: claim.track,
+                batch: claim.batch,
+            },
+        });
+        await store.appendEvent({
+            requestId: claim.requestId,
+            kind: 'lifecycle',
+            state: 'succeeded',
+            payload: {
+                jobKey: claim.jobKey,
+                generation: claim.generation,
+                successorCount,
+            },
+            contentHash: claim.inputHash,
+        });
+    } catch {
+        // Canonical evidence is dual-written during the observation window. The legacy
+        // completion already committed and remains authoritative if the shadow path drifts.
+    }
+}
 
 export type AnalysisV2StageId =
     | 'relationships'
@@ -1074,6 +1124,7 @@ export async function processAnalysisV2TaskDelivery(
         terminalFailureFinalizer?: AnalysisV2TerminalFailureFinalizer;
         terminalMediaCleanup?: AnalysisV2TerminalMediaCleanup;
         terminalFailureIntentLoader?: AnalysisV2TerminalFailureIntentLoader;
+        canonicalStore?: AnalysisCanonicalStore;
         analysisLifecycleEventEmitter?: typeof emitAnalysisLifecycleEvent;
         handlerDeadlineAtMs?: number;
         jobLeaseSeconds?: number;
@@ -1246,6 +1297,11 @@ export async function processAnalysisV2TaskDelivery(
     }
 
     const dispatchable = await store.completeAndFanout(claim, successors);
+    await recordCanonicalWorkerCompletion(
+        claim,
+        dispatchable.length,
+        dependencies.canonicalStore ?? analysisCanonicalStore,
+    );
     const settled = await Promise.allSettled(
         dispatchable.map(job => dispatch(job.requestId, job.jobKey))
     );

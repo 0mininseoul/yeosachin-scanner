@@ -36,6 +36,10 @@ import {
     refreshBetaApifyCreditSnapshots,
     settleBetaApifyRequestCredit,
 } from './beta-apify-credit-settlement-runtime';
+import {
+    createAnalysisCanonicalStore,
+    type AnalysisCanonicalStore,
+} from './canonical-analysis-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -1350,10 +1354,12 @@ export function createSupabaseAnalysisV2ResultStore(
         imageProxySigner?: ImageProxySigner;
         settleBetaRequest?: (requestId: string) => Promise<boolean>;
         refreshBetaCredit?: () => Promise<void>;
+        canonicalStore?: AnalysisCanonicalStore;
     } = {}
 ): AnalysisV2ResultStore {
     const imageProxySigner: ImageProxySigner = options.imageProxySigner
         ?? ((_rawUrl, locator) => createAnalysisV2ResultImageProxyPath(locator) ?? null);
+    const canonicalStore = options.canonicalStore ?? createAnalysisCanonicalStore(client);
     const postTerminalBetaCredit = async (requestId: string): Promise<void> => {
         let processed = false;
         let settlementFailed = false;
@@ -1629,6 +1635,23 @@ export function createSupabaseAnalysisV2ResultStore(
                 throw new Error('ANALYSIS_V2_RESULT_PERSISTENCE_ERROR: invalid finalization result.');
             }
             await postTerminalBetaCredit(claim.requestId);
+            try {
+                await canonicalStore.appendAuditRow({
+                    requestId: claim.requestId,
+                    version: 1,
+                    kind: 'bundle',
+                    state: 'complete',
+                    retentionClass: 'permanent',
+                    payload: {
+                        finalized: parsed.data.finalized,
+                        requestStatus: parsed.data.requestStatus,
+                        schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
+                    },
+                });
+            } catch {
+                // The result RPC is authoritative. Audit dual-write failure must not roll back
+                // a user-visible successful result and is retried by bounded maintenance.
+            }
             return Object.freeze({
                 finalized: parsed.data.finalized,
                 requestStatus: parsed.data.requestStatus,

@@ -23,6 +23,10 @@ import {
     operationalLogger,
     type OperationalLogger,
 } from '@/lib/observability/server';
+import {
+    analysisCanonicalStore,
+    type AnalysisCanonicalStore,
+} from './canonical-analysis-store';
 
 const TARGET_LATENCY_SECONDS = 300;
 
@@ -297,14 +301,47 @@ export function createAnalysisV2ProgressReporter(input: {
     candidateKeyDeriver?: CandidateKeyDeriver;
     logger?: Pick<OperationalLogger, 'emit'>;
     onFailOpen?: (notice: AnalysisV2ProgressFailOpenNotice) => void;
+    canonicalStore?: AnalysisCanonicalStore;
 } = {}): AnalysisV2ProgressReporter {
     const store = input.store ?? analysisV2ProgressStore;
     const imageProxySigner = input.imageProxySigner ?? createImageProxyPath;
     const candidateKeyDeriver = input.candidateKeyDeriver
         ?? analysisV2ProgressCandidateKey;
+    const canonicalStore = input.canonicalStore ?? analysisCanonicalStore;
 
     function noOpCheckpointResult(): null {
         return null;
+    }
+
+    async function appendCanonicalProgress(
+        claim: ClaimedAnalysisV2Job,
+        projected: AnalysisV2ProjectedProgress,
+    ): Promise<void> {
+        try {
+            await canonicalStore.appendEvent({
+                requestId: claim.requestId,
+                kind: 'progress',
+                state: projected.event.state,
+                payload: {
+                    jobKey: claim.jobKey,
+                    eventCode: projected.event.eventCode,
+                    copyCode: projected.event.copyCode,
+                    aggregateCount: projected.event.aggregateCount,
+                    tracks: projected.tracks,
+                },
+            });
+        } catch {
+            // Progress dual-write remains fail-open while the legacy checkpoint is authoritative.
+        }
+    }
+
+    async function checkpointAndMirror(
+        claim: ClaimedAnalysisV2Job,
+        projected: AnalysisV2ProjectedProgress,
+    ): Promise<AnalysisV2ProgressCheckpointResult | null> {
+        const result = await store.checkpoint(checkpointInput(claim, projected));
+        if (result) await appendCanonicalProgress(claim, projected);
+        return result;
     }
 
     async function checkpointWithConflictRecovery(
@@ -314,7 +351,7 @@ export function createAnalysisV2ProgressReporter(input: {
         reloadProjection: (state: AnalysisV2DagState) => AnalysisV2ProjectedProgress,
     ): Promise<AnalysisV2ProgressCheckpointResult | null> {
         try {
-            return await store.checkpoint(checkpointInput(claim, projected));
+            return await checkpointAndMirror(claim, projected);
         } catch (error) {
             if (isAnalysisV2ProgressFenceFailure(error)) throw error;
             if (!isAnalysisV2ProgressNonFenceFailure(error)) throw error;
@@ -338,9 +375,7 @@ export function createAnalysisV2ProgressReporter(input: {
                 }
                 if (current) {
                     try {
-                        return await store.checkpoint(
-                            checkpointInput(claim, reloadProjection(current))
-                        );
+                        return await checkpointAndMirror(claim, reloadProjection(current));
                     } catch (retryError) {
                         if (isAnalysisV2ProgressFenceFailure(retryError)) {
                             throw retryError;

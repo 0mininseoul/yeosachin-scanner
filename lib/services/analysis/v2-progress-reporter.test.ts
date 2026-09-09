@@ -101,6 +101,28 @@ describe('analysis V2 progress reporter', () => {
         }));
     });
 
+    it('dual-writes a sanitized canonical progress event after legacy checkpointing', async () => {
+        const canonicalStore = {
+            appendEvent: vi.fn(async () => ({ status: 'appended' })),
+        };
+        const reporter = createAnalysisV2ProgressReporter({
+            store: progressStore(),
+            canonicalStore: canonicalStore as never,
+        } as never);
+
+        await reporter.initialize({ claim: claim(), state: state() });
+
+        expect(canonicalStore.appendEvent).toHaveBeenCalledWith(expect.objectContaining({
+            requestId,
+            kind: 'progress',
+            state: 'confirmed',
+            payload: expect.objectContaining({
+                eventCode: 'TARGET_PROFILE_READY',
+            }),
+        }));
+        expect(JSON.stringify(canonicalStore.appendEvent.mock.calls)).not.toContain('instagram');
+    });
+
     it('fails open with a nullable result when initialize transport is unavailable', async () => {
         const checkpoint = vi.fn(async () => {
             throw new TypeError('fetch failed: ECONNREFUSED');
