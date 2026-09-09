@@ -71,10 +71,9 @@ describe('Supabase 22 rollback and traffic evidence', () => {
         ]));
     });
 
-    it('reads aggregate traffic counters and never exposes family names in the result', async () => {
+    it('reads aggregate traffic counters through an explicitly bounded reader and never exposes family names in the result', async () => {
         const evidence = await collectSupabase22RollbackEvidence({
-            rpc: async () => ({
-                data: {
+            readBoundedTrafficEvidence: async () => ({
                     families: [{
                         family: 'analysis',
                         serverOnly: true,
@@ -88,13 +87,38 @@ describe('Supabase 22 rollback and traffic evidence', () => {
                     }],
                     activeLegacyWriterCount: 0,
                     observationWindowClosed: true,
-                },
-                error: null,
             }),
         });
 
         expect(evidence.verified).toBe(true);
         expect(JSON.stringify(evidence)).not.toContain('analysis');
+    });
+
+    it('fails closed when only an unprovisioned RPC-shaped client is supplied', async () => {
+        await expect(collectSupabase22RollbackEvidence({
+            rpc: async () => ({ data: null, error: null }),
+        })).rejects.toThrow('SUPABASE_22_TRAFFIC_READ_UNAVAILABLE');
+    });
+
+    it('rejects untrusted traffic fields before constructing output', async () => {
+        await expect(collectSupabase22RollbackEvidence({
+            readBoundedTrafficEvidence: async () => ({
+                families: [{
+                    family: 'analysis',
+                    serverOnly: true,
+                    legacyReaderAvailable: true,
+                    canonicalReaderEnabled: true,
+                    canonicalWriterEnabled: true,
+                    shadowMismatch: false,
+                    retryQueueCount: 0,
+                    retryQueueBounded: true,
+                    activeLegacyWriterCount: 0,
+                    sentinel: 'do-not-emit',
+                }],
+                activeLegacyWriterCount: 0,
+                observationWindowClosed: true,
+            }),
+        })).rejects.toThrow('SUPABASE_22_TRAFFIC_PAYLOAD_INVALID');
     });
 
     it('requires independent provider evidence and a disposition for every pending order', () => {

@@ -176,7 +176,9 @@ describe('Supabase 22 evidence gate', () => {
     it.each([
         'deviceId', 'raw_device_id', 'anonymousDeviceId', 'anonymous_principal_hash',
         'userAgent', 'ipAddress', 'client_ip', 'apiKey', 'access_token',
-        'hashKey', 'hmac_key',
+        'hashKey', 'hmac_key', 'user_id_hash', 'owner_id_hash', 'ip_hash',
+        'visitor_id', 'fingerprint', 'browser_fingerprint', 'customer_id',
+        'tenant_uuid', 'tracking_hash', 'profile_fingerprint',
     ])('rejects sensitive key variant %s', key => {
         expect(() => assertPiiSafeConsolidationOutput({ [key]: 'redacted' }))
             .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');

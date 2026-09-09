@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { supabaseAdmin } from '../lib/supabase/admin';
 import {
@@ -14,6 +15,7 @@ import {
     isGenuineArchiveManifest,
     isGenuineRestoreManifest,
     type Supabase22ArchiveEvidence,
+    type Supabase22ArchiveManifest,
     type Supabase22Evidence,
     type Supabase22RestoreManifest,
 } from '../lib/services/operations/supabase-22-evidence';
@@ -36,6 +38,84 @@ export type Supabase22ArchiveRestoreCliOptions = Readonly<{
 
 function optionName(value: string): string {
     return value.split('=', 1)[0];
+}
+
+const EVIDENCE_KEYS = [
+    'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
+    'missingTables', 'dependencyClean', 'migrationHistoryClean', 'genuineCompletedBundleCount',
+    'parityStatus', 'archiveManifest', 'rollbackEvidenceVerified', 'observationWindowClosed',
+    'ownerApprovalRecorded', 'canonicalSetMatch', 'catalogDependencyClean',
+    'paymentPendingDispositionRecorded', 'noActivationOrCanary', 'archiveRestoreChecksumMatch',
+    'destructiveOperations', 'missingGates',
+] as const;
+const ARCHIVE_MANIFEST_KEYS = [
+    'schemaVersion', 'selectedCount', 'aggregateChecksum', 'encrypted', 'encryption',
+    'retentionClass',
+] as const;
+const ENCRYPTION_KEYS = ['algorithm', 'verified'] as const;
+const ARCHIVE_ENCRYPTION_ALGORITHM = 'AES-256-GCM';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+    value: Record<string, unknown>,
+    requiredKeys: readonly string[],
+    optionalKeys: readonly string[] = [],
+): boolean {
+    const allowed = new Set([...requiredKeys, ...optionalKeys]);
+    return Object.keys(value).every(key => allowed.has(key))
+        && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function safeManifestName(value: unknown): value is string {
+    return typeof value === 'string'
+        && value.length > 0
+        && value.length <= 256
+        && /^[a-z][a-z0-9_.-]*$/i.test(value);
+}
+
+function parseEncryption(value: unknown): { algorithm: string; verified: true } {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, ENCRYPTION_KEYS)
+        || value.algorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
+        || value.verified !== true) {
+        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+    }
+    return { algorithm: value.algorithm, verified: true };
+}
+
+function parseArchiveManifest(value: unknown): Supabase22ArchiveManifest {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
+        || !isGenuineArchiveManifest(value)) {
+        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+    }
+    return {
+        schemaVersion: 'supabase-22-archive-manifest-v1',
+        selectedCount: value.selectedCount,
+        aggregateChecksum: value.aggregateChecksum,
+        encrypted: true,
+        encryption: parseEncryption(value.encryption),
+        retentionClass: value.retentionClass,
+    };
+}
+
+function parseRestoreManifest(value: unknown): Supabase22RestoreManifest {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
+        || !isGenuineRestoreManifest(value)) {
+        throw new Error('SUPABASE_22_RESTORE_MANIFEST_INVALID');
+    }
+    return {
+        schemaVersion: 'supabase-22-restore-manifest-v1',
+        selectedCount: value.selectedCount,
+        aggregateChecksum: value.aggregateChecksum,
+        encrypted: true,
+        encryption: parseEncryption(value.encryption),
+        retentionClass: value.retentionClass,
+    };
 }
 
 export function parseSupabase22ArchiveRestoreCliArgs(
@@ -113,22 +193,23 @@ function defaultDependencies(): Supabase22ArchiveRestoreCliDependencies {
 }
 
 function parseEvidenceManifest(value: unknown): Supabase22Evidence {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (!isRecord(value) || !hasOnlyKeys(value, EVIDENCE_KEYS)) {
         throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
     }
     const evidence = value as Partial<Supabase22Evidence>;
     if (evidence.schemaVersion !== 'supabase-22-evidence-v1'
-        || (evidence.status !== undefined
-            && evidence.status !== 'ready'
+        || (evidence.status !== 'ready'
             && evidence.status !== 'mismatch'
             && evidence.status !== 'blocked')
-        || typeof evidence.publicTableCount !== 'number'
+        || !Number.isSafeInteger(evidence.publicTableCount)
+        || (evidence.publicTableCount ?? -1) < 0
         || !Array.isArray(evidence.canonicalTables)
         || !Array.isArray(evidence.unexpectedTables)
         || !Array.isArray(evidence.missingTables)
         || typeof evidence.dependencyClean !== 'boolean'
         || typeof evidence.migrationHistoryClean !== 'boolean'
-        || typeof evidence.genuineCompletedBundleCount !== 'number'
+        || !Number.isSafeInteger(evidence.genuineCompletedBundleCount)
+        || (evidence.genuineCompletedBundleCount ?? -1) < 0
         || (evidence.parityStatus !== 'ready'
             && evidence.parityStatus !== 'mismatch'
             && evidence.parityStatus !== 'blocked')
@@ -136,13 +217,26 @@ function parseEvidenceManifest(value: unknown): Supabase22Evidence {
         || typeof evidence.rollbackEvidenceVerified !== 'boolean'
         || typeof evidence.observationWindowClosed !== 'boolean'
         || typeof evidence.ownerApprovalRecorded !== 'boolean'
+        || typeof evidence.canonicalSetMatch !== 'boolean'
+        || typeof evidence.catalogDependencyClean !== 'boolean'
+        || typeof evidence.paymentPendingDispositionRecorded !== 'boolean'
+        || typeof evidence.noActivationOrCanary !== 'boolean'
+        || typeof evidence.archiveRestoreChecksumMatch !== 'boolean'
         || evidence.destructiveOperations !== 'refused'
         || !Array.isArray(evidence.missingGates)
         || evidence.missingGates.some(gate => typeof gate !== 'string')) {
         throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
     }
+    if (evidence.canonicalTables.some(table => !safeManifestName(table))
+        || evidence.unexpectedTables.some(table => !safeManifestName(table))
+        || evidence.missingTables.some(table => !safeManifestName(table))) {
+        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+    }
     const archive = evidence.archiveManifest;
-    if (typeof archive !== 'object' || archive === null
+    if (!isRecord(archive)
+        || !hasOnlyKeys(archive, ['verified', 'aggregateChecksum', 'restoreStatus'], [
+            'manifest', 'restoreManifest',
+        ])
         || typeof archive.verified !== 'boolean'
         || (archive.aggregateChecksum !== null
             && (typeof archive.aggregateChecksum !== 'string' || !HASH_PATTERN.test(archive.aggregateChecksum)))
@@ -152,35 +246,58 @@ function parseEvidenceManifest(value: unknown): Supabase22Evidence {
             && archive.restoreStatus !== 'not_run')) {
         throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
     }
-    if (archive.manifest !== undefined
-        && archive.manifest !== null
-        && !isGenuineArchiveManifest(archive.manifest)) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    if (archive.restoreManifest !== undefined
-        && archive.restoreManifest !== null
-        && !isGenuineRestoreManifest(archive.restoreManifest)) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    assertPiiSafeConsolidationOutput(evidence);
+    const archiveManifest = archive.manifest === undefined || archive.manifest === null
+        ? null
+        : parseArchiveManifest(archive.manifest);
+    const restoreManifest = archive.restoreManifest === undefined || archive.restoreManifest === null
+        ? null
+        : parseRestoreManifest(archive.restoreManifest);
+    const sanitizedEvidence: Supabase22Evidence = {
+        schemaVersion: 'supabase-22-evidence-v1',
+        status: evidence.status,
+        publicTableCount: evidence.publicTableCount!,
+        canonicalTables: [...evidence.canonicalTables],
+        unexpectedTables: [...evidence.unexpectedTables],
+        missingTables: [...evidence.missingTables],
+        dependencyClean: evidence.dependencyClean,
+        migrationHistoryClean: evidence.migrationHistoryClean,
+        genuineCompletedBundleCount: evidence.genuineCompletedBundleCount!,
+        parityStatus: evidence.parityStatus,
+        archiveManifest: {
+            verified: archive.verified,
+            aggregateChecksum: archive.aggregateChecksum,
+            restoreStatus: archive.restoreStatus,
+            ...(archiveManifest === null ? {} : { manifest: archiveManifest }),
+            ...(restoreManifest === null ? {} : { restoreManifest }),
+        },
+        rollbackEvidenceVerified: evidence.rollbackEvidenceVerified,
+        observationWindowClosed: evidence.observationWindowClosed,
+        ownerApprovalRecorded: evidence.ownerApprovalRecorded,
+        canonicalSetMatch: evidence.canonicalSetMatch!,
+        catalogDependencyClean: evidence.catalogDependencyClean!,
+        paymentPendingDispositionRecorded: evidence.paymentPendingDispositionRecorded!,
+        noActivationOrCanary: evidence.noActivationOrCanary!,
+        archiveRestoreChecksumMatch: evidence.archiveRestoreChecksumMatch!,
+        destructiveOperations: 'refused',
+        missingGates: [...evidence.missingGates],
+    };
+    assertPiiSafeConsolidationOutput(sanitizedEvidence);
     // Re-evaluate sanitized attestations instead of trusting a caller-provided
     // status or missing-gate list; absent proof therefore remains blocked.
     return evaluateSupabase22Gate({
-        ...evidence,
-        canonicalSetMatch: evidence.canonicalSetMatch === true,
-        catalogDependencyClean: evidence.catalogDependencyClean === true,
-        paymentPendingDispositionRecorded: evidence.paymentPendingDispositionRecorded === true,
-        noActivationOrCanary: evidence.noActivationOrCanary === true,
-        archiveRestoreChecksumMatch: evidence.archiveRestoreChecksumMatch === true,
-    } as Supabase22Evidence);
+        ...sanitizedEvidence,
+        canonicalSetMatch: sanitizedEvidence.canonicalSetMatch === true,
+        catalogDependencyClean: sanitizedEvidence.catalogDependencyClean === true,
+        paymentPendingDispositionRecorded: sanitizedEvidence.paymentPendingDispositionRecorded === true,
+        noActivationOrCanary: sanitizedEvidence.noActivationOrCanary === true,
+        archiveRestoreChecksumMatch: sanitizedEvidence.archiveRestoreChecksumMatch === true,
+    });
 }
 
 function parseRestoredManifest(value: unknown): Supabase22RestoredManifest {
-    if (!isGenuineRestoreManifest(value)) {
-        throw new Error('SUPABASE_22_RESTORE_MANIFEST_INVALID');
-    }
-    assertPiiSafeConsolidationOutput(value);
-    return value;
+    const manifest = parseRestoreManifest(value);
+    assertPiiSafeConsolidationOutput(manifest);
+    return manifest;
 }
 
 export type Supabase22ArchiveRestoreReport = Readonly<{
@@ -230,15 +347,52 @@ function reportFromEvidence(
                     ? 'not_run'
                     : 'blocked'
         : checksumMatch ? 'verified' : 'mismatch';
+    const sanitizedArchiveManifest: Supabase22ArchiveEvidence = {
+        verified: evidence.archiveManifest.verified === true,
+        aggregateChecksum: typeof checksum === 'string' && HASH_PATTERN.test(checksum)
+            ? checksum
+            : null,
+        restoreStatus,
+        ...(isGenuineArchiveManifest(sourceManifest)
+            ? {
+                manifest: {
+                    schemaVersion: 'supabase-22-archive-manifest-v1' as const,
+                    selectedCount: sourceManifest.selectedCount,
+                    aggregateChecksum: sourceManifest.aggregateChecksum,
+                    encrypted: true as const,
+                    encryption: {
+                        algorithm: sourceManifest.encryption.algorithm,
+                        verified: true as const,
+                    },
+                    retentionClass: sourceManifest.retentionClass,
+                },
+            }
+            : {}),
+        ...(isGenuineRestoreManifest(evidence.archiveManifest.restoreManifest)
+            ? {
+                restoreManifest: {
+                    schemaVersion: 'supabase-22-restore-manifest-v1' as const,
+                    selectedCount: evidence.archiveManifest.restoreManifest.selectedCount,
+                    aggregateChecksum: evidence.archiveManifest.restoreManifest.aggregateChecksum,
+                    encrypted: true as const,
+                    encryption: {
+                        algorithm: evidence.archiveManifest.restoreManifest.encryption.algorithm,
+                        verified: true as const,
+                    },
+                    retentionClass: evidence.archiveManifest.restoreManifest.retentionClass,
+                },
+            }
+            : {}),
+    };
     const report: Supabase22ArchiveRestoreReport = {
         schemaVersion: 'supabase-22-archive-restore-v1',
-        status: evidence.status === 'ready' && restoreStatus === 'verified'
+        status: evidence.status === 'ready' && restoreStatus === 'verified' && checksumMatch
             ? 'ready'
             : evidence.status === 'mismatch' || restoreStatus === 'mismatch' ? 'mismatch' : 'blocked',
         selectedCount,
-        aggregateChecksum: checksum,
+        aggregateChecksum: sanitizedArchiveManifest.aggregateChecksum,
         archiveManifest: {
-            ...evidence.archiveManifest,
+            ...sanitizedArchiveManifest,
             encrypted,
             retentionClass,
         },
@@ -313,9 +467,15 @@ export async function runSupabase22ArchiveRestoreCli(
             archiveRestoreChecksumMatch: false,
         });
     }
+    const isolatedRestorePath = options.restorePath !== null
+        && (options.manifestPath === null
+            || resolvePath(options.restorePath) !== resolvePath(options.manifestPath));
     let restored: Supabase22RestoredManifest | null = null;
     let restoreReadFailed = false;
-    if (options.restorePath
+    if (options.restorePath && !isolatedRestorePath) {
+        restoreReadFailed = true;
+    }
+    if (isolatedRestorePath
         && evidence.archiveManifest.verified
         && isGenuineArchiveManifest(evidence.archiveManifest.manifest)) {
         try {
@@ -335,7 +495,7 @@ export async function runSupabase22ArchiveRestoreCli(
         && restored.aggregateChecksum === evidence.archiveManifest.aggregateChecksum
         && isGenuineArchiveManifest(evidence.archiveManifest.manifest)
         && restored.retentionClass === evidence.archiveManifest.manifest.retentionClass;
-    const evaluatedEvidence = restoreReadFailed
+    const evaluatedEvidence = !isolatedRestorePath || restoreReadFailed
         ? evaluateSupabase22Gate({
             ...evidence,
             archiveManifest: {

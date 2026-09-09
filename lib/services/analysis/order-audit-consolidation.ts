@@ -115,6 +115,13 @@ const forbiddenOutputKeyPatterns = [
     /(?:client|remote|forwarded|xforwarded)?ip(?:$|address|v4|v6|value)/,
     /(?:raw|http|client)?useragent(?:$|string|hash|value)/,
     /(?:hash|hmac)key/,
+    // Identity and tracking aliases are forbidden even when callers add a
+    // suffix or use snake_case/camelCase spelling.  Do not broaden this to
+    // every hash: aggregate/content checksums are intentional evidence.
+    /(?:user|owner|visitor|principal|actor|subject|account|identity|customer|member|profile|target|subscriber|tenant|organization|org|team|client|tracking|session|email|phone|mobile|contact)(?:id|uuid|hash|fingerprint)/,
+    /(?:ip|address)(?:id|hash|fingerprint)/,
+    /(?:visitor|tracking|browser|device|fingerprint)(?:id|uuid|hash|fingerprint)/,
+    /fingerprint/,
 ];
 const UUID_VALUE_PATTERN = UUID_PATTERN;
 const EMAIL_VALUE_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

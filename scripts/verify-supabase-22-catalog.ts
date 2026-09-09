@@ -3,9 +3,9 @@ import { pathToFileURL } from 'node:url';
 import {
     assertPiiSafeConsolidationOutput,
     evaluateSupabase22Catalog,
+    parseSupabase22CatalogSnapshot,
     SUPABASE_22_CANONICAL_TABLES,
     type Supabase22CatalogEvidence,
-    type Supabase22CatalogSnapshot,
 } from '../lib/services/operations/supabase-22-evidence';
 
 const READ_ONLY_OPTIONS = new Set([
@@ -19,6 +19,34 @@ export type Supabase22CatalogCliOptions = Readonly<{
 
 function optionName(value: string): string {
     return value.split('=', 1)[0];
+}
+
+const CATALOG_METADATA_KEYS = [
+    'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
+    'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
+] as const;
+const CATALOG_EVIDENCE_KEYS = [
+    'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
+    'missingTables', 'dependencyClean', 'migrationHistoryClean', 'rlsClean',
+    'routinesClean', 'aclClean', 'triggersClean', 'foreignKeysClean', 'viewsClean',
+    'publicationsClean', 'sequencesClean', 'partitionsClean', 'legacyWritersClean',
+    'metadataAvailability', 'clean', 'destructiveOperations',
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, requiredKeys: readonly string[]): boolean {
+    return Object.keys(value).length === requiredKeys.length
+        && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function safeCatalogName(value: unknown): value is string {
+    return typeof value === 'string'
+        && value.length > 0
+        && value.length <= 256
+        && /^[a-z][a-z0-9_.-]*$/i.test(value);
 }
 
 export function parseSupabase22CatalogCliArgs(
@@ -50,7 +78,7 @@ export function parseSupabase22CatalogCliArgs(
 }
 
 export interface Supabase22CatalogCliDependencies {
-    readCatalog(): Promise<Supabase22CatalogSnapshot>;
+    readCatalog(): Promise<unknown>;
     readManifest?(path: string): Promise<unknown>;
     writeStdout(value: string): void;
 }
@@ -69,7 +97,7 @@ function defaultDependencies(): Supabase22CatalogCliDependencies {
 }
 
 function parseManifest(value: unknown): Supabase22CatalogEvidence {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    if (!isRecord(value) || !hasOnlyKeys(value, CATALOG_EVIDENCE_KEYS)) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     const manifest = value as Partial<Supabase22CatalogEvidence>;
@@ -97,9 +125,9 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         || manifest.destructiveOperations !== 'refused') {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
-    if (manifest.canonicalTables.some(table => typeof table !== 'string')
-        || manifest.unexpectedTables.some(table => typeof table !== 'string')
-        || manifest.missingTables.some(table => typeof table !== 'string')) {
+    if (manifest.canonicalTables.some(table => !safeCatalogName(table))
+        || manifest.unexpectedTables.some(table => !safeCatalogName(table))
+        || manifest.missingTables.some(table => !safeCatalogName(table))) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     const metadataAvailability = manifest.metadataAvailability;
@@ -107,8 +135,8 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
         'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
     ] as const;
-    if (typeof metadataAvailability !== 'object'
-        || metadataAvailability === null
+    if (!isRecord(metadataAvailability)
+        || !hasOnlyKeys(metadataAvailability, CATALOG_METADATA_KEYS)
         || metadataKeys.some(key => typeof metadataAvailability[key] !== 'boolean')) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
@@ -136,7 +164,31 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         || manifest.clean !== (manifest.status === 'ready')) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
-    return manifest as Supabase22CatalogEvidence;
+    return {
+        schemaVersion: 'supabase-22-catalog-v1',
+        status: manifest.clean ? 'ready' : 'blocked',
+        publicTableCount: manifest.publicTableCount!,
+        canonicalTables: [...manifest.canonicalTables],
+        unexpectedTables: [...manifest.unexpectedTables],
+        missingTables: [...manifest.missingTables],
+        dependencyClean: manifest.dependencyClean,
+        migrationHistoryClean: manifest.migrationHistoryClean,
+        rlsClean: manifest.rlsClean,
+        routinesClean: manifest.routinesClean,
+        aclClean: manifest.aclClean,
+        triggersClean: manifest.triggersClean,
+        foreignKeysClean: manifest.foreignKeysClean,
+        viewsClean: manifest.viewsClean,
+        publicationsClean: manifest.publicationsClean,
+        sequencesClean: manifest.sequencesClean,
+        partitionsClean: manifest.partitionsClean,
+        legacyWritersClean: manifest.legacyWritersClean,
+        metadataAvailability: Object.fromEntries(
+            metadataKeys.map(key => [key, metadataAvailability[key] === true]),
+        ) as Supabase22CatalogEvidence['metadataAvailability'],
+        clean: manifest.clean,
+        destructiveOperations: 'refused',
+    };
 }
 
 function unavailableCatalogEvidence(): Supabase22CatalogEvidence {
@@ -179,9 +231,14 @@ export async function runSupabase22CatalogCli(
     const options = parseSupabase22CatalogCliArgs(args);
     let evidence: Supabase22CatalogEvidence;
     try {
-        evidence = options.manifestPath && dependencies.readManifest
-            ? parseManifest(await dependencies.readManifest(options.manifestPath))
-            : evaluateSupabase22Catalog(await dependencies.readCatalog());
+        if (options.manifestPath) {
+            if (!dependencies.readManifest) throw new Error('SUPABASE_22_CATALOG_MANIFEST_READ_UNAVAILABLE');
+            evidence = parseManifest(await dependencies.readManifest(options.manifestPath));
+        } else {
+            evidence = evaluateSupabase22Catalog(parseSupabase22CatalogSnapshot(
+                await dependencies.readCatalog(),
+            ));
+        }
     } catch {
         evidence = unavailableCatalogEvidence();
     }

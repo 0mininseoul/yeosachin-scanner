@@ -28,6 +28,9 @@ describe('Supabase 22 catalog verifier CLI', () => {
         }
         expect(SUPABASE_22_CATALOG_QUERIES.acls).toContain("has_table_privilege('anon'");
         expect(SUPABASE_22_CATALOG_QUERIES.acls).toContain("has_table_privilege('service_role'");
+        expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('pg_identify_object');
+        expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('pg_catalog.pg_proc');
+        expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('CROSS JOIN LATERAL');
     });
 
     it('prints sanitized catalog evidence and exits non-zero when the live set is not exact', async () => {
@@ -96,5 +99,47 @@ describe('Supabase 22 catalog verifier CLI', () => {
             status: 'blocked',
             destructiveOperations: 'refused',
         });
+    });
+
+    it('rejects unknown catalog fields and emits only the unavailable safe report', async () => {
+        const writeStdout = vi.fn();
+        const result = await runSupabase22CatalogCli(['--report-only'], {
+            readCatalog: vi.fn(async () => ({
+                tables: [],
+                acls: [],
+                dependencies: [],
+                foreignKeys: [],
+                securityDefinerFunctions: [],
+                migrationHistory: [],
+                legacyWriters: [],
+                views: [],
+                sequences: [],
+                partitions: [],
+                publications: [],
+                triggers: [],
+                policies: [],
+                metadataAvailability: {
+                    catalog: false,
+                    acl: false,
+                    routine: false,
+                    trigger: false,
+                    dependency: false,
+                    migration: false,
+                    rls: false,
+                    view: false,
+                    publication: false,
+                    sequence: false,
+                    partition: false,
+                    foreignKey: false,
+                    legacyWriter: false,
+                },
+                sentinel: 'do-not-emit',
+            })),
+            writeStdout,
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.evidence.clean).toBe(false);
+        expect(JSON.stringify(writeStdout.mock.calls)).not.toContain('do-not-emit');
     });
 });

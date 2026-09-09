@@ -4,6 +4,8 @@ import {
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
+    SUPABASE_22_CATALOG_QUERY,
+    SUPABASE_22_CATALOG_QUERIES,
 } from './supabase-22-evidence';
 
 const CANONICAL_TABLES = [
@@ -32,20 +34,33 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
     });
 
     it('collects catalog rows without turning SQL execution into a mutation path', async () => {
+        let queryCount = 0;
         const query = async (sql: string): Promise<unknown> => {
-            expect(sql).toContain('pg_catalog');
+            queryCount += 1;
+            expect(sql.trim()).toMatch(/^SELECT\b/i);
             expect(sql.toUpperCase()).not.toMatch(/\b(DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE)\b/);
-            const result = await db.query<{ relname: string }>(sql);
+            if (sql.trim() === SUPABASE_22_CATALOG_QUERY.trim()) {
+                const result = await db.query<{ relname: string }>(sql);
+                expect(result.rows.map(row => row.relname)).toEqual(['analysis_requests', 'users']);
+            }
             return {
-                tables: result.rows.map(row => ({
-                    name: row.relname,
-                    relkind: 'r',
-                    rlsEnabled: true,
-                    forceRls: false,
-                })),
-                acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: true }],
-                dependencies: [],
-                foreignKeys: [{ resolved: true, allowed: true }],
+                tables: [
+                    {
+                        name: 'users',
+                        relkind: 'r',
+                        rlsEnabled: true,
+                        forceRls: false,
+                    },
+                    {
+                        name: 'analysis_requests',
+                        relkind: 'r',
+                        rlsEnabled: true,
+                        forceRls: false,
+                    },
+                ],
+                acls: [{ objectName: 'analysis_requests', resolved: true, serviceRoleOnly: true }],
+                dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
+                foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
                 securityDefinerFunctions: [],
                 migrationHistory: [{ version: '20260905000000' }],
                 legacyWriters: [],
@@ -75,6 +90,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
         const evidence = await collectSupabase22CatalogEvidence({ query });
 
+        expect(queryCount).toBe(Object.keys(SUPABASE_22_CATALOG_QUERIES).length);
         expect(evidence.publicTableCount).toBe(2);
         expect(evidence.canonicalTables).toEqual(['analysis_requests', 'users']);
         expect(evidence.unexpectedTables).toEqual([]);
@@ -93,9 +109,16 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 rlsEnabled: true,
                 forceRls: true,
             })),
-            acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: true }],
-            dependencies: [{ resolved: true, allowed: true }],
-            foreignKeys: [{ resolved: true, allowed: true }],
+            acls: [
+                ...SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+                    objectName,
+                    resolved: true,
+                    serviceRoleOnly: true,
+                })),
+                { objectName: 'canonical-routine', resolved: true, serviceRoleOnly: true },
+            ],
+            dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
+            foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
             securityDefinerFunctions: [{
                 name: 'canonical-routine',
                 securityDefiner: true,
@@ -111,9 +134,15 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             sequences: [],
             partitions: [],
             publications: [],
-            triggers: [{ resolved: true, allowed: true }],
+            triggers: [{ objectName: 'trigger-1', resolved: true, allowed: true }],
             policies: [{ tableName: 'users', enabled: true }],
         };
+
+        const undercoveredAclSnapshot = {
+            ...completeSnapshot,
+            acls: [{ objectName: 'users', resolved: true, serviceRoleOnly: true }],
+        };
+        expect(evaluateSupabase22Catalog(undercoveredAclSnapshot as never).aclClean).toBe(false);
 
         for (const key of [
             'tables', 'acls', 'securityDefinerFunctions', 'triggers', 'dependencies',
@@ -135,9 +164,16 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 rlsEnabled: true,
                 forceRls: true,
             })),
-            acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: false }],
-            dependencies: [{ resolved: true, allowed: true }],
-            foreignKeys: [{ resolved: true, allowed: true }],
+            acls: [
+                ...SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+                    objectName,
+                    resolved: true,
+                    serviceRoleOnly: true,
+                })),
+                { objectName: 'canonical-routine', resolved: true, serviceRoleOnly: false },
+            ],
+            dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
+            foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
             securityDefinerFunctions: [{
                 name: 'canonical-routine',
                 securityDefiner: true,
@@ -153,7 +189,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             sequences: [],
             partitions: [],
             publications: [],
-            triggers: [{ resolved: true, allowed: true }],
+            triggers: [{ objectName: 'trigger-1', resolved: true, allowed: true }],
             policies: [{ tableName: 'users', enabled: true }],
         };
 

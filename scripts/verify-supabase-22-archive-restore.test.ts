@@ -78,6 +78,49 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
         expect(dependencies.readRestoreManifest).not.toHaveBeenCalled();
     });
 
+    it('rejects unknown evidence fields before they can reach stdout', async () => {
+        const writeStdout = vi.fn();
+        const dependencies: Supabase22ArchiveRestoreCliDependencies = {
+            readManifest: vi.fn(async () => ({
+                schemaVersion: 'supabase-22-evidence-v1',
+                status: 'blocked' as const,
+                publicTableCount: 0,
+                canonicalTables: [],
+                unexpectedTables: [],
+                missingTables: [],
+                dependencyClean: false,
+                migrationHistoryClean: false,
+                genuineCompletedBundleCount: 0,
+                parityStatus: 'blocked' as const,
+                archiveManifest: {
+                    verified: false,
+                    aggregateChecksum: null,
+                    restoreStatus: 'blocked' as const,
+                },
+                rollbackEvidenceVerified: false,
+                observationWindowClosed: false,
+                ownerApprovalRecorded: false,
+                canonicalSetMatch: false,
+                catalogDependencyClean: false,
+                paymentPendingDispositionRecorded: false,
+                noActivationOrCanary: true,
+                archiveRestoreChecksumMatch: false,
+                destructiveOperations: 'refused' as const,
+                missingGates: ['genuine-completed-bundle'],
+                sentinel: 'do-not-emit',
+            })),
+            readRestoreManifest: vi.fn(),
+            readSnapshot: vi.fn(),
+            writeStdout,
+        } as unknown as Supabase22ArchiveRestoreCliDependencies;
+
+        await expect(runSupabase22ArchiveRestoreCli(
+            ['--report-only', '--manifest', 'evidence.json'],
+            dependencies,
+        )).rejects.toThrow('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+        expect(JSON.stringify(writeStdout.mock.calls)).not.toContain('do-not-emit');
+    });
+
     it('compares an encrypted isolated restore by count and aggregate checksum', async () => {
         const writeStdout = vi.fn();
         const dependencies: Supabase22ArchiveRestoreCliDependencies = {
@@ -112,6 +155,14 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
                         encryption: { algorithm: 'AES-256-GCM', verified: true },
                         retentionClass: 'permanent',
                     },
+                    restoreManifest: {
+                        schemaVersion: 'supabase-22-restore-manifest-v1',
+                        selectedCount: 1,
+                        aggregateChecksum: HASH,
+                        encrypted: true,
+                        encryption: { algorithm: 'AES-256-GCM', verified: true },
+                        retentionClass: 'permanent',
+                    },
                 },
                 rollbackEvidenceVerified: true,
                 observationWindowClosed: true,
@@ -136,6 +187,22 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
             writeStdout,
         };
 
+        const withoutIsolatedRestore = await runSupabase22ArchiveRestoreCli([
+            '--report-only', '--manifest', 'evidence.json',
+        ], dependencies);
+
+        expect(withoutIsolatedRestore.exitCode).toBe(1);
+        expect(withoutIsolatedRestore.report.status).not.toBe('ready');
+        expect(withoutIsolatedRestore.report.checksumMatch).toBe(false);
+
+        const sameRestorePath = await runSupabase22ArchiveRestoreCli([
+            '--report-only', '--manifest', './evidence.json', '--restore-path', 'evidence.json',
+        ], dependencies);
+        expect(sameRestorePath.exitCode).toBe(1);
+        expect(sameRestorePath.report.status).not.toBe('ready');
+        expect(sameRestorePath.report.checksumMatch).toBe(false);
+        expect(dependencies.readRestoreManifest).not.toHaveBeenCalled();
+
         const result = await runSupabase22ArchiveRestoreCli([
             '--report-only', '--manifest', 'evidence.json', '--restore-path', 'restored.json',
         ], dependencies);
@@ -148,6 +215,21 @@ describe('Supabase 22 archive/restore verifier CLI', () => {
             archiveManifest: { encrypted: true, retentionClass: 'permanent' },
             destructiveOperations: 'refused',
         });
+
+        vi.mocked(dependencies.readRestoreManifest).mockResolvedValueOnce({
+            schemaVersion: 'supabase-22-restore-manifest-v1',
+            selectedCount: 1,
+            aggregateChecksum: 'b'.repeat(64),
+            encrypted: true,
+            encryption: { algorithm: 'AES-256-GCM', verified: true },
+            retentionClass: 'permanent',
+        });
+        const checksumMismatch = await runSupabase22ArchiveRestoreCli([
+            '--report-only', '--manifest', 'evidence.json', '--restore-path', 'restored.json',
+        ], dependencies);
+        expect(checksumMismatch.exitCode).toBe(1);
+        expect(checksumMismatch.report.status).not.toBe('ready');
+        expect(checksumMismatch.report.checksumMatch).toBe(false);
     });
 
     it('does not treat a bare encrypted flag as a genuine restore manifest', async () => {

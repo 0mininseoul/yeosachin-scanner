@@ -1,5 +1,6 @@
 {
   "schemaVersion": "supabase-22-evidence-v1",
+  "status": "blocked",
   "publicTableCount": 174,
   "canonicalTables": [],
   "unexpectedTables": [],
@@ -16,6 +17,11 @@
   "rollbackEvidenceVerified": false,
   "observationWindowClosed": false,
   "ownerApprovalRecorded": false,
+  "canonicalSetMatch": false,
+  "catalogDependencyClean": false,
+  "paymentPendingDispositionRecorded": false,
+  "noActivationOrCanary": true,
+  "archiveRestoreChecksumMatch": false,
   "destructiveOperations": "refused",
   "missingGates": [
     "public-table-count",
