@@ -1,10 +1,9 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { supabaseAdmin } from '../lib/supabase/admin';
 import {
     assertPiiSafeConsolidationOutput,
     evaluateSupabase22Catalog,
-    SUPABASE_22_CATALOG_QUERY,
+    SUPABASE_22_CANONICAL_TABLES,
     type Supabase22CatalogEvidence,
     type Supabase22CatalogSnapshot,
 } from '../lib/services/operations/supabase-22-evidence';
@@ -58,12 +57,11 @@ export interface Supabase22CatalogCliDependencies {
 
 function defaultDependencies(): Supabase22CatalogCliDependencies {
     return {
+        // Supabase JS does not expose pg_catalog. A direct read-only catalog
+        // connection may be injected by the operator; without one, fail closed
+        // instead of guessing or calling an unprovisioned repository RPC.
         readCatalog: async () => {
-            const { data, error } = await supabaseAdmin.rpc('read_supabase_22_catalog', {
-                p_catalog_query: SUPABASE_22_CATALOG_QUERY,
-            });
-            if (error) throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
-            return data as Supabase22CatalogSnapshot;
+            throw new Error('SUPABASE_22_CATALOG_READ_UNAVAILABLE');
         },
         readManifest: async path => JSON.parse(await readFile(path, 'utf8')) as unknown,
         writeStdout: value => process.stdout.write(value),
@@ -76,14 +74,102 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
     }
     const manifest = value as Partial<Supabase22CatalogEvidence>;
     if (manifest.schemaVersion !== 'supabase-22-catalog-v1'
-        || typeof manifest.publicTableCount !== 'number'
+        || !Number.isSafeInteger(manifest.publicTableCount)
+        || (manifest.publicTableCount ?? -1) < 0
+        || (manifest.status !== 'ready' && manifest.status !== 'blocked')
         || !Array.isArray(manifest.canonicalTables)
         || !Array.isArray(manifest.unexpectedTables)
         || !Array.isArray(manifest.missingTables)
-        || typeof manifest.clean !== 'boolean') {
+        || typeof manifest.dependencyClean !== 'boolean'
+        || typeof manifest.migrationHistoryClean !== 'boolean'
+        || typeof manifest.rlsClean !== 'boolean'
+        || typeof manifest.routinesClean !== 'boolean'
+        || typeof manifest.aclClean !== 'boolean'
+        || typeof manifest.triggersClean !== 'boolean'
+        || typeof manifest.foreignKeysClean !== 'boolean'
+        || typeof manifest.viewsClean !== 'boolean'
+        || typeof manifest.publicationsClean !== 'boolean'
+        || typeof manifest.sequencesClean !== 'boolean'
+        || typeof manifest.partitionsClean !== 'boolean'
+        || typeof manifest.legacyWritersClean !== 'boolean'
+        || !manifest.metadataAvailability
+        || typeof manifest.clean !== 'boolean'
+        || manifest.destructiveOperations !== 'refused') {
+        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
+    }
+    if (manifest.canonicalTables.some(table => typeof table !== 'string')
+        || manifest.unexpectedTables.some(table => typeof table !== 'string')
+        || manifest.missingTables.some(table => typeof table !== 'string')) {
+        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
+    }
+    const metadataAvailability = manifest.metadataAvailability;
+    const metadataKeys = [
+        'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
+        'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
+    ] as const;
+    if (typeof metadataAvailability !== 'object'
+        || metadataAvailability === null
+        || metadataKeys.some(key => typeof metadataAvailability[key] !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
+    }
+    const allChecksClean = manifest.dependencyClean
+        && manifest.migrationHistoryClean
+        && manifest.rlsClean
+        && manifest.routinesClean
+        && manifest.aclClean
+        && manifest.triggersClean
+        && manifest.foreignKeysClean
+        && manifest.viewsClean
+        && manifest.publicationsClean
+        && manifest.sequencesClean
+        && manifest.partitionsClean
+        && manifest.legacyWritersClean;
+    const exactCanonicalSet = manifest.publicTableCount === SUPABASE_22_CANONICAL_TABLES.length
+        && [...manifest.canonicalTables].sort().join('\u0000')
+        === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
+        && manifest.unexpectedTables.length === 0
+        && manifest.missingTables.length === 0;
+    const allMetadataAvailable = metadataKeys.every(key => metadataAvailability[key] === true);
+    if (manifest.clean !== allChecksClean
+        || manifest.clean !== allMetadataAvailable
+        || (manifest.clean && !exactCanonicalSet)
+        || manifest.clean !== (manifest.status === 'ready')) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     return manifest as Supabase22CatalogEvidence;
+}
+
+function unavailableCatalogEvidence(): Supabase22CatalogEvidence {
+    return evaluateSupabase22Catalog({
+        tables: [],
+        acls: [],
+        dependencies: [],
+        foreignKeys: [],
+        securityDefinerFunctions: [],
+        migrationHistory: [],
+        legacyWriters: [],
+        views: [],
+        sequences: [],
+        partitions: [],
+        publications: [],
+        triggers: [],
+        policies: [],
+        metadataAvailability: {
+            catalog: false,
+            acl: false,
+            routine: false,
+            trigger: false,
+            dependency: false,
+            migration: false,
+            rls: false,
+            view: false,
+            publication: false,
+            sequence: false,
+            partition: false,
+            foreignKey: false,
+            legacyWriter: false,
+        },
+    });
 }
 
 export async function runSupabase22CatalogCli(
@@ -91,9 +177,14 @@ export async function runSupabase22CatalogCli(
     dependencies: Supabase22CatalogCliDependencies = defaultDependencies(),
 ): Promise<{ exitCode: 0 | 1; evidence: Supabase22CatalogEvidence }> {
     const options = parseSupabase22CatalogCliArgs(args);
-    const evidence = options.manifestPath && dependencies.readManifest
-        ? parseManifest(await dependencies.readManifest(options.manifestPath))
-        : evaluateSupabase22Catalog(await dependencies.readCatalog());
+    let evidence: Supabase22CatalogEvidence;
+    try {
+        evidence = options.manifestPath && dependencies.readManifest
+            ? parseManifest(await dependencies.readManifest(options.manifestPath))
+            : evaluateSupabase22Catalog(await dependencies.readCatalog());
+    } catch {
+        evidence = unavailableCatalogEvidence();
+    }
     assertPiiSafeConsolidationOutput(evidence);
     dependencies.writeStdout(`${JSON.stringify(evidence, null, 2)}\n`);
     return { exitCode: evidence.clean ? 0 : 1, evidence };

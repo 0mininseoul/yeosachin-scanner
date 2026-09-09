@@ -2,6 +2,8 @@ import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
     collectSupabase22CatalogEvidence,
+    evaluateSupabase22Catalog,
+    SUPABASE_22_CANONICAL_TABLES,
 } from './supabase-22-evidence';
 
 const CANONICAL_TABLES = [
@@ -41,7 +43,9 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                     rlsEnabled: true,
                     forceRls: false,
                 })),
+                acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: true }],
                 dependencies: [],
+                foreignKeys: [{ resolved: true, allowed: true }],
                 securityDefinerFunctions: [],
                 migrationHistory: [{ version: '20260905000000' }],
                 legacyWriters: [],
@@ -51,6 +55,21 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 publications: [],
                 triggers: [],
                 policies: [],
+                metadataAvailability: {
+                    catalog: true,
+                    acl: true,
+                    routine: true,
+                    trigger: true,
+                    dependency: true,
+                    migration: true,
+                    rls: true,
+                    view: true,
+                    publication: true,
+                    sequence: true,
+                    partition: true,
+                    foreignKey: true,
+                    legacyWriter: true,
+                },
             };
         };
 
@@ -64,5 +83,83 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         ));
         expect(evidence.dependencyClean).toBe(true);
         expect(evidence.rlsClean).toBe(true);
+    });
+
+    it('fails closed when any catalog evidence family is absent', () => {
+        const completeSnapshot = {
+            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+                name,
+                relkind: 'r' as const,
+                rlsEnabled: true,
+                forceRls: true,
+            })),
+            acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: true }],
+            dependencies: [{ resolved: true, allowed: true }],
+            foreignKeys: [{ resolved: true, allowed: true }],
+            securityDefinerFunctions: [{
+                name: 'canonical-routine',
+                securityDefiner: true,
+                searchPathEmpty: true,
+                executePublic: false,
+                executeAnon: false,
+                executeAuthenticated: false,
+                executeServiceRole: true,
+            }],
+            migrationHistory: [{ version: '20260905000000', pending: false }],
+            legacyWriters: [],
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            triggers: [{ resolved: true, allowed: true }],
+            policies: [{ tableName: 'users', enabled: true }],
+        };
+
+        for (const key of [
+            'tables', 'acls', 'securityDefinerFunctions', 'triggers', 'dependencies',
+            'migrationHistory', 'views', 'publications', 'sequences', 'partitions',
+            'foreignKeys', 'policies', 'legacyWriters',
+        ]) {
+            const missing = { ...completeSnapshot } as Record<string, unknown>;
+            delete missing[key];
+            const evidence = evaluateSupabase22Catalog(missing as never);
+            expect(evidence.clean, key).toBe(false);
+        }
+    });
+
+    it('requires explicit service-only ACL evidence for routines', () => {
+        const snapshot = {
+            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+                name,
+                relkind: 'r' as const,
+                rlsEnabled: true,
+                forceRls: true,
+            })),
+            acls: [{ objectName: 'canonical-routines', resolved: true, serviceRoleOnly: false }],
+            dependencies: [{ resolved: true, allowed: true }],
+            foreignKeys: [{ resolved: true, allowed: true }],
+            securityDefinerFunctions: [{
+                name: 'canonical-routine',
+                securityDefiner: true,
+                searchPathEmpty: true,
+                executePublic: false,
+                executeAnon: false,
+                executeAuthenticated: false,
+                executeServiceRole: true,
+            }],
+            migrationHistory: [{ version: '20260905000000', pending: false }],
+            legacyWriters: [],
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            triggers: [{ resolved: true, allowed: true }],
+            policies: [{ tableName: 'users', enabled: true }],
+        };
+
+        const evidence = evaluateSupabase22Catalog(snapshot as never);
+
+        expect(evidence.aclClean).toBe(false);
+        expect(evidence.clean).toBe(false);
     });
 });

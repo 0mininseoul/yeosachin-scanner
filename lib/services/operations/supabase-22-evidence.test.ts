@@ -24,12 +24,31 @@ function completeInput(overrides: Partial<Supabase22GateInput> = {}): Supabase22
             verified: true,
             aggregateChecksum: HASH,
             restoreStatus: 'verified',
+            manifest: {
+                schemaVersion: 'supabase-22-archive-manifest-v1',
+                selectedCount: 1,
+                aggregateChecksum: HASH,
+                encrypted: true,
+                encryption: { algorithm: 'AES-256-GCM', verified: true },
+                retentionClass: 'permanent',
+            },
+            restoreManifest: {
+                schemaVersion: 'supabase-22-restore-manifest-v1',
+                selectedCount: 1,
+                aggregateChecksum: HASH,
+                encrypted: true,
+                encryption: { algorithm: 'AES-256-GCM', verified: true },
+                retentionClass: 'permanent',
+            },
         },
         rollbackEvidenceVerified: true,
         observationWindowClosed: true,
         ownerApprovalRecorded: true,
+        canonicalSetMatch: true,
+        catalogDependencyClean: true,
         paymentPendingDispositionRecorded: true,
         noActivationOrCanary: true,
+        archiveRestoreChecksumMatch: true,
         ...overrides,
     };
 }
@@ -57,8 +76,11 @@ describe('Supabase 22 evidence gate', () => {
             rollbackEvidenceVerified: false,
             observationWindowClosed: false,
             ownerApprovalRecorded: false,
+            canonicalSetMatch: false,
+            catalogDependencyClean: false,
             paymentPendingDispositionRecorded: false,
             noActivationOrCanary: true,
+            archiveRestoreChecksumMatch: false,
         });
 
         expect(result).toMatchObject({
@@ -76,15 +98,33 @@ describe('Supabase 22 evidence gate', () => {
         expect(result.destructiveOperations).toBe('refused');
     });
 
-    it('keeps the v1 evidence shape compatible when optional operation attestations are absent', () => {
+    it('fails closed when v1 evidence omits production operation attestations', () => {
         const v1Input = Object.fromEntries(
             Object.entries(completeInput({ publicTableCount: 21 }))
                 .filter(([key]) => key !== 'paymentPendingDispositionRecorded' && key !== 'noActivationOrCanary'),
         ) as Supabase22GateInput;
         const result = evaluateSupabase22Gate(v1Input);
 
-        expect(result.status).toBe('mismatch');
-        expect(result.missingGates).toEqual(['public-table-count']);
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toEqual(expect.arrayContaining([
+            'public-table-count',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+        ]));
+    });
+
+    it('fails closed when a production attestation is absent', () => {
+        const input = { ...completeInput() } as Record<string, unknown>;
+        delete input.paymentPendingDispositionRecorded;
+        delete input.noActivationOrCanary;
+
+        const result = evaluateSupabase22Gate(input as unknown as Supabase22GateInput);
+
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toEqual(expect.arrayContaining([
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+        ]));
     });
 
     it('identifies missing and unexpected canonical table names', () => {
@@ -133,6 +173,22 @@ describe('Supabase 22 evidence gate', () => {
         })).toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
     });
 
+    it.each([
+        'deviceId', 'raw_device_id', 'anonymousDeviceId', 'anonymous_principal_hash',
+        'userAgent', 'ipAddress', 'client_ip', 'apiKey', 'access_token',
+        'hashKey', 'hmac_key',
+    ])('rejects sensitive key variant %s', key => {
+        expect(() => assertPiiSafeConsolidationOutput({ [key]: 'redacted' }))
+            .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+    });
+
+    it('rejects raw network and credential values even under an otherwise safe key', () => {
+        for (const value of ['192.168.0.10', '2001:db8::1', 'Bearer secret-token']) {
+            expect(() => assertPiiSafeConsolidationOutput({ value }))
+                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
+        }
+    });
+
     it('requires the extended production contract evidence fields', () => {
         const readiness = evaluateConsolidationReadiness({
             genuineCompletedBundleCount: 1,
@@ -154,5 +210,29 @@ describe('Supabase 22 evidence gate', () => {
 
         expect(readiness.status).toBe('blocked');
         expect(readiness.missingGates).toContain('archive-restore-checksum');
+    });
+
+    it('requires every production readiness attestation even when no extended field is supplied', () => {
+        const readiness = evaluateConsolidationReadiness({
+            genuineCompletedBundleCount: 1,
+            perOrderParityCount: 1,
+            aggregateChecksumsMatch: true,
+            archiveManifestVerified: true,
+            restoreDrillVerified: true,
+            rollbackEvidenceVerified: true,
+            dependencyInventoryComplete: true,
+            separateApprovalGranted: true,
+            observationWindowClosed: true,
+        } as never);
+
+        expect(readiness.status).toBe('blocked');
+        expect(readiness.missingGates).toEqual(expect.arrayContaining([
+            'public-table-count',
+            'canonical-set',
+            'catalog-dependency',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+            'archive-restore-checksum',
+        ]));
     });
 });

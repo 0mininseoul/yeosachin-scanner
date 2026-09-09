@@ -171,6 +171,7 @@ describe('order-audit consolidation parity tooling', () => {
             mode: 'dry-run',
             reversible: true,
             destructiveOperations: 'refused',
+            retention: null,
             restore: { status: 'not_run', verified: false },
         });
         expect(verifyArchiveRestore(manifest, {
@@ -195,6 +196,12 @@ describe('order-audit consolidation parity tooling', () => {
             'dependency-inventory',
             'separate-approval',
             'observation-window',
+            'public-table-count',
+            'canonical-set',
+            'catalog-dependency',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+            'archive-restore-checksum',
         ]);
     });
 
@@ -225,6 +232,12 @@ describe('order-audit consolidation parity tooling', () => {
             dependencyInventoryComplete: false,
             separateApprovalGranted: false,
             observationWindowClosed: false,
+            publicTableCount: 0,
+            canonicalSetMatch: false,
+            catalogDependencyClean: false,
+            paymentPendingDispositionRecorded: false,
+            noActivationOrCanary: false,
+            archiveRestoreChecksumMatch: false,
         });
         expect(readiness.status).toBe('blocked');
         expect(readiness.missingGates).toEqual([
@@ -237,6 +250,12 @@ describe('order-audit consolidation parity tooling', () => {
             'dependency-inventory',
             'separate-approval',
             'observation-window',
+            'public-table-count',
+            'canonical-set',
+            'catalog-dependency',
+            'payment-pending-disposition',
+            'no-activation-or-canary',
+            'archive-restore-checksum',
         ]);
         expect(() => assertConsolidationMutationRefused()).toThrow(
             'ANALYSIS_ORDER_AUDIT_CONSOLIDATION_MUTATION_REFUSED',

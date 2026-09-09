@@ -5,6 +5,9 @@ export { assertPiiSafeConsolidationOutput } from '../analysis/order-audit-consol
 const HASH_PATTERN = /^[0-9a-f]{64}$/i;
 const SAFE_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/i;
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+const RETENTION_CLASS_PATTERN = /^(?:short|standard|permanent)$/;
+const ARCHIVE_MANIFEST_SCHEMA = 'supabase-22-archive-manifest-v1' as const;
+const RESTORE_MANIFEST_SCHEMA = 'supabase-22-restore-manifest-v1' as const;
 
 /** The only public base/partitioned tables that the approved contract permits. */
 export const SUPABASE_22_CANONICAL_TABLES = [
@@ -22,10 +25,37 @@ const canonicalTableSet = new Set<string>(SUPABASE_22_CANONICAL_TABLES);
 export type Supabase22GateStatus = 'ready' | 'mismatch' | 'blocked';
 export type Supabase22ArchiveRestoreStatus = 'verified' | 'mismatch' | 'blocked' | 'not_run';
 
+export type Supabase22EncryptionEvidence = Readonly<{
+    algorithm: string;
+    verified: boolean;
+}>;
+
+export type Supabase22ArchiveManifest = Readonly<{
+    schemaVersion: typeof ARCHIVE_MANIFEST_SCHEMA;
+    selectedCount: number;
+    aggregateChecksum: string;
+    encrypted: boolean;
+    encryption: Supabase22EncryptionEvidence;
+    retentionClass: string;
+}>;
+
+export type Supabase22RestoreManifest = Readonly<{
+    schemaVersion: typeof RESTORE_MANIFEST_SCHEMA;
+    selectedCount: number;
+    aggregateChecksum: string;
+    encrypted: boolean;
+    encryption: Supabase22EncryptionEvidence;
+    retentionClass: string;
+}>;
+
 export type Supabase22ArchiveEvidence = Readonly<{
     verified: boolean;
     aggregateChecksum: string | null;
     restoreStatus: Supabase22ArchiveRestoreStatus;
+    /** A parsed archive manifest is required for readiness; absence is blocked. */
+    manifest?: Supabase22ArchiveManifest | null;
+    /** A parsed isolated restore manifest is required for a verified restore. */
+    restoreManifest?: Supabase22RestoreManifest | null;
 }>;
 
 export type Supabase22GateInput = Readonly<{
@@ -41,14 +71,14 @@ export type Supabase22GateInput = Readonly<{
     rollbackEvidenceVerified: boolean;
     observationWindowClosed: boolean;
     ownerApprovalRecorded: boolean;
-    /** Optional aliases used when importing the extended readiness contract. */
-    canonicalSetMatch?: boolean;
-    catalogDependencyClean?: boolean;
-    archiveRestoreChecksumMatch?: boolean;
+    /** Production attestations are mandatory; missing values fail closed at runtime. */
+    canonicalSetMatch: boolean;
+    catalogDependencyClean: boolean;
+    archiveRestoreChecksumMatch: boolean;
     /** True only when all pending payment evidence has an independent disposition. */
-    paymentPendingDispositionRecorded?: boolean;
+    paymentPendingDispositionRecorded: boolean;
     /** True only when the run was proven not to activate admission or a real canary. */
-    noActivationOrCanary?: boolean;
+    noActivationOrCanary: boolean;
 }>;
 
 export type Supabase22Evidence = Supabase22GateInput & Readonly<{
@@ -75,6 +105,67 @@ function addGate(gates: string[], gate: string): void {
     if (!gates.includes(gate)) gates.push(gate);
 }
 
+function isSafeRetentionClass(value: unknown): value is string {
+    return typeof value === 'string' && RETENTION_CLASS_PATTERN.test(value);
+}
+
+function isSafeEncryptionEvidence(value: unknown): value is Supabase22EncryptionEvidence {
+    return isRecord(value)
+        && typeof value.algorithm === 'string'
+        && value.algorithm.length > 0
+        && value.algorithm.length <= 64
+        && typeof value.verified === 'boolean'
+        && value.verified === true;
+}
+
+export function isGenuineArchiveManifest(value: unknown): value is Supabase22ArchiveManifest {
+    return isRecord(value)
+        && value.schemaVersion === ARCHIVE_MANIFEST_SCHEMA
+        && Number.isSafeInteger(value.selectedCount)
+        && (value.selectedCount as number) > 0
+        && typeof value.aggregateChecksum === 'string'
+        && HASH_PATTERN.test(value.aggregateChecksum)
+        && value.encrypted === true
+        && isSafeEncryptionEvidence(value.encryption)
+        && isSafeRetentionClass(value.retentionClass);
+}
+
+export function isGenuineRestoreManifest(value: unknown): value is Supabase22RestoreManifest {
+    return isRecord(value)
+        && value.schemaVersion === RESTORE_MANIFEST_SCHEMA
+        && Number.isSafeInteger(value.selectedCount)
+        && (value.selectedCount as number) >= 0
+        && typeof value.aggregateChecksum === 'string'
+        && HASH_PATTERN.test(value.aggregateChecksum)
+        && value.encrypted === true
+        && isSafeEncryptionEvidence(value.encryption)
+        && isSafeRetentionClass(value.retentionClass);
+}
+
+function archiveManifestEvidenceClean(
+    archive: Supabase22ArchiveEvidence,
+    expectedCount: number,
+): boolean {
+    return archive.verified === true
+        && typeof archive.aggregateChecksum === 'string'
+        && HASH_PATTERN.test(archive.aggregateChecksum)
+        && isGenuineArchiveManifest(archive.manifest)
+        && archive.manifest.selectedCount === expectedCount
+        && archive.manifest.aggregateChecksum === archive.aggregateChecksum;
+}
+
+function restoreManifestEvidenceClean(
+    archive: Supabase22ArchiveEvidence,
+    expectedCount: number,
+): boolean {
+    return archive.restoreStatus === 'verified'
+        && isGenuineRestoreManifest(archive.restoreManifest)
+        && archive.restoreManifest.selectedCount === expectedCount
+        && archive.restoreManifest.aggregateChecksum === archive.aggregateChecksum
+        && isGenuineArchiveManifest(archive.manifest)
+        && archive.restoreManifest.retentionClass === archive.manifest.retentionClass;
+}
+
 /**
  * Evaluate every contraction prerequisite without granting a destructive capability.
  * Missing evidence is intentionally represented as a missing gate rather than inferred
@@ -91,34 +182,31 @@ export function evaluateSupabase22Gate(input: Supabase22GateInput): Supabase22Ev
     if (input.unexpectedTables.length > 0) addGate(missingGates, 'unexpected-table');
     if (!canonicalSetMatch) addGate(missingGates, 'canonical-table-set');
     if (!input.dependencyClean) addGate(missingGates, 'dependency-inventory');
-    if ('canonicalSetMatch' in input && input.canonicalSetMatch !== true) {
+    if (input.canonicalSetMatch !== true) {
         addGate(missingGates, 'canonical-table-set');
     }
-    if ('catalogDependencyClean' in input && input.catalogDependencyClean !== true) {
+    if (input.catalogDependencyClean !== true) {
         addGate(missingGates, 'dependency-inventory');
     }
     if (!input.migrationHistoryClean) addGate(missingGates, 'migration-history');
     if (input.genuineCompletedBundleCount <= 0) addGate(missingGates, 'genuine-completed-bundle');
     if (input.parityStatus !== 'ready') addGate(missingGates, 'per-order-parity');
-    if (!input.archiveManifest.verified
-        || typeof input.archiveManifest.aggregateChecksum !== 'string'
-        || !HASH_PATTERN.test(input.archiveManifest.aggregateChecksum)) {
+    if (!archiveManifestEvidenceClean(input.archiveManifest, input.genuineCompletedBundleCount)) {
         addGate(missingGates, 'archive-manifest');
     }
-    if (input.archiveManifest.restoreStatus !== 'verified') {
+    if (!restoreManifestEvidenceClean(input.archiveManifest, input.genuineCompletedBundleCount)) {
         addGate(missingGates, 'restore-drill');
     }
-    if ('archiveRestoreChecksumMatch' in input && input.archiveRestoreChecksumMatch !== true) {
+    if (input.archiveRestoreChecksumMatch !== true) {
         addGate(missingGates, 'restore-drill');
     }
     if (!input.rollbackEvidenceVerified) addGate(missingGates, 'rollback-evidence');
     if (!input.observationWindowClosed) addGate(missingGates, 'observation-window');
     if (!input.ownerApprovalRecorded) addGate(missingGates, 'separate-approval');
-    if ('paymentPendingDispositionRecorded' in input
-        && input.paymentPendingDispositionRecorded !== true) {
+    if (input.paymentPendingDispositionRecorded !== true) {
         addGate(missingGates, 'payment-pending-disposition');
     }
-    if ('noActivationOrCanary' in input && input.noActivationOrCanary !== true) {
+    if (input.noActivationOrCanary !== true) {
         addGate(missingGates, 'no-activation-or-canary');
     }
 
@@ -201,14 +289,39 @@ export type Supabase22CatalogRoutine = Readonly<{
     executeServiceRole: boolean;
 }>;
 
+export type Supabase22CatalogAcl = Readonly<{
+    objectName: string;
+    resolved: boolean;
+    /** Explicitly parsed from pg_class/pg_proc ACLs, never inferred from routine flags. */
+    serviceRoleOnly: boolean;
+}>;
+
 export type Supabase22CatalogDependency = Readonly<{
     resolved: boolean;
     allowed: boolean;
 }>;
 
+export type Supabase22CatalogMetadataAvailability = Readonly<{
+    catalog: boolean;
+    acl: boolean;
+    routine: boolean;
+    trigger: boolean;
+    dependency: boolean;
+    migration: boolean;
+    rls: boolean;
+    view: boolean;
+    publication: boolean;
+    sequence: boolean;
+    partition: boolean;
+    foreignKey: boolean;
+    legacyWriter: boolean;
+}>;
+
 export type Supabase22CatalogSnapshot = Readonly<{
     tables: readonly Supabase22CatalogTable[];
+    acls: readonly Supabase22CatalogAcl[];
     dependencies: readonly Supabase22CatalogDependency[];
+    foreignKeys: readonly Supabase22CatalogDependency[];
     securityDefinerFunctions: readonly Supabase22CatalogRoutine[];
     migrationHistory: readonly Readonly<{ version: string; pending?: boolean }>[];
     legacyWriters: readonly Readonly<{ active: boolean }>[];
@@ -218,6 +331,8 @@ export type Supabase22CatalogSnapshot = Readonly<{
     publications: readonly Readonly<{ resolved: boolean; allowed: boolean }>[];
     triggers: readonly Readonly<{ resolved: boolean; allowed: boolean }>[];
     policies: readonly Readonly<{ tableName: string; enabled: boolean }>[];
+    /** Every catalog query must explicitly attest that its result is available. */
+    metadataAvailability: Supabase22CatalogMetadataAvailability;
 }>;
 
 export type Supabase22CatalogEvidence = Readonly<{
@@ -239,13 +354,14 @@ export type Supabase22CatalogEvidence = Readonly<{
     sequencesClean: boolean;
     partitionsClean: boolean;
     legacyWritersClean: boolean;
+    metadataAvailability: Supabase22CatalogMetadataAvailability;
     clean: boolean;
     destructiveOperations: 'refused';
 }>;
 
 export function isSafeSecurityDefinerRoutine(routine: Supabase22CatalogRoutine): boolean {
-    if (!routine.securityDefiner) return true;
-    return routine.searchPathEmpty
+    return routine.securityDefiner === true
+        && routine.searchPathEmpty
         && !routine.executePublic
         && !routine.executeAnon
         && !routine.executeAuthenticated
@@ -254,28 +370,56 @@ export function isSafeSecurityDefinerRoutine(routine: Supabase22CatalogRoutine):
 
 function catalogObjectsClean(
     values: readonly Readonly<{ resolved: boolean; allowed: boolean }>[],
+    requireEvidence = false,
 ): boolean {
-    return values.every(value => value.resolved && value.allowed);
+    return (!requireEvidence || values.length > 0)
+        && values.every(value => value.resolved === true && value.allowed === true);
 }
 
 /** Evaluate normalized PostgreSQL catalog rows. This function never repairs the catalog. */
 export function evaluateSupabase22Catalog(
     snapshot: Supabase22CatalogSnapshot,
 ): Supabase22CatalogEvidence {
-    const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];
-    const dependencies = Array.isArray(snapshot.dependencies) ? snapshot.dependencies : null;
-    const routines = Array.isArray(snapshot.securityDefinerFunctions)
-        ? snapshot.securityDefinerFunctions : null;
-    const migrationHistory = Array.isArray(snapshot.migrationHistory)
-        ? snapshot.migrationHistory : null;
-    const legacyWriters = Array.isArray(snapshot.legacyWriters) ? snapshot.legacyWriters : null;
-    const views = Array.isArray(snapshot.views) ? snapshot.views : null;
-    const sequences = Array.isArray(snapshot.sequences) ? snapshot.sequences : null;
-    const partitions = Array.isArray(snapshot.partitions) ? snapshot.partitions : null;
-    const publications = Array.isArray(snapshot.publications) ? snapshot.publications : null;
-    const triggers = Array.isArray(snapshot.triggers) ? snapshot.triggers : null;
-    const policies = Array.isArray(snapshot.policies) ? snapshot.policies : null;
-    const metadataComplete = dependencies !== null
+    const source = isRecord(snapshot)
+        ? snapshot as Partial<Supabase22CatalogSnapshot>
+        : {};
+    const tables = Array.isArray(source.tables) ? source.tables : [];
+    const acls = Array.isArray(source.acls) ? source.acls : null;
+    const dependencies = Array.isArray(source.dependencies) ? source.dependencies : null;
+    const foreignKeys = Array.isArray(source.foreignKeys) ? source.foreignKeys : null;
+    const routines = Array.isArray(source.securityDefinerFunctions)
+        ? source.securityDefinerFunctions : null;
+    const migrationHistory = Array.isArray(source.migrationHistory)
+        ? source.migrationHistory : null;
+    const legacyWriters = Array.isArray(source.legacyWriters) ? source.legacyWriters : null;
+    const views = Array.isArray(source.views) ? source.views : null;
+    const sequences = Array.isArray(source.sequences) ? source.sequences : null;
+    const partitions = Array.isArray(source.partitions) ? source.partitions : null;
+    const publications = Array.isArray(source.publications) ? source.publications : null;
+    const triggers = Array.isArray(source.triggers) ? source.triggers : null;
+    const policies = Array.isArray(source.policies) ? source.policies : null;
+    const availability = isRecord(source.metadataAvailability)
+        ? source.metadataAvailability as Partial<Supabase22CatalogMetadataAvailability>
+        : null;
+    const metadataAvailability: Supabase22CatalogMetadataAvailability = {
+        catalog: availability?.catalog === true,
+        acl: availability?.acl === true,
+        routine: availability?.routine === true,
+        trigger: availability?.trigger === true,
+        dependency: availability?.dependency === true,
+        migration: availability?.migration === true,
+        rls: availability?.rls === true,
+        view: availability?.view === true,
+        publication: availability?.publication === true,
+        sequence: availability?.sequence === true,
+        partition: availability?.partition === true,
+        foreignKey: availability?.foreignKey === true,
+        legacyWriter: availability?.legacyWriter === true,
+    };
+    const metadataComplete = Object.values(metadataAvailability).every(Boolean)
+        && acls !== null
+        && dependencies !== null
+        && foreignKeys !== null
         && routines !== null
         && migrationHistory !== null
         && legacyWriters !== null
@@ -292,34 +436,54 @@ export function evaluateSupabase22Catalog(
     const canonicalTables = publicTables.filter(name => canonicalTableSet.has(name));
     const unexpectedTables = publicTables.filter(name => !canonicalTableSet.has(name));
     const missingTables = SUPABASE_22_CANONICAL_TABLES.filter(name => !publicTables.includes(name));
-    const rlsClean = publicTables.length > 0
+    const rlsClean = metadataAvailability.rls
+        && publicTables.length > 0
         && tables
             .filter(table => table.relkind === 'r' || table.relkind === 'p')
             .every(table => table.rlsEnabled === true);
-    const routinesClean = routines !== null
+    const routinesClean = metadataAvailability.routine
+        && routines !== null
+        && routines.length > 0
         && routines.every(isSafeSecurityDefinerRoutine);
-    const dependencyClean = dependencies !== null
-        && dependencies.every(value => value.resolved && value.allowed);
-    const migrationHistoryClean = migrationHistory !== null
+    const aclClean = metadataAvailability.acl
+        && acls !== null
+        && acls.length > 0
+        && acls.every(acl => acl.resolved === true && acl.serviceRoleOnly === true);
+    const dependencyClean = metadataAvailability.dependency
+        && dependencies !== null
+        && catalogObjectsClean(dependencies);
+    const foreignKeysClean = metadataAvailability.foreignKey
+        && foreignKeys !== null
+        && catalogObjectsClean(foreignKeys);
+    const migrationHistoryClean = metadataAvailability.migration
+        && migrationHistory !== null
         && migrationHistory.length > 0
         && migrationHistory.every(migration =>
             typeof migration.version === 'string'
             && migration.version.length > 0
             && migration.pending !== true);
-    const legacyWritersClean = legacyWriters !== null
-        && legacyWriters.every(writer => writer.active !== true);
-    const viewsClean = views !== null && catalogObjectsClean(views);
-    const sequencesClean = sequences !== null && catalogObjectsClean(sequences);
-    const partitionsClean = partitions !== null && catalogObjectsClean(partitions);
-    const publicationsClean = publications !== null && catalogObjectsClean(publications);
-    const triggersClean = triggers !== null && catalogObjectsClean(triggers);
-    const policiesClean = policies !== null && policies.every(policy => policy.enabled === true);
-    const clean = publicTables.length === SUPABASE_22_CANONICAL_TABLES.length
+    const legacyWritersClean = metadataAvailability.legacyWriter
+        && legacyWriters !== null
+        && legacyWriters.every(writer => writer.active === false);
+    const viewsClean = metadataAvailability.view && views !== null && catalogObjectsClean(views);
+    const sequencesClean = metadataAvailability.sequence
+        && sequences !== null && catalogObjectsClean(sequences);
+    const partitionsClean = metadataAvailability.partition
+        && partitions !== null && catalogObjectsClean(partitions);
+    const publicationsClean = metadataAvailability.publication
+        && publications !== null && catalogObjectsClean(publications);
+    const triggersClean = metadataAvailability.trigger
+        && triggers !== null && catalogObjectsClean(triggers);
+    const policiesClean = metadataAvailability.rls
+        && policies !== null && policies.every(policy => policy.enabled === true);
+    const clean = metadataAvailability.catalog
+        && publicTables.length === SUPABASE_22_CANONICAL_TABLES.length
         && canonicalTables.join('\u0000') === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
         && unexpectedTables.length === 0
         && missingTables.length === 0
         && metadataComplete
         && dependencyClean
+        && aclClean
         && migrationHistoryClean
         && rlsClean
         && routinesClean
@@ -328,6 +492,7 @@ export function evaluateSupabase22Catalog(
         && partitionsClean
         && publicationsClean
         && triggersClean
+        && foreignKeysClean
         && policiesClean
         && legacyWritersClean;
     const evidence: Supabase22CatalogEvidence = {
@@ -341,14 +506,15 @@ export function evaluateSupabase22Catalog(
         migrationHistoryClean,
         rlsClean,
         routinesClean,
-        aclClean: routinesClean,
+        aclClean,
         triggersClean,
-        foreignKeysClean: dependencyClean,
+        foreignKeysClean,
         viewsClean,
         publicationsClean,
         sequencesClean,
         partitionsClean,
         legacyWritersClean,
+        metadataAvailability,
         clean,
         destructiveOperations: 'refused',
     };
@@ -356,7 +522,7 @@ export function evaluateSupabase22Catalog(
     return evidence;
 }
 
-/** One read-only catalog query; the database function behind this query must be read-only. */
+/** Read-only catalog query executed through an injected service-role connection. */
 export const SUPABASE_22_CATALOG_QUERY = `
 SELECT c.relname,
        c.relkind,
@@ -371,7 +537,7 @@ ORDER BY c.relname
 `;
 
 /**
- * Read-only catalog query fragments used by the service-role catalog RPC. Keeping
+ * Read-only catalog query fragments used by an injected service-role catalog reader. Keeping
  * each surface explicit prevents a table-count check from being mistaken for a
  * dependency proof.
  */
@@ -395,6 +561,26 @@ SELECT n.nspname, c.relname, c.relacl
 FROM pg_catalog.pg_class AS c
 JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public'
+`,
+    acls: `
+SELECT n.nspname, c.relname, c.relacl,
+       pg_catalog.has_table_privilege('anon', c.oid, 'SELECT') AS anon_select,
+       pg_catalog.has_table_privilege('authenticated', c.oid, 'SELECT') AS authenticated_select,
+       pg_catalog.has_table_privilege('service_role', c.oid, 'SELECT') AS service_select
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND c.relkind IN ('r', 'p')
+ORDER BY c.relname
+`,
+    foreignKeys: `
+SELECT con.conname, con.convalidated,
+       pg_catalog.pg_get_constraintdef(con.oid) AS definition
+FROM pg_catalog.pg_constraint AS con
+JOIN pg_catalog.pg_class AS c ON c.oid = con.conrelid
+JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public'
+  AND con.contype = 'f'
 `,
     triggers: `
 SELECT n.nspname, c.relname, trigger_row.tgname,
@@ -460,7 +646,7 @@ ORDER BY extension.extname
 `,
 } as const;
 
-export interface Supabase22CatalogRpcClient {
+export interface Supabase22CatalogQueryClient {
     query(sql: string): PromiseLike<unknown>;
 }
 
@@ -471,7 +657,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseCatalogSnapshot(value: unknown): Supabase22CatalogSnapshot {
     if (!isRecord(value)) throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
     const arrayKeys = [
-        'tables', 'dependencies', 'securityDefinerFunctions', 'migrationHistory',
+        'tables', 'acls', 'dependencies', 'foreignKeys', 'securityDefinerFunctions', 'migrationHistory',
         'legacyWriters', 'views', 'sequences', 'partitions', 'publications',
         'triggers', 'policies',
     ] as const;
@@ -497,11 +683,50 @@ function parseCatalogSnapshot(value: unknown): Supabase22CatalogSnapshot {
         || typeof routine.executeServiceRole !== 'boolean')) {
         throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
     }
+    if (snapshot.acls.some(acl =>
+        !isRecord(acl)
+        || typeof acl.objectName !== 'string'
+        || typeof acl.resolved !== 'boolean'
+        || typeof acl.serviceRoleOnly !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
+    for (const key of ['dependencies', 'foreignKeys', 'views', 'sequences', 'partitions', 'publications', 'triggers'] as const) {
+        if (snapshot[key].some(value =>
+            !isRecord(value)
+            || typeof value.resolved !== 'boolean'
+            || typeof value.allowed !== 'boolean')) {
+            throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+        }
+    }
+    if (snapshot.migrationHistory.some(migration =>
+        !isRecord(migration)
+        || typeof migration.version !== 'string'
+        || (migration.pending !== undefined && typeof migration.pending !== 'boolean'))
+        || snapshot.legacyWriters.some(writer =>
+            !isRecord(writer) || typeof writer.active !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
+    if (snapshot.policies.some(policy =>
+        !isRecord(policy)
+        || typeof policy.tableName !== 'string'
+        || typeof policy.enabled !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
+    const metadataAvailability = snapshot.metadataAvailability;
+    const metadataKeys = [
+        'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
+        'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
+    ] as const;
+    if (metadataAvailability !== undefined
+        && (!isRecord(metadataAvailability)
+            || !metadataKeys.every(key => typeof metadataAvailability[key] === 'boolean'))) {
+        throw new Error('SUPABASE_22_CATALOG_PAYLOAD_INVALID');
+    }
     return snapshot;
 }
 
 export async function collectSupabase22CatalogEvidence(
-    client: Supabase22CatalogRpcClient,
+    client: Supabase22CatalogQueryClient,
 ): Promise<Supabase22CatalogEvidence> {
     if (!/^\s*SELECT\b/i.test(SUPABASE_22_CATALOG_QUERY)
         || /\b(?:DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE|GRANT|REVOKE)\b/i.test(SUPABASE_22_CATALOG_QUERY)) {

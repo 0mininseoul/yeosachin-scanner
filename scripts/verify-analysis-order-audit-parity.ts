@@ -145,16 +145,25 @@ function isDirectExecution(): boolean {
     return Boolean(entry) && import.meta.url === pathToFileURL(entry).href;
 }
 
+export function formatOrderAuditParityCliError(): Readonly<{
+    status: 'failed';
+    errorCode: 'ANALYSIS_ORDER_AUDIT_PARITY_FAILED';
+    destructiveOperations: 'refused';
+}> {
+    return {
+        status: 'failed',
+        errorCode: 'ANALYSIS_ORDER_AUDIT_PARITY_FAILED',
+        destructiveOperations: 'refused',
+    };
+}
+
 if (isDirectExecution()) {
     runOrderAuditParityCli(process.argv.slice(2))
         .then(result => {
             process.exitCode = result.exitCode;
         })
         .catch(() => {
-            process.stderr.write(`${JSON.stringify({
-                status: 'failed',
-                errorCode: 'ANALYSIS_ORDER_AUDIT_PARITY_FAILED',
-            })}\n`);
+            process.stderr.write(`${JSON.stringify(formatOrderAuditParityCliError())}\n`);
             process.exitCode = 1;
         });
 }

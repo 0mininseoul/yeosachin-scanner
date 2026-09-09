@@ -18,13 +18,18 @@
   "ownerApprovalRecorded": false,
   "destructiveOperations": "refused",
   "missingGates": [
+    "public-table-count",
+    "canonical-table-set",
+    "dependency-inventory",
+    "migration-history",
     "genuine-completed-bundle",
     "per-order-parity",
     "archive-manifest",
     "restore-drill",
-    "dependency-inventory",
     "rollback-evidence",
     "observation-window",
-    "separate-approval"
+    "separate-approval",
+    "payment-pending-disposition",
+    "no-activation-or-canary"
   ]
 }
