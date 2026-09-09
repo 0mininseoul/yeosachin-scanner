@@ -18,6 +18,20 @@ export type LandingLeadJourneyClaim = Readonly<{
     created: boolean;
 }>;
 
+export class LandingLeadCaptureMismatchError extends Error {
+    constructor() {
+        super('LANDING_LEAD_CAPTURE_MISMATCH');
+        this.name = 'LandingLeadCaptureMismatchError';
+    }
+}
+
+export class LandingLeadCursorInvalidError extends Error {
+    constructor() {
+        super('LANDING_LEAD_CURSOR_INVALID');
+        this.name = 'LandingLeadCursorInvalidError';
+    }
+}
+
 export type LandingLeadJourneyRpcClient = {
     rpc(
         name: string,
@@ -127,8 +141,15 @@ export type LandingLeadCaptureToken = Readonly<{
 export function createCaptureToken(
     _deviceId: string,
     secret: string = secretFor(),
+    deterministicSeed?: string,
 ): LandingLeadCaptureToken {
-    const payload = `v1.${randomBytes(24).toString('base64url')}`;
+    const nonce = deterministicSeed
+        ? createHmac('sha256', secret)
+            .update(`${LANDING_LEAD_CAPTURE_DOMAIN}:nonce\0${deterministicSeed}`, 'utf8')
+            .digest('base64url')
+            .slice(0, 32)
+        : randomBytes(24).toString('base64url');
+    const payload = `v1.${nonce}`;
     const token = `${payload}.${signatureFor(payload, secret)}`;
     const tokenHash = hashCaptureToken(token, secret);
     return { token, tokenHash, journeyId: captureJourneyId(tokenHash) };
@@ -182,7 +203,16 @@ function throwRpc(error: { message?: string; code?: string } | null, operation: 
     if (error?.message === 'LANDING_LEAD_JOURNEY_CLAIM_CONFLICT') {
         throw new Error('LANDING_LEAD_JOURNEY_CLAIM_CONFLICT');
     }
+    if (error?.message === 'LANDING_LEAD_CAPTURE_MISMATCH') {
+        throw new LandingLeadCaptureMismatchError();
+    }
     throw new Error(`LANDING_LEAD_PERSISTENCE_ERROR:${operation}`);
+}
+
+function normalizeInstagramId(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (!INSTAGRAM_PATTERN.test(normalized)) throw new Error('LANDING_LEAD_INSTAGRAM_INVALID');
+    return normalized;
 }
 
 export async function createOrReplayLandingLeadCapture(
@@ -196,27 +226,105 @@ export async function createOrReplayLandingLeadCapture(
     },
 ): Promise<LandingLeadJourneyClaim> {
     const journeyId = validUuid(input.journeyId, 'JOURNEY');
-    if (!INSTAGRAM_PATTERN.test(input.instagramId)) throw new Error('LANDING_LEAD_INSTAGRAM_INVALID');
+    const instagramId = normalizeInstagramId(input.instagramId);
+    if (input.inputContext !== 'target') throw new Error('LANDING_LEAD_CAPTURE_CONTEXT_INVALID');
     if (!/^[a-f0-9]{64}$/.test(input.anonymousPrincipalHash)) throw new Error('LANDING_LEAD_PRINCIPAL_HASH_INVALID');
     if (!/^[a-f0-9]{64}$/.test(input.captureTokenHash)) throw new Error('LANDING_LEAD_CAPTURE_HASH_INVALID');
     const result = await client.rpc('create_or_replay_landing_lead_capture', {
         p_journey_id: journeyId,
-        p_instagram_id: input.instagramId,
+        p_instagram_id: instagramId,
         p_input_context: input.inputContext,
         p_anonymous_principal_hash: input.anonymousPrincipalHash,
         p_capture_token_hash: input.captureTokenHash,
     });
     if (result.error) throwRpc(result.error, 'capture');
     const row = rpcRow(result.data, 'capture');
-    if (!row || typeof row.journey_id !== 'string') {
+    if (!row || typeof row.journey_id !== 'string' || typeof row.created !== 'boolean') {
         throw new Error('LANDING_LEAD_PERSISTENCE_ERROR:capture');
     }
+    const returnedJourneyId = validUuid(String(row.journey_id), 'JOURNEY');
+    if (returnedJourneyId !== journeyId) throw new LandingLeadCaptureMismatchError();
     return {
-        journeyId: validUuid(String(row.journey_id), 'JOURNEY'),
+        journeyId: returnedJourneyId,
         tokenHash: input.captureTokenHash,
         mappingStatus: 'anonymous_device',
-        created: row.created === true,
+        created: row.created,
     };
+}
+
+export type LandingLeadBindingResult = Readonly<{
+    bound: true;
+    repaired: boolean;
+    journeyId: string;
+}>;
+
+export async function captureAndBindLandingLeadJourney(
+    client: LandingLeadJourneyRpcClient,
+    input: {
+        preflightId: string;
+        targetInstagramId: string;
+        landingCaptureToken?: string | null;
+        anonymousDeviceId?: string | null;
+        authUserId?: string | null;
+        secret?: string;
+        env?: Record<string, string | undefined>;
+    },
+): Promise<LandingLeadBindingResult> {
+    const preflightId = validUuid(input.preflightId, 'PREFLIGHT');
+    const instagramId = normalizeInstagramId(input.targetInstagramId);
+    const deviceId = input.anonymousDeviceId?.trim();
+    if (!deviceId) throw new Error('LANDING_LEAD_DEVICE_REQUIRED');
+    const secret = input.secret ?? landingLeadCaptureSecret(input.env);
+    const anonymousPrincipalHash = deriveAnonymousPrincipalHash(deviceId, secret);
+    const requestedToken = input.landingCaptureToken?.trim() || null;
+    // Include only the derived principal in deterministic repair seeds. This
+    // keeps same-device retries idempotent while preventing a different
+    // browser from replaying the prior browser's repair journey.
+    const deterministicSeed = `preflight:${preflightId}:${anonymousPrincipalHash}`;
+    const retrySeed = `${deterministicSeed}:repair`;
+    const deterministicToken = createCaptureToken(deviceId, secret, deterministicSeed).token;
+    let repaired = false;
+
+    const persistCapture = async (token: string): Promise<LandingLeadJourneyClaim> => {
+        const parsed = readCaptureToken(token, secret);
+        if (!parsed) throw new LandingLeadCaptureMismatchError();
+        return createOrReplayLandingLeadCapture(client, {
+            journeyId: captureTokenJourneyId(parsed.tokenHash),
+            instagramId,
+            inputContext: 'target',
+            anonymousPrincipalHash,
+            captureTokenHash: parsed.tokenHash,
+        });
+    };
+
+    let captured: LandingLeadJourneyClaim;
+    try {
+        captured = await persistCapture(
+            requestedToken ?? deterministicToken,
+        );
+    } catch (error) {
+        if (!(error instanceof LandingLeadCaptureMismatchError)) throw error;
+        // A stale handoff must never be rebound to a different account, device,
+        // or context. Create a fresh opaque capture and bind that exact target.
+        repaired = true;
+        captured = await persistCapture(createCaptureToken(deviceId, secret, retrySeed).token);
+    }
+
+    const bound = await bindLandingLeadJourneyToPreflight(
+        client,
+        captured.journeyId,
+        preflightId,
+    );
+    if (!bound) throw new Error('LANDING_LEAD_BINDING_FAILED');
+    if (input.authUserId) {
+        const claimed = await claimLandingLeadJourney(
+            client,
+            captured.journeyId,
+            input.authUserId,
+        );
+        if (!claimed) throw new Error('LANDING_LEAD_CLAIM_FAILED');
+    }
+    return { bound: true, repaired, journeyId: captured.journeyId };
 }
 
 export async function bindLandingLeadJourneyToPreflight(
@@ -237,10 +345,10 @@ export async function createOrReplayLandingLeadExclusion(
     sourcePreflightId: string,
     instagramId: string,
 ): Promise<boolean> {
-    if (!INSTAGRAM_PATTERN.test(instagramId)) throw new Error('LANDING_LEAD_INSTAGRAM_INVALID');
+    const normalizedInstagramId = normalizeInstagramId(instagramId);
     const result = await client.rpc('create_or_replay_landing_lead_exclusion', {
         p_source_preflight_id: validUuid(sourcePreflightId, 'PREFLIGHT'),
-        p_instagram_id: instagramId,
+        p_instagram_id: normalizedInstagramId,
     });
     if (result.error) throwRpc(result.error, 'exclusion');
     return result.data === true;
@@ -304,7 +412,7 @@ function decodeAdminCursor(cursor: string, secret: string): { createdAt: string;
         z.string().datetime({ offset: true }).parse(parsed.createdAt);
         return { createdAt: parsed.createdAt, id: parsed.id };
     } catch {
-        throw new Error('LANDING_LEAD_CURSOR_INVALID');
+        throw new LandingLeadCursorInvalidError();
     }
 }
 

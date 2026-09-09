@@ -66,5 +66,9 @@ describe('landing lead journey migration', () => {
             expect(journeySql).toMatch(new RegExp(`REVOKE EXECUTE ON FUNCTION public\\.${name}\\(`));
             expect(journeySql).toMatch(new RegExp(`GRANT EXECUTE ON FUNCTION public\\.${name}\\([\\s\\S]*?\\) TO service_role`));
         }
+        expect(journeySql).toContain("p_input_context <> 'target'");
+        expect(journeySql).toContain('LANDING_LEAD_CAPTURE_MISMATCH');
+        expect(journeySql).toContain('v_existing.instagram_id IS DISTINCT FROM lower(p_instagram_id)');
+        expect(journeySql).toContain('v_existing.anonymous_principal_hash IS DISTINCT FROM p_anonymous_principal_hash');
     });
 });

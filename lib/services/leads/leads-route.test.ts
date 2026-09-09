@@ -12,11 +12,13 @@ function request(body: unknown, {
     origin = 'https://example.com',
     contentType = 'application/json',
     userAgent = 'UA',
-}: { origin?: string | null; contentType?: string | null; userAgent?: string } = {}): Request {
+    deviceId = '123e4567-e89b-42d3-a456-426614174000',
+}: { origin?: string | null; contentType?: string | null; userAgent?: string; deviceId?: string | null } = {}): Request {
     const headers = new Headers();
     if (origin !== null) headers.set('origin', origin);
     if (contentType !== null) headers.set('content-type', contentType);
     headers.set('user-agent', userAgent);
+    if (deviceId !== null) headers.set('x-anonymous-device-id', deviceId);
     return new Request('https://example.com/api/leads', {
         method: 'POST',
         headers,
@@ -52,6 +54,13 @@ describe('POST /api/leads', () => {
     it('rejects an un-normalizable instagram id with 400', async () => {
         const res = await POST(request({ instagramId: 'bad name' }, {}));
         expect(res.status).toBe(400);
+        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
+    });
+
+    it('rejects requests without a stable browser identifier instead of correlating by user-agent', async () => {
+        const res = await POST(request({ instagramId: 'suzy' }, { deviceId: null }));
+        expect(res.status).toBe(400);
+        await expect(res.json()).resolves.toMatchObject({ code: 'DEVICE_ID_REQUIRED' });
         expect(mocks.insertLandingLead).not.toHaveBeenCalled();
     });
 

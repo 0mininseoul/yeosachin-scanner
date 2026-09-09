@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
     anonymousExclusion: vi.fn(),
     anonymousReserve: vi.fn(),
     anonymousMark: vi.fn(),
+    landingCaptureBind: vi.fn(),
     admin: {
         from: vi.fn(),
     },
@@ -119,6 +120,10 @@ vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
 vi.mock('@/lib/services/leads/store', () => ({
     insertLandingLead: mocks.insertLandingLead,
 }));
+vi.mock('@/lib/services/landing/landing-lead-journey', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/landing/landing-lead-journey')>()),
+    captureAndBindLandingLeadJourney: mocks.landingCaptureBind,
+}));
 vi.mock('@/lib/services/demo-analysis/store', () => ({ demoAnalysisStore: mocks.demoStore }));
 vi.mock('@/lib/services/demo-analysis/fixture-store', () => ({ loadDemoFixtureForVersion: mocks.loadFixture }));
 vi.mock('@/lib/services/identity/account-principal-store', async importOriginal => ({
@@ -178,12 +183,18 @@ function targetProfile(overrides: Partial<InstagramProfile> = {}): InstagramProf
 function postRequest(
     body: unknown = { targetInstagramId: 'Target.Name' },
     idempotencyKey = 'preflight-key-000000000000',
-    testAdmission?: string
+    testAdmission?: string,
+    options: { deviceId?: string | null; captureToken?: string } = {},
 ) {
     const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': idempotencyKey,
     });
+    const deviceId = options.deviceId === undefined
+        ? '123e4567-e89b-42d3-a456-426614174000'
+        : options.deviceId;
+    if (deviceId) headers.set('X-Anonymous-Device-Id', deviceId);
+    if (options.captureToken) headers.set('X-Landing-Lead-Capture-Token', options.captureToken);
     if (testAdmission) headers.set('x-analysis-test-admission', testAdmission);
     return new Request('https://example.com/api/analysis/preflight', {
         method: 'POST',
@@ -234,6 +245,11 @@ describe('preflight owner routes', () => {
             error: null,
         });
         mocks.insertLandingLead.mockResolvedValue(undefined);
+        mocks.landingCaptureBind.mockResolvedValue({
+            bound: true,
+            repaired: false,
+            journeyId: '523e4567-e89b-42d3-a456-426614174000',
+        });
         mocks.resolveDispatch.mockReturnValue({ mode: 'queue', config: taskConfig });
         mocks.trustedAccessMode.mockReturnValue('test_entitlement');
         mocks.betaEnabled.mockReturnValue(true);
@@ -486,6 +502,44 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 
+    it('captures and binds the exact authenticated target before acknowledging preflight', async () => {
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            undefined,
+            {
+                captureToken: 'v1.opaque.signed-token',
+            },
+        ));
+
+        expect(response.status).toBe(202);
+        expect(mocks.landingCaptureBind).toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({
+                preflightId,
+                targetInstagramId: 'target.name',
+                landingCaptureToken: 'v1.opaque.signed-token',
+                anonymousDeviceId: '123e4567-e89b-42d3-a456-426614174000',
+                authUserId: userId,
+            }),
+        );
+        expect(mocks.store.reserveDispatch).toHaveBeenCalledOnce();
+    });
+
+    it('rejects authenticated preflight without a stable browser identifier', async () => {
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            undefined,
+            { deviceId: null },
+        ));
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toMatchObject({ code: 'DEVICE_ID_REQUIRED' });
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.landingCaptureBind).not.toHaveBeenCalled();
+    });
+
     it('fails closed before authenticated preflight persistence for a retired account', async () => {
         mocks.requireActiveAccountClassification.mockRejectedValue(
             new AccountPrincipalAdmissionError(),
@@ -511,6 +565,7 @@ describe('preflight owner routes', () => {
                 headers: {
                     'content-type': 'application/json',
                     'idempotency-key': 'preflight-key-000000000000',
+                    'x-anonymous-device-id': '123e4567-e89b-42d3-a456-426614174000',
                     'x-analysis-beta': 'true',
                     referer: 'https://example.com/analyze?betatest=true',
                 },
@@ -1394,7 +1449,7 @@ describe('preflight owner routes', () => {
         }
     });
 
-    it('captures a normalized excluded lead after the durable decision succeeds', async () => {
+    it('captures a normalized excluded lead before acknowledging the durable decision', async () => {
         const response = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -1402,12 +1457,6 @@ describe('preflight owner routes', () => {
         }), context());
 
         expect(response.status).toBe(204);
-        expect(mocks.after).toHaveBeenCalledTimes(1);
-        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
-
-        const capture = mocks.after.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
-        await capture?.();
-
         expect(mocks.insertLandingLead).toHaveBeenCalledWith({
             instagramId: 'girlfriend.name',
             inputContext: 'excluded',
@@ -1415,7 +1464,7 @@ describe('preflight owner routes', () => {
         });
     });
 
-    it('never lets excluded lead persistence fail the PATCH', async () => {
+    it('returns a retryable failure when excluded lead persistence fails', async () => {
         mocks.insertLandingLead.mockRejectedValueOnce(new Error('lead database unavailable'));
 
         const excluded = await patchPreflight(new Request('https://example.com', {
@@ -1423,10 +1472,8 @@ describe('preflight owner routes', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'girlfriend.name' }),
         }), context());
-        expect(excluded.status).toBe(204);
-        expect(mocks.after).toHaveBeenCalledTimes(1);
-        const capture = mocks.after.mock.calls[0][0] as () => Promise<void>;
-        await expect(capture()).resolves.toBeUndefined();
+        expect(excluded.status).toBe(500);
+        expect(mocks.after).not.toHaveBeenCalled();
     });
 
     it('does not capture skip decisions', async () => {
@@ -1440,10 +1487,8 @@ describe('preflight owner routes', () => {
         expect(mocks.insertLandingLead).not.toHaveBeenCalled();
     });
 
-    it('keeps a durable exclusion accepted when background scheduling is unavailable', async () => {
-        mocks.after.mockImplementationOnce(() => {
-            throw new Error('after unavailable');
-        });
+    it('does not acknowledge an exclusion when the lead row cannot be persisted', async () => {
+        mocks.insertLandingLead.mockRejectedValueOnce(new Error('lead database unavailable'));
 
         const response = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',
@@ -1451,12 +1496,12 @@ describe('preflight owner routes', () => {
             body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'girlfriend.name' }),
         }), context());
 
-        expect(response.status).toBe(204);
-        expect(mocks.store.setExclusion).toHaveBeenCalledTimes(1);
-        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
+        expect(response.status).toBe(500);
+        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+        expect(mocks.insertLandingLead).toHaveBeenCalledTimes(1);
     });
 
-    it('never schedules a lead capture when the exclusion decision is rejected', async () => {
+    it('does not acknowledge an invalid exclusion decision', async () => {
         mocks.store.setExclusion.mockRejectedValueOnce(new InvalidPreflightExclusionError());
 
         const response = await patchPreflight(new Request('https://example.com', {
@@ -1467,7 +1512,7 @@ describe('preflight owner routes', () => {
 
         expect(response.status).toBe(400);
         expect(mocks.after).not.toHaveBeenCalled();
-        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
+        expect(mocks.insertLandingLead).toHaveBeenCalledTimes(1);
     });
 
     it('isolates the exact allowlisted synthetic target before reservation, task, and provider work', async () => {

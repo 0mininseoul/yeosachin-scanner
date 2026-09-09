@@ -76,9 +76,12 @@ RETURNS TABLE(journey_id UUID, created BOOLEAN)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
-    v_existing_journey_id UUID;
+    v_existing public.landing_leads%ROWTYPE;
 BEGIN
-    IF p_input_context NOT IN ('target', 'excluded')
+    -- Exclusions must carry source_preflight_id and are persisted through the
+    -- dedicated exclusion RPC below. This capture RPC is target-only so an
+    -- omitted source preflight can never violate the context shape contract.
+    IF p_input_context <> 'target'
        OR p_instagram_id !~ '^[a-z0-9._]{1,30}$'
        OR p_anonymous_principal_hash !~ '^[a-f0-9]{64}$'
        OR p_capture_token_hash !~ '^[a-f0-9]{64}$' THEN
@@ -89,7 +92,7 @@ BEGIN
         anonymous_principal_hash, capture_token_hash,
         mapping_status, mapping_source, created_at
     ) VALUES (
-        p_journey_id, p_instagram_id, p_input_context,
+        p_journey_id, lower(p_instagram_id), p_input_context,
         p_anonymous_principal_hash, p_capture_token_hash,
         'anonymous_device', 'capture_v1', pg_catalog.clock_timestamp()
     )
@@ -98,11 +101,18 @@ BEGIN
         RETURN QUERY SELECT p_journey_id, TRUE;
         RETURN;
     END IF;
-    SELECT lead.journey_id INTO v_existing_journey_id
+    SELECT lead.* INTO v_existing
     FROM public.landing_leads AS lead
     WHERE lead.capture_token_hash = p_capture_token_hash
     LIMIT 1;
-    RETURN QUERY SELECT v_existing_journey_id, FALSE;
+    IF NOT FOUND
+       OR v_existing.journey_id IS DISTINCT FROM p_journey_id
+       OR v_existing.instagram_id IS DISTINCT FROM lower(p_instagram_id)
+       OR v_existing.input_context IS DISTINCT FROM p_input_context
+       OR v_existing.anonymous_principal_hash IS DISTINCT FROM p_anonymous_principal_hash THEN
+        RAISE EXCEPTION 'LANDING_LEAD_CAPTURE_MISMATCH';
+    END IF;
+    RETURN QUERY SELECT v_existing.journey_id, FALSE;
 END;
 $$;
 
@@ -122,7 +132,10 @@ BEGIN
         END
     WHERE journey_id = p_journey_id
       AND input_context = 'target'
-      AND source_preflight_id IS NULL
+      AND (
+          source_preflight_id IS NULL
+          OR source_preflight_id = p_source_preflight_id
+      )
       AND mapping_status <> 'unlinked_after_deletion';
     RETURN FOUND;
 END;

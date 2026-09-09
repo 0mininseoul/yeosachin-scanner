@@ -1,4 +1,4 @@
-import { after, NextResponse } from 'next/server';
+import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -67,25 +67,15 @@ async function authenticatedSession() {
     };
 }
 
-function captureExcludedLandingLead(
+async function captureExcludedLandingLead(
     preflightId: string,
     excludedInstagramId: string,
-): void {
-    try {
-        after(async () => {
-            try {
-                await insertLandingLead({
-                    instagramId: excludedInstagramId,
-                    inputContext: 'excluded',
-                    sourcePreflightId: preflightId,
-                });
-            } catch {
-                // Lead capture is best-effort and must never alter the exclusion decision.
-            }
-        });
-    } catch {
-        // The durable exclusion remains authoritative when background work is unavailable.
-    }
+): Promise<void> {
+    await insertLandingLead({
+        instagramId: excludedInstagramId,
+        inputContext: 'excluded',
+        sourcePreflightId: preflightId,
+    });
 }
 
 function exclusionFailureErrorCode(error: unknown): 'PREFLIGHT_PERSISTENCE_ERROR' | 'INTERNAL_ERROR' {
@@ -282,6 +272,9 @@ async function handlePATCH(
                 });
                 return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
             }
+            if (anonymousParsed.data.decision === 'exclude') {
+                await captureExcludedLandingLead(preflightId, anonymousParsed.data.excludedInstagramId);
+            }
             const updated = await setAnonymousAnalysisV2PreflightExclusion({
                 preflightId,
                 claimToken,
@@ -291,9 +284,6 @@ async function handlePATCH(
                     : null,
             }, { client: session.supabase });
             if (!updated) return errorResponse(409, 'PREFLIGHT_IMMUTABLE', '이 사전 점검 요청은 변경할 수 없습니다.');
-            if (anonymousParsed.data.decision === 'exclude') {
-                captureExcludedLandingLead(preflightId, anonymousParsed.data.excludedInstagramId);
-            }
             operationalLogger.emit({
                 event: 'preflight.exclusion_decided',
                 severity: 'info',
@@ -379,6 +369,12 @@ async function handlePATCH(
             );
         }
 
+        if (parsed.data.decision === 'exclude') {
+            await captureExcludedLandingLead(
+                preflightId,
+                parsed.data.excludedInstagramId,
+            );
+        }
         await preflightStore.setExclusion({
             preflightId,
             userId: user.id,
@@ -387,12 +383,6 @@ async function handlePATCH(
                 ? parsed.data.excludedInstagramId
                 : null,
         }, { client: supabase });
-        if (parsed.data.decision === 'exclude') {
-            captureExcludedLandingLead(
-                preflightId,
-                parsed.data.excludedInstagramId,
-            );
-        }
         operationalLogger.emit({
             event: 'preflight.exclusion_decided',
             severity: 'info',
@@ -438,6 +428,12 @@ async function handlePATCH(
             return errorResponse(409, error.message, '이 사전 점검 요청은 변경할 수 없습니다.');
         }
         const errorCode = exclusionFailureErrorCode(error);
+        void recordPreflightFailure({
+            ...(observedUserId ? { userId: observedUserId } : {}),
+            ...(observedPreflightId ? { preflightId: observedPreflightId } : {}),
+            stage: 'exclusion',
+            errorCode: 'INTERNAL_ERROR',
+        });
         operationalLogger.emit({
             event: 'preflight.failed',
             severity: 'error',

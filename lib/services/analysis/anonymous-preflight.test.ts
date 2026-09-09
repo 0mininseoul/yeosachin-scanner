@@ -97,6 +97,36 @@ describe('anonymous preflight service', () => {
         expect(JSON.stringify(landingRpc.mock.calls)).not.toContain('device-123');
     });
 
+    it('does not report preflight success when the landing capture cannot be persisted', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                preflight_id: preflightId,
+                expires_at: '2026-08-05T00:30:00.000Z',
+                created: true,
+                preflight_status: 'pending',
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: { message: 'LANDING_LEAD_PERSISTENCE_ERROR' },
+        });
+
+        await expect(createAnonymousAnalysisV2Preflight({
+            targetInstagramId: 'target_user',
+            targetInputHash: 'a'.repeat(64),
+            idempotencyKey: 'anonymous-preflight-003',
+            claimToken: claim.token,
+            landingCaptureToken: createCaptureToken('device-123', env.ANONYMOUS_PREFLIGHT_CLAIM_SECRET).token,
+            anonymousDeviceId: 'device-123',
+            env,
+        }, { client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } })).rejects.toMatchObject({
+            message: 'LANDING_LEAD_PERSISTENCE_ERROR:capture',
+            preflightId,
+        });
+    });
+
     it('requires the signed token before reading anonymous status', async () => {
         const claim = createAnonymousPreflightClaim({ env });
         const rpc = vi.fn().mockResolvedValue({ data: [], error: null });
@@ -204,6 +234,33 @@ describe('anonymous preflight service', () => {
             ownerPreflightId: preflightId,
         });
     });
+
+    it('claims the anonymous preflight and landing journey through one atomic RPC', async () => {
+        const claim = createAnonymousPreflightClaim({ env });
+        const preflightRpc = vi.fn().mockResolvedValue({
+            data: [{
+                claimed: true,
+                preflight_status: 'claimed',
+                owner_preflight_id: null,
+            }],
+            error: null,
+        });
+        const landingRpc = vi.fn();
+
+        await expect(claimAnonymousAnalysisV2Preflight(
+            preflightId,
+            claim.token,
+            '223e4567-e89b-42d3-a456-426614174000',
+            { env, client: { rpc: preflightRpc }, landingClient: { rpc: landingRpc } },
+        )).resolves.toEqual({ claimed: true, ownerPreflightId: null });
+
+        expect(preflightRpc).toHaveBeenCalledWith(
+            'claim_anonymous_analysis_v2_preflight_with_landing',
+            expect.objectContaining({ p_preflight_id: preflightId }),
+        );
+        expect(landingRpc).not.toHaveBeenCalled();
+    });
+
     it('uses versioned role-aware dispatch RPCs for new anonymous tasks', async () => {
         const claim = createAnonymousPreflightClaim({ env });
         const dispatchToken = '323e4567-e89b-42d3-a456-426614174000';

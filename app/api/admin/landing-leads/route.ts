@@ -7,6 +7,7 @@ import {
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import {
+    LandingLeadCursorInvalidError,
     landingLeadListRowSchema,
     loadLandingLeadAdminProjection,
 } from '@/lib/services/landing/landing-lead-journey';
@@ -154,7 +155,13 @@ export async function GET(request: Request) {
     try {
         const payload = await loadLandingLeadAdminProjection(supabaseAdmin, query);
         return privateJson(safeProjection(payload));
-    } catch {
+    } catch (error) {
+        if (
+            error instanceof LandingLeadCursorInvalidError
+            || (error instanceof Error && error.message === 'LANDING_LEAD_CURSOR_INVALID')
+        ) {
+            return privateJson({ error: 'Invalid landing lead request' }, 400);
+        }
         return privateJson({ error: 'Landing lead service unavailable' }, 503);
     }
 }

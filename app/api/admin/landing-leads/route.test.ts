@@ -134,6 +134,17 @@ describe('operator landing-lead list route', () => {
         expect(body).not.toContain('secret_internal_details');
     });
 
+    it('maps a tampered signed cursor to a client error instead of service unavailable', async () => {
+        routeMocks.loadLandingLeadAdminProjection.mockRejectedValue(
+            new Error('LANDING_LEAD_CURSOR_INVALID'),
+        );
+
+        const response = await GET(request('?cursor=tampered'));
+
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: 'Invalid landing lead request' });
+    });
+
     it('strips projection extras and never returns raw input, hashes, ids, or claim fields', async () => {
         routeMocks.loadLandingLeadAdminProjection.mockResolvedValue({
             rows: [{

@@ -15,14 +15,7 @@ import {
 } from './anonymous-preflight-claim';
 import { PLAN_PRICING_VERSION } from '@/lib/domain/analysis/plan-catalog';
 import {
-    bindLandingLeadJourneyToPreflight,
-    captureTokenJourneyId,
-    claimLandingLeadJourney,
-    createOrReplayLandingLeadCapture,
-    deriveAnonymousPrincipalHash,
-    hashCaptureToken,
-    landingLeadCaptureSecret,
-    readCaptureToken,
+    captureAndBindLandingLeadJourney,
     type LandingLeadJourneyRpcClient,
 } from '@/lib/services/landing/landing-lead-journey';
 
@@ -35,6 +28,7 @@ export const ANONYMOUS_PREFLIGHT_DATABASE_NAMES = Object.freeze({
     createRpc: 'create_anonymous_analysis_v2_preflight',
     readRpc: 'read_anonymous_analysis_v2_preflight_public',
     claimRpc: 'claim_anonymous_analysis_v2_preflight',
+    claimWithLandingRpc: 'claim_anonymous_analysis_v2_preflight_with_landing',
     exclusionRpc: 'set_anonymous_analysis_v2_preflight_exclusion',
     // New anonymous producers stamp the same trusted preflight dispatch
     // contract as authenticated producers. The historical RPCs remain
@@ -91,6 +85,16 @@ export class AnonymousPreflightRateLimitedError extends Error {
     constructor(readonly reason: 'daily_cap' | 'rate_limited') {
         super('ANONYMOUS_PREFLIGHT_RATE_LIMITED');
         this.name = 'AnonymousPreflightRateLimitedError';
+    }
+}
+
+export class AnonymousPreflightLandingCaptureError extends Error {
+    constructor(
+        readonly preflightId: string,
+        cause: unknown,
+    ) {
+        super(cause instanceof Error ? cause.message : 'ANONYMOUS_PREFLIGHT_LANDING_CAPTURE_FAILED');
+        this.name = 'AnonymousPreflightLandingCaptureError';
     }
 }
 
@@ -218,41 +222,31 @@ export async function createAnonymousAnalysisV2Preflight(
     if (error) rpcError(error, 'create');
     const row = rpcRow(data, 'create');
     if (!row) throw new Error('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:create');
-    const landingCaptureToken = input.landingCaptureToken ?? input.captureToken;
-    if (landingCaptureToken) {
-        // Landing capture is deliberately best-effort. A dropped lead request is
-        // repaired at the preflight boundary, but a malformed/temporarily
-        // unavailable capture must never block analysis admission.
+    const createdPreflightId = requireUuid(String(row.preflight_id), 'ID');
+    if (options.landingClient) {
+        // The preflight is only acknowledged after the exact target capture is
+        // positively persisted and bound. A caller can retry the same
+        // idempotency key when this repair path fails.
         try {
-            const captureSecret = landingLeadCaptureSecret(env);
-            const parsedCapture = readCaptureToken(landingCaptureToken, captureSecret);
-            if (parsedCapture) {
-                const tokenHash = parsedCapture.tokenHash;
-                const journeyId = captureTokenJourneyId(tokenHash);
-                const landingClient = options.landingClient ?? supabaseAdmin;
-                await createOrReplayLandingLeadCapture(landingClient, {
-                    journeyId,
-                    instagramId: input.targetInstagramId,
-                    inputContext: 'target',
-                    anonymousPrincipalHash: deriveAnonymousPrincipalHash(
-                        input.anonymousDeviceId ?? 'missing-device',
-                        captureSecret,
-                    ),
-                    captureTokenHash: hashCaptureToken(landingCaptureToken, captureSecret),
-                });
-                await bindLandingLeadJourneyToPreflight(
-                    landingClient,
-                    journeyId,
-                    requireUuid(String(row.preflight_id), 'ID'),
-                );
-            }
-        } catch {
-            // A bounded durable preflight already exists; do not turn optional
-            // landing attribution into a user-visible analysis failure.
+            await captureAndBindLandingLeadJourney(
+                options.landingClient,
+                {
+                    preflightId: createdPreflightId,
+                    targetInstagramId: input.targetInstagramId,
+                    landingCaptureToken: input.landingCaptureToken ?? input.captureToken,
+                    anonymousDeviceId: input.anonymousDeviceId,
+                    env,
+                },
+            );
+        } catch (error) {
+            // Preserve the exact durable preflight identity for the failure
+            // ledger. The caller cannot otherwise assign it because this
+            // function must reject until capture/bind succeeds.
+            throw new AnonymousPreflightLandingCaptureError(createdPreflightId, error);
         }
     }
     return {
-        preflightId: requireUuid(String(row.preflight_id), 'ID'),
+        preflightId: createdPreflightId,
         expiresAt: String(row.expires_at),
         created: row.created === true,
         status: requireCreatedStatus(row.preflight_status),
@@ -294,11 +288,16 @@ export async function claimAnonymousAnalysisV2Preflight(
     const env = options.env ?? process.env;
     const claim = requireClaim(claimToken, env);
     const client = options.client ?? supabaseAdmin;
-    const { data, error } = await client.rpc(ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimRpc, {
-        p_preflight_id: id,
-        p_claim_token_hash: claim.tokenHash,
-        p_user_id: ownerId,
-    });
+    const { data, error } = await client.rpc(
+        options.landingClient
+            ? ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimWithLandingRpc
+            : ANONYMOUS_PREFLIGHT_DATABASE_NAMES.claimRpc,
+        {
+            p_preflight_id: id,
+            p_claim_token_hash: claim.tokenHash,
+            p_user_id: ownerId,
+        },
+    );
     if (error) rpcError(error, 'claim');
     const row = rpcRow(data, 'claim');
     if (!row || typeof row.claimed !== 'boolean') {
@@ -308,9 +307,6 @@ export async function claimAnonymousAnalysisV2Preflight(
         || row.owner_preflight_id === undefined
         ? null
         : requireUuid(String(row.owner_preflight_id), 'OWNER_PREFLIGHT_ID');
-    if (row.claimed && options.landingClient) {
-        await claimLandingLeadJourney(options.landingClient, id, ownerId);
-    }
     return { claimed: row.claimed, ownerPreflightId };
 }
 

@@ -52,9 +52,18 @@ describe('landing lead journey database contract', () => {
 
         const replay = await db.query<{ journey_id: string; created: boolean }>(
             `SELECT * FROM public.create_or_replay_landing_lead_capture($1, $2, 'target', $3, $4)`,
-            [replayJourneyId, 'different.user', principalHash, tokenHash],
+            [journeyId, 'target.user', principalHash, tokenHash],
         );
         expect(replay.rows).toEqual([{ journey_id: journeyId, created: false }]);
+
+        await expect(db.query(
+            `SELECT * FROM public.create_or_replay_landing_lead_capture($1, $2, 'target', $3, $4)`,
+            [replayJourneyId, 'target.user', 'c'.repeat(64), tokenHash],
+        )).rejects.toThrow('LANDING_LEAD_CAPTURE_MISMATCH');
+        await expect(db.query(
+            `SELECT * FROM public.create_or_replay_landing_lead_capture($1, $2, 'excluded', $3, $4)`,
+            [replayJourneyId, 'target.user', principalHash, 'd'.repeat(64)],
+        )).rejects.toThrow('LANDING_LEAD_INPUT_INVALID');
 
         await db.query(`SELECT public.bind_landing_lead_journey_to_preflight($1, $2)`, [journeyId, preflightId]);
         await db.query(`SELECT public.create_or_replay_landing_lead_exclusion($1, $2)`, [preflightId, 'excluded.user']);

@@ -64,13 +64,17 @@ export async function insertLandingLead(
 ): Promise<void | StoredLandingLeadCapture> {
     if (input.inputContext === 'excluded') {
         try {
-            await createOrReplayLandingLeadExclusion(
+            const created = await createOrReplayLandingLeadExclusion(
                 supabaseAdmin,
                 input.sourcePreflightId,
                 input.instagramId,
             );
+            if (!created) {
+                throw new LeadPersistenceError('landing lead exclusion target missing');
+            }
             return;
         } catch (error) {
+            if (error instanceof LeadPersistenceError) throw error;
             throw new LeadPersistenceError(error instanceof Error ? error.message : 'landing lead exclusion failed');
         }
     }
