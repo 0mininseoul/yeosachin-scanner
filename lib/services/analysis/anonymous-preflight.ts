@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    InvalidPreflightExclusionError,
+    PreflightImmutableError,
     launchStatusSnapshot,
     planCatalogSnapshot,
     preflightPolicyVersions,
@@ -29,7 +31,7 @@ export const ANONYMOUS_PREFLIGHT_DATABASE_NAMES = Object.freeze({
     readRpc: 'read_anonymous_analysis_v2_preflight_public',
     claimRpc: 'claim_anonymous_analysis_v2_preflight',
     claimWithLandingRpc: 'claim_anonymous_analysis_v2_preflight_with_landing',
-    exclusionRpc: 'set_anonymous_analysis_v2_preflight_exclusion',
+    exclusionRpc: 'set_analysis_v2_preflight_exclusion_with_landing',
     // New anonymous producers stamp the same trusted preflight dispatch
     // contract as authenticated producers. The historical RPCs remain
     // marker-free for roleless mixed-version drain only.
@@ -120,6 +122,19 @@ function rpcError(error: RpcError, operation: string): never {
         || error.message === 'ANONYMOUS_PREFLIGHT_NOT_FOUND'
     ) {
         throw new AnonymousPreflightClaimInvalidError();
+    }
+    if (error.message === 'ANALYSIS_V2_INVALID_EXCLUSION') {
+        throw new InvalidPreflightExclusionError();
+    }
+    if (error.message === 'ANALYSIS_V2_PREFLIGHT_EXPIRED') {
+        throw new PreflightImmutableError(error.message);
+    }
+    if (
+        error.message === 'PREFLIGHT_IMMUTABLE'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_CONSUMED'
+        || error.message === 'ANALYSIS_V2_PREFLIGHT_NOT_READY'
+    ) {
+        throw new PreflightImmutableError(error.message);
     }
     const rpcCode = typeof error.code === 'string'
         && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
@@ -322,6 +337,7 @@ export async function setAnonymousAnalysisV2PreflightExclusion(input: {
     const client = options.client ?? supabaseAdmin;
     const { data, error } = await client.rpc(ANONYMOUS_PREFLIGHT_DATABASE_NAMES.exclusionRpc, {
         p_preflight_id: id,
+        p_user_id: null,
         p_claim_token_hash: claim.tokenHash,
         p_decision: input.decision,
         p_excluded_instagram_id: input.excludedInstagramId,

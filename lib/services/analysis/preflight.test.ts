@@ -1532,6 +1532,37 @@ describe('preflight persistence adapter', () => {
         });
     });
 
+    it('uses the owner-or-claim atomic exclusion RPC for an authenticated owner client', async () => {
+        const ownerRpc = vi.fn(async () => ({ data: true, error: null }));
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({ data: true, error: null })),
+            from: vi.fn() as never,
+        });
+
+        await store.setExclusion({
+            preflightId,
+            userId,
+            decision: 'exclude',
+            excludedInstagramId: 'owner.name',
+        }, {
+            client: {
+                rpc: ownerRpc,
+                from: vi.fn() as never,
+            },
+        });
+
+        expect(ownerRpc).toHaveBeenCalledWith(
+            PREFLIGHT_DATABASE_NAMES.ownerExclusionRpc,
+            {
+                p_preflight_id: preflightId,
+                p_user_id: userId,
+                p_claim_token_hash: null,
+                p_decision: 'exclude',
+                p_excluded_instagram_id: 'owner.name',
+            },
+        );
+    });
+
     it('maps a conflicting write-once exclusion decision to an immutable error', async () => {
         const store = createSupabasePreflightStore({
             rpc: vi.fn(async () => ({

@@ -20,7 +20,6 @@ const mocks = vi.hoisted(() => ({
     })),
     process: vi.fn(),
     suppressOperationalObservation: vi.fn((response: Response) => response),
-    insertLandingLead: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
     betaEnabled: vi.fn(),
@@ -117,9 +116,6 @@ vi.mock('@/lib/services/analysis/betatest-access', async importOriginal => ({
     betaTestFreePoolEnabled: mocks.betaEnabled,
     hasBetaTestAccess: mocks.betaAccess,
 }));
-vi.mock('@/lib/services/leads/store', () => ({
-    insertLandingLead: mocks.insertLandingLead,
-}));
 vi.mock('@/lib/services/landing/landing-lead-journey', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/landing/landing-lead-journey')>()),
     captureAndBindLandingLeadJourney: mocks.landingCaptureBind,
@@ -138,6 +134,7 @@ import {
     GET as getPreflight,
     PATCH as patchPreflight,
 } from '@/app/api/analysis/preflight/[preflightId]/route';
+import { AnonymousPreflightClaimInvalidError } from './anonymous-preflight';
 import {
     InvalidPreflightExclusionError,
     PreflightImmutableError,
@@ -244,7 +241,6 @@ describe('preflight owner routes', () => {
             },
             error: null,
         });
-        mocks.insertLandingLead.mockResolvedValue(undefined);
         mocks.landingCaptureBind.mockResolvedValue({
             bound: true,
             repaired: false,
@@ -418,6 +414,77 @@ describe('preflight owner routes', () => {
             excludedInstagramId: null,
         }, expect.objectContaining({ client: expect.any(Object) }));
         expect(mocks.store.setExclusion).not.toHaveBeenCalled();
+    });
+
+    it('classifies anonymous exclusion persistence failures as retryable persistence errors', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        mocks.anonymousExclusion.mockRejectedValueOnce(
+            new Error('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:exclusion'),
+        );
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        try {
+            const response = await patchPreflight(new Request('https://example.com', {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-preflight-claim-token': 'v1.claim.signature',
+                },
+                body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'excluded.user' }),
+            }), context());
+
+            expect(response.status).toBe(500);
+            expect(mocks.emit).toHaveBeenCalledWith({
+                event: 'preflight.failed',
+                severity: 'error',
+                fields: expect.objectContaining({
+                    operation: 'exclusion',
+                    disposition: 'failed',
+                    error_code: 'PREFLIGHT_PERSISTENCE_ERROR',
+                }),
+                error: expect.any(Error),
+            });
+        } finally {
+            errorSpy.mockRestore();
+        }
+    });
+
+    it('maps stale or foreign anonymous claim failures to unauthorized', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        mocks.anonymousExclusion.mockRejectedValueOnce(new AnonymousPreflightClaimInvalidError());
+
+        const response = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-preflight-claim-token': 'v1.claim.signature',
+            },
+            body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'excluded.user' }),
+        }), context());
+
+        expect(response.status).toBe(401);
+        await expect(response.json()).resolves.toMatchObject({ code: 'UNAUTHORIZED' });
+    });
+
+    it('maps anonymous lifecycle and immutable failures to conflict', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        mocks.anonymousExclusion.mockRejectedValueOnce(
+            new PreflightImmutableError('ANALYSIS_V2_PREFLIGHT_EXPIRED'),
+        );
+
+        const response = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-preflight-claim-token': 'v1.claim.signature',
+            },
+            body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'excluded.user' }),
+        }), context());
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'ANALYSIS_V2_PREFLIGHT_EXPIRED',
+        });
     });
 
     it('creates an anonymous preflight with a claim token and the isolated Apify dispatch', async () => {
@@ -1449,7 +1516,7 @@ describe('preflight owner routes', () => {
         }
     });
 
-    it('captures a normalized excluded lead before acknowledging the durable decision', async () => {
+    it('acknowledges an excluded decision only after the atomic database boundary succeeds', async () => {
         const response = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -1457,15 +1524,16 @@ describe('preflight owner routes', () => {
         }), context());
 
         expect(response.status).toBe(204);
-        expect(mocks.insertLandingLead).toHaveBeenCalledWith({
-            instagramId: 'girlfriend.name',
-            inputContext: 'excluded',
-            sourcePreflightId: preflightId,
-        });
+        expect(mocks.store.setExclusion).toHaveBeenCalledWith({
+            preflightId,
+            userId,
+            decision: 'exclude',
+            excludedInstagramId: 'girlfriend.name',
+        }, expect.objectContaining({ client: expect.any(Object) }));
     });
 
-    it('returns a retryable failure when excluded lead persistence fails', async () => {
-        mocks.insertLandingLead.mockRejectedValueOnce(new Error('lead database unavailable'));
+    it('returns a retryable failure when the atomic exclusion boundary fails', async () => {
+        mocks.store.setExclusion.mockRejectedValueOnce(new Error('landing lead database unavailable'));
 
         const excluded = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',
@@ -1473,22 +1541,11 @@ describe('preflight owner routes', () => {
             body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'girlfriend.name' }),
         }), context());
         expect(excluded.status).toBe(500);
-        expect(mocks.after).not.toHaveBeenCalled();
+        expect(mocks.store.setExclusion).toHaveBeenCalledTimes(1);
     });
 
-    it('does not capture skip decisions', async () => {
-        const skipped = await patchPreflight(new Request('https://example.com', {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ decision: 'skip' }),
-        }), context());
-        expect(skipped.status).toBe(204);
-        expect(mocks.after).not.toHaveBeenCalled();
-        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
-    });
-
-    it('does not acknowledge an exclusion when the lead row cannot be persisted', async () => {
-        mocks.insertLandingLead.mockRejectedValueOnce(new Error('lead database unavailable'));
+    it('does not acknowledge an exclusion when the atomic lead insert rolls back', async () => {
+        mocks.store.setExclusion.mockRejectedValueOnce(new Error('LANDING_LEAD_TARGET_MISSING'));
 
         const response = await patchPreflight(new Request('https://example.com', {
             method: 'PATCH',
@@ -1497,8 +1554,7 @@ describe('preflight owner routes', () => {
         }), context());
 
         expect(response.status).toBe(500);
-        expect(mocks.store.setExclusion).not.toHaveBeenCalled();
-        expect(mocks.insertLandingLead).toHaveBeenCalledTimes(1);
+        expect(mocks.store.setExclusion).toHaveBeenCalledTimes(1);
     });
 
     it('does not acknowledge an invalid exclusion decision', async () => {
@@ -1511,8 +1567,17 @@ describe('preflight owner routes', () => {
         }), context());
 
         expect(response.status).toBe(400);
+        expect(mocks.store.setExclusion).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not capture skip decisions', async () => {
+        const skipped = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(skipped.status).toBe(204);
         expect(mocks.after).not.toHaveBeenCalled();
-        expect(mocks.insertLandingLead).toHaveBeenCalledTimes(1);
     });
 
     it('isolates the exact allowlisted synthetic target before reservation, task, and provider work', async () => {
@@ -1780,7 +1845,6 @@ describe('preflight owner routes', () => {
         expect(response.status).toBe(400);
         expect(mocks.suppressOperationalObservation).toHaveBeenCalledWith(response);
         expect(mocks.emit).not.toHaveBeenCalled();
-        expect(mocks.insertLandingLead).not.toHaveBeenCalled();
         expect(mocks.store.setExclusion).not.toHaveBeenCalled();
     });
 });

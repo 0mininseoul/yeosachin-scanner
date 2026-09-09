@@ -10,6 +10,7 @@ Status: READY_FOR_OPERATOR_DRY_RUN
   (`fix: close landing identity compliance gaps`).
 - Landing journey migration: `supabase/migrations/20260909095950_add_landing_lead_journey_contract.sql`.
 - Atomic OAuth claim migration: `supabase/migrations/20260909110000_atomic_anonymous_preflight_landing_claim.sql`.
+- Atomic exclusion migration: `supabase/migrations/20260909150000_atomic_preflight_exclusion_landing.sql`.
 - Predecessors inspected: `20260719160000_add_landing_leads.sql`,
   `20260725021500_add_landing_lead_input_context.sql`, and the production
   preflight claim recovery migration that owns the private claim helper.
@@ -35,12 +36,27 @@ raises and rolls back the preflight owner transition, leaving the signed claim
 retryable; owner claims remain monotonic and the account-retirement trigger
 keeps deleted journeys permanently fenced.
 
-The local PGlite contract applies the two predecessor migrations plus the
-landing journey migration and verifies target/excluded rows share one journey,
-capture replay is idempotent, account/principal/context mismatches are rejected,
-excluded capture context is rejected, excluded replay does not duplicate,
-claims are monotonic, conflicting owners are rejected, deletion fencing clears
-the owner, and a fenced journey cannot be claimed again.
+The exclusion boundary now validates either the authenticated owner or a live
+anonymous claim hash while holding the preflight row lock, then records the
+write-once decision and excluded landing row through one RPC/transaction. It
+rejects foreign or stale anonymous claims, invalid lifecycle/expiry states,
+conflicting decisions, and target-equals-excluded inputs. A missing target
+journey or failed excluded-row insert raises and rolls back the decision;
+identical retries replay the existing excluded row idempotently. The atomic
+function is `SECURITY DEFINER` with an empty search path, five-second lock and
+two-minute statement timeouts, and is executable only by `anon`/`authenticated`;
+the historical browser wrappers delegate to it with their narrow grants.
+
+The local PGlite contracts apply the predecessor migrations plus the landing
+journey and atomic exclusion migrations. They verify target/excluded rows share
+one journey, capture replay is idempotent, account/principal/context
+mismatches are rejected, excluded capture context is rejected, excluded replay
+does not duplicate, claims are monotonic, conflicting owners are rejected,
+deletion fencing clears the owner, and a fenced journey cannot be claimed again.
+The atomic exclusion cases cover authenticated ownership, foreign/stale
+anonymous claims, lifecycle and expiry fences, immutable decisions, target
+equality, idempotent retries, excluded-row insertion, and rollback when the
+target landing row is absent.
 
 Production migration dry-run/apply and production row-count/checksum parity
 were not run. No remote migration was applied, and no production database
@@ -60,8 +76,10 @@ positive binding.
 OAuth restoration selects the atomic preflight-plus-landing claim RPC. Landing
 capture and exclusion failures are no longer fire-and-forget: they return a
 failure response, record a bounded PII-free preflight failure event, and keep
-the request retryable. An exclusion cannot return success when its target row
-is missing.
+the request retryable. Exclusion persistence failures are classified as
+retryable persistence errors; stale/foreign claims map to 401, lifecycle or
+immutable decisions map to 409, and invalid exclusion payloads map to 400. An
+exclusion cannot return success when its target row is missing.
 
 `POST /api/leads` no longer derives identity from User-Agent or a
 `missing-device` constant. It rejects a missing/invalid stable device ID and
@@ -76,7 +94,8 @@ fields from JSON.
 
 All commands below were run in this worktree:
 
-- Focused landing/preflight/admin suite: `npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/leads/landing-leads-migration-contract.test.ts lib/services/leads/leads-route.test.ts lib/services/leads/store.test.ts lib/services/analysis/anonymous-preflight.test.ts lib/services/analysis/anonymous-preflight-claim.test.ts app/api/admin/landing-leads/route.test.ts app/admin/analysis-audit/operator-console-leads.test.tsx app/admin/analysis-audit/operator-console-interaction.test.tsx lib/services/analysis/preflight-route.test.ts lib/services/analysis/anonymous-preflight-landing-claim-migration-contract.test.ts lib/services/landing-lead.test.ts` — **PASS, 11 files / 109 tests**.
+- Focused landing/preflight/admin suite (prior landing identity implementation): `npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/leads/landing-leads-migration-contract.test.ts lib/services/leads/leads-route.test.ts lib/services/leads/store.test.ts lib/services/analysis/anonymous-preflight.test.ts lib/services/analysis/anonymous-preflight-claim.test.ts app/api/admin/landing-leads/route.test.ts app/admin/analysis-audit/operator-console-leads.test.tsx app/admin/analysis-audit/operator-console-interaction.test.tsx lib/services/analysis/preflight-route.test.ts lib/services/analysis/anonymous-preflight-landing-claim-migration-contract.test.ts lib/services/landing-lead.test.ts` — **PASS, 11 files / 109 tests**.
+- Atomic exclusion/preflight contract suite: `npx vitest run lib/services/analysis/preflight-exclusion-landing-atomic-pglite.test.ts lib/services/analysis/preflight-route.test.ts lib/services/analysis/preflight.test.ts lib/services/analysis/anonymous-preflight.test.ts lib/services/analysis/anonymous-preflight-landing-claim-migration-contract.test.ts lib/services/analysis/authenticated-preflight-exclusion-security-definer-migration-contract.test.ts lib/services/analysis/v2-preflight-exclusion-write-once-migration-contract.test.ts lib/services/analysis/analytics-and-anonymous-migration-contract.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/leads/landing-leads-migration-contract.test.ts` — **PASS, 10 files / 210 tests**.
 - OAuth callback regressions: `npx vitest run lib/services/auth/callback-route.test.ts lib/services/auth/oauth-redirect-intent.test.ts` — **PASS, 2 files / 28 tests**.
 - Typecheck: `npx tsc --noEmit --pretty false` — **PASS**.
 - Lint: `npm run lint` — **PASS, 0 errors, 27 warnings** (existing warning set; no warning in the changed production files).

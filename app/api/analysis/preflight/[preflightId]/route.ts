@@ -20,7 +20,6 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
-import { insertLandingLead } from '@/lib/services/leads/store';
 import { demoPreflightLifecycle, demoReadyPreflight, demoResponseHeaders, isDemoOperator } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import { loadDemoFixtureForVersion } from '@/lib/services/demo-analysis/fixture-store';
@@ -67,19 +66,11 @@ async function authenticatedSession() {
     };
 }
 
-async function captureExcludedLandingLead(
-    preflightId: string,
-    excludedInstagramId: string,
-): Promise<void> {
-    await insertLandingLead({
-        instagramId: excludedInstagramId,
-        inputContext: 'excluded',
-        sourcePreflightId: preflightId,
-    });
-}
-
 function exclusionFailureErrorCode(error: unknown): 'PREFLIGHT_PERSISTENCE_ERROR' | 'INTERNAL_ERROR' {
-    return error instanceof Error && error.message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+    return error instanceof Error && (
+        error.message.startsWith('PREFLIGHT_PERSISTENCE_ERROR:')
+        || error.message.startsWith('ANONYMOUS_PREFLIGHT_PERSISTENCE_ERROR:')
+    )
         ? 'PREFLIGHT_PERSISTENCE_ERROR'
         : 'INTERNAL_ERROR';
 }
@@ -272,9 +263,6 @@ async function handlePATCH(
                 });
                 return errorResponse(400, 'INVALID_EXCLUSION', '제외 계정 입력을 확인해주세요.');
             }
-            if (anonymousParsed.data.decision === 'exclude') {
-                await captureExcludedLandingLead(preflightId, anonymousParsed.data.excludedInstagramId);
-            }
             const updated = await setAnonymousAnalysisV2PreflightExclusion({
                 preflightId,
                 claimToken,
@@ -369,12 +357,6 @@ async function handlePATCH(
             );
         }
 
-        if (parsed.data.decision === 'exclude') {
-            await captureExcludedLandingLead(
-                preflightId,
-                parsed.data.excludedInstagramId,
-            );
-        }
         await preflightStore.setExclusion({
             preflightId,
             userId: user.id,

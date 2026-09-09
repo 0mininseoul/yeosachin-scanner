@@ -189,7 +189,7 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     exclusionRpc: 'set_analysis_v2_preflight_exclusion',
     anonymousCompleteRpc: 'complete_anonymous_analysis_v2_preflight',
     anonymousBlockRpc: 'block_anonymous_analysis_v2_preflight',
-    ownerExclusionRpc: 'set_authenticated_analysis_v2_preflight_exclusion',
+    ownerExclusionRpc: 'set_analysis_v2_preflight_exclusion_with_landing',
 });
 
 export type PreflightPolicyVersionsSnapshot = Readonly<{
@@ -1650,6 +1650,7 @@ export function createSupabasePreflightStore(
                 {
                     p_preflight_id: input.preflightId,
                     p_user_id: input.userId,
+                    ...(options?.client ? { p_claim_token_hash: null } : {}),
                     p_decision: input.decision,
                     p_excluded_instagram_id: input.excludedInstagramId,
                 },
