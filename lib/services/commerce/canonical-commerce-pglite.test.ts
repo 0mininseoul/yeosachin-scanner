@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { describe, expect, it } from 'vitest';
-import { canonicalEvidenceHash } from './canonical-commerce-store';
+import { canonicalJson, canonicalJsonHash } from './canonical-commerce-store';
 
 function migrationSql(): string {
     const migration = readdirSync(join(process.cwd(), 'supabase/migrations'))
@@ -306,6 +306,73 @@ describe('commerce canonical SQL smoke contract', () => {
         await db.close();
     });
 
+    it('reproduces the TypeScript canonical bytes across whitespace, key order, and Unicode', async () => {
+        const db = await PGlite.create({ extensions: { pgcrypto } });
+        const sql = migrationSql()
+            .replace(/^REVOKE[^;]*;\n?/gm, '')
+            .replace(/^GRANT[^;]*;\n?/gm, '');
+        await db.exec(`
+            CREATE SCHEMA extensions;
+            CREATE FUNCTION extensions.gen_random_uuid()
+            RETURNS uuid LANGUAGE SQL
+            AS 'SELECT pg_catalog.gen_random_uuid()';
+            CREATE FUNCTION extensions.digest(data bytea, algorithm text)
+            RETURNS bytea LANGUAGE SQL
+            AS 'SELECT pg_catalog.sha256(data)';
+            CREATE TABLE public.users(id uuid PRIMARY KEY);
+            CREATE TABLE public.earlybird_orders(id uuid PRIMARY KEY);
+            CREATE TABLE public.analysis_requests(id uuid PRIMARY KEY);
+        `);
+        await db.exec(sql);
+
+        const vectors = [
+            {
+                json: '{ "z": "홍\\n길동 😀", "a": { "\ud83d\ude00": "따뜻함", "가": "값" }, "list": [true, null, "a\\\"b"] }',
+                value: {
+                    z: '홍\n길동 😀',
+                    a: { '😀': '따뜻함', '가': '값' },
+                    list: [true, null, 'a"b'],
+                },
+            },
+            {
+                json: '{"list":["é","한글"],"a":{"가":"값","😀":"따뜻함"},"z":"홍\\n길동 😀"}',
+                value: {
+                    list: ['é', '한글'],
+                    a: { '가': '값', '😀': '따뜻함' },
+                    z: '홍\n길동 😀',
+                },
+            },
+            {
+                json: '{"huge":1e21,"large":100000000000000000000,"small":0.000001,"tiny":1e-7,"fraction":1.2300,"negative":-0,"precision":0.30000000000000004,"long":1.2345678901234567,"oddLarge":1000000000000000100}',
+                value: {
+                    huge: 1e21,
+                    large: 1e20,
+                    small: 0.000001,
+                    tiny: 1e-7,
+                    fraction: 1.23,
+                    negative: -0,
+                    precision: 0.30000000000000004,
+                    long: 1.2345678901234567,
+                    oddLarge: 1000000000000000100,
+                },
+            },
+            {
+                json: '{"10":"ten","2":"two","a":"A"}',
+                value: { '10': 'ten', '2': 'two', a: 'A' },
+            },
+        ] as const;
+        for (const vector of vectors) {
+            const result = await db.query<{ canonical: string; hash: string }>(
+                `SELECT public.canonical_system_configuration_json($1::jsonb) AS canonical,
+                        public.canonical_json_hash_v1($2, $1::jsonb) AS hash`,
+                [vector.json, 'system-configuration'],
+            );
+            expect(result.rows[0].canonical).toBe(canonicalJson(vector.value));
+            expect(result.rows[0].hash).toBe(canonicalJsonHash('system-configuration', vector.value));
+        }
+        await db.close();
+    });
+
     it('compares legacy notification family content through a bounded SQL reader', async () => {
         const db = await PGlite.create({ extensions: { pgcrypto } });
         const sql = migrationSql()
@@ -362,15 +429,39 @@ describe('commerce canonical SQL smoke contract', () => {
         expect(rows.rows.map(row => row.channel).sort()).toEqual(['discord', 'kakao', 'sentry']);
         expect(rows.rows.every(row => Object.keys(row.payload).length > 0 && /^[a-f0-9]{64}$/.test(row.content_hash))).toBe(true);
         const payment = rows.rows.find(row => row.channel === 'discord');
-        expect(payment?.content_hash).toBe(canonicalEvidenceHash(
+        expect(payment?.content_hash).toBe(canonicalJsonHash(
             'payment-discord-content',
-            JSON.stringify({
+            {
                 order_id: '123e4567-e89b-42d3-a456-426614174000',
                 plan_id: 'basic',
                 amount_krw: 990,
                 paid_at: '2026-09-09T00:00:00.000Z',
-            }),
+            },
         ));
+        const kakao = rows.rows.find(row => row.channel === 'kakao');
+        const kakaoPayload = {
+            user_id: '223e4567-e89b-42d3-a456-426614174000',
+            masked_name: '홍*동',
+            birthyear: '1990',
+            gender: '남성',
+            signed_up_at: '2026-09-09T00:00:00.000Z',
+            attribution_origin: 'https://example.com/',
+        };
+        expect(kakao?.dedupe_key).toBe(`kakao-signup:${canonicalJsonHash('kakao-signup-key', kakaoPayload.user_id)}`);
+        expect(kakao?.content_hash).toBe(canonicalJsonHash('kakao-signup-content', kakaoPayload));
+        const sentry = rows.rows.find(row => row.channel === 'sentry');
+        const sentryKeyHash = canonicalJsonHash('sentry-dedupe-key', 'a'.repeat(64));
+        const sentryPayload = {
+            dedupe_key_hash: sentryKeyHash,
+            project_slug: 'yeosachin',
+            occurred_at: '2026-09-09T00:00:00.000Z',
+            issue_url: 'https://sentry.io/organizations/example/issues/1/',
+            issue_short_id: 'YEOSA-1',
+            error_type: 'Error',
+            release: '2026.09.09',
+        };
+        expect(sentry?.dedupe_key).toBe(`sentry:${sentryKeyHash}`);
+        expect(sentry?.content_hash).toBe(canonicalJsonHash('sentry-notification-content', sentryPayload));
         await db.close();
     });
 });

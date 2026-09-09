@@ -10,6 +10,7 @@ import {
     shadowCompareCanonicalFamily,
     isCanonicalFamilyReadEnabled,
     rollbackCanonicalReadFlags,
+    shadowReadCanonicalNotificationOutbox,
     withCanonicalMirrorTimeout,
 } from './canonical-operations-store';
 
@@ -285,6 +286,20 @@ describe('canonical operations store', () => {
             const outcome = expect(pending).rejects.toMatchObject({ code: 'CANONICAL_MIRROR_TIMEOUT' });
             await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
             await outcome;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('bounds both enabled notification shadow reads', async () => {
+        vi.useFakeTimers();
+        try {
+            const rpc = vi.fn(() => new Promise<never>(() => undefined));
+            const read = shadowReadCanonicalNotificationOutbox(10, rpc);
+
+            await vi.runAllTimersAsync();
+            await expect(read).resolves.toEqual({ status: 'blocked', rowCount: 0 });
+            expect(rpc).toHaveBeenCalledTimes(2);
         } finally {
             vi.useRealTimers();
         }

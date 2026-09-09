@@ -3,7 +3,10 @@ import 'server-only';
 import * as Sentry from '@sentry/nextjs';
 import { formatKst, maskKakaoName } from '@/lib/services/identity/kakao-signup-discord';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { canonicalEvidenceHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    CANONICAL_HASH_NAMESPACES,
+    canonicalJsonHash,
+} from '@/lib/services/commerce/canonical-commerce-store';
 import {
     canonicalOperationsStore,
     isCanonicalFamilyWriteEnabled,
@@ -206,9 +209,9 @@ async function mirrorPaymentNotification(item: EarlybirdPaymentDiscordItem): Pro
         amount_krw: item.actual_amount_krw,
         paid_at: item.paid_at,
     };
-    const contentHash = canonicalEvidenceHash(
-        'payment-discord-content',
-        JSON.stringify(payload),
+    const contentHash = canonicalJsonHash(
+        CANONICAL_HASH_NAMESPACES.paymentNotificationContent,
+        payload,
     );
     try {
         await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({

@@ -233,9 +233,243 @@ CREATE TRIGGER system_configuration_immutable
 BEFORE UPDATE OR DELETE ON public.system_configuration
 FOR EACH ROW EXECUTE FUNCTION public.reject_commerce_append_only_mutation();
 
--- JSONB stores object keys in a deterministic order. Expose that canonical
--- representation only to the service boundary so configuration hashes are
--- derived from the exact value persisted by the RPC.
+-- Hash contract: the bytes are UTF-8(`${namespace}\n${canonical_json_v1(value)}`).
+-- canonical_json_v1 is deliberately explicit instead of relying on JSONB's
+-- display output. Object keys are ordered by their UTF-8 bytes, arrays retain
+-- order, strings use PostgreSQL's JSON string encoder, and numbers use the
+-- ECMAScript-compatible decimal/scientific thresholds used by JSON.stringify.
+CREATE FUNCTION public.canonical_json_string_v1(
+    p_value TEXT
+)
+RETURNS TEXT
+LANGUAGE SQL
+IMMUTABLE
+STRICT
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT pg_catalog.to_json(p_value)::TEXT;
+$$;
+
+CREATE FUNCTION public.canonical_json_number_v1(
+    p_value JSONB
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SECURITY DEFINER
+SET search_path = ''
+SET extra_float_digits = 3
+AS $$
+DECLARE
+    v_number DOUBLE PRECISION;
+    v_number_text TEXT;
+    v_mantissa TEXT;
+    v_exponent INTEGER;
+    v_decimal TEXT;
+    v_unsigned_mantissa TEXT;
+    v_digits TEXT;
+    v_decimal_position INTEGER;
+BEGIN
+    IF pg_catalog.jsonb_typeof(p_value) <> 'number' THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CANONICAL_JSON_NUMBER_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+
+    v_number := (p_value #>> '{}')::DOUBLE PRECISION;
+    v_number_text := v_number::TEXT;
+    IF v_number <> v_number
+       OR v_number_text IN ('Infinity', '-Infinity', 'NaN') THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CANONICAL_JSON_NUMBER_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    IF v_number = 0 THEN
+        RETURN '0';
+    END IF;
+
+    -- JSON.stringify uses decimal notation in [1e-6, 1e21), even when the
+    -- PostgreSQL float formatter chooses scientific notation.
+    IF pg_catalog.abs(v_number) >= 1e-6
+       AND pg_catalog.abs(v_number) < 1e21 THEN
+        v_number_text := pg_catalog.lower(v_number::TEXT);
+        v_decimal := v_number_text;
+        -- Expand PostgreSQL's shortest float representation when it uses
+        -- scientific notation; this keeps all significant digits instead of
+        -- going through numeric's lower-precision display cast.
+        IF pg_catalog.strpos(v_number_text, 'e') > 0 THEN
+            v_mantissa := pg_catalog.split_part(v_number_text, 'e', 1);
+            v_exponent := pg_catalog.split_part(v_number_text, 'e', 2)::INTEGER;
+            v_unsigned_mantissa := pg_catalog.ltrim(v_mantissa, '+-');
+            v_digits := pg_catalog.replace(v_unsigned_mantissa, '.', '');
+            v_decimal_position := (
+                CASE
+                    WHEN pg_catalog.strpos(v_unsigned_mantissa, '.') > 0
+                    THEN pg_catalog.strpos(v_unsigned_mantissa, '.') - 1
+                    ELSE pg_catalog.length(v_unsigned_mantissa)
+                END
+            ) + v_exponent;
+            IF v_decimal_position <= 0 THEN
+                v_decimal := CASE WHEN pg_catalog.left(v_mantissa, 1) = '-' THEN '-' ELSE '' END
+                    || '0.'
+                    || pg_catalog.repeat('0', -v_decimal_position)
+                    || v_digits;
+            ELSIF v_decimal_position >= pg_catalog.length(v_digits) THEN
+                v_decimal := CASE WHEN pg_catalog.left(v_mantissa, 1) = '-' THEN '-' ELSE '' END
+                    || v_digits
+                    || pg_catalog.repeat('0', v_decimal_position - pg_catalog.length(v_digits));
+            ELSE
+                v_decimal := CASE WHEN pg_catalog.left(v_mantissa, 1) = '-' THEN '-' ELSE '' END
+                    || pg_catalog.substr(v_digits, 1, v_decimal_position)
+                    || '.'
+                    || pg_catalog.substr(v_digits, v_decimal_position + 1);
+            END IF;
+        END IF;
+        IF pg_catalog.strpos(v_decimal, '.') > 0 THEN
+            v_decimal := pg_catalog.rtrim(pg_catalog.rtrim(v_decimal, '0'), '.');
+        END IF;
+        RETURN v_decimal;
+    END IF;
+
+    v_number_text := pg_catalog.lower(v_number_text);
+    IF pg_catalog.strpos(v_number_text, 'e') = 0 THEN
+        RETURN v_number_text;
+    END IF;
+    v_mantissa := pg_catalog.split_part(v_number_text, 'e', 1);
+    v_exponent := pg_catalog.split_part(v_number_text, 'e', 2)::INTEGER;
+    IF pg_catalog.strpos(v_mantissa, '.') > 0 THEN
+        v_mantissa := pg_catalog.rtrim(pg_catalog.rtrim(v_mantissa, '0'), '.');
+    END IF;
+    RETURN v_mantissa || 'e'
+        || CASE WHEN v_exponent >= 0 THEN '+' ELSE '' END
+        || v_exponent::TEXT;
+END;
+$$;
+
+CREATE FUNCTION public.canonical_json_v1(
+    p_value JSONB,
+    p_depth INTEGER DEFAULT 0
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_result TEXT;
+BEGIN
+    IF p_depth IS NULL OR p_depth NOT BETWEEN 0 AND 8 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CANONICAL_JSON_DEPTH_LIMIT',
+            ERRCODE = 'P0001';
+    END IF;
+
+    CASE pg_catalog.jsonb_typeof(p_value)
+        WHEN 'object' THEN
+            IF (
+                SELECT pg_catalog.count(*)
+                FROM pg_catalog.jsonb_object_keys(p_value)
+            ) > 100
+            OR EXISTS (
+                SELECT 1
+                FROM pg_catalog.jsonb_object_keys(p_value) AS object_key(key)
+                WHERE object_key.key IS NULL
+                   OR pg_catalog.length(object_key.key) = 0
+                   OR pg_catalog.length(object_key.key) > 128
+            ) THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'CANONICAL_JSON_KEY_INVALID',
+                    ERRCODE = 'P0001';
+            END IF;
+            SELECT '{' || COALESCE(pg_catalog.string_agg(
+                public.canonical_json_string_v1(entry.key) || ':'
+                    || public.canonical_json_v1(entry.value, p_depth + 1),
+                ',' ORDER BY pg_catalog.encode(
+                    pg_catalog.convert_to(entry.key, 'UTF8'),
+                    'hex'
+                ) COLLATE "C"
+            ), '') || '}'
+            INTO v_result
+            FROM pg_catalog.jsonb_each(p_value) AS entry(key, value);
+        WHEN 'array' THEN
+            IF pg_catalog.jsonb_array_length(p_value) > 100 THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'CANONICAL_JSON_ARRAY_LIMIT',
+                    ERRCODE = 'P0001';
+            END IF;
+            SELECT '[' || COALESCE(pg_catalog.string_agg(
+                public.canonical_json_v1(entry.value, p_depth + 1),
+                ',' ORDER BY entry.ordinality
+            ), '') || ']'
+            INTO v_result
+            FROM pg_catalog.jsonb_array_elements(p_value)
+                WITH ORDINALITY AS entry(value, ordinality);
+        WHEN 'string' THEN
+            IF pg_catalog.length(p_value #>> '{}') > 8192 THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'CANONICAL_JSON_STRING_LIMIT',
+                    ERRCODE = 'P0001';
+            END IF;
+            v_result := public.canonical_json_string_v1(p_value #>> '{}');
+        WHEN 'number' THEN
+            v_result := public.canonical_json_number_v1(p_value);
+        WHEN 'boolean' THEN
+            v_result := p_value #>> '{}';
+        WHEN 'null' THEN
+            v_result := 'null';
+        ELSE
+            RAISE EXCEPTION USING
+                MESSAGE = 'CANONICAL_JSON_VALUE_INVALID',
+                ERRCODE = 'P0001';
+    END CASE;
+
+    IF pg_catalog.octet_length(v_result) > 262144 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CANONICAL_JSON_SIZE_LIMIT',
+            ERRCODE = 'P0001';
+    END IF;
+    RETURN v_result;
+END;
+$$;
+
+CREATE FUNCTION public.canonical_json_hash_v1(
+    p_namespace TEXT,
+    p_value JSONB
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+STRICT
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF pg_catalog.length(p_namespace) = 0
+       OR pg_catalog.strpos(p_namespace, pg_catalog.chr(10)) > 0 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CANONICAL_JSON_NAMESPACE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    RETURN pg_catalog.encode(
+        extensions.digest(
+            pg_catalog.convert_to(
+                p_namespace || pg_catalog.chr(10)
+                    || public.canonical_json_v1(p_value),
+                'UTF8'
+            ),
+            'sha256'
+        ),
+        'hex'
+    );
+END;
+$$;
+
+-- Keep this named boundary for callers that need to display/verify the exact
+-- configuration bytes; all hashes use the same canonical serializer above.
 CREATE FUNCTION public.canonical_system_configuration_json(
     p_config JSONB
 )
@@ -245,7 +479,7 @@ IMMUTABLE
 SECURITY DEFINER
 SET search_path = ''
 AS $$
-    SELECT p_config::TEXT;
+    SELECT public.canonical_json_v1(p_config);
 $$;
 
 CREATE FUNCTION public.record_payment_event_v1(
@@ -746,16 +980,9 @@ BEGIN
        OR (p_state = 'effective' AND p_effective_at IS NULL) THEN
         RAISE EXCEPTION USING MESSAGE = 'SYSTEM_CONFIGURATION_INPUT_INVALID', ERRCODE = 'P0001';
     END IF;
-    IF p_content_hash IS DISTINCT FROM pg_catalog.encode(
-        extensions.digest(
-            pg_catalog.convert_to(
-                'system-configuration' || pg_catalog.chr(10)
-                    || public.canonical_system_configuration_json(p_config),
-                'UTF8'
-            ),
-            'sha256'
-        ),
-        'hex'
+    IF p_content_hash IS DISTINCT FROM public.canonical_json_hash_v1(
+        'system-configuration',
+        p_config
     ) THEN
         RAISE EXCEPTION USING MESSAGE = 'SYSTEM_CONFIGURATION_HASH_INVALID', ERRCODE = 'P0001';
     END IF;
@@ -1226,20 +1453,9 @@ BEGIN
                payment.channel,
                payment.event_kind,
                payment.payload,
-               pg_catalog.encode(
-                   extensions.digest(
-                       pg_catalog.convert_to(
-                           'payment-discord-content' || pg_catalog.chr(10)
-                               || '{"order_id":' || pg_catalog.to_json(payment.order_id::TEXT)::TEXT
-                               || ',"plan_id":' || pg_catalog.to_json(payment.plan_id)::TEXT
-                               || ',"amount_krw":' || COALESCE(payment.amount_krw::TEXT, 'null')
-                               || ',"paid_at":' || pg_catalog.to_json(payment.paid_at)::TEXT
-                               || '}',
-                           'UTF8'
-                       ),
-                       'sha256'
-                   ),
-                   'hex'
+               public.canonical_json_hash_v1(
+                   'payment-discord-content',
+                   payment.payload
                ) AS content_hash
         FROM (
             SELECT 'earlybird-payment:' || outbox.order_id::TEXT AS dedupe_key,
@@ -1270,27 +1486,14 @@ BEGIN
                kakao.channel,
                kakao.event_kind,
                kakao.payload,
-               pg_catalog.encode(
-                   extensions.digest(
-                       pg_catalog.convert_to(
-                           'kakao-signup-content' || pg_catalog.chr(10) || kakao.payload::TEXT,
-                           'UTF8'
-                       ),
-                       'sha256'
-                   ),
-                   'hex'
+               public.canonical_json_hash_v1(
+                   'kakao-signup-content',
+                   kakao.payload
                ) AS content_hash
         FROM (
-            SELECT 'kakao-signup:' || pg_catalog.encode(
-                       extensions.digest(
-                           pg_catalog.convert_to(
-                               'kakao-signup-key' || pg_catalog.chr(10)
-                                   || pg_catalog.to_json(outbox.user_id::TEXT)::TEXT,
-                               'UTF8'
-                           ),
-                           'sha256'
-                       ),
-                       'hex'
+            SELECT 'kakao-signup:' || public.canonical_json_hash_v1(
+                       'kakao-signup-key',
+                       pg_catalog.to_jsonb(outbox.user_id::TEXT)
                    ) AS dedupe_key,
                    'kakao'::TEXT AS channel,
                    'kakao.signup'::TEXT AS event_kind,
@@ -1303,7 +1506,13 @@ BEGIN
                            outbox.signed_up_at AT TIME ZONE 'UTC',
                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
                        ),
-                       'attribution_origin', outbox.attribution_origin
+                       'attribution_origin', CASE
+                           WHEN outbox.attribution_origin IS NOT NULL
+                                AND outbox.attribution_origin ~ '^https?://[a-z0-9][a-z0-9.-]{0,251}/$'
+                                AND outbox.attribution_origin !~ '^https?://(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})/'
+                           THEN outbox.attribution_origin
+                           ELSE NULL
+                       END
                    ) AS payload
             FROM public.kakao_signup_discord_outbox AS outbox
         ) AS kakao
@@ -1312,43 +1521,28 @@ BEGIN
                sentry.channel,
                sentry.event_kind,
                sentry.payload,
-               pg_catalog.encode(
-                   extensions.digest(
-                       pg_catalog.convert_to(
-                           'sentry-notification-content' || pg_catalog.chr(10) || sentry.payload::TEXT,
-                           'UTF8'
-                       ),
-                       'sha256'
-                   ),
-                   'hex'
+               public.canonical_json_hash_v1(
+                   'sentry-notification-content',
+                   sentry.payload
                ) AS content_hash
         FROM (
-            SELECT 'sentry:' || pg_catalog.encode(
-                       extensions.digest(
-                           pg_catalog.convert_to(
-                               'sentry-dedupe-key' || pg_catalog.chr(10)
-                                   || pg_catalog.to_json(pg_catalog.btrim(outbox.dedupe_key))::TEXT,
-                               'UTF8'
-                           ),
-                           'sha256'
-                       ),
-                       'hex'
+            SELECT 'sentry:' || public.canonical_json_hash_v1(
+                       'sentry-dedupe-key',
+                       pg_catalog.to_jsonb(pg_catalog.btrim(outbox.dedupe_key))
                    ) AS dedupe_key,
                    'sentry'::TEXT AS channel,
                    'sentry.issue_alert'::TEXT AS event_kind,
                    pg_catalog.jsonb_build_object(
-                       'dedupe_key_hash', pg_catalog.encode(
-                           extensions.digest(
-                               pg_catalog.convert_to(
-                                   'sentry-dedupe-key' || pg_catalog.chr(10)
-                                       || pg_catalog.to_json(pg_catalog.btrim(outbox.dedupe_key))::TEXT,
-                                   'UTF8'
-                               ),
-                               'sha256'
-                           ),
-                           'hex'
+                       'dedupe_key_hash', public.canonical_json_hash_v1(
+                           'sentry-dedupe-key',
+                           pg_catalog.to_jsonb(pg_catalog.btrim(outbox.dedupe_key))
                        ),
-                       'project_slug', outbox.project_slug,
+                       'project_slug', CASE
+                           WHEN outbox.project_slug IS NOT NULL
+                                AND outbox.project_slug ~ '^[A-Za-z0-9][A-Za-z0-9-]{0,99}$'
+                           THEN outbox.project_slug
+                           ELSE NULL
+                       END,
                        'occurred_at', pg_catalog.to_char(
                            outbox.occurred_at AT TIME ZONE 'UTC',
                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
@@ -1359,9 +1553,26 @@ BEGIN
                            THEN outbox.issue_url
                            ELSE NULL
                        END,
-                       'issue_short_id', outbox.issue_short_id,
-                       'error_type', outbox.error_type,
-                       'release', outbox.release
+                       'issue_short_id', CASE
+                           WHEN outbox.issue_short_id IS NOT NULL
+                                AND outbox.issue_short_id ~ '^[A-Z][A-Z0-9_-]{0,49}-[0-9]{1,12}$'
+                           THEN outbox.issue_short_id
+                           ELSE NULL
+                       END,
+                       'error_type', CASE
+                           WHEN outbox.error_type IS NOT NULL
+                                AND outbox.error_type ~ '^[A-Za-z_$][A-Za-z0-9_$.]*(::[A-Za-z_$][A-Za-z0-9_$.]*)*$'
+                           THEN outbox.error_type
+                           ELSE NULL
+                       END,
+                       'release', CASE
+                           WHEN outbox.release IS NOT NULL
+                                AND outbox.release ~ '^[0-9A-Za-z][0-9A-Za-z._+-]*$'
+                                AND pg_catalog.length(outbox.release) <= 80
+                                AND outbox.release !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                           THEN outbox.release
+                           ELSE NULL
+                       END
                    ) AS payload
             FROM public.sentry_discord_alert_outbox AS outbox
         ) AS sentry
@@ -1399,10 +1610,14 @@ $$;
 
 REVOKE EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, INTEGER) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_payment_event_v1(TEXT, TEXT, TEXT, TEXT, UUID, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, INTEGER) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.canonical_json_string_v1(TEXT) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.canonical_json_number_v1(JSONB) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.canonical_json_v1(JSONB, INTEGER) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE EXECUTE ON FUNCTION public.canonical_json_hash_v1(TEXT, JSONB) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE EXECUTE ON FUNCTION public.canonical_system_configuration_json(JSONB) FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.canonical_system_configuration_json(JSONB) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, UUID, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, UUID, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.upsert_fulfillment_job_v1(UUID, UUID, TEXT, SMALLINT, BIGINT, UUID, TIMESTAMPTZ, TIMESTAMPTZ, TEXT, JSONB, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, JSONB, TEXT, BOOLEAN) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.enqueue_notification_v1(TEXT, TEXT, TEXT, JSONB, TEXT, BOOLEAN) TO service_role;
 REVOKE EXECUTE ON FUNCTION public.append_account_lifecycle_v1(UUID, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated;

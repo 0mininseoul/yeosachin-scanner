@@ -2,7 +2,10 @@ import 'server-only';
 
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    CANONICAL_HASH_NAMESPACES,
+    canonicalJsonHash,
+} from '@/lib/services/commerce/canonical-commerce-store';
 import {
     canonicalOperationsStore,
     isCanonicalFamilyWriteEnabled,
@@ -485,7 +488,7 @@ async function mirrorSentryCanonicalNotification(alert: SentryAlertForOutbox): P
         ? alert.occurredAt.toISOString()
         : null;
     const payload = {
-        dedupe_key_hash: canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey),
+        dedupe_key_hash: canonicalJsonHash(CANONICAL_HASH_NAMESPACES.sentryNotificationKey, alert.dedupeKey),
         project_slug: safeProjectSlug(alert.projectSlug),
         occurred_at: occurred,
         issue_url: safeIssueUrl(alert.issueUrl),
@@ -497,9 +500,9 @@ async function mirrorSentryCanonicalNotification(alert: SentryAlertForOutbox): P
         await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
                 channel: 'sentry',
                 eventKind: 'sentry.issue_alert',
-                dedupeKey: `sentry:${canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey)}`,
+                dedupeKey: `sentry:${canonicalJsonHash(CANONICAL_HASH_NAMESPACES.sentryNotificationKey, alert.dedupeKey)}`,
                 payload,
-                contentHash: canonicalJsonHash('sentry-notification-content', payload),
+                contentHash: canonicalJsonHash(CANONICAL_HASH_NAMESPACES.sentryNotificationContent, payload),
             }));
     } catch {
         try {

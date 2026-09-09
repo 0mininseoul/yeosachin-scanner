@@ -2,7 +2,10 @@ import 'server-only';
 
 import * as Sentry from '@sentry/nextjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
+import {
+    CANONICAL_HASH_NAMESPACES,
+    canonicalJsonHash,
+} from '@/lib/services/commerce/canonical-commerce-store';
 import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
@@ -66,7 +69,15 @@ function safeAttributionOrigin(value: unknown): string | null {
             || url.search
             || url.hash
         ) return null;
-        return url.toString();
+        const normalized = url.toString();
+        // Keep this projection byte-for-byte compatible with the legacy
+        // outbox column check and its SQL shadow reader: root origins only,
+        // lowercase DNS labels, and no localhost/private-IP destinations.
+        if (
+            !/^https?:\/\/[a-z0-9][a-z0-9.-]{0,251}\/$/.test(normalized)
+            || /^https?:\/\/(?:localhost|(?:[0-9]{1,3}\.){3}[0-9]{1,3})\//.test(normalized)
+        ) return null;
+        return normalized;
     } catch {
         return null;
     }
@@ -266,7 +277,7 @@ export function kakaoSignupProfileForOutbox(profile: KakaoSignupProfile) {
         gender: safeGender(profile.gender),
         signed_up_at: profile.signedUpAt.toISOString(),
         attribution_label: profile.attributionLabel ?? null,
-        attribution_origin: profile.attributionOrigin ?? null,
+        attribution_origin: safeAttributionOrigin(profile.attributionOrigin),
     };
 }
 
@@ -287,9 +298,9 @@ async function mirrorKakaoSignupNotification(
         await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
                 channel: 'kakao',
                 eventKind: 'kakao.signup',
-                dedupeKey: `kakao-signup:${canonicalJsonHash('kakao-signup-key', userId)}`,
+                dedupeKey: `kakao-signup:${canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationKey, userId)}`,
                 payload: canonicalPayload,
-                contentHash: canonicalJsonHash('kakao-signup-content', canonicalPayload),
+                contentHash: canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationContent, canonicalPayload),
             }));
     } catch {
         try {

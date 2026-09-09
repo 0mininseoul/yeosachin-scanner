@@ -18,6 +18,7 @@ import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
     type CanonicalOperationsStore,
 } from '@/lib/services/operations/canonical-operations-store';
 import { operationalLogger } from '@/lib/observability/server';
@@ -458,16 +459,16 @@ export function createEarlybirdFulfillmentStore(
                 ?? (input.status === 'manual_review' ? now : null),
         } as const;
         try {
-            await canonicalStore.upsertFulfillmentJob(snapshot);
+            await withCanonicalMirrorTimeout(() => canonicalStore.upsertFulfillmentJob(snapshot));
         } catch {
             try {
-                await enqueueMaintenance(
+                await withCanonicalMirrorTimeout(() => enqueueMaintenance(
                     maintenanceMarker(
                         'recovery',
                         input.orderId,
                         `fulfillment:${input.status}`,
                     ),
-                );
+                ));
             } catch {
                 // Legacy fulfillment remains authoritative when both mirrors fail.
             }

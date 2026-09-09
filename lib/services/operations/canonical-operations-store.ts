@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     canonicalEvidenceHash,
+    CANONICAL_HASH_NAMESPACES,
     canonicalJson,
     canonicalJsonHash,
     parseCanonicalJsonObject,
@@ -165,7 +166,8 @@ export type SystemLeaseResult = Readonly<{
     leaseExpiresAt: string | null;
 }>;
 
-export const CANONICAL_SYSTEM_CONFIGURATION_HASH_NAMESPACE = 'system-configuration';
+export const CANONICAL_SYSTEM_CONFIGURATION_HASH_NAMESPACE =
+    CANONICAL_HASH_NAMESPACES.systemConfiguration;
 
 export function canonicalSystemConfigurationHash(config: CanonicalJsonObject): string {
     return canonicalJsonHash(CANONICAL_SYSTEM_CONFIGURATION_HASH_NAMESPACE, config);
@@ -652,6 +654,8 @@ export async function shadowCompareCanonicalFamily(
 
 export async function shadowReadCanonicalNotificationOutbox(
     limit = 10,
+    rpc: CanonicalOperationsRpcClient['rpc'] = (name, params) =>
+        supabaseAdmin.rpc(name, params),
 ): Promise<{
     status: 'ok' | 'blocked';
     rowCount: number;
@@ -667,12 +671,12 @@ export async function shadowReadCanonicalNotificationOutbox(
     const readLimit = comparisonLimit + 1;
     try {
         const [legacyResult, canonicalResult] = await Promise.all([
-            supabaseAdmin.rpc('list_notification_legacy_outbox_v1', {
+            withCanonicalMirrorTimeout(() => rpc('list_notification_legacy_outbox_v1', {
                 p_limit: readLimit,
-            }),
-            supabaseAdmin.rpc('list_notification_outbox_v1', {
+            })),
+            withCanonicalMirrorTimeout(() => rpc('list_notification_outbox_v1', {
                 p_limit: readLimit,
-            }),
+            })),
         ]);
         if (legacyResult.error || canonicalResult.error
             || !Array.isArray(legacyResult.data)

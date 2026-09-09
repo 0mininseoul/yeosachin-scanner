@@ -33,6 +33,32 @@ export type CanonicalJsonObject = { [key: string]: CanonicalJsonValue };
 
 const sensitiveKeyPattern = /(?:token|secret|password|cookie|authorization|raw[_-]?body|buyer[_-]?(?:email|phone)|email|phone)/i;
 
+/**
+ * Hashes in the commerce/operations boundary use one deliberately boring
+ * wire format: UTF-8 bytes of `${namespace}\n${canonicalJson(value)}`. Keep
+ * the separator and encoding named so the SQL implementation can mirror this
+ * contract without relying on a database's JSONB display representation.
+ */
+export const CANONICAL_JSON_HASH_SEPARATOR = '\n';
+export const CANONICAL_JSON_HASH_ENCODING = 'utf8';
+export const CANONICAL_HASH_NAMESPACES = Object.freeze({
+    systemConfiguration: 'system-configuration',
+    paymentNotificationContent: 'payment-discord-content',
+    kakaoNotificationKey: 'kakao-signup-key',
+    kakaoNotificationContent: 'kakao-signup-content',
+    sentryNotificationKey: 'sentry-dedupe-key',
+    sentryNotificationContent: 'sentry-notification-content',
+});
+
+function compareCanonicalKeys(left: string, right: string): number {
+    // Sort by UTF-8 bytes. PostgreSQL reproduces this ordering by sorting the
+    // lowercase hex form of convert_to(key, 'UTF8'), independent of collation.
+    return Buffer.compare(
+        Buffer.from(left, CANONICAL_JSON_HASH_ENCODING),
+        Buffer.from(right, CANONICAL_JSON_HASH_ENCODING),
+    );
+}
+
 function normalizeCanonicalJson(value: unknown, depth = 0, key = 'root'): CanonicalJsonValue {
     if (depth > 8) {
         throw new Error('CANONICAL_JSON_DEPTH_LIMIT');
@@ -78,7 +104,7 @@ function normalizeCanonicalJson(value: unknown, depth = 0, key = 'root'): Canoni
         output[childKey] = normalizeCanonicalJson(childValue, depth + 1, `${key}.${childKey}`);
     }
     return Object.fromEntries(
-        Object.entries(output).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+        Object.entries(output).sort(([left], [right]) => compareCanonicalKeys(left, right)),
     );
 }
 
@@ -90,13 +116,40 @@ export function parseCanonicalJsonObject(value: unknown): CanonicalJsonObject {
     return normalized;
 }
 
+function serializeCanonicalJson(value: CanonicalJsonValue): string {
+    if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+        const serialized = JSON.stringify(value);
+        if (typeof serialized !== 'string') {
+            throw new Error('CANONICAL_JSON_VALUE_INVALID');
+        }
+        return serialized;
+    }
+    if (Array.isArray(value)) {
+        return `[${value.map(serializeCanonicalJson).join(',')}]`;
+    }
+    // JSON.stringify gives integer-like object keys special enumeration
+    // ordering. Serialize entries explicitly so PostgreSQL's UTF-8 ordering
+    // remains the source of truth for every valid object key.
+    return `{${Object.entries(value)
+        .sort(([left], [right]) => compareCanonicalKeys(left, right))
+        .map(([key, child]) => `${JSON.stringify(key)}:${serializeCanonicalJson(child)}`)
+        .join(',')}}`;
+}
+
 export function canonicalJson(value: unknown): string {
-    return JSON.stringify(normalizeCanonicalJson(value));
+    return serializeCanonicalJson(normalizeCanonicalJson(value));
+}
+
+export function canonicalJsonHashInput(namespace: string, value: unknown): string {
+    if (!namespace || namespace.includes(CANONICAL_JSON_HASH_SEPARATOR)) {
+        throw new Error('CANONICAL_JSON_NAMESPACE_INVALID');
+    }
+    return `${namespace}${CANONICAL_JSON_HASH_SEPARATOR}${canonicalJson(value)}`;
 }
 
 export function canonicalJsonHash(namespace: string, value: unknown): string {
     return createHash('sha256')
-        .update(`${namespace}\n${canonicalJson(value)}`, 'utf8')
+        .update(canonicalJsonHashInput(namespace, value), CANONICAL_JSON_HASH_ENCODING)
         .digest('hex');
 }
 
@@ -254,7 +307,7 @@ export const canonicalCommerceStore = createCanonicalCommerceStore();
 
 export function canonicalEvidenceHash(namespace: string, value: string): string {
     return createHash('sha256')
-        .update(`${namespace}\n${value}`, 'utf8')
+        .update(`${namespace}${CANONICAL_JSON_HASH_SEPARATOR}${value}`, CANONICAL_JSON_HASH_ENCODING)
         .digest('hex');
 }
 
