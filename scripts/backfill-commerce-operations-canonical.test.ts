@@ -59,7 +59,7 @@ describe('commerce canonical report-only backfill', () => {
             },
         });
 
-        expect(requestedLimit).toBe(100);
+        expect(requestedLimit).toBe(101);
         expect(report.status).toBe('blocked');
         expect(report.unknownEvidenceCount).toBe(1);
         expect(JSON.stringify(report)).not.toContain('order-secret-id');
@@ -104,5 +104,51 @@ describe('commerce canonical report-only backfill', () => {
         }));
         expect(JSON.stringify(report)).not.toContain('queued');
         expect(JSON.stringify(report)).not.toContain('sent');
+    });
+
+    it('fails closed on a canonical-only tail and on either side being truncated', () => {
+        const canonicalOnly = compareCanonicalParity(
+            [{ family: 'notification', key: 'one', content: 'ignored' }],
+            [
+                { family: 'notification', key: 'one', content: 'ignored' },
+                { family: 'notification', key: 'two', content: 'ignored' },
+            ],
+        );
+        expect(canonicalOnly.status).toBe('mismatch');
+        expect(canonicalOnly.mismatchedFamilies).toContain('notification');
+        expect(canonicalOnly.fieldMismatches.notification).toEqual(
+            expect.arrayContaining(['missing_record', 'record_count']),
+        );
+
+        const rows = Array.from({ length: 101 }, (_, index) => ({
+            family: 'maintenance' as const,
+            key: `maintenance-${index}`,
+            content: 'same',
+        }));
+        const truncated = compareCanonicalParity(rows, rows);
+        expect(truncated.status).toBe('mismatch');
+        expect(truncated.truncatedFamilies).toEqual(['maintenance']);
+        expect(truncated.fieldMismatches.maintenance).toEqual(['truncated']);
+    });
+
+    it('requires bounded source and canonical readers before reporting backfill parity complete', async () => {
+        const source = [{ family: 'payment' as const, key: 'one', content: 'same' }];
+        const report = await backfillCommerceOperationsCanonical({
+            limit: 100,
+            reportOnly: true,
+            readBatch: async () => source,
+            readCanonicalBatch: async () => source,
+        });
+
+        expect(report.status).toBe('complete');
+        expect(report.parity).toEqual(expect.objectContaining({ status: 'match' }));
+
+        const blocked = await backfillCommerceOperationsCanonical({
+            limit: 100,
+            reportOnly: true,
+            readBatch: async () => source,
+        });
+        expect(blocked.status).toBe('blocked');
+        expect(blocked.blockedReasons).toContain('CANONICAL_SOURCE_NOT_CONFIGURED');
     });
 });

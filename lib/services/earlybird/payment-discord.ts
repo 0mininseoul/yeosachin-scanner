@@ -9,6 +9,7 @@ import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -210,18 +211,18 @@ async function mirrorPaymentNotification(item: EarlybirdPaymentDiscordItem): Pro
         JSON.stringify(payload),
     );
     try {
-        await canonicalOperationsStore.enqueueNotification({
-            channel: 'discord',
-            eventKind: 'earlybird.payment.completed',
-            dedupeKey: `earlybird-payment:${item.order_id}`,
-            payload,
-            contentHash,
-        });
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
+                channel: 'discord',
+                eventKind: 'earlybird.payment.completed',
+                dedupeKey: `earlybird-payment:${item.order_id}`,
+                payload,
+                contentHash,
+            }));
     } catch {
         try {
-            await queueCanonicalMaintenanceJob(
-                maintenanceMarker('recovery', item.order_id, 'payment-notification'),
-            );
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                    maintenanceMarker('recovery', item.order_id, 'payment-notification'),
+                ));
         } catch {
             operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
         }

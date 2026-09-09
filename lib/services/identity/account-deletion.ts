@@ -91,7 +91,17 @@ export async function deleteAccountPermanently(
         state: parsed.data.state,
     });
 
-    if (parsed.data.state === 'completed') return;
+    if (parsed.data.state === 'completed') {
+        // begin_account_deletion_v1 may have completed all irreversible work
+        // during an earlier attempt. The canonical lifecycle still needs an
+        // explicit terminal marker before this replay returns.
+        await recordLifecycle('retired', 'completed:completion', {
+            phase: 'completion',
+            resumed: true,
+            completed_at_begin: true,
+        });
+        return;
+    }
 
     if (parsed.data.state !== 'database_purged') {
         await recordLifecycle('deletion_requested', 'prepared:objects', {

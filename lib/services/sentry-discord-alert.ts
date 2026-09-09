@@ -8,6 +8,7 @@ import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -493,18 +494,18 @@ async function mirrorSentryCanonicalNotification(alert: SentryAlertForOutbox): P
         release: safeRelease(alert.release),
     };
     try {
-        await canonicalOperationsStore.enqueueNotification({
-            channel: 'sentry',
-            eventKind: 'sentry.issue_alert',
-            dedupeKey: `sentry:${canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey)}`,
-            payload,
-            contentHash: canonicalJsonHash('sentry-notification-content', payload),
-        });
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
+                channel: 'sentry',
+                eventKind: 'sentry.issue_alert',
+                dedupeKey: `sentry:${canonicalJsonHash('sentry-dedupe-key', alert.dedupeKey)}`,
+                payload,
+                contentHash: canonicalJsonHash('sentry-notification-content', payload),
+            }));
     } catch {
         try {
-            await queueCanonicalMaintenanceJob(
-                maintenanceMarker('recovery', alert.dedupeKey, 'sentry-notification'),
-            );
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                    maintenanceMarker('recovery', alert.dedupeKey, 'sentry-notification'),
+                ));
         } catch {
             operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
         }

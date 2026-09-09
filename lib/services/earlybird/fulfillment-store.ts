@@ -45,6 +45,7 @@ const claimRowSchema = z.object({
     claimed: z.boolean(),
     fulfillment_status: fulfillmentStatusSchema,
     lease_token: uuidSchema.nullable(),
+    lease_expires_at: z.string().datetime({ offset: true }).nullable().optional(),
     lease_fence: z.number().int().min(0).safe(),
     attempt_count: z.number().int().min(0).max(10),
 }).strict();
@@ -423,18 +424,38 @@ export function createEarlybirdFulfillmentStore(
         leaseToken?: string | null;
         leaseExpiresAt?: string | null;
         lastErrorCode?: string | null;
+        operatorAdmittedAt?: string | null;
+        lastErrorAt?: string | null;
+        completedAt?: string | null;
+        manualReviewAt?: string | null;
     }): Promise<void> => {
         if (!dualWrite) return;
+        const now = new Date().toISOString();
+        const leaseToken = input.leaseToken ?? null;
         const snapshot = {
             orderId: input.orderId,
             requestId: input.requestId,
             state: input.status,
             attemptCount: input.attemptCount ?? 0,
             leaseGeneration: input.leaseGeneration ?? 0,
-            leaseToken: input.leaseToken ?? null,
-            leaseExpiresAt: input.leaseExpiresAt ?? null,
-            nextAttemptAt: new Date().toISOString(),
+            leaseToken,
+            // The legacy claim RPC historically returned the token and fence
+            // but not the expiry. Preserve that active lease in the mirror
+            // with the same five-minute lease used by claim() rather than
+            // dropping the token or writing an invalid half-lease shape.
+            leaseExpiresAt: leaseToken
+                ? input.leaseExpiresAt ?? new Date(Date.now() + 300_000).toISOString()
+                : null,
+            nextAttemptAt: now,
             lastErrorCode: input.lastErrorCode ?? null,
+            operatorAdmittedAt: input.operatorAdmittedAt
+                ?? (input.status === 'awaiting_operator' ? null : now),
+            lastErrorAt: input.lastErrorAt
+                ?? (input.lastErrorCode ? now : null),
+            completedAt: input.completedAt
+                ?? (input.status === 'completed' ? now : null),
+            manualReviewAt: input.manualReviewAt
+                ?? (input.status === 'manual_review' ? now : null),
         } as const;
         try {
             await canonicalStore.upsertFulfillmentJob(snapshot);
@@ -475,6 +496,7 @@ export function createEarlybirdFulfillmentStore(
                 orderId: identity.orderId,
                 requestId: identity.requestId,
                 status: identity.status,
+                operatorAdmittedAt: new Date().toISOString(),
             });
             return identity;
         },
@@ -501,6 +523,9 @@ export function createEarlybirdFulfillmentStore(
                 orderId: identity.orderId,
                 requestId: identity.requestId,
                 status: identity.status,
+                operatorAdmittedAt: new Date().toISOString(),
+                completedAt: identity.status === 'completed' ? new Date().toISOString() : null,
+                manualReviewAt: identity.status === 'manual_review' ? new Date().toISOString() : null,
             })));
             return Object.freeze(identities);
         },
@@ -523,6 +548,9 @@ export function createEarlybirdFulfillmentStore(
                 orderId: identity.orderId,
                 requestId: identity.requestId,
                 status: identity.status,
+                operatorAdmittedAt: new Date().toISOString(),
+                completedAt: identity.status === 'completed' ? new Date().toISOString() : null,
+                manualReviewAt: identity.status === 'manual_review' ? new Date().toISOString() : null,
             })));
             return Object.freeze(identities);
         },
@@ -569,7 +597,8 @@ export function createEarlybirdFulfillmentStore(
                 attemptCount: row.attempt_count,
                 leaseGeneration: row.lease_fence,
                 leaseToken: row.lease_token,
-                leaseExpiresAt: null,
+                leaseExpiresAt: row.lease_expires_at ?? null,
+                operatorAdmittedAt: new Date().toISOString(),
             });
             return Object.freeze({
                 claimed: row.claimed,
@@ -619,6 +648,9 @@ export function createEarlybirdFulfillmentStore(
                 status: row.fulfillment_status,
                 leaseGeneration: claim.fence,
                 leaseToken: claim.claimToken,
+                operatorAdmittedAt: new Date().toISOString(),
+                completedAt: row.fulfillment_status === 'completed' ? new Date().toISOString() : null,
+                manualReviewAt: row.fulfillment_status === 'manual_review' ? new Date().toISOString() : null,
             });
             return Object.freeze({
                 orderId: row.order_id,
@@ -649,6 +681,9 @@ export function createEarlybirdFulfillmentStore(
                 requestId: null,
                 status: 'manual_review',
                 lastErrorCode: parsedCode.data,
+                operatorAdmittedAt: new Date().toISOString(),
+                lastErrorAt: new Date().toISOString(),
+                manualReviewAt: new Date().toISOString(),
             });
             return 'manual_review';
         },
@@ -666,6 +701,7 @@ export function createEarlybirdFulfillmentStore(
                 orderId: row.order_id,
                 requestId: null,
                 status: row.fulfillment_status,
+                operatorAdmittedAt: new Date().toISOString(),
             });
             return Object.freeze({
                 orderId: row.order_id,
@@ -698,6 +734,8 @@ export function createEarlybirdFulfillmentStore(
                 orderId: row.order_id,
                 requestId: row.request_id,
                 status: row.fulfillment_status,
+                operatorAdmittedAt: new Date().toISOString(),
+                completedAt: row.fulfillment_status === 'completed' ? new Date().toISOString() : null,
             });
             return identityFromRow(row);
         },

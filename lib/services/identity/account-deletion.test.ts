@@ -69,6 +69,35 @@ describe('deleteAccountPermanently', () => {
         expect(deleteAuthUser).toHaveBeenCalledOnce();
     });
 
+    it('records completion lifecycle evidence before returning for an already-completed begin result', async () => {
+        const lifecycle: string[] = [];
+        const rpc = vi.fn(async (name: string) => ({
+            data: name === 'begin_account_deletion_v1'
+                ? { state: 'completed', objectKeys: [] }
+                : true,
+            error: null,
+        }));
+        const appendLifecycle = vi.fn(async input => {
+            lifecycle.push(`${input.eventKind}:${input.state}`);
+        });
+
+        await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            rpc,
+            dualWrite: true,
+            appendLifecycle,
+            deleteObject: vi.fn(),
+            deleteAuthUser: vi.fn(),
+        });
+
+        expect(lifecycle).toEqual([
+            'deletion_requested:started:begin',
+            'deletion_requested:completed:begin',
+            'retired:completed:completion',
+        ]);
+        expect(appendLifecycle).toHaveBeenCalledTimes(3);
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('appends lifecycle evidence before each irreversible deletion phase', async () => {
         const lifecycle: string[] = [];
         const rpc = vi.fn(async (name: string) => ({

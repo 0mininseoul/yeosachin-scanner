@@ -36,6 +36,7 @@ import {
 import {
     isCanonicalFamilyWriteEnabled,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
 } from '@/lib/services/operations/canonical-operations-store';
 import {
     observeRoute,
@@ -97,15 +98,15 @@ async function mirrorCanonicalPaymentEvent(
 ): Promise<void> {
     if (!input || !isCanonicalFamilyWriteEnabled('payment')) return;
     try {
-        const result = await recordPaymentEventWithMaintenance(
-            canonicalCommerceStore,
-            input,
-            marker => queueCanonicalMaintenanceJob({
-                kind: 'replay',
-                targetKeyHash: marker.targetKeyHash,
-                contentHash: marker.contentHash,
-            }).then(() => undefined),
-        );
+        const result = await withCanonicalMirrorTimeout(() => recordPaymentEventWithMaintenance(
+                canonicalCommerceStore,
+                input,
+                marker => queueCanonicalMaintenanceJob({
+                    kind: 'replay',
+                    targetKeyHash: marker.targetKeyHash,
+                    contentHash: marker.contentHash,
+                }).then(() => undefined),
+            ));
         if (result.status === 'unavailable') {
             operationalLogger.emit({
                 event: 'groble.webhook_canonical_mirror_unavailable',

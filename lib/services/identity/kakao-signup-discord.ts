@@ -8,6 +8,7 @@ import {
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
     canonicalOperationsStore,
+    withCanonicalMirrorTimeout,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
@@ -283,18 +284,18 @@ async function mirrorKakaoSignupNotification(
         attribution_origin: safeAttributionOrigin(payload.attribution_origin),
     };
     try {
-        await canonicalOperationsStore.enqueueNotification({
-            channel: 'kakao',
-            eventKind: 'kakao.signup',
-            dedupeKey: `kakao-signup:${canonicalJsonHash('kakao-signup-key', userId)}`,
-            payload: canonicalPayload,
-            contentHash: canonicalJsonHash('kakao-signup-content', canonicalPayload),
-        });
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
+                channel: 'kakao',
+                eventKind: 'kakao.signup',
+                dedupeKey: `kakao-signup:${canonicalJsonHash('kakao-signup-key', userId)}`,
+                payload: canonicalPayload,
+                contentHash: canonicalJsonHash('kakao-signup-content', canonicalPayload),
+            }));
     } catch {
         try {
-            await queueCanonicalMaintenanceJob(
-                maintenanceMarker('recovery', userId, 'kakao-signup-notification'),
-            );
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
+                    maintenanceMarker('recovery', userId, 'kakao-signup-notification'),
+                ));
         } catch {
             operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
         }

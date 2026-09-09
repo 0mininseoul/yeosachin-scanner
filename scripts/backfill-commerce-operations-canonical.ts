@@ -93,18 +93,28 @@ export interface CommerceCanonicalBackfillReport {
     unknownEvidenceCount: number;
     blockedReasons: readonly string[];
     familyChecksums: Readonly<Record<BackfillFamily, string>>;
+    canonicalFamilyChecksums: Readonly<Record<BackfillFamily, string>>;
+    parity: CanonicalParityReport;
 }
+
+export type BackfillReadResult =
+    | readonly LegacyBackfillRecord[]
+    | Readonly<{
+        records: readonly LegacyBackfillRecord[];
+        truncated?: boolean;
+    }>;
 
 type ReadBatch = (
     limit: number,
     cursor: string | null,
-) => Promise<readonly LegacyBackfillRecord[]>;
+) => Promise<BackfillReadResult>;
 
 export interface CommerceCanonicalBackfillOptions {
     limit?: number;
     cursor?: string | null;
     reportOnly: boolean;
     readBatch?: ReadBatch;
+    readCanonicalBatch?: ReadBatch;
     destructive?: boolean;
     activate?: boolean;
     cutover?: boolean;
@@ -134,8 +144,8 @@ function hashBatch(records: readonly LegacyBackfillRecord[]): Record<BackfillFam
         const digest = createHash('sha256');
         for (const record of records
             .filter(candidate => candidate.family === family)
-            .slice(0, PARITY_LIMIT)
-            .sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0)) {
+            .sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
+            .slice(0, PARITY_LIMIT)) {
             digest.update(`${record.key.length}:${record.key}\n${record.content.length}:${record.content}\n`);
         }
         checksums[family] = digest.digest('hex');
@@ -165,6 +175,22 @@ function recordFields(record: LegacyBackfillRecord): Readonly<Record<string, unk
     return record.fields ?? { content: record.content };
 }
 
+function stableValue(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(stableValue);
+    if (value && typeof value === 'object') {
+        return Object.fromEntries(
+            Object.entries(value as Record<string, unknown>)
+                .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+                .map(([key, child]) => [key, stableValue(child)]),
+        );
+    }
+    return value;
+}
+
+function stableFieldValue(value: unknown): string {
+    return JSON.stringify(stableValue(value));
+}
+
 function fieldParity(
     sourceRecords: readonly LegacyBackfillRecord[],
     canonicalRecords: readonly LegacyBackfillRecord[],
@@ -176,6 +202,9 @@ function fieldParity(
     const canonicalByKey = new Map(canonicalRecords.map(record => [record.key, record]));
     const fields = new Set<string>();
     let compared = 0;
+    if (sourceByKey.size !== sourceRecords.length || canonicalByKey.size !== canonicalRecords.length) {
+        fields.add('duplicate_key');
+    }
     for (const [key, source] of sourceByKey) {
         const canonical = canonicalByKey.get(key);
         if (!canonical) {
@@ -190,10 +219,13 @@ function fieldParity(
             ...Object.keys(canonicalFields),
         ]);
         for (const field of allFields) {
-            const sourceValue = JSON.stringify(sourceFields[field]);
-            const canonicalValue = JSON.stringify(canonicalFields[field]);
+            const sourceValue = stableFieldValue(sourceFields[field]);
+            const canonicalValue = stableFieldValue(canonicalFields[field]);
             if (sourceValue !== canonicalValue) fields.add(field);
         }
+    }
+    for (const key of canonicalByKey.keys()) {
+        if (!sourceByKey.has(key)) fields.add('missing_record');
     }
     if (sourceByKey.size !== canonicalByKey.size) fields.add('record_count');
     return {
@@ -205,6 +237,10 @@ function fieldParity(
 export function compareCanonicalParity(
     sourceRecords: readonly LegacyBackfillRecord[],
     canonicalRecords: readonly LegacyBackfillRecord[],
+    options: Readonly<{
+        sourceTruncated?: boolean;
+        canonicalTruncated?: boolean;
+    }> = {},
 ): CanonicalParityReport {
     const sourceChecksums = hashBatch(sourceRecords);
     const canonicalChecksums = hashBatch(canonicalRecords);
@@ -214,15 +250,43 @@ export function compareCanonicalParity(
     const fieldMismatches = Object.fromEntries(families.map(family => [family, []])) as unknown as Record<BackfillFamily, readonly string[]>;
     const truncatedFamilies: BackfillFamily[] = [];
     for (const family of families) {
-        const source = sourceRecords.filter(record => record.family === family).slice(0, PARITY_LIMIT);
-        const canonical = canonicalRecords.filter(record => record.family === family).slice(0, PARITY_LIMIT);
+        const sourceFamily = sourceRecords
+            .filter(record => record.family === family)
+            .sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+        const canonicalFamily = canonicalRecords
+            .filter(record => record.family === family)
+            .sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+        const source = sourceFamily.slice(0, PARITY_LIMIT);
+        const canonical = canonicalFamily.slice(0, PARITY_LIMIT);
         const parity = fieldParity(source, canonical);
         comparedCounts[family] = parity.compared;
-        fieldMismatches[family] = parity.mismatches;
+        const mismatches = new Set(parity.mismatches);
         if (
-            sourceRecords.filter(record => record.family === family).length > PARITY_LIMIT
-            || canonicalRecords.filter(record => record.family === family).length > PARITY_LIMIT
+            sourceFamily.length > PARITY_LIMIT
+            || canonicalFamily.length > PARITY_LIMIT
+            || (options.sourceTruncated && sourceFamily.length > 0)
+            || (options.canonicalTruncated && canonicalFamily.length > 0)
         ) truncatedFamilies.push(family);
+        if (
+            sourceFamily.length > PARITY_LIMIT
+            || canonicalFamily.length > PARITY_LIMIT
+            || options.sourceTruncated
+            || options.canonicalTruncated
+        ) {
+            // The reader metadata applies to the whole bounded batch. Mark
+            // only families represented in the batch so an empty family does
+            // not create a synthetic parity mismatch.
+            if (sourceFamily.length > 0 || canonicalFamily.length > 0) {
+                mismatches.add('truncated');
+            } else if (options.sourceTruncated || options.canonicalTruncated) {
+                // A reader can report a truncated empty page when the cursor
+                // moved past the visible batch. Keep this standalone parity
+                // helper fail-closed even when no family row survived the
+                // bounded page.
+                mismatches.add('truncated');
+            }
+        }
+        fieldMismatches[family] = [...mismatches].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
     }
     const mismatchedFamilies = families.filter(family =>
         sourceChecksums[family] !== canonicalChecksums[family]
@@ -257,10 +321,45 @@ function boundedLimit(value: number | undefined): number {
     return Math.min(value, 100);
 }
 
+function unpackReadResult(result: BackfillReadResult): {
+    records: readonly LegacyBackfillRecord[];
+    truncated: boolean;
+} {
+    if (Array.isArray(result)) {
+        return { records: result as readonly LegacyBackfillRecord[], truncated: false };
+    }
+    const objectResult = result as {
+        records?: readonly LegacyBackfillRecord[];
+        truncated?: boolean;
+    } | null;
+    if (!objectResult || !Array.isArray(objectResult.records)) {
+        throw new Error('BACKFILL_READ_RESULT_INVALID');
+    }
+    return {
+        records: objectResult.records,
+        truncated: objectResult.truncated === true,
+    };
+}
+
+function boundedRead(
+    result: BackfillReadResult,
+    limit: number,
+): { records: readonly LegacyBackfillRecord[]; truncated: boolean } {
+    const unpacked = unpackReadResult(result);
+    if (unpacked.records.length > limit) {
+        return {
+            records: unpacked.records.slice(0, limit),
+            truncated: true,
+        };
+    }
+    return unpacked;
+}
+
 function blockedReport(
     limit: number,
     reason: string,
 ): CommerceCanonicalBackfillReport {
+    const parity = compareCanonicalParity([], []);
     return {
         status: 'blocked',
         mode: 'report_only',
@@ -270,6 +369,8 @@ function blockedReport(
         unknownEvidenceCount: 0,
         blockedReasons: [reason],
         familyChecksums: emptyChecksums(),
+        canonicalFamilyChecksums: emptyChecksums(),
+        parity,
     };
 }
 
@@ -287,8 +388,47 @@ export async function backfillCommerceOperationsCanonical(
         return blockedReport(limit, 'SOURCE_NOT_CONFIGURED');
     }
 
-    const records = (await options.readBatch(limit, options.cursor ?? null)).slice(0, limit);
+    let sourceRead: { records: readonly LegacyBackfillRecord[]; truncated: boolean };
+    try {
+        sourceRead = boundedRead(
+            // Probe one record past the bounded batch. A reader that returns
+            // only `limit` rows cannot distinguish a complete page from a
+            // truncated tail, so the sentinel is required for fail-closed
+            // parity.
+            await options.readBatch(Math.min(limit + 1, PARITY_LIMIT + 1), options.cursor ?? null),
+            limit,
+        );
+    } catch {
+        return blockedReport(limit, 'SOURCE_READ_FAILED');
+    }
+    const records = sourceRead.records;
+    let canonicalRead: { records: readonly LegacyBackfillRecord[]; truncated: boolean };
     const blockedReasons = new Set<string>();
+    if (!options.readCanonicalBatch) {
+        canonicalRead = { records: [], truncated: false };
+        blockedReasons.add('CANONICAL_SOURCE_NOT_CONFIGURED');
+    } else {
+        try {
+            canonicalRead = boundedRead(
+                await options.readCanonicalBatch(Math.min(limit + 1, PARITY_LIMIT + 1), options.cursor ?? null),
+                limit,
+            );
+        } catch {
+            canonicalRead = { records: [], truncated: false };
+            blockedReasons.add('CANONICAL_READ_FAILED');
+        }
+    }
+    const parity = compareCanonicalParity(
+        records,
+        canonicalRead.records,
+        {
+            sourceTruncated: sourceRead.truncated,
+            canonicalTruncated: canonicalRead.truncated,
+        },
+    );
+    if (parity.status !== 'match') blockedReasons.add('CANONICAL_PARITY_MISMATCH');
+    if (sourceRead.truncated) blockedReasons.add('SOURCE_TAIL_TRUNCATED');
+    if (canonicalRead.truncated) blockedReasons.add('CANONICAL_TAIL_TRUNCATED');
     let unknownEvidenceCount = 0;
     for (const record of records) {
         if (record.family !== 'payment' || record.orderStatus === undefined) continue;
@@ -311,6 +451,8 @@ export async function backfillCommerceOperationsCanonical(
         unknownEvidenceCount,
         blockedReasons: [...blockedReasons].sort(),
         familyChecksums: hashBatch(records),
+        canonicalFamilyChecksums: hashBatch(canonicalRead.records),
+        parity,
     };
 }
 

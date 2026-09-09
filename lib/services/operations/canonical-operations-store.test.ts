@@ -1,13 +1,16 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-store';
 import {
+    CANONICAL_MIRROR_TIMEOUT_MS,
     createCanonicalOperationsStore,
     isCanonicalFamilyWriteEnabled,
     rollbackCanonicalFlags,
     shadowCompareCanonicalFamily,
     isCanonicalFamilyReadEnabled,
     rollbackCanonicalReadFlags,
+    withCanonicalMirrorTimeout,
 } from './canonical-operations-store';
 
 function migrationSql(): string {
@@ -120,14 +123,15 @@ describe('canonical operations store', () => {
     });
 
     it('records immutable configuration versions through a typed service RPC', async () => {
+        const config = { maxAttempts: 3 };
         const rpc = async (name: string, params: Record<string, unknown>) => {
             expect(name).toBe('record_system_configuration_v1');
             expect(params).toEqual({
                 p_config_key: 'analysis.policy',
                 p_version: 3,
                 p_state: 'draft',
-                p_config: { maxAttempts: 3 },
-                p_content_hash: 'e'.repeat(64),
+                p_config: config,
+                p_content_hash: canonicalJsonHash('system-configuration', config),
                 p_effective_at: null,
             });
             return { data: { status: 'recorded', duplicate: false }, error: null };
@@ -138,10 +142,33 @@ describe('canonical operations store', () => {
             configKey: 'analysis.policy',
             version: 3,
             state: 'draft',
-            config: { maxAttempts: 3 },
-            contentHash: 'e'.repeat(64),
+            config,
+            contentHash: canonicalJsonHash('system-configuration', config),
             effectiveAt: null,
         })).resolves.toEqual({ status: 'recorded', duplicate: false });
+    });
+
+    it('rejects empty or non-derived configuration content hashes before the RPC', async () => {
+        const rpc = vi.fn(async () => ({ data: { status: 'recorded' }, error: null }));
+        const store = createCanonicalOperationsStore({ rpc });
+
+        await expect(store.recordSystemConfiguration({
+            configKey: 'analysis.policy',
+            version: 4,
+            state: 'draft',
+            config: {},
+            contentHash: 'a'.repeat(64),
+            effectiveAt: null,
+        })).rejects.toMatchObject({ code: 'CANONICAL_OPERATIONS_INPUT_INVALID' });
+        await expect(store.recordSystemConfiguration({
+            configKey: 'analysis.policy',
+            version: 5,
+            state: 'draft',
+            config: { maxAttempts: 3 },
+            contentHash: 'a'.repeat(64),
+            effectiveAt: null,
+        })).rejects.toMatchObject({ code: 'CANONICAL_OPERATIONS_INPUT_INVALID' });
+        expect(rpc).not.toHaveBeenCalled();
     });
 
     it('keeps all canonical family reads disabled until explicitly enabled', () => {
@@ -220,6 +247,47 @@ describe('canonical operations store', () => {
         }));
         expect(JSON.stringify(result)).not.toContain('queued');
         expect(JSON.stringify(result)).not.toContain('sent');
+    });
+
+    it('compares both tails and fails closed when either bounded reader is truncated', async () => {
+        await expect(shadowCompareCanonicalFamily(
+            'notification',
+            async () => [{ key: 'one', fields: { content_hash: 'a' } }],
+            async () => [{ key: 'one', fields: { content_hash: 'a' } }, { key: 'two', fields: { content_hash: 'b' } }],
+            100,
+            { COMMERCE_CANONICAL_NOTIFICATION_READ: 'true' },
+        )).resolves.toEqual(expect.objectContaining({
+            status: 'mismatch',
+            mismatchedFields: expect.arrayContaining(['missing_record', 'record_count']),
+        }));
+
+        const rows = Array.from({ length: 101 }, (_, index) => ({
+            key: `row-${index}`,
+            fields: { content_hash: 'a' },
+        }));
+        await expect(shadowCompareCanonicalFamily(
+            'notification',
+            async () => rows,
+            async () => rows,
+            100,
+            { COMMERCE_CANONICAL_NOTIFICATION_READ: 'true' },
+        )).resolves.toEqual(expect.objectContaining({
+            status: 'mismatch',
+            truncated: true,
+            mismatchedFields: ['truncated'],
+        }));
+    });
+
+    it('bounds fail-open canonical mirror awaits', async () => {
+        vi.useFakeTimers();
+        try {
+            const pending = withCanonicalMirrorTimeout(() => new Promise<never>(() => undefined));
+            const outcome = expect(pending).rejects.toMatchObject({ code: 'CANONICAL_MIRROR_TIMEOUT' });
+            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
+            await outcome;
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('validates bounded claim inputs and forwards generation-fenced finish inputs', async () => {

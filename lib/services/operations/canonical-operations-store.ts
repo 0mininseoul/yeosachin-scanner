@@ -5,6 +5,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     canonicalEvidenceHash,
     canonicalJson,
+    canonicalJsonHash,
     parseCanonicalJsonObject,
     type CanonicalJsonObject,
 } from '@/lib/services/commerce/canonical-commerce-store';
@@ -58,6 +59,10 @@ const fulfillmentInputSchema = z.object({
     leaseExpiresAt: z.string().datetime({ offset: true }).nullable(),
     nextAttemptAt: z.string().datetime({ offset: true }),
     lastErrorCode: errorCodeSchema,
+    operatorAdmittedAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
+    lastErrorAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
+    completedAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
+    manualReviewAt: z.string().datetime({ offset: true }).nullable().optional().default(null),
     payload: z.unknown().optional().default({}),
 }).strict().transform(input => ({
     ...input,
@@ -69,6 +74,7 @@ const notificationInputSchema = z.object({
     dedupeKey: z.string().trim().min(1).max(512),
     payload: z.unknown().optional().default({}),
     contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    requeue: z.boolean().optional().default(false),
 }).strict().transform(input => ({
     ...input,
     payload: parseJsonObject(input.payload, 'CANONICAL_OPERATIONS_INPUT_INVALID'),
@@ -105,6 +111,7 @@ const maintenanceInputSchema = z.object({
     targetKeyHash: z.string().regex(/^[a-f0-9]{64}$/),
     payload: z.unknown().optional().default({}),
     contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    requeue: z.boolean().optional().default(false),
 }).strict().transform(input => ({
     ...input,
     payload: parseJsonObject(input.payload, 'CANONICAL_OPERATIONS_INPUT_INVALID'),
@@ -157,6 +164,47 @@ export type SystemLeaseResult = Readonly<{
     fenceToken: number;
     leaseExpiresAt: string | null;
 }>;
+
+export const CANONICAL_SYSTEM_CONFIGURATION_HASH_NAMESPACE = 'system-configuration';
+
+export function canonicalSystemConfigurationHash(config: CanonicalJsonObject): string {
+    return canonicalJsonHash(CANONICAL_SYSTEM_CONFIGURATION_HASH_NAMESPACE, config);
+}
+
+/**
+ * Canonical mirrors are deliberately fail-open for legacy producers, but they
+ * must never wait indefinitely on a control-plane write. The operation is
+ * started lazily so the timeout covers both invocation and completion.
+ */
+export const CANONICAL_MIRROR_TIMEOUT_MS = 1_000;
+
+export async function withCanonicalMirrorTimeout<T>(
+    operation: () => PromiseLike<T>,
+    timeoutMs = CANONICAL_MIRROR_TIMEOUT_MS,
+): Promise<T> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
+        throw new CanonicalOperationsError('CANONICAL_OPERATIONS_INPUT_INVALID');
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        return await Promise.race([
+            Promise.resolve().then(operation),
+            new Promise<never>((_, reject) => {
+                timer = setTimeout(() => {
+                    const error = new Error('CANONICAL_MIRROR_TIMEOUT');
+                    Object.defineProperty(error, 'code', {
+                        configurable: true,
+                        enumerable: true,
+                        value: 'CANONICAL_MIRROR_TIMEOUT',
+                    });
+                    reject(error);
+                }, timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
 
 export interface CanonicalOperationsRpcClient {
     rpc(
@@ -305,10 +353,10 @@ export interface CanonicalOperationsStore {
     enqueueMaintenanceJob(input: MaintenanceJobInput): Promise<unknown>;
     claimNotificationOutbox(input: CanonicalClaimInput): Promise<ReadonlyArray<Record<string, unknown>>>;
     finishNotificationOutbox(input: NotificationFinishInput): Promise<unknown>;
-    reconcileStaleNotificationOutboxClaims(): Promise<unknown>;
+    reconcileStaleNotificationOutboxClaims(limit?: number): Promise<unknown>;
     claimMaintenanceJobs(input: CanonicalClaimInput): Promise<ReadonlyArray<Record<string, unknown>>>;
     finishMaintenanceJob(input: MaintenanceFinishInput): Promise<unknown>;
-    reconcileStaleMaintenanceJobs(): Promise<unknown>;
+    reconcileStaleMaintenanceJobs(limit?: number): Promise<unknown>;
 }
 
 export function createCanonicalOperationsStore(
@@ -332,6 +380,10 @@ export function createCanonicalOperationsStore(
                     p_lease_expires_at: parsed.leaseExpiresAt,
                     p_next_attempt_at: parsed.nextAttemptAt,
                     p_last_error_code: parsed.lastErrorCode,
+                    p_operator_admitted_at: parsed.operatorAdmittedAt,
+                    p_last_error_at: parsed.lastErrorAt,
+                    p_completed_at: parsed.completedAt,
+                    p_manual_review_at: parsed.manualReviewAt,
                     p_payload: parsed.payload,
                 },
             );
@@ -349,6 +401,7 @@ export function createCanonicalOperationsStore(
                     p_dedupe_key: parsed.dedupeKey,
                     p_payload: parsed.payload,
                     p_content_hash: parsed.contentHash,
+                    ...(parsed.requeue ? { p_requeue: true } : {}),
                 },
             );
             return parseOperationResult(data);
@@ -372,6 +425,12 @@ export function createCanonicalOperationsStore(
 
         async recordSystemConfiguration(input: SystemConfigurationInput) {
             const parsed = parseInput(configurationInputSchema, input);
+            if (
+                Object.keys(parsed.config).length === 0
+                || parsed.contentHash !== canonicalSystemConfigurationHash(parsed.config)
+            ) {
+                throw new CanonicalOperationsError('CANONICAL_OPERATIONS_INPUT_INVALID');
+            }
             const data = await callRpc(
                 dependencies.rpc,
                 'record_system_configuration_v1',
@@ -421,6 +480,7 @@ export function createCanonicalOperationsStore(
                     p_target_key_hash: parsed.targetKeyHash,
                     p_payload: parsed.payload,
                     p_content_hash: parsed.contentHash,
+                    ...(parsed.requeue ? { p_requeue: true } : {}),
                 },
             );
             return parseOperationResult(data);
@@ -448,8 +508,16 @@ export function createCanonicalOperationsStore(
             }));
         },
 
-        async reconcileStaleNotificationOutboxClaims() {
-            return parseOperationResult(await callRpc(dependencies.rpc, 'reconcile_stale_notification_outbox_v1'));
+        async reconcileStaleNotificationOutboxClaims(limit = 100) {
+            const parsedLimit = claimInputSchema.shape.limit.safeParse(limit);
+            if (!parsedLimit.success) {
+                throw new CanonicalOperationsError('CANONICAL_OPERATIONS_INPUT_INVALID');
+            }
+            return parseOperationResult(await callRpc(
+                dependencies.rpc,
+                'reconcile_stale_notification_outbox_v1',
+                { p_limit: parsedLimit.data },
+            ));
         },
 
         async claimMaintenanceJobs(input: CanonicalClaimInput) {
@@ -474,8 +542,16 @@ export function createCanonicalOperationsStore(
             }));
         },
 
-        async reconcileStaleMaintenanceJobs() {
-            return parseOperationResult(await callRpc(dependencies.rpc, 'reconcile_stale_maintenance_jobs_v1'));
+        async reconcileStaleMaintenanceJobs(limit = 100) {
+            const parsedLimit = claimInputSchema.shape.limit.safeParse(limit);
+            if (!parsedLimit.success) {
+                throw new CanonicalOperationsError('CANONICAL_OPERATIONS_INPUT_INVALID');
+            }
+            return parseOperationResult(await callRpc(
+                dependencies.rpc,
+                'reconcile_stale_maintenance_jobs_v1',
+                { p_limit: parsedLimit.data },
+            ));
         },
     });
 }
@@ -519,10 +595,18 @@ export async function shadowCompareCanonicalFamily(
     }
     try {
         const [legacy, canonical] = await Promise.all([readLegacy(), readCanonical()]);
+        if (!Array.isArray(legacy) || !Array.isArray(canonical)) {
+            return { status: 'unavailable', compared: 0 };
+        }
+        const truncated = legacy.length > limit || canonical.length > limit;
         const boundedLegacy = legacy.slice(0, limit);
         const boundedCanonical = canonical.slice(0, limit);
         const canonicalByKey = new Map(boundedCanonical.map(row => [row.key, row]));
+        const legacyByKey = new Map(boundedLegacy.map(row => [row.key, row]));
         const mismatchedFields = new Set<string>();
+        if (legacyByKey.size !== boundedLegacy.length || canonicalByKey.size !== boundedCanonical.length) {
+            mismatchedFields.add('duplicate_key');
+        }
         let compared = 0;
         for (const legacyRow of boundedLegacy) {
             const canonicalRow = canonicalByKey.get(legacyRow.key);
@@ -545,14 +629,20 @@ export async function shadowCompareCanonicalFamily(
                 if (!equal) mismatchedFields.add(field);
             }
         }
-        if (boundedLegacy.length !== boundedCanonical.length) {
-            mismatchedFields.add('record_count');
+        // Compare the canonical tail back against legacy as well. Equal row
+        // counts are not parity when a row exists only on the canonical side.
+        for (const canonicalRow of boundedCanonical) {
+            if (!legacyByKey.has(canonicalRow.key)) {
+                mismatchedFields.add('missing_record');
+            }
         }
+        if (boundedLegacy.length !== boundedCanonical.length) mismatchedFields.add('record_count');
+        if (truncated) mismatchedFields.add('truncated');
         const result = {
             status: mismatchedFields.size > 0 ? 'mismatch' as const : 'match' as const,
             compared,
             mismatchedFields: [...mismatchedFields].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
-            truncated: legacy.length > limit || canonical.length > limit,
+            truncated,
         };
         return result;
     } catch {
@@ -562,18 +652,75 @@ export async function shadowCompareCanonicalFamily(
 
 export async function shadowReadCanonicalNotificationOutbox(
     limit = 10,
-): Promise<{ status: 'ok' | 'blocked'; rowCount: number }> {
+): Promise<{
+    status: 'ok' | 'blocked';
+    rowCount: number;
+    comparison?: ShadowComparisonResult;
+}> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
         return { status: 'blocked', rowCount: 0 };
     }
+    // Ask for one sentinel row so a full page cannot be mistaken for parity.
+    // The SQL reader is capped at 100, therefore a requested limit of 100 is
+    // compared at 99 with a 100-row probe and fails closed on a full probe.
+    const comparisonLimit = Math.min(limit, 99);
+    const readLimit = comparisonLimit + 1;
     try {
-        const result = await supabaseAdmin.rpc('list_notification_outbox_v1', {
-            p_limit: limit,
-        });
-        if (result.error || !Array.isArray(result.data)) {
+        const [legacyResult, canonicalResult] = await Promise.all([
+            supabaseAdmin.rpc('list_notification_legacy_outbox_v1', {
+                p_limit: readLimit,
+            }),
+            supabaseAdmin.rpc('list_notification_outbox_v1', {
+                p_limit: readLimit,
+            }),
+        ]);
+        if (legacyResult.error || canonicalResult.error
+            || !Array.isArray(legacyResult.data)
+            || !Array.isArray(canonicalResult.data)) {
             return { status: 'blocked', rowCount: 0 };
         }
-        return { status: 'ok', rowCount: result.data.length };
+        const normalize = (data: unknown): ReadonlyArray<ShadowRow> => {
+            if (!Array.isArray(data)) throw new Error('SHADOW_ROWS_INVALID');
+            return data.map(row => {
+                if (!row || typeof row !== 'object' || Array.isArray(row)) {
+                    throw new Error('SHADOW_ROW_INVALID');
+                }
+                const value = row as Record<string, unknown>;
+                if (typeof value.dedupe_key !== 'string'
+                    || typeof value.channel !== 'string'
+                    || typeof value.event_kind !== 'string'
+                    || typeof value.content_hash !== 'string') {
+                    throw new Error('SHADOW_ROW_INVALID');
+                }
+                const fields: Record<string, unknown> = {
+                    channel: value.channel,
+                    event_kind: value.event_kind,
+                    payload: value.payload,
+                    content_hash: value.content_hash,
+                };
+                return {
+                    key: value.dedupe_key,
+                    fields,
+                };
+            });
+        };
+        const legacyRows = normalize(legacyResult.data);
+        const canonicalRows = normalize(canonicalResult.data);
+        // This helper is reached only after the route's explicit read flag
+        // gate. Keep the comparison itself independent of process.env so a
+        // diagnostic call cannot silently skip its parity check.
+        const comparison = await shadowCompareCanonicalFamily(
+            'notification',
+            async () => legacyRows,
+            async () => canonicalRows,
+            comparisonLimit,
+            { COMMERCE_CANONICAL_NOTIFICATION_READ: 'true' },
+        );
+        return {
+            status: comparison.status === 'match' ? 'ok' : 'blocked',
+            rowCount: canonicalRows.length,
+            comparison,
+        };
     } catch {
         return { status: 'blocked', rowCount: 0 };
     }
