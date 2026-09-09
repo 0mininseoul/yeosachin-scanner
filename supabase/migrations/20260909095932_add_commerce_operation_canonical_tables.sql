@@ -644,6 +644,7 @@ DECLARE
     v_next_last_error_at TIMESTAMPTZ;
     v_next_completed_at TIMESTAMPTZ;
     v_next_manual_review_at TIMESTAMPTZ;
+    v_inserted BOOLEAN := FALSE;
 BEGIN
     IF p_order_id IS NULL
        OR p_state NOT IN (
@@ -718,8 +719,41 @@ BEGIN
             v_next_last_error_code, v_next_operator_admitted_at, v_next_last_error_at,
             v_next_completed_at, v_next_manual_review_at, p_payload
         )
+        ON CONFLICT DO NOTHING
         RETURNING * INTO v_job;
-    ELSE
+        IF FOUND THEN
+            v_inserted := TRUE;
+        ELSE
+            -- The unique order key may have been won by a concurrent first
+            -- fulfillment call. Re-read the committed row and let the normal
+            -- request/fence/monotonic checks decide whether this replay is
+            -- compatible.
+            SELECT fulfillment_job.*
+            INTO v_job
+            FROM public.fulfillment_jobs AS fulfillment_job
+            WHERE fulfillment_job.order_id = p_order_id
+            FOR UPDATE;
+            IF NOT FOUND THEN
+                IF p_request_id IS NOT NULL AND EXISTS (
+                    SELECT 1
+                    FROM public.fulfillment_jobs AS request_job
+                    WHERE request_job.request_id = p_request_id
+                ) THEN
+                    RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_REQUEST_CONFLICT', ERRCODE = 'P0001';
+                END IF;
+                RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_INSERT_CONFLICT', ERRCODE = 'P0001';
+            END IF;
+        END IF;
+    END IF;
+    IF NOT v_inserted THEN
+        IF p_request_id IS NOT NULL AND EXISTS (
+            SELECT 1
+            FROM public.fulfillment_jobs AS request_job
+            WHERE request_job.request_id = p_request_id
+              AND request_job.order_id IS DISTINCT FROM p_order_id
+        ) THEN
+            RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_REQUEST_CONFLICT', ERRCODE = 'P0001';
+        END IF;
         IF v_job.request_id IS NOT NULL AND p_request_id IS NOT NULL
            AND v_job.request_id IS DISTINCT FROM p_request_id THEN
             RAISE EXCEPTION USING MESSAGE = 'FULFILLMENT_JOB_REQUEST_CONFLICT', ERRCODE = 'P0001';

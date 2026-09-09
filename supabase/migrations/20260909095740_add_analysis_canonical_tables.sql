@@ -697,7 +697,21 @@ BEGIN
     ON CONFLICT (request_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
     DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+        WHERE public.analysis_costs.source_hash = EXCLUDED.source_hash
     RETURNING * INTO v_row;
+    IF p_idempotency_key IS NOT NULL AND NOT FOUND THEN
+        -- A concurrent insert may have won the unique-key race after the
+        -- preflight SELECT above. Re-read its committed row and apply the
+        -- same source-hash conflict rule instead of silently accepting it.
+        SELECT * INTO v_row
+        FROM public.analysis_costs
+        WHERE request_id = p_request_id
+          AND idempotency_key = p_idempotency_key
+        FOR UPDATE;
+        IF NOT FOUND OR v_row.source_hash IS DISTINCT FROM p_source_hash THEN
+            RAISE EXCEPTION 'ANALYSIS_CANONICAL_IDEMPOTENCY_CONFLICT' USING ERRCODE = '22023';
+        END IF;
+    END IF;
     RETURN pg_catalog.to_jsonb(v_row);
 END;
 $$;

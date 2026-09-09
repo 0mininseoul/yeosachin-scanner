@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 
 const mocks = vi.hoisted(() => ({
     rpc: vi.fn(),
@@ -47,6 +48,31 @@ const principalRow = Object.freeze({
 describe('account principal RPC store', () => {
     beforeEach(() => {
         vi.resetAllMocks();
+    });
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+        vi.useRealTimers();
+    });
+
+    it('bounds the account lifecycle mirror and preserves the principal success', async () => {
+        vi.useFakeTimers();
+        vi.stubEnv('COMMERCE_CANONICAL_ACCOUNT_WRITE', 'true');
+        vi.stubEnv('COMMERCE_CANONICAL_MAINTENANCE_WRITE', 'true');
+        mocks.rpc
+            .mockResolvedValueOnce({ data: [principalRow], error: null })
+            .mockImplementation(() => new Promise<never>(() => undefined));
+
+        const ensure = ensureAccountPrincipal({
+            userId: USER_ID,
+            email: 'user@example.com',
+            provider: 'kakao',
+            profile: {},
+        });
+        await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS * 2);
+
+        await expect(ensure).resolves.toEqual(principalRow);
+        expect(mocks.rpc).toHaveBeenCalledTimes(3);
     });
 
     it('loads one active principal through the stable bridge and accepts no row', async () => {

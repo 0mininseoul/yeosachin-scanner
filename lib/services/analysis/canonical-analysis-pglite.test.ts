@@ -160,6 +160,34 @@ describe('analysis canonical tables PGlite contract', () => {
         expect(costs.rows[0]?.count).toBe(1);
     });
 
+    it('rejects a concurrent conflicting first cost for one idempotency key', async () => {
+        const call = (sourceHash: string) => db.query(
+            `SELECT public.append_analysis_canonical_cost(
+                $1, 'vertex', 'provider-run:race', 'provider_cost', 'USD',
+                0.01, 0.01, FALSE, $2, '{"schemaVersion":1}'::jsonb,
+                'permanent', 'cost-race-key'
+            )`,
+            [requestId, sourceHash],
+        );
+        const results = await Promise.allSettled([
+            call('c'.repeat(64)),
+            call('d'.repeat(64)),
+        ]);
+
+        expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+        const rejection = results.find(result => result.status === 'rejected');
+        expect(rejection).toMatchObject({
+            status: 'rejected',
+            reason: expect.objectContaining({ message: expect.stringContaining('ANALYSIS_CANONICAL_IDEMPOTENCY_CONFLICT') }),
+        });
+        const rows = await db.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM public.analysis_costs
+             WHERE request_id = $1 AND idempotency_key = 'cost-race-key'`,
+            [requestId],
+        );
+        expect(rows.rows[0]?.count).toBe(1);
+    });
+
     it('allocates concurrent late-cost audit versions atomically under the request lock', async () => {
         const call = (sourceHash: string) => db.query<{ version: number }>(
             `SELECT (public.append_analysis_canonical_late_cost_audit(

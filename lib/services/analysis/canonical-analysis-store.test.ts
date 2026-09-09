@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 import {
     createAnalysisCanonicalStore,
     type AnalysisCanonicalSupabaseClient,
@@ -121,6 +122,28 @@ afterEach(() => {
 });
 
 describe('analysis canonical server adapter', () => {
+    it('bounds a canonical record and retry-marker RPC that never settles', async () => {
+        vi.useFakeTimers();
+        try {
+            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_WRITE', 'true');
+            const rpc = vi.fn(() => new Promise<never>(() => undefined));
+            const store = createAnalysisCanonicalStore(rpcClient(rpc));
+            const record = store.recordJob({
+                requestId,
+                jobKey: 'coordinator:finalize',
+                kind: 'coordinator',
+                state: 'succeeded',
+            });
+
+            await vi.runAllTimersAsync();
+            await expect(record).resolves.toEqual({ status: 'blocked', family: 'jobs' });
+            expect(rpc).toHaveBeenCalledTimes(2);
+            expect(CANONICAL_MIRROR_TIMEOUT_MS).toBeLessThanOrEqual(2_000);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('keeps all canonical writes disabled unless the family flag is explicit', async () => {
         const rpc = vi.fn();
         const store = createAnalysisCanonicalStore(rpcClient(rpc));

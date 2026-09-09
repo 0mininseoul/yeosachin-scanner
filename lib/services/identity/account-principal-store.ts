@@ -6,6 +6,7 @@ import {
     isCanonicalFamilyWriteEnabled,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
+    withCanonicalMirrorTimeout,
 } from '@/lib/services/operations/canonical-operations-store';
 
 const accountClassSchema = z.enum(['production', 'e2e_test']);
@@ -196,7 +197,7 @@ async function mirrorAccountClassification(account: {
         lifecycle: account.lifecycle,
     };
     try {
-        await canonicalOperationsStore.appendAccountLifecycle({
+        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.appendAccountLifecycle({
             accountId: account.id,
             eventKind: 'classification',
             state,
@@ -205,12 +206,12 @@ async function mirrorAccountClassification(account: {
                 account_id: account.id,
                 ...payload,
             }),
-        });
+        }));
     } catch {
         try {
-            await queueCanonicalMaintenanceJob(
+            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
                 maintenanceMarker('recovery', account.id, 'account-classification'),
-            );
+            ));
         } catch {
             // Principal admission remains authoritative when the mirror is down.
         }

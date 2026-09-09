@@ -53,6 +53,15 @@ describe('landing lead journey migration', () => {
     });
 
     it('defines constrained mappings and service-only security-definer RPCs', () => {
+        expect(journeySql).toContain('landing_leads_context_shape_v2_check');
+        const addIndex = journeySql.indexOf('ADD CONSTRAINT landing_leads_context_shape_v2_check');
+        const validateIndex = journeySql.indexOf('VALIDATE CONSTRAINT landing_leads_context_shape_v2_check');
+        const dropIndex = journeySql.indexOf('DROP CONSTRAINT landing_leads_context_shape_check');
+        expect(addIndex).toBeGreaterThan(-1);
+        expect(journeySql.slice(addIndex)).toContain('NOT VALID');
+        expect(validateIndex).toBeGreaterThan(addIndex);
+        expect(dropIndex).toBeGreaterThan(validateIndex);
+        expect(journeySql).toMatch(/pg_catalog\.pg_constraint[\s\S]*conname = 'landing_leads_context_shape_check'[\s\S]*DROP CONSTRAINT landing_leads_context_shape_check/);
         expect(journeySql).toMatch(/mapping_status IN \([\s\S]*'legacy_unlinked',[\s\S]*'anonymous_device',[\s\S]*'authenticated_user',[\s\S]*'unlinked_after_deletion'/);
         expect(journeySql).toMatch(/'legacy_import_v1',[\s\S]*'capture_v1',[\s\S]*'preflight_v1',[\s\S]*'account_deletion_v1'/);
         expect(journeySql).toContain("capture_token_hash ~ '^[a-f0-9]{64}$'");

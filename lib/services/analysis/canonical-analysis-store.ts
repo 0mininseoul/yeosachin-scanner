@@ -2,6 +2,7 @@ import 'server-only';
 
 import { createHash } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { withCanonicalMirrorTimeout } from '@/lib/services/operations/canonical-operations-store';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -687,6 +688,9 @@ export function createAnalysisCanonicalStore(
     options: { env?: Record<string, string | undefined> } = {},
 ): AnalysisCanonicalStore {
     const env = options.env ?? process.env;
+    const boundedRpc = (name: string, params: Record<string, unknown>): Promise<RpcResult> => (
+        withCanonicalMirrorTimeout(() => client.rpc(name, params))
+    );
 
     async function enqueueRetry(
         requestId: string,
@@ -697,7 +701,7 @@ export function createAnalysisCanonicalStore(
     }>> {
         assertUuid(requestId, 'request id');
         try {
-            const result = await client.rpc('enqueue_analysis_canonical_retry', {
+            const result = await boundedRpc('enqueue_analysis_canonical_retry', {
                 p_request_id: requestId,
                 p_family: family,
             });
@@ -718,7 +722,7 @@ export function createAnalysisCanonicalStore(
         if (!analysisCanonicalWriteEnabled(family, env)) return { status: 'disabled' };
         if (requestId !== null) assertUuid(requestId, 'request id');
         try {
-            const result = await client.rpc(rpcName, params);
+            const result = await boundedRpc(rpcName, params);
             if (result.error) throw new Error(errorMessage(result.error));
             return { status: 'appended' };
         } catch {
@@ -731,7 +735,7 @@ export function createAnalysisCanonicalStore(
     return {
         async loadAuditVersions(requestId) {
             assertUuid(requestId, 'request id');
-            const result = await client.rpc('load_analysis_canonical_family', {
+            const result = await boundedRpc('load_analysis_canonical_family', {
                 p_request_id: requestId,
                 p_family: 'audit',
             });
@@ -904,7 +908,7 @@ export function createAnalysisCanonicalStore(
                 return { status: 'disabled', usageUnknown: input.usageUnknown };
             }
             try {
-                const result = await client.rpc('append_analysis_canonical_cost', {
+                const result = await boundedRpc('append_analysis_canonical_cost', {
                     p_request_id: input.requestId,
                     p_provider: input.provider,
                     p_operation_key: input.operationKey,
@@ -989,7 +993,7 @@ export function createAnalysisCanonicalStore(
                 payload: auditPayload,
             });
             try {
-                const result = await client.rpc('append_analysis_canonical_late_cost_audit', {
+                const result = await boundedRpc('append_analysis_canonical_late_cost_audit', {
                     p_request_id: input.requestId,
                     p_provider: input.provider,
                     p_operation_key: input.operationKey,

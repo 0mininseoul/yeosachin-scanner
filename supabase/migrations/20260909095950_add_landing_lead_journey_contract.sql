@@ -11,28 +11,47 @@ ALTER TABLE public.landing_leads
     ADD COLUMN mapping_source TEXT,
     ADD COLUMN linked_at TIMESTAMPTZ;
 
--- The original context check predated preflight attribution and rejected a
--- target row once it was bound to its preflight. Replace only that constraint
--- with a compatible shape check; no table, row, or function is removed.
-ALTER TABLE public.landing_leads
-    DROP CONSTRAINT landing_leads_context_shape_check;
-
-ALTER TABLE public.landing_leads
-    ADD CONSTRAINT landing_leads_context_shape_check CHECK (
-        (input_context = 'target')
-        OR (
-            input_context = 'excluded'
-            AND source_preflight_id IS NOT NULL
-            AND raw_input IS NULL
-            AND utm_source IS NULL
-            AND utm_medium IS NULL
-            AND utm_campaign IS NULL
-            AND utm_content IS NULL
-            AND utm_term IS NULL
-            AND referrer IS NULL
-            AND user_agent IS NULL
-        )
-    );
+-- Widen the predecessor context guard through a retryable validation step.
+-- Existing rows are checked before the old constraint is removed, so a
+-- partially applied migration leaves the original invariant in force.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.landing_leads'::pg_catalog.regclass
+          AND conname = 'landing_leads_context_shape_v2_check'
+    ) THEN
+        ALTER TABLE public.landing_leads
+            ADD CONSTRAINT landing_leads_context_shape_v2_check CHECK (
+                (input_context = 'target')
+                OR (
+                    input_context = 'excluded'
+                    AND source_preflight_id IS NOT NULL
+                    AND raw_input IS NULL
+                    AND utm_source IS NULL
+                    AND utm_medium IS NULL
+                    AND utm_campaign IS NULL
+                    AND utm_content IS NULL
+                    AND utm_term IS NULL
+                    AND referrer IS NULL
+                    AND user_agent IS NULL
+                )
+            ) NOT VALID;
+    END IF;
+    ALTER TABLE public.landing_leads
+        VALIDATE CONSTRAINT landing_leads_context_shape_v2_check;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.landing_leads'::pg_catalog.regclass
+          AND conname = 'landing_leads_context_shape_check'
+    ) THEN
+        ALTER TABLE public.landing_leads
+            DROP CONSTRAINT landing_leads_context_shape_check;
+    END IF;
+END;
+$$;
 
 ALTER TABLE public.landing_leads
     ADD CONSTRAINT landing_leads_mapping_status_check CHECK (

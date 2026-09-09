@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { withCanonicalMirrorTimeout } from '@/lib/services/operations/canonical-operations-store';
 import {
     type AnalysisCanonicalSupabaseClient,
 } from './canonical-analysis-store';
@@ -957,10 +958,10 @@ export function createAnalysisCanonicalReadStore(
                 throw new Error('ANALYSIS_CANONICAL_READ_ERROR: invalid request id.');
             }
             if (!analysisCanonicalReadEnabled(family, env)) return null;
-            const result = await client.rpc('load_analysis_canonical_family', {
+            const result = await withCanonicalMirrorTimeout(() => client.rpc('load_analysis_canonical_family', {
                 p_request_id: requestId,
                 p_family: family,
-            }) as CanonicalReadRpcResult;
+            })) as CanonicalReadRpcResult;
             if (result.error) throw new Error(
                 result.error.message || result.error.code || 'canonical read failed'
             );
@@ -978,7 +979,7 @@ export function createAnalysisCanonicalReadStore(
             if (!analysisCanonicalReadEnabled(input.family, env)) return legacy;
             let canonical: T;
             try {
-                canonical = await input.canonical();
+                canonical = await withCanonicalMirrorTimeout(input.canonical);
             } catch {
                 reportMismatch(input.family, {
                     status: 'blocked',

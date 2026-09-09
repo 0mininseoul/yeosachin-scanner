@@ -6,6 +6,7 @@ import {
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
     SUPABASE_22_CANONICAL_TABLES,
+    SUPABASE_22_CANONICAL_ROUTINE_NAMES,
     SUPABASE_22_CATALOG_QUERY,
     SUPABASE_22_CATALOG_QUERIES,
 } from './supabase-22-evidence';
@@ -54,14 +55,14 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                         relkind: 'r',
                         relpersistence: 'p',
                         relrowsecurity: true,
-                        relforcerowsecurity: false,
+                        relforcerowsecurity: true,
                     },
                     {
                         relname: 'analysis_requests',
                         relkind: 'r',
                         relpersistence: 'p',
                         relrowsecurity: true,
-                        relforcerowsecurity: false,
+                        relforcerowsecurity: true,
                     },
                 ],
                 policies: [],
@@ -94,6 +95,46 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         ));
         expect(evidence.dependencyClean).toBe(false);
         expect(evidence.rlsClean).toBe(true);
+    });
+
+    it('fails closed when a public table is RLS-enabled but not FORCE RLS', () => {
+        const snapshot = {
+            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+                name,
+                relkind: 'r' as const,
+                rlsEnabled: true,
+                forceRls: name === 'users' ? false : true,
+            })),
+            acls: [],
+            dependencies: [],
+            foreignKeys: [],
+            securityDefinerFunctions: [],
+            migrationHistory: [],
+            legacyWriters: [],
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            triggers: [],
+            policies: [],
+            metadataAvailability: {
+                catalog: true,
+                acl: true,
+                routine: true,
+                trigger: true,
+                dependency: true,
+                migration: true,
+                rls: true,
+                view: true,
+                publication: true,
+                sequence: true,
+                partition: true,
+                foreignKey: true,
+                legacyWriter: true,
+            },
+        };
+
+        expect(evaluateSupabase22Catalog(snapshot as never).rlsClean).toBe(false);
     });
 
     it('rejects an ambiguous/truncated catalog result at the bounded adapter boundary', async () => {
@@ -178,12 +219,16 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                     resolved: true,
                     serviceRoleOnly: true,
                 })),
-                { objectName: 'canonical-routine', resolved: true, serviceRoleOnly: false },
+                {
+                    objectName: SUPABASE_22_CANONICAL_ROUTINE_NAMES[0],
+                    resolved: true,
+                    serviceRoleOnly: false,
+                },
             ],
             dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
             foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
             securityDefinerFunctions: [{
-                name: 'canonical-routine',
+                name: SUPABASE_22_CANONICAL_ROUTINE_NAMES[0],
                 securityDefiner: true,
                 searchPathEmpty: true,
                 executePublic: false,
@@ -204,6 +249,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         const evidence = evaluateSupabase22Catalog(snapshot as never);
 
         expect(evidence.aclClean).toBe(false);
+        expect(evidence.routinesClean).toBe(false);
         expect(evidence.clean).toBe(false);
     });
 

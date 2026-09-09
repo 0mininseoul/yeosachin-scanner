@@ -145,6 +145,26 @@ describe('commerce canonical SQL smoke contract', () => {
             ['123e4567-e89b-42d3-a456-426614174000', '223e4567-e89b-42d3-a456-426614174000', 'retryable_failure', 2, 4, null, null, '2026-09-09T00:00:00Z', 'RETRYABLE', '{}'],
         )).rejects.toThrow('FULFILLMENT_JOB_MONOTONIC_CONFLICT');
 
+        const raceOrderId = '323e4567-e89b-42d3-a456-426614174000';
+        const raceRequestId = '423e4567-e89b-42d3-a456-426614174000';
+        await db.query(`INSERT INTO public.earlybird_orders VALUES ($1)`, [raceOrderId]);
+        await db.query(`INSERT INTO public.analysis_requests VALUES ($1)`, [raceRequestId]);
+        const upsertRace = () => db.query(
+            `SELECT public.upsert_fulfillment_job_v1($1::uuid,$2::uuid,'analysis_in_progress',1::smallint,0::bigint,NULL::uuid,NULL::timestamptz,'2026-09-09T00:00:00Z'::timestamptz,NULL::text,'{}'::jsonb)`,
+            [raceOrderId, raceRequestId],
+        );
+        const raceResults = await Promise.allSettled([upsertRace(), upsertRace()]);
+        expect(raceResults.every(result => result.status === 'fulfilled')).toBe(true);
+        const raceRows = await db.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM public.fulfillment_jobs WHERE order_id = $1`,
+            [raceOrderId],
+        );
+        expect(raceRows.rows[0]?.count).toBe(1);
+        await expect(db.query(
+            `SELECT public.upsert_fulfillment_job_v1($1::uuid,$2::uuid,'analysis_in_progress',1::smallint,0::bigint,NULL::uuid,NULL::timestamptz,'2026-09-09T00:00:00Z'::timestamptz,NULL::text,'{}'::jsonb)`,
+            [raceOrderId, '523e4567-e89b-42d3-a456-426614174000'],
+        )).rejects.toThrow('FULFILLMENT_JOB_REQUEST_CONFLICT');
+
         const [concurrentEnqueueOne, concurrentEnqueueTwo] = await Promise.all([
             db.query<{ enqueue_notification_v1: { duplicate: boolean } }>(
                 `SELECT public.enqueue_notification_v1($1,$2,$3,$4::jsonb,$5)`,

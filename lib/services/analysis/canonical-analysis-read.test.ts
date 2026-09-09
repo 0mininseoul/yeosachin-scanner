@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 import {
     CANONICAL_READ_MAX_ROWS,
     analysisCanonicalReadEnabled,
@@ -15,6 +16,50 @@ afterEach(() => {
 });
 
 describe('analysis canonical shadow reads', () => {
+    it('bounds a canonical family load that never settles', async () => {
+        vi.useFakeTimers();
+        try {
+            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+            const store = createAnalysisCanonicalReadStore({
+                rpc: vi.fn(() => new Promise<never>(() => undefined)),
+            });
+            const load = store.loadRequest(requestId, 'jobs');
+            const rejected = expect(load).rejects.toMatchObject({ code: 'CANONICAL_MIRROR_TIMEOUT' });
+
+            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
+            await rejected;
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('fails open to legacy when the shadow projection never settles', async () => {
+        vi.useFakeTimers();
+        try {
+            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
+            const onMismatch = vi.fn();
+            const store = createAnalysisCanonicalReadStore({
+                rpc: vi.fn(async () => ({ data: {}, error: null })),
+            }, { onMismatch });
+            const legacy = { requestStatus: 'completed' };
+            const read = store.shadowRead({
+                family: 'jobs',
+                legacy: async () => legacy,
+                canonical: async () => new Promise<never>(() => undefined),
+                compare: () => ({ status: 'match', mismatchPaths: [] }),
+            });
+
+            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
+            await expect(read).resolves.toEqual(legacy);
+            expect(onMismatch).toHaveBeenCalledWith({
+                family: 'jobs',
+                summary: { status: 'blocked', mismatchPaths: ['canonical.error'] },
+            });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('does not allow a partial projection to report a parity match', () => {
         expect(compareAnalysisCanonicalProjection(
             { requestStatus: 'completed' },

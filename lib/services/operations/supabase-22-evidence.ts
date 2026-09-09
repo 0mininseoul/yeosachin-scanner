@@ -21,6 +21,46 @@ export const SUPABASE_22_CANONICAL_TABLES = [
     'system_configuration', 'system_leases', 'users',
 ] as const;
 
+/**
+ * Every security-definer helper introduced by the analysis and commerce
+ * canonical migrations must be present in the catalog before the evidence can
+ * report routine or ACL readiness. Additional pre-existing service routines
+ * may be present, but this allowlist is never inferred from the observed rows.
+ */
+export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
+    'reject_analysis_canonical_mutation',
+    'record_analysis_canonical_job',
+    'append_analysis_canonical_event',
+    'append_analysis_canonical_artifact',
+    'append_analysis_canonical_cost',
+    'upsert_analysis_canonical_cache',
+    'append_analysis_canonical_audit',
+    'append_analysis_canonical_late_cost_audit',
+    'enqueue_analysis_canonical_retry',
+    'load_analysis_canonical_family',
+    'reject_commerce_append_only_mutation',
+    'canonical_json_string_v1',
+    'canonical_json_number_v1',
+    'canonical_json_v1',
+    'canonical_json_hash_v1',
+    'canonical_system_configuration_json',
+    'record_payment_event_v1',
+    'upsert_fulfillment_job_v1',
+    'enqueue_notification_v1',
+    'append_account_lifecycle_v1',
+    'record_system_configuration_v1',
+    'acquire_system_lease_v1',
+    'enqueue_maintenance_job_v1',
+    'claim_notification_outbox_v1',
+    'finish_notification_outbox_v1',
+    'reconcile_stale_notification_outbox_v1',
+    'claim_maintenance_jobs_v1',
+    'finish_maintenance_job_v1',
+    'reconcile_stale_maintenance_jobs_v1',
+    'list_notification_legacy_outbox_v1',
+    'list_notification_outbox_v1',
+] as const;
+
 const canonicalTableSet = new Set<string>(SUPABASE_22_CANONICAL_TABLES);
 
 export type Supabase22GateStatus = 'ready' | 'mismatch' | 'blocked';
@@ -518,6 +558,18 @@ function completeObjectCoverage(
         && expected.every(name => observed.includes(name));
 }
 
+function completeRoutineCoverage(
+    values: readonly Supabase22CatalogRoutine[],
+): boolean {
+    if (values.length === 0) return false;
+    const observed = values.map(value => comparableCatalogObjectName(value.name));
+    const expected = SUPABASE_22_CANONICAL_ROUTINE_NAMES.map(comparableCatalogObjectName);
+    return observed.every(name => name.length > 0)
+        && new Set(observed).size === observed.length
+        && new Set(expected).size === expected.length
+        && expected.every(name => observed.includes(name));
+}
+
 /** Evaluate normalized PostgreSQL catalog rows. This function never repairs the catalog. */
 export function evaluateSupabase22Catalog(
     snapshot: Supabase22CatalogSnapshot,
@@ -582,10 +634,12 @@ export function evaluateSupabase22Catalog(
         && publicTables.length > 0
         && tables
             .filter(table => table.relkind === 'r' || table.relkind === 'p')
-            .every(table => table.rlsEnabled === true);
+            .every(table => table.rlsEnabled === true && table.forceRls === true);
+    const canonicalRoutineCoverage = routines !== null && completeRoutineCoverage(routines);
     const routinesClean = metadataAvailability.routine
         && routines !== null
         && routines.length > 0
+        && canonicalRoutineCoverage
         && routines.every(isSafeSecurityDefinerRoutine);
     const expectedAclObjectNames = new Set([
         ...publicTables,
@@ -599,6 +653,7 @@ export function evaluateSupabase22Catalog(
     const aclClean = metadataAvailability.acl
         && acls !== null
         && expectedAclObjectNames.size > 0
+        && canonicalRoutineCoverage
         && acls.length === expectedAclObjectNames.size
         && observedAclObjectNames.size === expectedAclObjectNames.size
         && [...expectedAclObjectNames].every(name => observedAclObjectNames.has(name))
