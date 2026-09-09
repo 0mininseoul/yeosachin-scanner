@@ -83,6 +83,9 @@ CREATE UNIQUE INDEX landing_leads_capture_token_hash_uidx
 ALTER TABLE public.landing_leads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.landing_leads FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.landing_leads FROM PUBLIC, anon, authenticated, service_role;
+-- Wave A compatibility: the old /api/leads writer still inserts directly
+-- through service_role until the RPC-backed application is ready for Wave B.
+GRANT INSERT ON TABLE public.landing_leads TO service_role;
 
 CREATE OR REPLACE FUNCTION public.create_or_replay_landing_lead_capture(
     p_journey_id UUID,

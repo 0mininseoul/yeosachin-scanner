@@ -21,6 +21,13 @@ const journeyMigration = readFileSync(
     new URL('../../../supabase/migrations/20260909095950_add_landing_lead_journey_contract.sql', import.meta.url),
     'utf8',
 );
+const revokeLegacyInsertAfterRpcReadyMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260909183850_revoke_legacy_landing_lead_insert_after_rpc_ready.sql',
+        import.meta.url,
+    ),
+    'utf8',
+);
 const atomicExclusionMigration = readFileSync(
     new URL('../../../supabase/migrations/20260909150000_atomic_preflight_exclusion_landing.sql', import.meta.url),
     'utf8',
@@ -105,6 +112,16 @@ async function bootstrap(pool: Pool): Promise<void> {
     await pool.query(landingLeadsMigration);
     await pool.query(inputContextMigration);
     await pool.query(journeyMigration);
+    // Wave A compatibility proof: the legacy route can still insert before
+    // the post-deploy contraction is applied.
+    await pool.query(`
+        BEGIN;
+        SET LOCAL ROLE service_role;
+        INSERT INTO public.landing_leads(instagram_id)
+        VALUES ('legacy.wave-a');
+        COMMIT;
+    `);
+    await pool.query(revokeLegacyInsertAfterRpcReadyMigration);
     await pool.query(atomicExclusionMigration);
 }
 
@@ -328,4 +345,39 @@ describePostgres('preflight exclusion PostgreSQL lock-wait expiry', () => {
             { id: ownerPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
         ]);
     }, 15_000);
+
+    it('leaves the final landing table ACL RPC-only after the Wave B contraction', async () => {
+        await expect(pool.query<{
+            select: boolean;
+            insert: boolean;
+            update: boolean;
+            delete: boolean;
+            capture_rpc: boolean;
+        }>(`
+            SELECT has_table_privilege('service_role', 'public.landing_leads', 'SELECT') AS select,
+                   has_table_privilege('service_role', 'public.landing_leads', 'INSERT') AS insert,
+                   has_table_privilege('service_role', 'public.landing_leads', 'UPDATE') AS update,
+                   has_table_privilege('service_role', 'public.landing_leads', 'DELETE') AS delete,
+                   has_function_privilege(
+                       'service_role',
+                       'public.create_or_replay_landing_lead_capture(uuid,text,text,character varying,character varying)',
+                       'EXECUTE'
+                   ) AS capture_rpc
+        `)).resolves.toMatchObject({
+            rows: [{ select: false, insert: false, update: false, delete: false, capture_rpc: true }],
+        });
+
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN');
+            await client.query('SET LOCAL ROLE service_role');
+            await expect(client.query(
+                `INSERT INTO public.landing_leads(instagram_id)
+                 VALUES ('legacy.wave-b')`,
+            )).rejects.toThrow(/permission denied/i);
+            await client.query('ROLLBACK');
+        } finally {
+            client.release();
+        }
+    });
 });

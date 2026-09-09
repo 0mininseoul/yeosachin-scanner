@@ -14,6 +14,11 @@ const journeyMigrationName = readdirSync(migrationDirectory)
 const journeySql = journeyMigrationName
     ? readFileSync(join(migrationDirectory, journeyMigrationName), 'utf8')
     : '';
+const postDeployMigrationNames = readdirSync(migrationDirectory)
+    .filter(name => name.endsWith('_revoke_legacy_landing_lead_insert_after_rpc_ready.sql'));
+const postDeploySql = postDeployMigrationNames[0]
+    ? readFileSync(join(migrationDirectory, postDeployMigrationNames[0]), 'utf8')
+    : '';
 
 describe('landing_leads migration', () => {
     it('creates the table with the hardened id and timestamp defaults', () => {
@@ -46,10 +51,19 @@ describe('landing lead journey migration', () => {
         expect(journeySql).toContain('landing_leads_mapping_filter_idx');
     });
 
-    it('keeps RLS and the complete table ACL boundary', () => {
+    it('keeps Wave A compatibility while preserving the RPC-only final ACL shape', () => {
         expect(journeySql).toContain('ALTER TABLE public.landing_leads ENABLE ROW LEVEL SECURITY');
         expect(journeySql).toContain('ALTER TABLE public.landing_leads FORCE ROW LEVEL SECURITY');
         expect(journeySql).toMatch(/REVOKE ALL ON TABLE public\.landing_leads FROM PUBLIC, anon, authenticated, service_role/);
+        expect(journeySql).toContain('GRANT INSERT ON TABLE public.landing_leads TO service_role;');
+        expect(journeySql).not.toMatch(/GRANT\s+(?:INSERT,\s*SELECT|SELECT,\s*INSERT)\s+ON TABLE public\.landing_leads\s+TO service_role/i);
+    });
+
+    it('generates one Wave B migration that revokes only the legacy INSERT', () => {
+        expect(postDeployMigrationNames).toHaveLength(1);
+        expect(postDeploySql).toContain('REVOKE INSERT ON TABLE public.landing_leads FROM service_role;');
+        expect(postDeploySql).not.toMatch(/REVOKE ALL\s+ON TABLE public\.landing_leads/i);
+        expect(postDeploySql).not.toMatch(/GRANT\s+\w[\w,\s]*\s+ON TABLE public\.landing_leads/i);
     });
 
     it('defines constrained mappings and service-only security-definer RPCs', () => {

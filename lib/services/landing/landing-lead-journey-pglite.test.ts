@@ -7,6 +7,9 @@ const migration = (file: string): string => readFileSync(new URL(file, migration
 const createLandingLeads = migration('20260719160000_add_landing_leads.sql');
 const addInputContext = migration('20260725021500_add_landing_lead_input_context.sql');
 const addJourneyContract = migration('20260909095950_add_landing_lead_journey_contract.sql');
+const revokeLegacyInsertAfterRpcReady = migration(
+    '20260909183850_revoke_legacy_landing_lead_insert_after_rpc_ready.sql',
+);
 const databases: PGlite[] = [];
 
 async function createDatabase(): Promise<PGlite> {
@@ -31,11 +34,86 @@ async function createDatabase(): Promise<PGlite> {
     return db;
 }
 
+async function withRole<T>(
+    db: PGlite,
+    role: 'anon' | 'authenticated' | 'service_role',
+    operation: () => Promise<T>,
+): Promise<T> {
+    await db.exec(`SET ROLE ${role}`);
+    try {
+        return await operation();
+    } finally {
+        await db.exec('RESET ROLE');
+    }
+}
+
 afterEach(async () => {
     await Promise.all(databases.splice(0).map(database => database.close()));
 });
 
 describe('landing lead journey database contract', () => {
+    it('keeps the legacy INSERT through Wave A and revokes it in Wave B while RPC writes remain available', async () => {
+        const db = await createDatabase();
+        const waveBJourneyId = '823e4567-e89b-42d3-a456-426614174000';
+
+        await expect(withRole(db, 'service_role', () => db.query(
+            `INSERT INTO public.landing_leads(instagram_id)
+             VALUES ('legacy.wave-a')`,
+        ))).resolves.toBeDefined();
+        await expect(db.query<{
+            select: boolean;
+            insert: boolean;
+            update: boolean;
+            delete: boolean;
+        }>(`
+            SELECT has_table_privilege('service_role', 'public.landing_leads', 'SELECT') AS select,
+                   has_table_privilege('service_role', 'public.landing_leads', 'INSERT') AS insert,
+                   has_table_privilege('service_role', 'public.landing_leads', 'UPDATE') AS update,
+                   has_table_privilege('service_role', 'public.landing_leads', 'DELETE') AS delete
+        `)).resolves.toMatchObject({
+            rows: [{ select: false, insert: true, update: false, delete: false }],
+        });
+
+        await db.exec(revokeLegacyInsertAfterRpcReady);
+        await expect(db.query<{
+            select: boolean;
+            insert: boolean;
+            update: boolean;
+            delete: boolean;
+        }>(`
+            SELECT has_table_privilege('service_role', 'public.landing_leads', 'SELECT') AS select,
+                   has_table_privilege('service_role', 'public.landing_leads', 'INSERT') AS insert,
+                   has_table_privilege('service_role', 'public.landing_leads', 'UPDATE') AS update,
+                   has_table_privilege('service_role', 'public.landing_leads', 'DELETE') AS delete
+        `)).resolves.toMatchObject({
+            rows: [{ select: false, insert: false, update: false, delete: false }],
+        });
+        await expect(withRole(db, 'service_role', () => db.query(
+            `INSERT INTO public.landing_leads(instagram_id)
+             VALUES ('legacy.wave-b')`,
+        ))).rejects.toThrow(/permission denied/i);
+
+        await expect(withRole(db, 'service_role', () => db.query<{
+            journey_id: string;
+            created: boolean;
+        }>(
+            `SELECT * FROM public.create_or_replay_landing_lead_capture(
+                $1, 'rpc.target', 'target', $2, $3
+            )`,
+            [waveBJourneyId, 'a'.repeat(64), 'b'.repeat(64)],
+        ))).resolves.toMatchObject({
+            rows: [{ journey_id: waveBJourneyId, created: true }],
+        });
+
+        const rows = await db.query<{ instagram_id: string }>(
+            `SELECT instagram_id
+             FROM public.landing_leads
+             WHERE journey_id = $1`,
+            [waveBJourneyId],
+        );
+        expect(rows.rows).toEqual([{ instagram_id: 'rpc.target' }]);
+    }, 30_000);
+
     it('maps target and excluded rows to one journey and replays idempotently', async () => {
         const db = await createDatabase();
         const journeyId = '123e4567-e89b-42d3-a456-426614174000';

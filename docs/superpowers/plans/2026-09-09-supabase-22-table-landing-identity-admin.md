@@ -15,6 +15,7 @@
 | Action | Path |
 |---|---|
 | Create (generated path) | \`$LANDING_MIGRATION_PATH\` from \`npx supabase migration new add_landing_lead_journey_contract\` |
+| Create (generated post-deploy path) | \`supabase/migrations/20260909183850_revoke_legacy_landing_lead_insert_after_rpc_ready.sql\` from \`npx supabase migration new revoke_legacy_landing_lead_insert_after_rpc_ready\` |
 | Create | \`lib/services/landing/landing-lead-journey.ts\` |
 | Create | \`lib/services/landing/landing-lead-journey.test.ts\` |
 | Create | \`lib/services/landing/landing-lead-journey-pglite.test.ts\` |
@@ -25,6 +26,16 @@
 | Create | \`app/admin/analysis-audit/operator-console-leads.test.tsx\` |
 
 이 plan은 \`app/page.tsx\`, 기존 marketing copy, \`supabase/migrations/20260719190000_reconcile_stuck_groble_earlybird_order.sql\`, \`.playwright-mcp/\`를 수정하지 않는다. \`payments\`, \`payment_orders\`, \`pending_analysis\`의 상태나 데이터를 건드리지 않는다.
+
+## Rollout ACL seam
+
+Wave A applies the landing journey migration while mixed-version callers may
+still use the old direct writer: it revokes all table privileges and grants
+exactly `INSERT` to `service_role`. Wave B is a separate generated
+post-deploy migration, `supabase/migrations/20260909183850_revoke_legacy_landing_lead_insert_after_rpc_ready.sql`,
+which revokes only that `INSERT` after the RPC-backed code is deployed and
+ready; the final table ACL remains RPC-only. The Wave B migration must not be
+applied before the new writer is ready.
 
 ## Contract
 
@@ -114,7 +125,7 @@ npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/le
 
 Expected: FAIL because the journey migration and service functions do not exist.
 
-- [ ] **Step 3: Create the migration and add the minimal schema/service.** Run Steps 3–4 in one shell session so the generated path variable remains available. Capture exactly one path from the CLI output, place the contract SQL above in that file, enable and force RLS, revoke table access from \`PUBLIC, anon, authenticated, service_role\`, grant only \`service_role\` to the server RPCs, and set every SECURITY DEFINER function to \`SET search_path = ''\`.
+- [ ] **Step 3: Create the migration and add the minimal schema/service.** Run Steps 3–4 in one shell session so the generated path variable remains available. Capture exactly one path from the CLI output, place the contract SQL above in that file, enable and force RLS, keep only the Wave A \`service_role\` INSERT compatibility grant on the table, grant only \`service_role\` to the server RPCs, and set every SECURITY DEFINER function to \`SET search_path = ''\`. Apply the generated Wave B ACL migration only after the RPC-backed code is ready.
 
 ~~~bash
 set -euo pipefail

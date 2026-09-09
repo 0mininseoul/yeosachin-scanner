@@ -9,6 +9,8 @@ Status: READY_FOR_OPERATOR_DRY_RUN
 - Implementation commit: `a58fe72dc47d820a2989930dea0fc389fd449e96`
   (`fix: close landing identity compliance gaps`).
 - Landing journey migration: `supabase/migrations/20260909095950_add_landing_lead_journey_contract.sql`.
+- Wave B post-deploy ACL migration (generated):
+  `supabase/migrations/20260909183850_revoke_legacy_landing_lead_insert_after_rpc_ready.sql`.
 - Atomic OAuth claim migration: `supabase/migrations/20260909110000_atomic_anonymous_preflight_landing_claim.sql`.
 - Atomic exclusion migration: `supabase/migrations/20260909150000_atomic_preflight_exclusion_landing.sql`.
 - Predecessors inspected: `20260719160000_add_landing_leads.sql`,
@@ -20,15 +22,19 @@ protected reconciliation migration were not modified.
 
 ## Database boundary
 
-`public.landing_leads` enables and forces RLS, revokes table privileges from
-`PUBLIC`, `anon`, `authenticated`, and `service_role`, and exposes mutations
-only through the existing service-mediated `SECURITY DEFINER` functions with
-`SET search_path = ''`. Target capture is now target-only; the capture RPC
-normalizes the account and rejects replay when the journey, normalized account,
-input context, or anonymous principal differs from the stored token row. The
-dedicated exclusion RPC requires a target row bound to the supplied
-`source_preflight_id`, so a false/no-target result is a persistence failure,
-not a successful exclusion.
+`public.landing_leads` enables and forces RLS. Wave A revokes table privileges
+from `PUBLIC`, `anon`, `authenticated`, and `service_role`, then grants only
+`INSERT` to `service_role` so the old direct `/api/leads` writer remains
+available during the mixed-version window. The generated Wave B post-deploy
+migration revokes exactly that `INSERT` after the RPC-backed code is ready;
+the final table ACL is RPC-only, with mutations exposed through the existing
+service-mediated `SECURITY DEFINER` functions using `SET search_path = ''`.
+Target capture is now target-only; the capture RPC normalizes the account and
+rejects replay when the journey, normalized account, input context, or
+anonymous principal differs from the stored token row. The dedicated
+exclusion RPC requires a target row bound to the supplied `source_preflight_id`,
+so a false/no-target result is a persistence failure, not a successful
+exclusion.
 
 The new atomic claim RPC invokes the private anonymous preflight owner claim
 and the landing journey claim in one transaction. A landing claim failure
@@ -48,11 +54,14 @@ two-minute statement timeouts, and is executable only by `anon`/`authenticated`;
 the historical browser wrappers delegate to it with their narrow grants.
 
 The local PGlite contracts apply the predecessor migrations plus the landing
-journey and atomic exclusion migrations. They verify target/excluded rows share
-one journey, capture replay is idempotent, account/principal/context
-mismatches are rejected, excluded capture context is rejected, excluded replay
-does not duplicate, claims are monotonic, conflicting owners are rejected,
-deletion fencing clears the owner, and a fenced journey cannot be claimed again.
+journey, Wave B ACL, and atomic exclusion migrations. They verify the old
+direct `INSERT` succeeds in Wave A, is denied in Wave B, and the capture RPC
+remains executable after contraction, alongside target/excluded rows sharing
+one journey, idempotent capture replay, account/principal/context mismatches,
+excluded capture context rejection, monotonic claims, conflicting owners,
+deletion fencing, and permanent claim exclusion. The disposable native
+PostgreSQL contract exercises the same Wave A/B ACL transition when its
+explicit loopback marker is supplied.
 The atomic exclusion cases cover authenticated ownership, foreign/stale
 anonymous claims, lifecycle and expiry fences, immutable decisions, target
 equality, idempotent retries, excluded-row insertion, and rollback when the
@@ -96,6 +105,7 @@ All commands below were run in this worktree:
 
 - Focused landing/preflight/admin suite (prior landing identity implementation): `npx vitest run lib/services/landing/landing-lead-journey.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/leads/landing-leads-migration-contract.test.ts lib/services/leads/leads-route.test.ts lib/services/leads/store.test.ts lib/services/analysis/anonymous-preflight.test.ts lib/services/analysis/anonymous-preflight-claim.test.ts app/api/admin/landing-leads/route.test.ts app/admin/analysis-audit/operator-console-leads.test.tsx app/admin/analysis-audit/operator-console-interaction.test.tsx lib/services/analysis/preflight-route.test.ts lib/services/analysis/anonymous-preflight-landing-claim-migration-contract.test.ts lib/services/landing-lead.test.ts` — **PASS, 11 files / 109 tests**.
 - Atomic exclusion/preflight contract suite: `npx vitest run lib/services/analysis/preflight-exclusion-landing-atomic-pglite.test.ts lib/services/analysis/preflight-route.test.ts lib/services/analysis/preflight.test.ts lib/services/analysis/anonymous-preflight.test.ts lib/services/analysis/anonymous-preflight-landing-claim-migration-contract.test.ts lib/services/analysis/authenticated-preflight-exclusion-security-definer-migration-contract.test.ts lib/services/analysis/v2-preflight-exclusion-write-once-migration-contract.test.ts lib/services/analysis/analytics-and-anonymous-migration-contract.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/leads/landing-leads-migration-contract.test.ts` — **PASS, 10 files / 210 tests**.
+- Landing Wave A/B ACL contract and disposable native guard: `npx vitest run lib/services/leads/landing-leads-migration-contract.test.ts lib/services/landing/landing-lead-journey-pglite.test.ts lib/services/analysis/preflight-exclusion-landing-atomic-postgres-concurrency.integration.test.ts` — **PASS, 13 tests / 2 native tests skipped without the explicit loopback marker**.
 - OAuth callback regressions: `npx vitest run lib/services/auth/callback-route.test.ts lib/services/auth/oauth-redirect-intent.test.ts` — **PASS, 2 files / 28 tests**.
 - Typecheck: `npx tsc --noEmit --pretty false` — **PASS**.
 - Lint: `npm run lint` — **PASS, 0 errors, 27 warnings** (existing warning set; no warning in the changed production files).
