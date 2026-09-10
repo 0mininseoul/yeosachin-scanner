@@ -18,8 +18,10 @@ BEGIN
         FROM pg_catalog.pg_stat_activity AS activity
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
           AND activity.state = 'active'
+          AND activity.datname = pg_catalog.current_database()
           AND (
               activity.query IS NULL
+              OR activity.query = '<insufficient privilege>'
               OR activity.query ~* $retirement_active_ddl_pattern$(?x)
                   (
                       (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
@@ -285,8 +287,10 @@ BEGIN
         FROM pg_catalog.pg_stat_activity AS activity
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
           AND activity.state = 'active'
+          AND activity.datname = pg_catalog.current_database()
           AND (
               activity.query IS NULL
+              OR activity.query = '<insufficient privilege>'
               OR activity.query ~* $retirement_active_ddl_pattern$(?x)
                   (
                       (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)

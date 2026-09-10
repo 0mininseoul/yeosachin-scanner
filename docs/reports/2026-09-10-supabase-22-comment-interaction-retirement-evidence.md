@@ -63,7 +63,10 @@ Two fail-closed active-DDL checks exclude this migration's own backend and run
 before catalog evidence and immediately before the two drops. They cover
 `CREATE`/`ALTER`/`DROP PUBLICATION` and `CREATE`/`ALTER`/`DROP` (including
 `OR REPLACE`) `FUNCTION`/`PROCEDURE`; a session whose query text is hidden is
-treated as unknown and blocks the rollout. The contiguous routine scan remains,
+treated as unknown and blocks the rollout. Both checks scope rows to
+`pg_catalog.current_database()` and treat both `NULL` and the PostgreSQL
+`<insufficient privilege>` query sentinel as unknown; the visible-query regex
+branch remains in place. The contiguous routine scan remains,
 and a separate split-literal guard applies only to non-system,
 non-extension `EXECUTE` routines containing the exact pairs
 `'comment_' || 'details'` or `'interaction_' || 'logs'`; production had 19
@@ -107,6 +110,11 @@ split dynamic-routine guard, unrelated `EXECUTE` routine allowance, non-empty
 and incoming-dependency guards, and active `FUNCTION` and `PUBLICATION` DDL
 guards. The drill used only local fixtures and was destroyed after verification;
 it did not call or mutate production.
+
+A follow-up disposable PostgreSQL 17 sanity check verified that the `NULL` and
+`<insufficient privilege>` fixtures fail closed, visible DDL in the current
+database is guarded, and visible DDL in another database is ignored by the
+`current_database()` scope.
 
 The manifest's bounded observation conclusion is: within the supplied
 postmaster-start counters and bounded `app/`/`lib/`/`hooks/`/`scripts/`

@@ -305,6 +305,26 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(secondActiveDdlGuard).toBeLessThan(firstDrop);
     });
 
+    it('scopes both active DDL guards to the current database and fails closed on hidden query text', () => {
+        const sql = readMigration();
+        const guardBlocks = [...sql.matchAll(
+            /DO \$retirement_active_ddl_guard\$[\s\S]*?\$retirement_active_ddl_guard\$;/g,
+        )].map(match => match[0]);
+        expect(guardBlocks).toHaveLength(2);
+        for (const guard of guardBlocks) {
+            expect(guard).toContain('activity.datname = pg_catalog.current_database()');
+            expect(guard).toMatch(
+                /activity\.query\s+IS\s+NULL\s+OR\s+activity\.query\s*=\s*'<insufficient privilege>'\s+OR\s+activity\.query\s+~\*/,
+            );
+            expect(guard).toContain('$retirement_active_ddl_pattern$');
+            expect(guard).toContain('(CREATE|ALTER|DROP)[[:space:]]+PUBLICATION');
+            expect(guard).toContain(
+                '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
+            );
+            expect(guard).toContain('[[:space:]]+(FUNCTION|PROCEDURE)');
+        }
+    });
+
     it('retains the contiguous scan and precisely guards EXECUTE split literals for both targets', () => {
         const sql = readMigration();
         expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
@@ -566,6 +586,9 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
                 fixedTransactionAdvisoryLock: string;
                 serializesCoordinatedCopiesOnly: boolean;
                 blocksUncoordinatedPostgresqlDdl: boolean;
+                activeDdlCurrentDatabaseScoped: boolean;
+                activeDdlNullQueryFailsClosed: boolean;
+                activeDdlInsufficientPrivilegeSentinelFailsClosed: boolean;
                 activeDdlGuardBeforeCatalogEvidence: boolean;
                 activeDdlGuardImmediatelyBeforeDrops: boolean;
                 splitLiteralProductionMatchCount: number;
@@ -582,6 +605,9 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         );
         expect(concurrency.serializesCoordinatedCopiesOnly).toBe(true);
         expect(concurrency.blocksUncoordinatedPostgresqlDdl).toBe(false);
+        expect(concurrency.activeDdlCurrentDatabaseScoped).toBe(true);
+        expect(concurrency.activeDdlNullQueryFailsClosed).toBe(true);
+        expect(concurrency.activeDdlInsufficientPrivilegeSentinelFailsClosed).toBe(true);
         expect(concurrency.activeDdlGuardBeforeCatalogEvidence).toBe(true);
         expect(concurrency.activeDdlGuardImmediatelyBeforeDrops).toBe(true);
         expect(concurrency.splitLiteralProductionMatchCount).toBe(0);
