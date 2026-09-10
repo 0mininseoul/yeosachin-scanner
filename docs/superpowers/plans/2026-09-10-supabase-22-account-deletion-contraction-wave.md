@@ -34,9 +34,9 @@ The full sanitized evidence and archive/restore manifest are recorded in
    state/timestamp projection in one `maintenance_jobs` `purge` row, and keeps
    the source table authoritative. It never stores the account UUID in the
    maintenance payload.
-2. Add a typed maintenance-store method and a disabled-by-default maintenance
-   write hook after each successful legacy deletion transition. Mirror failure
-   is bounded and reportable; it cannot turn into a destructive fallback.
+2. Add a typed wave-specific adapter and a disabled-by-default maintenance write
+   hook after each successful legacy deletion transition. Mirror failure is
+   bounded and reportable; it cannot turn into a destructive fallback.
 3. Add pure projection/parity helpers and a bounded report-only backfill
    harness. It accepts at most 100 source rows, returns counts/checksums and
    sanitized mismatch fields only, and has no apply/drop/truncate/delete/
