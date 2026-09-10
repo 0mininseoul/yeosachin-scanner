@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "supabase-22-comment-interaction-retirement-v3",
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v4",
   "asOf": "2026-09-10",
   "sourceBoundary": {
     "productionEvidence": "coordinator-independent-read-only-collection",
@@ -156,8 +156,9 @@
     "serializesCoordinatedCopiesOnly": true,
     "blocksUncoordinatedPostgresqlDdl": false,
     "activeDdlCurrentDatabaseScoped": true,
-    "activeDdlNullQueryFailsClosed": true,
-    "activeDdlInsufficientPrivilegeSentinelFailsClosed": true,
+    "activeDdlClientBackendUnknownStateOrQueryFailsClosed": true,
+    "activeDdlUnknownBackendTypeFailsClosed": true,
+    "activeDdlKnownNonClientBackgroundNullStateAllowed": true,
     "activeDdlGuardBeforeCatalogEvidence": true,
     "activeDdlGuardImmediatelyBeforeDrops": true,
     "routineExecuteProductionCount": 19,
@@ -168,6 +169,8 @@
     "singleWriterDdlMaintenanceWindowRequired": true,
     "coordinatorOnlyFromFinalPreflightThroughPostApplyVerification": true,
     "currentProductionActiveRelevantDdlCount": 0,
+    "currentProductionHiddenActivityCount": 2,
+    "currentProductionHiddenActivity": "exactly pg_cron launcher and pg_net 0.19.5 worker; each query visible and state NULL; known non-client background activity",
     "trackedCiProductionDbPushEntrypoint": false,
     "targetOrAdvisoryLocksAloneBlockUncoordinatedDdl": false,
     "catalogShareLockPrivileges": {
@@ -193,9 +196,9 @@
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
-    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (13 tests, including EOF/dynamic destructive-scope regressions and isolated PGlite restore drill)",
-    "redEvidence": "captured before implementation: focused run failed 3 expected regressions for EOF/dynamic destructive-scope handling, unknown active-DDL visibility, and complete EXECUTE inventory binding",
-    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t, inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (14 tests, including backend-type-scoped NULL-state regression, EOF/dynamic destructive-scope regressions, and isolated PGlite restore drill)",
+    "redEvidence": "captured before implementation: focused run failed the expected backend-type-scoped NULL-state regression for benign non-client background activity while retaining unknown client/backend fail-closed checks",
+    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t for unknown client/backend visibility, inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
     "localPostgresql17Sanity": "not-run: no separate sanity probe; all local coverage is recorded in localPostgresql17Drill",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",

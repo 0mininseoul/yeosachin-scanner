@@ -53,6 +53,11 @@ refused, and the reversible draft SQL remains under `supabase/operations/`.
   `public.analysis_results` can make PostgreSQL use a child `result_id` index
   for foreign-key cascade checks. The index counters therefore do not override
   the zero-row, zero-write, dependency, and runtime evidence above.
+- The supplied activity evidence had `hidden_activity=2`, consisting exactly
+  of the pg_cron launcher and pg_net 0.19.5 worker. Both rows had visible
+  queries and `state` `NULL`; they were known non-client background activity,
+  not hidden client backends. The current production relevant active DDL count
+  was `0`, and all other supplied evidence matched the package above.
 
 ## Concurrency correction and apply window
 
@@ -66,9 +71,12 @@ before catalog evidence and immediately before the two drops. They cover
 `CREATE`/`ALTER`/`DROP PUBLICATION` and `CREATE`/`ALTER`/`DROP` (including
 `OR REPLACE`) `FUNCTION`/`PROCEDURE`/`ROUTINE`; comments between tokens are
 normalized before the visible-query regex branch is evaluated. A same-database
-session whose `state` is `NULL`, whose query is `NULL`, or whose query is the
-PostgreSQL `<insufficient privilege>` sentinel is treated as unknown and
-blocks the rollout, so hidden rows are not discarded by an `active` filter.
+session whose `backend_type` is `NULL`, or a `client backend` whose `state` is
+`NULL`, whose query is `NULL`, or whose query is the PostgreSQL `<insufficient
+privilege>` sentinel, is treated as unknown and blocks the rollout. Known
+non-client background rows with `state` `NULL` are allowed, matching the two
+supplied pg_cron/pg_net rows; active relevant DDL is still fail-closed for
+`client backend` sessions. Hidden rows are not discarded by an `active` filter.
 The contiguous routine scan remains, and a complete inventory guard covers all
 non-system, non-extension `prokind` function/procedure definitions containing
 the exact `EXECUTE` token. The reviewed production inventory count is `19`

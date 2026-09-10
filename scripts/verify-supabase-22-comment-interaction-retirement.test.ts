@@ -414,6 +414,23 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         }
     });
 
+    it('allows benign non-client background NULL state while retaining client fail-closed checks', () => {
+        const sql = readMigration();
+        const guardBlocks = [...sql.matchAll(
+            /DO \$retirement_active_ddl_guard\$[\s\S]*?\$retirement_active_ddl_guard\$;/g,
+        )].map(match => match[0]);
+        expect(guardBlocks).toHaveLength(2);
+
+        for (const guard of guardBlocks) {
+            // Background workers such as pg_cron and pg_net can legitimately
+            // report state NULL. Unknown visibility remains fail-closed for
+            // client backends, including hidden state/query and active DDL.
+            expect(guard).toMatch(
+                /activity\.backend_type\s+IS\s+NULL\s+OR\s+\(\s*activity\.backend_type\s*=\s*'client backend'\s+AND\s+\([\s\S]*activity\.state\s+IS\s+NULL[\s\S]*activity\.query\s+IS\s+NULL[\s\S]*activity\.query\s*=\s*'<insufficient privilege>'[\s\S]*activity\.state\s*=\s*'active'[\s\S]*retirement_active_ddl_normalized_query\s+~\*/,
+            );
+        }
+    });
+
     it('retains the contiguous scan and guards the complete reviewed EXECUTE inventory', () => {
         const sql = readMigration();
         expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
@@ -686,8 +703,9 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
                 serializesCoordinatedCopiesOnly: boolean;
                 blocksUncoordinatedPostgresqlDdl: boolean;
                 activeDdlCurrentDatabaseScoped: boolean;
-                activeDdlNullQueryFailsClosed: boolean;
-                activeDdlInsufficientPrivilegeSentinelFailsClosed: boolean;
+                activeDdlClientBackendUnknownStateOrQueryFailsClosed: boolean;
+                activeDdlUnknownBackendTypeFailsClosed: boolean;
+                activeDdlKnownNonClientBackgroundNullStateAllowed: boolean;
                 activeDdlGuardBeforeCatalogEvidence: boolean;
                 activeDdlGuardImmediatelyBeforeDrops: boolean;
                 splitLiteralProductionMatchCount: number;
@@ -695,6 +713,8 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
                 singleWriterDdlMaintenanceWindowRequired: boolean;
                 coordinatorOnlyFromFinalPreflightThroughPostApplyVerification: boolean;
                 currentProductionActiveRelevantDdlCount: number;
+                currentProductionHiddenActivityCount: number;
+                currentProductionHiddenActivity: string;
                 trackedCiProductionDbPushEntrypoint: boolean;
                 targetOrAdvisoryLocksAloneBlockUncoordinatedDdl: boolean;
             };
@@ -705,8 +725,9 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(concurrency.serializesCoordinatedCopiesOnly).toBe(true);
         expect(concurrency.blocksUncoordinatedPostgresqlDdl).toBe(false);
         expect(concurrency.activeDdlCurrentDatabaseScoped).toBe(true);
-        expect(concurrency.activeDdlNullQueryFailsClosed).toBe(true);
-        expect(concurrency.activeDdlInsufficientPrivilegeSentinelFailsClosed).toBe(true);
+        expect(concurrency.activeDdlClientBackendUnknownStateOrQueryFailsClosed).toBe(true);
+        expect(concurrency.activeDdlUnknownBackendTypeFailsClosed).toBe(true);
+        expect(concurrency.activeDdlKnownNonClientBackgroundNullStateAllowed).toBe(true);
         expect(concurrency.activeDdlGuardBeforeCatalogEvidence).toBe(true);
         expect(concurrency.activeDdlGuardImmediatelyBeforeDrops).toBe(true);
         expect(concurrency.splitLiteralProductionMatchCount).toBe(0);
@@ -715,6 +736,10 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(concurrency.coordinatorOnlyFromFinalPreflightThroughPostApplyVerification)
             .toBe(true);
         expect(concurrency.currentProductionActiveRelevantDdlCount).toBe(0);
+        expect(concurrency.currentProductionHiddenActivityCount).toBe(2);
+        expect(concurrency.currentProductionHiddenActivity).toContain('pg_cron launcher');
+        expect(concurrency.currentProductionHiddenActivity).toContain('pg_net 0.19.5 worker');
+        expect(concurrency.currentProductionHiddenActivity).toContain('state NULL');
         expect(concurrency.trackedCiProductionDbPushEntrypoint).toBe(false);
         expect(concurrency.targetOrAdvisoryLocksAloneBlockUncoordinatedDdl).toBe(false);
     });

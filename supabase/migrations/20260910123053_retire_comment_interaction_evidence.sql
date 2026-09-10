@@ -8,9 +8,10 @@ BEGIN;
 SELECT pg_catalog.pg_advisory_xact_lock(22091010, 22);
 
 -- This preflight guard runs before relation/catalog evidence and is repeated
--- immediately before the destructive statements below. It fails closed on an
--- active session whose query text is hidden from this role because the DDL
--- type cannot be safely established.
+-- immediately before the destructive statements below. It fails closed on a
+-- same-database session with unknown backend identity or a client backend
+-- whose query text is hidden from this role because the DDL type cannot be
+-- safely established.
 DO $retirement_active_ddl_guard$
 BEGIN
     IF EXISTS (
@@ -32,19 +33,25 @@ BEGIN
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
           AND activity.datname = pg_catalog.current_database()
           AND (
-              activity.state IS NULL
-              OR
-              activity.query IS NULL
-              OR activity.query = '<insufficient privilege>'
+              activity.backend_type IS NULL
               OR (
-                  activity.state = 'active'
-                  AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
-                      (
-                          (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
-                          [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
-                        | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                  activity.backend_type = 'client backend'
+                  AND (
+                      activity.state IS NULL
+                      OR
+                      activity.query IS NULL
+                      OR activity.query = '<insufficient privilege>'
+                      OR (
+                          activity.state = 'active'
+                          AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                              (
+                                  (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                                  [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                                | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                              )
+                          $retirement_active_ddl_pattern$
                       )
-                  $retirement_active_ddl_pattern$
+                  )
               )
           )
     ) THEN
@@ -347,19 +354,25 @@ BEGIN
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
           AND activity.datname = pg_catalog.current_database()
           AND (
-              activity.state IS NULL
-              OR
-              activity.query IS NULL
-              OR activity.query = '<insufficient privilege>'
+              activity.backend_type IS NULL
               OR (
-                  activity.state = 'active'
-                  AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
-                      (
-                          (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
-                          [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
-                        | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                  activity.backend_type = 'client backend'
+                  AND (
+                      activity.state IS NULL
+                      OR
+                      activity.query IS NULL
+                      OR activity.query = '<insufficient privilege>'
+                      OR (
+                          activity.state = 'active'
+                          AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                              (
+                                  (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                                  [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                                | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                              )
+                          $retirement_active_ddl_pattern$
                       )
-                  $retirement_active_ddl_pattern$
+                  )
               )
           )
     ) THEN
