@@ -44,6 +44,21 @@ function accountDeletionMigrationSql(): string {
     );
 }
 
+function accountDeletionBackfillMigrationSql(): string {
+    const migration = readdirSync(join(process.cwd(), 'supabase/migrations'))
+        .filter(name => name.endsWith('_add_account_deletion_backfill_parity.sql'))
+        .sort();
+    if (migration.length !== 1) {
+        throw new Error(
+            `Expected one generated account-deletion backfill migration, found ${migration.length}`,
+        );
+    }
+    return readFileSync(
+        join(process.cwd(), 'supabase/migrations', migration[0]),
+        'utf8',
+    );
+}
+
 describe('operations canonical migration contract', () => {
     it('adds bounded recovery indexes and lease fence columns', () => {
         const sql = migrationSql();
@@ -106,6 +121,27 @@ describe('operations canonical migration contract', () => {
         expect(sql).toContain('REVOKE EXECUTE ON FUNCTION public.mirror_account_deletion_job_v1');
         expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.mirror_account_deletion_job_v1');
         expect(sql).not.toMatch(/\bDROP\s+(?:TABLE|COLUMN|FUNCTION)\b|\bTRUNCATE\b|\bDELETE\s+FROM\s+public\.account_deletion_jobs\b/i);
+    });
+
+    it('adds bounded service-only backfill and aggregate-only parity routines', () => {
+        const sql = accountDeletionBackfillMigrationSql();
+        for (const functionName of [
+            'backfill_account_deletion_jobs_v1',
+            'collect_account_deletion_parity_v1',
+        ]) {
+            expect(sql).toContain(`CREATE FUNCTION public.${functionName}`);
+            expect(sql).toContain(`REVOKE EXECUTE ON FUNCTION public.${functionName}`);
+            expect(sql).toContain(`GRANT EXECUTE ON FUNCTION public.${functionName}`);
+            expect(sql).toContain("SET search_path = ''");
+        }
+        expect(sql).toContain('p_limit INTEGER DEFAULT 100');
+        expect(sql).toContain('ACCOUNT_DELETION_BACKFILL_LIMIT_INVALID');
+        expect(sql).toContain('mirror_account_deletion_job_v1');
+        expect(sql).toContain('mismatch_fields');
+        expect(sql).toContain('source_checksum');
+        expect(sql).toContain('canonical_checksum');
+        expect(sql).not.toMatch(/\b(DROP|TRUNCATE|DELETE\s+FROM)\b/i);
+        expect(sql).not.toMatch(/RETURN\s+QUERY\s+SELECT\s+.*account_id/i);
     });
 });
 

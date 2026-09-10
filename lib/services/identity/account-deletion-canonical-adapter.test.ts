@@ -30,4 +30,72 @@ describe('account-deletion canonical wave adapter', () => {
         });
         expect(rpc).not.toHaveBeenCalled();
     });
+
+    it('runs only the bounded forward backfill RPC when the maintenance writer is enabled', async () => {
+        const rpc = vi.fn(async (name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('backfill_account_deletion_jobs_v1');
+            expect(params).toEqual({
+                p_limit: 100,
+                p_cursor_hash: null,
+            });
+            return {
+                data: {
+                    schema_version: 'supabase-22-account-deletion-backfill-v1',
+                    status: 'completed',
+                    processed: 2,
+                    mirrored: 1,
+                    duplicates: 1,
+                    blocked: 0,
+                    has_more: false,
+                    next_cursor_hash: null,
+                },
+                error: null,
+            };
+        });
+        const adapter = createAccountDeletionCanonicalAdapter({
+            rpc,
+            environment: { COMMERCE_CANONICAL_MAINTENANCE_WRITE: 'true' },
+        });
+
+        await expect(adapter.backfillMaintenanceJobs()).resolves.toEqual({
+            schema_version: 'supabase-22-account-deletion-backfill-v1',
+            status: 'completed',
+            processed: 2,
+            mirrored: 1,
+            duplicates: 1,
+            blocked: 0,
+            has_more: false,
+            next_cursor_hash: null,
+        });
+    });
+
+    it('collects aggregate parity through the read-only RPC without a write flag', async () => {
+        const rpc = vi.fn(async (name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('collect_account_deletion_parity_v1');
+            expect(params).toEqual({});
+            return {
+                data: {
+                    schema_version: 'supabase-22-account-deletion-parity-v1',
+                    status: 'match',
+                    source_count: 12,
+                    canonical_count: 12,
+                    source_checksum: 'a'.repeat(64),
+                    canonical_checksum: 'a'.repeat(64),
+                    mismatch_fields: [],
+                },
+                error: null,
+            };
+        });
+        const adapter = createAccountDeletionCanonicalAdapter({ rpc, environment: {} });
+
+        await expect(adapter.collectParity()).resolves.toEqual({
+            schema_version: 'supabase-22-account-deletion-parity-v1',
+            status: 'match',
+            source_count: 12,
+            canonical_count: 12,
+            source_checksum: 'a'.repeat(64),
+            canonical_checksum: 'a'.repeat(64),
+            mismatch_fields: [],
+        });
+    });
 });

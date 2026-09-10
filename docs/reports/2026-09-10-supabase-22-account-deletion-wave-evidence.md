@@ -76,9 +76,25 @@ no account UUID in the canonical payload. Repeated calls are idempotent;
 source regression after canonical success is marked blocked with
 `ACCOUNT_DELETION_SOURCE_REGRESSION`.
 
-The report-only harness is bounded to 100 rows per page, refuses mutation,
-cutover, activation, drop, truncate, and delete options, and emits counts,
-checksums, and field names only. The read-only source projection checksum is
+### Proposed implementation, not run in production
+
+The generated migration
+`supabase/migrations/20260910035257_add_account_deletion_backfill_parity.sql`
+adds two service-role-only routines. This is a code proposal only; the
+migration was not applied remotely and neither routine was invoked against
+production.
+
+| Action | Production status | Output/scope contract |
+|---|---|---|
+| `backfill_account_deletion_jobs_v1(integer,text)` | proposed, not run | At most 100 source rows, opaque hash cursor, forward-only calls to `mirror_account_deletion_job_v1` inside SQL, idempotent mirror counts, no raw UUID output. |
+| `collect_account_deletion_parity_v1()` | proposed, not run | Read-only SQL aggregation of source/canonical counts, deterministic checksums, and mismatch field names only; no row or UUID export. |
+| typed server adapter methods | local code only, not activated | Backfill remains gated by `COMMERCE_CANONICAL_MAINTENANCE_WRITE`; parity has no write path. |
+
+The local report-only harness remains bounded to 100 rows per page and refuses
+mutation, cutover, activation, drop, truncate, and delete options. It is not a
+substitute for a production parity result.
+
+The read-only source projection checksum is
 `865d24fc97cb5d8816b7d5a17eb0fc78e3f31d9395d7055e8545aacd39ec4b6f` for 12
 rows; canonical count is 0 and canonical checksum is null, so parity is
 blocked and no backfill was attempted.
@@ -99,8 +115,8 @@ Destructive readiness is blocked. Required independent evidence remains:
 - `observation-window`: a closed window with the maintenance writer/read flags
   still independently controlled;
 - `dependency-inventory` and `migration-history`: zero dependency/traffic
-  proof after the additive wave and clean history after any separately
-  approved apply;
+  proof after the additive wave, plus clean history after any separately
+  approved migration apply;
 - `rollback-evidence`: an independently verified rollback path;
 - `no-activation-or-canary`: independent read-only proof that admission and a
   real canary stayed inactive;
@@ -113,3 +129,19 @@ Destructive readiness is blocked. Required independent evidence remains:
 `payment_pending` was not read or mutated. Admission remains inactive, the real
 `0_min._.00` canary was not run, the destructive allowlist is `[]`, and the
 source table was not dropped, renamed, truncated, deleted from, or backfilled.
+
+## Local implementation verification
+
+The additive implementation was verified locally without a remote connection:
+
+- Focused TDD contracts: `35` tests passed, including migration contract,
+  adapter, report-only helper, and PGlite backfill/parity tests.
+- Typecheck: `npx tsc --noEmit --pretty false` passed.
+- Lint: `npm run lint` passed with existing repository warnings and no errors.
+- Diff hygiene: `git diff --check` passed.
+- Secret scan: changed hunks and the generated migration passed redacted
+  `gitleaks` scans. A whole-tree scan remains noisy from pre-existing findings
+  outside this wave and was not used as evidence of a new secret.
+- Production actions: migration apply, backfill RPC, parity RPC, archive,
+  restore, flag change, admission activation, canary, and destructive action
+  were all not run.

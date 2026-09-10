@@ -37,11 +37,17 @@ The full sanitized evidence and archive/restore manifest are recorded in
 2. Add a typed wave-specific adapter and a disabled-by-default maintenance write
    hook after each successful legacy deletion transition. Mirror failure is
    bounded and reportable; it cannot turn into a destructive fallback.
-3. Add pure projection/parity helpers and a bounded report-only backfill
-   harness. It accepts at most 100 source rows, returns counts/checksums and
-   sanitized mismatch fields only, and has no apply/drop/truncate/delete/
-   mutate option.
-4. Add an archive/restore manifest and evidence report with source and
+3. Add pure projection/parity helpers and a separate forward-only SQL backfill
+   boundary. It accepts at most 100 source rows per call, invokes the existing
+   service-only mirror routine inside the database, uses an opaque hash cursor,
+   and returns aggregate progress only. The backfill boundary has no
+   drop/truncate/delete/rename option; the production invocation remains
+   proposed and not run in this wave.
+4. Add a production-usable read-only SQL parity collector. It aggregates source
+   and canonical counts/checksums and sanitized mismatch field names inside the
+   database; no account UUID is returned. The collector is proposed and not
+   called against production in this wave.
+5. Add an archive/restore manifest and evidence report with source and
    canonical hashes, exact proposed object names, empty destructive allowlist,
    and every unavailable gate recorded as blocked. No production archive,
    restore, backfill, migration push, or canary is run.
