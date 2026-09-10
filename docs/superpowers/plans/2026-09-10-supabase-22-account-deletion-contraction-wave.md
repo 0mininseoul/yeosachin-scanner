@@ -10,23 +10,35 @@ destructive operation is enabled by this wave.
 
 ## Production evidence captured 2026-09-10
 
-Migration `20260910020205_prepare_account_deletion_canonical_wave.sql` was
-merged, deployed, applied, and remotely verified. Immediately after that apply,
-the production public table count remained `187`, the legacy source exact count
-was `12`, and canonical `purge` rows were `0`. Migration
-`20260910035257_add_account_deletion_backfill_parity.sql` remains proposed and
-not applied; no production backfill or parity call has occurred. The source has
-seven columns, one
-`account_id` foreign key with `ON DELETE RESTRICT`, two state checks, no
-user-defined trigger, FORCE RLS with no policies, and service-role table ACL.
-The canonical tables have the reviewed 7-column lifecycle and 16-column
-maintenance shapes; lifecycle has one immutable trigger and maintenance has
-the existing `purge` kind, state, lease, hash, payload, and uniqueness checks.
-The exact source routines are `begin_account_deletion_v1(uuid)`,
-`finalize_account_deletion_database_v1(uuid,jsonb)`, and
-`complete_account_deletion_v1(uuid)`. Canonical routines are service-RPC
-boundaries; no runtime file directly references the legacy table, while the
-account-deletion service calls those three routines.
+The final main commit `fad5bc7ce7a0f02a970d7f7a6a9453e74e928c78` had
+successful main CI run `34441721804` and a successful Vercel production
+deployment. The selected migration
+`20260910035257_add_account_deletion_backfill_parity.sql` dry-run listed only
+that file; its apply succeeded, local and remote migration history matched, and
+a final dry-run returned `upToDate: true`.
+
+Immediately before the backfill, the aggregate public/source/canonical counts
+were `187/12/0`. The read-only pre-parity snapshot was `mismatch` with
+source/canonical counts `12/0`. One bounded backfill returned
+`processed: 12`, `mirrored: 12`, `duplicates: 0`, `blocked: 0`,
+`has_more: false`, and `status: parity_required`. The immediate post-parity
+snapshot was `match` with source/canonical counts `12/12`, equal checksum
+`865d24fc97cb5d8816b7d5a17eb0fc78e3f31d9395d7055e8545aacd39ec4b6f`, and
+`mismatch_fields: []`. Source states remained `completed: 8` and `requested: 4`;
+canonical states were `succeeded: 8` and `queued: 4`; the public table count
+stayed `187`.
+
+Both RPCs are `SECURITY DEFINER` with an empty `search_path`; `service_role`
+execute is true and `anon`/`authenticated` execute is false. The backfill RPC
+has `statement_timeout = '2min'` and `lock_timeout = '5s'`; the parity RPC has
+`statement_timeout = '2min'`.
+
+This is a parity snapshot only. The source remains authoritative and active,
+and four requested jobs remain. Account-deletion-specific continuous
+mirror/cutover, observation, archive/restore, dependency/traffic-zero,
+rollback, and exact approval remain blocked. The destructive allowlist remains
+empty; no DROP, source mutation, global flag, admission, canary, or
+`payment_pending` action occurred.
 The full sanitized evidence and archive/restore manifest are recorded in
 `docs/reports/2026-09-10-supabase-22-account-deletion-wave-evidence.md` and
 `docs/reports/2026-09-10-account-deletion-canonical-archive-restore-manifest.json`.
@@ -50,34 +62,38 @@ The full sanitized evidence and archive/restore manifest are recorded in
    statuses. `has_more = false` always returns `parity_required`, requiring a
    separate `collect_account_deletion_parity_v1()` call. If that parity snapshot
    mismatches, the operator contract restarts the backfill from a `NULL` cursor.
-   The backfill boundary has no drop/truncate/delete/rename option; migration
-   `20260910035257` remains proposed and not applied in this wave.
+   The selected migration was applied under the exact single-file allowlist;
+   the bounded production result processed 12 rows, mirrored 12, reported no
+   duplicates or blocked rows, returned `has_more = false`, and required parity.
+   The backfill boundary has no drop/truncate/delete/rename option.
 4. Add a production-usable read-only SQL parity collector. It aggregates source
    and canonical counts/checksums and sanitized mismatch field names inside the
-   database; no account UUID is returned. The collector is a final parity
-   snapshot only: it does not establish source quiescence or replace an
-   account-deletion-specific continuous mirror/cutover before retirement. It is
-   proposed and not called against production in this wave.
+   database; no account UUID is returned. The immediate post-backfill result
+   was a matching `12/12` snapshot with the checksum and empty mismatch list
+   recorded above. The collector is a final parity snapshot only: it does not
+   establish source quiescence or replace an account-deletion-specific
+   continuous mirror/cutover before retirement.
 5. Add an archive/restore manifest and evidence report with source and
    canonical hashes, exact proposed object names, empty destructive allowlist,
-   and every unavailable gate recorded as blocked. No production archive,
-   restore, `20260910035257` migration apply, backfill, or canary is run.
+   and every unavailable gate recorded as blocked. No production archive or
+   restore, flag change, admission activation, or canary is run.
 
 ## Gates left blocked
 
-Archive encryption and isolated restore, complete per-row parity, source
-quiescence, an account-deletion-specific continuous mirror/cutover, a closed
-observation window, dependency/traffic zero proof, owner approval, migration
-history after the applied migration, and separate approval to contract the
-legacy table remain required. `payment_pending` is not inspected or mutated by
-this wave. The destructive allowlist remains empty; any future proposal must
-contain only the exact object names and allowlist hash and stop for owner
-approval.
+The matching result is an aggregate parity snapshot only; complete per-row or
+canonical-read proof and source quiescence remain unproven. Archive encryption
+and isolated restore, an account-deletion-specific continuous mirror/cutover,
+a closed observation window, dependency/traffic-zero proof, rollback evidence,
+exact owner approval, and separate approval to contract the legacy table remain
+blocked. `payment_pending` is not inspected or mutated by this wave. The
+source remains authoritative and active with four requested jobs remaining.
+The destructive allowlist remains empty; any future proposal must contain only
+the exact object names and allowlist hash and stop for owner approval.
 
 ## Verification
 
 Run the focused TDD contracts first, then the repository TypeScript, lint,
-secret scan, and diff review. The final handoff must state the commit SHA,
-remaining gates, and distinguish the remotely verified `20260910020205` apply
-from the unapplied `20260910035257` proposal and the absent production
-backfill/parity calls.
+secret scan, and diff review. The final handoff must state the final main SHA,
+successful CI/deployment evidence, selected migration apply and history/dry-run
+evidence, parity snapshot, remaining blocked gates, and the empty destructive
+allowlist.
