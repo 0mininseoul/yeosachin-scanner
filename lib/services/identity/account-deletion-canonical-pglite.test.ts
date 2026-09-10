@@ -287,4 +287,18 @@ describe('account deletion canonical migration PGlite contract', () => {
             `SELECT public.backfill_account_deletion_jobs_v1(101, NULL)`,
         )).rejects.toThrow('ACCOUNT_DELETION_BACKFILL_LIMIT_INVALID');
     });
+
+    it('requires an explicit parity snapshot after the final hash-cursor page', async () => {
+        const result = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.backfill_account_deletion_jobs_v1(100, $1) AS result`,
+            ['f'.repeat(64)],
+        );
+
+        expect(result.rows[0].result).toMatchObject({
+            status: 'parity_required',
+            processed: 0,
+            has_more: false,
+            next_cursor_hash: null,
+        });
+    });
 });

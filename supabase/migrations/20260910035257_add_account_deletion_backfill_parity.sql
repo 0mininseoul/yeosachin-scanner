@@ -12,6 +12,8 @@ RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET statement_timeout = '2min'
+SET lock_timeout = '5s'
 AS $$
 DECLARE
     v_source RECORD;
@@ -77,9 +79,16 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- A hash-cursor pass is never evidence of parity or retirement. Callers
+    -- must collect the separate parity snapshot after the final page; a
+    -- mismatch requires restarting the pass with a NULL cursor.
     RETURN pg_catalog.jsonb_build_object(
         'schema_version', 'supabase-22-account-deletion-backfill-v1',
-        'status', CASE WHEN v_blocked > 0 THEN 'blocked' ELSE 'completed' END,
+        'status', CASE
+            WHEN v_blocked > 0 THEN 'blocked'
+            WHEN v_has_more THEN 'progressed'
+            ELSE 'parity_required'
+        END,
         'processed', v_processed,
         'mirrored', v_mirrored,
         'duplicates', v_duplicates,
@@ -90,6 +99,9 @@ BEGIN
 END;
 $$;
 
+-- This parity result is a snapshot only. It does not establish source
+-- quiescence or replace an account-deletion-specific continuous mirror and
+-- cutover before retirement.
 CREATE FUNCTION public.collect_account_deletion_parity_v1()
 RETURNS JSONB
 LANGUAGE SQL

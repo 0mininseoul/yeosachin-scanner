@@ -125,6 +125,20 @@ describe('operations canonical migration contract', () => {
 
     it('adds bounded service-only backfill and aggregate-only parity routines', () => {
         const sql = accountDeletionBackfillMigrationSql();
+        const backfillStart = sql.indexOf(
+            'CREATE FUNCTION public.backfill_account_deletion_jobs_v1',
+        );
+        const parityStart = sql.indexOf(
+            'CREATE FUNCTION public.collect_account_deletion_parity_v1',
+        );
+        expect(backfillStart).toBeGreaterThanOrEqual(0);
+        expect(parityStart).toBeGreaterThan(backfillStart);
+        const backfillSql = sql.slice(backfillStart, parityStart);
+        expect(backfillSql).toContain("SET statement_timeout = '2min'");
+        expect(backfillSql).toContain("SET lock_timeout = '5s'");
+        expect(backfillSql).toContain("'progressed'");
+        expect(backfillSql).toContain("'parity_required'");
+        expect(backfillSql).not.toContain("'completed'");
         for (const functionName of [
             'backfill_account_deletion_jobs_v1',
             'collect_account_deletion_parity_v1',
