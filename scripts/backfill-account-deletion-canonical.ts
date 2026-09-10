@@ -217,7 +217,9 @@ export function buildAccountDeletionCanonicalProjection(
     };
 }
 
-function projectionChecksum(rows: readonly AccountDeletionCanonicalProjection[]): string | null {
+export function accountDeletionProjectionChecksum(
+    rows: readonly AccountDeletionCanonicalProjection[],
+): string | null {
     if (rows.length === 0) return null;
     const digest = createHash('sha256');
     for (const row of [...rows].sort((left, right) => left.key.localeCompare(right.key))) {
@@ -280,8 +282,8 @@ export function compareAccountDeletionParity(
         sourceCount: sourceRows.length,
         canonicalCount: canonicalRows.length,
         mismatchFields: sortedMismatchFields,
-        sourceChecksum: projectionChecksum(sourceRows),
-        canonicalChecksum: projectionChecksum(canonicalRows),
+        sourceChecksum: accountDeletionProjectionChecksum(sourceRows),
+        canonicalChecksum: accountDeletionProjectionChecksum(canonicalRows),
     };
 }
 

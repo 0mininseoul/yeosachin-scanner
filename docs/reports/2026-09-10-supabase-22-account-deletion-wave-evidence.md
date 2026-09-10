@@ -1,8 +1,12 @@
 # Supabase 22 account-deletion contraction wave evidence
 
-Captured 2026-09-10 from the linked production project using read-only Supabase
-CLI metadata/query access. No production migration, write RPC, archive,
-restore, backfill, admission activation, or canary was run.
+Captured 2026-09-10 with the linked Supabase CLI. Migration
+`20260910020205_prepare_account_deletion_canonical_wave.sql` was merged,
+deployed, applied, and remotely verified. Immediately after that apply, the
+production public table count remained `187`, the legacy source exact count was
+`12`, and canonical `purge` rows were `0`. Migration
+`20260910035257_add_account_deletion_backfill_parity.sql` remains proposed and
+not applied; no production backfill or parity call has occurred.
 
 ## Scope and inventory
 
@@ -16,10 +20,10 @@ restore, backfill, admission activation, or canary was run.
 
 ## Read-only production shape
 
-Exact row counts were `account_deletion_jobs=12`, `account_lifecycle=0`, and
-`maintenance_jobs=0`. The source state distribution was `completed=8` with
-all three phase timestamps present, and `requested=4` with all three phase
-timestamps absent.
+The pre-apply source inventory recorded the exact legacy row count as `12`.
+Immediately after the applied migration, the public table count remained `187`
+and canonical `purge` rows were `0`. No additional post-apply production row
+counts are inferred here.
 
 The source columns are, in order: `account_id uuid NOT NULL` (primary key and
 `users(id)` foreign key with `ON DELETE RESTRICT`), `state text NOT NULL`
@@ -68,20 +72,42 @@ maintenance read flag remains disabled.
 
 ## Additive wave and parity evidence
 
-The proposed function is `public.mirror_account_deletion_job_v1(uuid)`,
-service-role-only. It reads one source row, derives a domain-separated target
-hash, writes only a sanitized state/timestamp projection to one `purge`
-`maintenance_jobs` row, and preserves the source as authoritative. It stores
-no account UUID in the canonical payload. Repeated calls are idempotent;
-source regression after canonical success is marked blocked with
-`ACCOUNT_DELETION_SOURCE_REGRESSION`.
+The applied migration exposes `public.mirror_account_deletion_job_v1(uuid)` as
+a service-role-only routine. It reads one source row, derives a
+domain-separated target hash, writes only a sanitized state/timestamp
+projection to one `purge` `maintenance_jobs` row, and preserves the source as
+authoritative. It stores no account UUID in the canonical payload. Repeated
+calls are idempotent; source regression after canonical success is marked
+blocked with `ACCOUNT_DELETION_SOURCE_REGRESSION`.
 
-The report-only harness is bounded to 100 rows per page, refuses mutation,
-cutover, activation, drop, truncate, and delete options, and emits counts,
-checksums, and field names only. The read-only source projection checksum is
+### Proposed implementation, not run in production
+
+The generated migration
+`supabase/migrations/20260910035257_add_account_deletion_backfill_parity.sql`
+adds two service-role-only routines. This is a code proposal only; the
+migration remains proposed and not applied, and neither routine has been
+invoked against production.
+
+| Action | Production status | Output/scope contract |
+|---|---|---|
+| `backfill_account_deletion_jobs_v1(integer,text)` | proposed, not applied or run | At most 100 source rows, opaque hash cursor, forward-only calls to `mirror_account_deletion_job_v1` inside SQL, idempotent mirror counts, no raw UUID output; returns only nonterminal `progressed`, `parity_required`, or `blocked`. |
+| `collect_account_deletion_parity_v1()` | proposed, not applied or run | Read-only SQL aggregation of source/canonical counts, deterministic checksums, and mismatch field names only; no row or UUID export; operator-only through the linked CLI. |
+| runtime mirror adapter | local code only, not activated | Retained only for the existing account-deletion runtime mirror hook; no backfill/parity TypeScript adapter surface. |
+
+The local report-only harness remains bounded to 100 rows per page and refuses
+mutation, cutover, activation, drop, truncate, and delete options. A terminal
+hash-cursor backfill result is `parity_required`, so the operator must call
+`collect_account_deletion_parity_v1()` separately. A parity mismatch requires
+restarting the backfill from a `NULL` cursor. Even a matching parity result is
+only a snapshot: it does not prove source quiescence or replace an
+account-deletion-specific continuous mirror and cutover before retirement.
+The harness is not a substitute for a production parity result.
+
+The local/read-only source projection checksum is
 `865d24fc97cb5d8816b7d5a17eb0fc78e3f31d9395d7055e8545aacd39ec4b6f` for 12
-rows; canonical count is 0 and canonical checksum is null, so parity is
-blocked and no backfill was attempted.
+rows. No production parity snapshot exists because the proposed parity
+collector was not applied or called; immediately after the applied migration,
+canonical `purge` rows were `0`.
 
 The archive/restore manifest is recorded separately at
 `docs/reports/2026-09-10-account-deletion-canonical-archive-restore-manifest.json`.
@@ -99,8 +125,9 @@ Destructive readiness is blocked. Required independent evidence remains:
 - `observation-window`: a closed window with the maintenance writer/read flags
   still independently controlled;
 - `dependency-inventory` and `migration-history`: zero dependency/traffic
-  proof after the additive wave and clean history after any separately
-  approved apply;
+  proof after the additive wave, with the applied `20260910020205` migration
+  remotely verified and the proposed `20260910035257` migration still not
+  applied;
 - `rollback-evidence`: an independently verified rollback path;
 - `no-activation-or-canary`: independent read-only proof that admission and a
   real canary stayed inactive;
@@ -113,3 +140,22 @@ Destructive readiness is blocked. Required independent evidence remains:
 `payment_pending` was not read or mutated. Admission remains inactive, the real
 `0_min._.00` canary was not run, the destructive allowlist is `[]`, and the
 source table was not dropped, renamed, truncated, deleted from, or backfilled.
+The applied migration did not perform a backfill; no production backfill or
+parity call has occurred.
+
+## Local implementation verification
+
+The additive implementation was verified locally without a remote connection:
+
+- Focused TDD contracts: `42` tests passed locally across migration contract,
+  runtime mirror adapter, report-only helper, and PGlite backfill/parity tests.
+- Typecheck: `npx tsc --noEmit --pretty false` passed.
+- Lint: `npm run lint` passed with existing repository warnings and no errors.
+- Diff hygiene: `git diff --check` passed.
+- Secret scan: changed hunks and the generated migration passed redacted
+  `gitleaks` scans. A whole-tree scan remains noisy from pre-existing findings
+  outside this wave and was not used as evidence of a new secret.
+- Production actions: `20260910020205` was merged, deployed, applied, and
+  remotely verified; `20260910035257` remains proposed/not applied, and no
+  production backfill or parity call, archive, restore, flag change, admission
+  activation, canary, or destructive action has occurred.

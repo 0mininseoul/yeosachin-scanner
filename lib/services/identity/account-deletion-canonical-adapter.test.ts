@@ -30,4 +30,5 @@ describe('account-deletion canonical wave adapter', () => {
         });
         expect(rpc).not.toHaveBeenCalled();
     });
+
 });

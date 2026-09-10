@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
-import { buildAccountDeletionCanonicalProjection } from '../../../scripts/backfill-account-deletion-canonical';
+import {
+    accountDeletionProjectionChecksum,
+    buildAccountDeletionCanonicalProjection,
+} from '../../../scripts/backfill-account-deletion-canonical';
 
 const commerceMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260909095932_add_commerce_operation_canonical_tables.sql',
@@ -10,6 +13,10 @@ const commerceMigration = readFileSync(new URL(
 ), 'utf8');
 const accountDeletionMigration = readFileSync(new URL(
     '../../../supabase/migrations/20260910020205_prepare_account_deletion_canonical_wave.sql',
+    import.meta.url,
+), 'utf8');
+const accountDeletionBackfillMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20260910035257_add_account_deletion_backfill_parity.sql',
     import.meta.url,
 ), 'utf8');
 
@@ -57,6 +64,7 @@ beforeAll(async () => {
         );
     `);
     await db.exec(withoutAclStatements(accountDeletionMigration));
+    await db.exec(withoutAclStatements(accountDeletionBackfillMigration));
 });
 
 afterAll(async () => {
@@ -162,6 +170,135 @@ describe('account deletion canonical migration PGlite contract', () => {
         )).rows[0]).toEqual({
             state: 'blocked',
             last_error_code: 'ACCOUNT_DELETION_SOURCE_REGRESSION',
+        });
+    });
+
+    it('backfills at most 100 rows through the mirror RPC and is idempotent', async () => {
+        const backfillAccountId = '9d809496-1cb8-4e4f-a081-8efc14a7a64c';
+        await seedCompleted(backfillAccountId);
+
+        const first = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.backfill_account_deletion_jobs_v1(100, NULL) AS result`,
+        );
+        expect(first.rows[0].result).toMatchObject({
+            schema_version: 'supabase-22-account-deletion-backfill-v1',
+            status: 'blocked',
+            processed: 4,
+            mirrored: 1,
+            duplicates: 2,
+            blocked: 1,
+            has_more: false,
+        });
+        expect(JSON.stringify(first.rows[0].result)).not.toContain(backfillAccountId);
+        expect((await db.query(`SELECT count(*)::int AS count FROM public.maintenance_jobs`)).rows[0])
+            .toEqual({ count: 4 });
+
+        const second = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.backfill_account_deletion_jobs_v1(100, NULL) AS result`,
+        );
+        expect(second.rows[0].result).toMatchObject({
+            processed: 4,
+            mirrored: 0,
+            duplicates: 3,
+            blocked: 1,
+            has_more: false,
+        });
+        expect((await db.query(`SELECT count(*)::int AS count FROM public.maintenance_jobs`)).rows[0])
+            .toEqual({ count: 4 });
+    });
+
+    it('returns aggregate parity only and detects canonical payload mismatches', async () => {
+        const parityBefore = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.collect_account_deletion_parity_v1() AS result`,
+        );
+        expect(parityBefore.rows[0].result).toMatchObject({
+            schema_version: 'supabase-22-account-deletion-parity-v1',
+            status: 'mismatch',
+            source_count: 4,
+            canonical_count: 4,
+        });
+        expect(parityBefore.rows[0].result.source_checksum).toBe(accountDeletionProjectionChecksum([
+            buildAccountDeletionCanonicalProjection({
+                accountId,
+                state: 'completed',
+                requestedAt: '2026-09-01T00:00:00.000Z',
+                objectsPurgedAt: '2026-09-01T00:01:00.000Z',
+                databasePurgedAt: '2026-09-01T00:02:00.000Z',
+                completedAt: '2026-09-01T00:03:00.000Z',
+                updatedAt: '2026-09-01T00:03:00.000Z',
+            }),
+            buildAccountDeletionCanonicalProjection({
+                accountId: secondAccountId,
+                state: 'requested',
+                requestedAt: '2026-09-02T00:00:00.000Z',
+                objectsPurgedAt: null,
+                databasePurgedAt: null,
+                completedAt: null,
+                updatedAt: '2026-09-02T00:00:00.000Z',
+            }),
+            buildAccountDeletionCanonicalProjection({
+                accountId: '8d809496-1cb8-4e4f-a081-8efc14a7a64c',
+                state: 'requested',
+                requestedAt: '2026-09-01T00:00:00.000Z',
+                objectsPurgedAt: null,
+                databasePurgedAt: null,
+                completedAt: null,
+                updatedAt: '2026-09-03T00:00:00.000Z',
+            }),
+            buildAccountDeletionCanonicalProjection({
+                accountId: '9d809496-1cb8-4e4f-a081-8efc14a7a64c',
+                state: 'completed',
+                requestedAt: '2026-09-01T00:00:00.000Z',
+                objectsPurgedAt: '2026-09-01T00:01:00.000Z',
+                databasePurgedAt: '2026-09-01T00:02:00.000Z',
+                completedAt: '2026-09-01T00:03:00.000Z',
+                updatedAt: '2026-09-01T00:03:00.000Z',
+            }),
+        ]));
+        expect(JSON.stringify(parityBefore.rows[0].result)).not.toContain(accountId);
+
+        const row = await db.query<{ id: string }>(`
+            SELECT id FROM public.maintenance_jobs
+            WHERE payload->>'source_table' = 'account_deletion_jobs'
+            LIMIT 1
+        `);
+        await db.query(`
+            UPDATE public.maintenance_jobs
+            SET payload = jsonb_set(payload, '{legacy_state}', '"requested"'::jsonb),
+                content_hash = repeat('f', 64)
+            WHERE id = $1
+        `, [row.rows[0].id]);
+
+        const parityAfter = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.collect_account_deletion_parity_v1() AS result`,
+        );
+        expect(parityAfter.rows[0].result).toMatchObject({
+            status: 'mismatch',
+        });
+        expect(parityAfter.rows[0].result.mismatch_fields).toEqual(expect.arrayContaining([
+            'content_hash',
+            'payload',
+        ]));
+        expect(JSON.stringify(parityAfter.rows[0].result)).not.toContain(accountId);
+    });
+
+    it('rejects limits above 100 at the SQL boundary', async () => {
+        await expect(db.query(
+            `SELECT public.backfill_account_deletion_jobs_v1(101, NULL)`,
+        )).rejects.toThrow('ACCOUNT_DELETION_BACKFILL_LIMIT_INVALID');
+    });
+
+    it('requires an explicit parity snapshot after the final hash-cursor page', async () => {
+        const result = await db.query<{ result: Record<string, unknown> }>(
+            `SELECT public.backfill_account_deletion_jobs_v1(100, $1) AS result`,
+            ['f'.repeat(64)],
+        );
+
+        expect(result.rows[0].result).toMatchObject({
+            status: 'parity_required',
+            processed: 0,
+            has_more: false,
+            next_cursor_hash: null,
         });
     });
 });
