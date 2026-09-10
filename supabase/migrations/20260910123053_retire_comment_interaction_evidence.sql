@@ -3,6 +3,37 @@
 
 BEGIN;
 
+-- This fixed transaction-scoped advisory lock serializes coordinated copies
+-- of this rollout only; it does not block uncoordinated PostgreSQL DDL.
+SELECT pg_catalog.pg_advisory_xact_lock(22091010, 22);
+
+-- This preflight guard runs before relation/catalog evidence and is repeated
+-- immediately before the destructive statements below. It fails closed on an
+-- active session whose query text is hidden from this role because the DDL
+-- type cannot be safely established.
+DO $retirement_active_ddl_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_stat_activity AS activity
+        WHERE activity.pid <> pg_catalog.pg_backend_pid()
+          AND activity.state = 'active'
+          AND (
+              activity.query IS NULL
+              OR activity.query ~* $retirement_active_ddl_pattern$(?x)
+                  (
+                      (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                      [[:space:]]+(FUNCTION|PROCEDURE)
+                    | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                  )
+              $retirement_active_ddl_pattern$
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
+    END IF;
+END;
+$retirement_active_ddl_guard$;
+
 -- Resolve the exact base relations before taking locks. A missing or replaced
 -- relation aborts the transaction instead of being silently skipped. The OIDs
 -- are kept in transaction-local custom GUCs so the post-lock check can detect
@@ -170,6 +201,33 @@ BEGIN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE: a stored function or procedure mentions public.comment_details or public.interaction_logs';
     END IF;
 
+    -- A split literal can construct a reviewed target without a contiguous
+    -- name or pg_depend entry. Limit this guard to EXECUTE routines and the
+    -- two exact literal pairs so unrelated dynamic routines remain allowed.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS stored_routine
+        JOIN pg_catalog.pg_namespace AS routine_schema
+            ON routine_schema.oid = stored_routine.pronamespace
+        WHERE stored_routine.prokind IN ('f', 'p')
+          AND routine_schema.nspname <> 'information_schema'
+          AND routine_schema.nspname !~ '^pg_'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_catalog.pg_depend AS extension_dependency
+              WHERE extension_dependency.classid = 'pg_catalog.pg_proc'::regclass
+                AND extension_dependency.objid = stored_routine.oid
+                AND extension_dependency.deptype = 'e'
+          )
+          AND pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_execute_token_pattern$(^|[^[:alnum:]_])EXECUTE([^[:alnum:]_]|$)$retirement_execute_token_pattern$
+          AND (
+              pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_split_comment_pattern$'comment_'[[:space:]]*\|\|[[:space:]]*'details'$retirement_split_comment_pattern$
+              OR pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_split_interaction_pattern$'interaction_'[[:space:]]*\|\|[[:space:]]*'logs'$retirement_split_interaction_pattern$
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE: an EXECUTE routine constructs a reviewed target from split literals';
+    END IF;
+
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_trigger AS user_trigger
@@ -215,6 +273,33 @@ BEGIN
     END IF;
 END;
 $retirement_evidence_guard$;
+
+-- The active DDL guard is repeated immediately before the exact destructive
+-- allowlist. The advisory lock and target locks do not block uncoordinated
+-- publication or function/procedure DDL, so the operator single-writer window
+-- remains required even when this guard passes.
+DO $retirement_active_ddl_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_stat_activity AS activity
+        WHERE activity.pid <> pg_catalog.pg_backend_pid()
+          AND activity.state = 'active'
+          AND (
+              activity.query IS NULL
+              OR activity.query ~* $retirement_active_ddl_pattern$(?x)
+                  (
+                      (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                      [[:space:]]+(FUNCTION|PROCEDURE)
+                    | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                  )
+              $retirement_active_ddl_pattern$
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
+    END IF;
+END;
+$retirement_active_ddl_guard$;
 
 -- The only destructive statements in this migration. No CASCADE is permitted.
 DROP TABLE public.comment_details;

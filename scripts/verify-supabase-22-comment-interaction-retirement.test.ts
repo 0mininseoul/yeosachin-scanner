@@ -44,8 +44,9 @@ function normalizeSqlWhitespace(sql: string): string {
 }
 
 function extractNormalizedDropStatements(sql: string): string[] {
-    return (stripSqlComments(sql).match(/\bDROP\b[^;]*;/gi) ?? [])
-        .map(normalizeSqlWhitespace);
+    const activeSql = stripSqlComments(sql);
+    return [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\b[^;]*;)/gim)]
+        .map(match => normalizeSqlWhitespace(match[1]));
 }
 
 function readDraft(): string {
@@ -179,9 +180,9 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(destructiveStatements.map(normalizeSqlWhitespace)).toEqual(dropStatements);
         expect(dropStatements.every(statement => !/\bCASCADE\b/i.test(statement))).toBe(true);
         expect(migration).not.toMatch(/\bDROP\s+TABLE\b[^;]*\bCASCADE\b/i);
-        expect(activeMigration).not.toMatch(
-            /\b(?:TRUNCATE|DELETE|UPDATE|INSERT|CREATE|ALTER|RENAME|GRANT|REVOKE)\b/i,
-        );
+        expect(activeMigration.match(
+            /(?:^|[;\r\n])\s*(?:TRUNCATE|DELETE|UPDATE|INSERT|CREATE|ALTER|RENAME|GRANT|REVOKE)\b/gim,
+        ) ?? []).toEqual([]);
     });
 
     it('rejects non-table DROP forms in the active statement allowlist', () => {
@@ -197,6 +198,23 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
             'DROP PROCEDURE public.legacy_cleanup();',
         ]);
         expect(extractNormalizedDropStatements(migrationWithNonTableDrop))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
+
+        const migrationWithDropInsideDo = [
+            'DO $$',
+            'BEGIN',
+            '    DROP TABLE public.unapproved_table;',
+            'END;',
+            '$$;',
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDropInsideDo))
+            .toEqual([
+                'DROP TABLE public.unapproved_table;',
+                ...EXPECTED_DROP_STATEMENTS,
+            ]);
+        expect(extractNormalizedDropStatements(migrationWithDropInsideDo))
             .not.toEqual(EXPECTED_DROP_STATEMENTS);
     });
 
@@ -249,6 +267,62 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(sql).toContain(
             'LOCK TABLE public.comment_details, public.interaction_logs IN ACCESS EXCLUSIVE MODE',
         );
+    });
+
+    it('serializes coordinated copies and guards both catalog evidence and drops from active DDL', () => {
+        const sql = readMigration();
+        const beginIndex = sql.indexOf('BEGIN;');
+        expect(beginIndex).toBeGreaterThanOrEqual(0);
+        const firstSqlAfterBegin = sql
+            .slice(beginIndex + 'BEGIN;'.length)
+            .replace(/^\s*--[^\r\n]*(?:\r?\n|$)/gm, '')
+            .trimStart();
+        expect(firstSqlAfterBegin).toMatch(
+            /^SELECT pg_catalog\.pg_advisory_xact_lock\(22091010, 22\);/,
+        );
+        expect(sql).toContain('serializes coordinated copies');
+        expect(sql).toContain('does not block uncoordinated PostgreSQL DDL');
+
+        expect(sql.match(/RETIREMENT_GUARD_ACTIVE_DDL/g)).toHaveLength(2);
+        expect(sql).toMatch(
+            /activity\.pid\s*<>\s*pg_catalog\.pg_backend_pid\(\)[\s\S]*activity\.state\s*=\s*'active'[\s\S]*activity\.query[\s\S]*~\*/,
+        );
+        expect(sql).toContain('(CREATE|ALTER|DROP)[[:space:]]+PUBLICATION');
+        expect(sql).toContain(
+            '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
+        );
+        expect(sql).toContain('[[:space:]]+(FUNCTION|PROCEDURE)');
+
+        const firstActiveDdlGuard = sql.indexOf('RETIREMENT_GUARD_ACTIVE_DDL');
+        const secondActiveDdlGuard = sql.indexOf(
+            'RETIREMENT_GUARD_ACTIVE_DDL',
+            firstActiveDdlGuard + 1,
+        );
+        const catalogEvidence = sql.indexOf('RETIREMENT_GUARD_PUBLICATION_ALL_TABLES');
+        const firstDrop = sql.indexOf('DROP TABLE public.comment_details;');
+        expect(firstActiveDdlGuard).toBeLessThan(catalogEvidence);
+        expect(secondActiveDdlGuard).toBeGreaterThan(catalogEvidence);
+        expect(secondActiveDdlGuard).toBeLessThan(firstDrop);
+    });
+
+    it('retains the contiguous scan and precisely guards EXECUTE split literals for both targets', () => {
+        const sql = readMigration();
+        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
+        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE');
+        expect(sql).toContain('retirement_execute_token_pattern');
+        expect(sql).toContain('(^|[^[:alnum:]_])EXECUTE([^[:alnum:]_]|$)');
+        expect(sql).toContain(
+            "'comment_'[[:space:]]*\\|\\|[[:space:]]*'details'",
+        );
+        expect(sql).toContain(
+            "'interaction_'[[:space:]]*\\|\\|[[:space:]]*'logs'",
+        );
+        const executeToken = sql.indexOf('retirement_execute_token_pattern');
+        const splitGuardMessage = sql.indexOf(
+            'RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE',
+        );
+        expect(executeToken).toBeGreaterThanOrEqual(0);
+        expect(executeToken).toBeLessThan(splitGuardMessage);
     });
 
     it('covers exact restoration of columns, constraints, indexes, RLS policies, and grants', () => {
@@ -486,6 +560,38 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(manifest.retirementDecision.ownerApproval).toBe('approved');
         expect(manifest.retirementDecision.migrationFileCreated).toBe(true);
         expect(manifest.retirementDecision.migrationFilePath).toBe(MIGRATION_RELATIVE_PATH);
+
+        const concurrency = (manifest as RetirementManifest & {
+            concurrencyCorrection: {
+                fixedTransactionAdvisoryLock: string;
+                serializesCoordinatedCopiesOnly: boolean;
+                blocksUncoordinatedPostgresqlDdl: boolean;
+                activeDdlGuardBeforeCatalogEvidence: boolean;
+                activeDdlGuardImmediatelyBeforeDrops: boolean;
+                splitLiteralProductionMatchCount: number;
+                rejectsAllExecuteRoutines: boolean;
+                singleWriterDdlMaintenanceWindowRequired: boolean;
+                coordinatorOnlyFromFinalPreflightThroughPostApplyVerification: boolean;
+                currentProductionActiveRelevantDdlCount: number;
+                trackedCiProductionDbPushEntrypoint: boolean;
+                targetOrAdvisoryLocksAloneBlockUncoordinatedDdl: boolean;
+            };
+        }).concurrencyCorrection;
+        expect(concurrency.fixedTransactionAdvisoryLock).toBe(
+            'pg_advisory_xact_lock(22091010, 22)',
+        );
+        expect(concurrency.serializesCoordinatedCopiesOnly).toBe(true);
+        expect(concurrency.blocksUncoordinatedPostgresqlDdl).toBe(false);
+        expect(concurrency.activeDdlGuardBeforeCatalogEvidence).toBe(true);
+        expect(concurrency.activeDdlGuardImmediatelyBeforeDrops).toBe(true);
+        expect(concurrency.splitLiteralProductionMatchCount).toBe(0);
+        expect(concurrency.rejectsAllExecuteRoutines).toBe(false);
+        expect(concurrency.singleWriterDdlMaintenanceWindowRequired).toBe(true);
+        expect(concurrency.coordinatorOnlyFromFinalPreflightThroughPostApplyVerification)
+            .toBe(true);
+        expect(concurrency.currentProductionActiveRelevantDdlCount).toBe(0);
+        expect(concurrency.trackedCiProductionDbPushEntrypoint).toBe(false);
+        expect(concurrency.targetOrAdvisoryLocksAloneBlockUncoordinatedDdl).toBe(false);
     });
 
     it('records the evidence and explicitly preserves non-production gates', () => {
@@ -501,5 +607,11 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toContain(MIGRATION_RELATIVE_PATH);
         expect(report).toContain('No flag activation');
         expect(report).toContain('No Management API log evidence was collected or claimed.');
+        expect(report).toContain('single-writer DDL maintenance window');
+        expect(report).toContain('coordinator-only');
+        expect(report).toContain('current production relevant active DDL count is `0`');
+        expect(report).toMatch(/Tracked CI has no\s+production `supabase db push` entrypoint/);
+        expect(report).toContain('uncoordinated PostgreSQL DDL');
+        expect(report).toContain('split-literal');
     });
 });

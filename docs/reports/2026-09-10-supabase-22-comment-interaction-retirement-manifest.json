@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "supabase-22-comment-interaction-retirement-v1",
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v2",
   "asOf": "2026-09-10",
   "sourceBoundary": {
     "productionEvidence": "coordinator-independent-read-only-collection",
@@ -151,6 +151,27 @@
     },
     "idxScanInterpretation": "A nonzero idx_scan on a result_id index can be caused by parent-side foreign-key cascade checks when analysis_results rows are deleted; it is not direct-use proof."
   },
+  "concurrencyCorrection": {
+    "fixedTransactionAdvisoryLock": "pg_advisory_xact_lock(22091010, 22)",
+    "serializesCoordinatedCopiesOnly": true,
+    "blocksUncoordinatedPostgresqlDdl": false,
+    "activeDdlGuardBeforeCatalogEvidence": true,
+    "activeDdlGuardImmediatelyBeforeDrops": true,
+    "routineExecuteProductionCount": 19,
+    "splitLiteralProductionMatchCount": 0,
+    "rejectsAllExecuteRoutines": false,
+    "singleWriterDdlMaintenanceWindowRequired": true,
+    "coordinatorOnlyFromFinalPreflightThroughPostApplyVerification": true,
+    "currentProductionActiveRelevantDdlCount": 0,
+    "trackedCiProductionDbPushEntrypoint": false,
+    "targetOrAdvisoryLocksAloneBlockUncoordinatedDdl": false,
+    "catalogShareLockPrivileges": {
+      "pg_proc": false,
+      "pg_publication": false,
+      "pg_publication_namespace": false,
+      "pg_publication_rel": false
+    }
+  },
   "retirementDecision": {
     "evidenceSupportsRetirementProposal": true,
     "status": "approved-not-applied",
@@ -167,7 +188,9 @@
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
-    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (9 tests, including isolated PGlite restore drill)",
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (11 tests, including isolated PGlite restore drill)",
+    "redEvidence": "captured before implementation: focused run failed 4 tests for the missing advisory/active-DDL/split-literal guards and maintenance-window evidence",
+    "localPostgresql17Drill": "passed: fresh disposable PostgreSQL 17 (10 scenarios: success, all-table/public-schema/explicit-target publications, split-dynamic, unrelated-EXECUTE, nonempty, incoming-dependency, active FUNCTION DDL, active PUBLICATION DDL)",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
     "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",

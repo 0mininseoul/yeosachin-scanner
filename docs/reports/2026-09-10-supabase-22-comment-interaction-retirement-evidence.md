@@ -52,6 +52,35 @@ refused, and the reversible draft SQL remains under `supabase/operations/`.
   for foreign-key cascade checks. The index counters therefore do not override
   the zero-row, zero-write, dependency, and runtime evidence above.
 
+## Concurrency correction and apply window
+
+The generated migration now takes the fixed transaction-scoped advisory lock
+`pg_advisory_xact_lock(22091010, 22)` immediately after `BEGIN`. This lock
+serializes coordinated copies of this rollout only; it does not block
+uncoordinated PostgreSQL DDL.
+
+Two fail-closed active-DDL checks exclude this migration's own backend and run
+before catalog evidence and immediately before the two drops. They cover
+`CREATE`/`ALTER`/`DROP PUBLICATION` and `CREATE`/`ALTER`/`DROP` (including
+`OR REPLACE`) `FUNCTION`/`PROCEDURE`; a session whose query text is hidden is
+treated as unknown and blocks the rollout. The contiguous routine scan remains,
+and a separate split-literal guard applies only to non-system,
+non-extension `EXECUTE` routines containing the exact pairs
+`'comment_' || 'details'` or `'interaction_' || 'logs'`; production had 19
+`EXECUTE` routines and a split-literal exact-target match count of `0`, so all
+19 are not rejected.
+
+The current production relevant active DDL count is `0`. Tracked CI has no
+production `supabase db push` entrypoint. A coordinator-only single-writer DDL
+maintenance window is required from final preflight through post-apply
+verification: only the coordinator may run schema, routine, or publication DDL
+during that interval. Target table locks and the advisory lock alone do not
+block uncoordinated PostgreSQL DDL, so the active-session checks are point-in-
+time fail-closed observations and not a distributed lock. Catalog `SHARE`
+locks are not used because the production role privilege checks were false for
+`pg_proc`, `pg_publication`, `pg_publication_namespace`, and
+`pg_publication_rel`.
+
 ## Zero-row archive and isolated restore evidence
 
 The deterministic zero-row dataset is the compact UTF-8 JSON
@@ -71,6 +100,13 @@ PGlite is a harness only: it does not provide hosted Supabase publication or
 catalog primitives, so the active guarded DROP section is not executed and no
 production or Management API log evidence is claimed.
 No Management API log evidence was collected or claimed.
+
+A fresh disposable local PostgreSQL 17 drill exercised the active migration's
+success path, all-table/public-schema/explicit-target publication guards,
+split dynamic-routine guard, unrelated `EXECUTE` routine allowance, non-empty
+and incoming-dependency guards, and active `FUNCTION` and `PUBLICATION` DDL
+guards. The drill used only local fixtures and was destroyed after verification;
+it did not call or mutate production.
 
 The manifest's bounded observation conclusion is: within the supplied
 postmaster-start counters and bounded `app/`/`lib/`/`hooks/`/`scripts/`
@@ -109,11 +145,13 @@ post-apply verification.
 ## Remaining gates
 
 1. Owner approval is recorded for exactly the two qualified names and the hash above.
-2. The generated migration is approved-but-not-applied and must remain limited
+2. The coordinator-only single-writer DDL maintenance window must remain in
+   force from final preflight through post-apply verification.
+3. The generated migration is approved-but-not-applied and must remain limited
    to the reviewed destructive scope.
-3. Run a dry-run and apply only that allowlisted migration, then verify remote
+4. Run a dry-run and apply only that allowlisted migration, then verify remote
    migration history.
-4. Perform post-apply read-only absence/dependency checks and retain the exact
+5. Perform post-apply read-only absence/dependency checks and retain the exact
    restore SQL as rollback evidence.
 
 No flag activation, real `0_min._.00` canary, `payment_pending` action, landing
