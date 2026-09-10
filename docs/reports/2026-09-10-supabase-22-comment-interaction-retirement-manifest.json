@@ -1,0 +1,181 @@
+{
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v1",
+  "asOf": "2026-09-10",
+  "sourceBoundary": {
+    "productionEvidence": "coordinator-independent-read-only-collection",
+    "remoteServiceCalledByWorker": false,
+    "supabaseMigrationAppliedByWorker": false,
+    "productionDropPerformed": false,
+    "flagActivationPerformed": false,
+    "realCanaryStarted": false,
+    "paymentPendingAction": "not-performed",
+    "landingCopyChanged": false
+  },
+  "scope": {
+    "schema": "public",
+    "tables": [
+      "public.comment_details",
+      "public.interaction_logs"
+    ],
+    "sourceMigrations": [
+      "supabase/migrations/001_initial_schema.sql",
+      "supabase/migrations/20260710161639_hide_interaction_evidence_from_clients.sql"
+    ],
+    "draftSqlPath": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql"
+  },
+  "destructiveAllowlist": [
+    "public.comment_details",
+    "public.interaction_logs"
+  ],
+  "destructiveAllowlistCanonicalJson": "[\"public.comment_details\",\"public.interaction_logs\"]",
+  "destructiveAllowlistSha256": "a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6",
+  "destructiveOperations": "refused",
+  "zeroRowDataset": {
+    "canonicalJson": "[{\"table\":\"public.comment_details\",\"rows\":[]},{\"table\":\"public.interaction_logs\",\"rows\":[]}]",
+    "sha256": "bb705113dc6c51ea03e76a8d92f1b1e644809809f6d15615b69b4a2ea36a56ad",
+    "rowCount": 0,
+    "tables": [
+      "public.comment_details",
+      "public.interaction_logs"
+    ],
+    "payloadEncryption": "excepted-zero-row-no-payload"
+  },
+  "archiveStatus": "excepted-zero-row",
+  "archiveException": {
+    "acceptable": true,
+    "reason": "No row payload exists to encrypt; exact zero-row counts are evidenced and schema restoration is still required."
+  },
+  "restoreStatus": "verified",
+  "restoreEvidence": {
+    "environment": "isolated-pglite",
+    "status": "verified",
+    "schemaVerified": true,
+    "tables": [
+      "public.comment_details",
+      "public.interaction_logs"
+    ],
+    "checks": [
+      "exact column order, types, nullability, and defaults",
+      "primary keys, outgoing analysis_results foreign keys, and checks",
+      "primary-key and result_id indexes",
+      "RLS enabled without FORCE RLS and exact SELECT policy names/predicates",
+      "postgres/service_role grants retained and PUBLIC/anon/authenticated revoked"
+    ],
+    "harnessBoundary": "PGlite supplies minimal anon/authenticated/service_role roles, auth.uid(), extensions.uuid_generate_v4(), and analysis_results; hosted Supabase publication/catalog primitives and the active destructive guard/drop section were not executed."
+  },
+  "observationConclusion": {
+    "status": "bounded",
+    "conclusion": "Within the supplied postmaster-start counters and bounded app/lib/hooks/scripts inspection, both tables are zero-row and zero-write with no observed runtime/dependency use; this is not a claim of Management API log evidence."
+  },
+  "productionEvidence": {
+    "exactRowCounts": [
+      {
+        "table": "public.comment_details",
+        "rows": 0
+      },
+      {
+        "table": "public.interaction_logs",
+        "rows": 0
+      }
+    ],
+    "postmasterStartAt": "2026-07-10T11:52:33+09:00",
+    "postmasterTupleCounters": {
+      "public.comment_details": {
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      },
+      "public.interaction_logs": {
+        "n_tup_ins": 0,
+        "n_tup_upd": 0,
+        "n_tup_del": 0
+      }
+    },
+    "incomingForeignKeys": [],
+    "dependentViews": [],
+    "routineMentions": [],
+    "userTriggers": [],
+    "publicationMembership": [],
+    "runtimeReferences": {
+      "public.comment_details": {
+        "appLibHooksScriptsFiles": 0,
+        "appLibHooksScriptsReferences": 0
+      },
+      "public.interaction_logs": {
+        "appLibHooksScriptsFiles": 0,
+        "appLibHooksScriptsReferences": 0
+      }
+    },
+    "gitHistoryReferences": "canonical-contract-fixtures-only",
+    "outgoingForeignKeys": [
+      {
+        "table": "public.comment_details",
+        "references": "public.analysis_results(id)",
+        "onDelete": "CASCADE"
+      },
+      {
+        "table": "public.interaction_logs",
+        "references": "public.analysis_results(id)",
+        "onDelete": "CASCADE"
+      }
+    ],
+    "indexes": [
+      "public.comment_details_pkey",
+      "public.idx_comment_details_result_id",
+      "public.interaction_logs_pkey",
+      "public.idx_interaction_logs_result_id"
+    ],
+    "rlsPolicies": [
+      {
+        "table": "public.comment_details",
+        "enabled": true,
+        "policy": "Users can view own comment details",
+        "command": "SELECT"
+      },
+      {
+        "table": "public.interaction_logs",
+        "enabled": true,
+        "policy": "Users can view own interaction logs",
+        "command": "SELECT"
+      }
+    ],
+    "grants": {
+      "revokedRoles": [
+        "anon",
+        "authenticated"
+      ],
+      "retainedRoles": [
+        "postgres",
+        "service_role"
+      ]
+    },
+    "idxScanInterpretation": "A nonzero idx_scan on a result_id index can be caused by parent-side foreign-key cascade checks when analysis_results rows are deleted; it is not direct-use proof."
+  },
+  "retirementDecision": {
+    "evidenceSupportsRetirementProposal": true,
+    "status": "ready-for-owner-approval",
+    "destructiveOperations": "refused",
+    "ownerApproval": "pending",
+    "allowlistSource": "top-level destructiveAllowlist",
+    "migrationFileCreated": false
+  },
+  "remainingGates": [
+    "owner approval for exactly the ordered destructiveAllowlist and its SHA-256",
+    "create a separately reviewed timestamped file under supabase/migrations only after approval",
+    "migration dry-run with the exact two-object allowlist",
+    "apply only the approved migration and verify remote migration history",
+    "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
+  ],
+  "validation": {
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (7 tests, including isolated PGlite restore drill)",
+    "typecheck": "not-run",
+    "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
+    "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",
+    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner"
+  },
+  "artifacts": {
+    "evidenceReport": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md",
+    "manifest": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-manifest.json",
+    "draftSql": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql"
+  }
+}
