@@ -4,8 +4,8 @@
   "canonicalTable": "maintenance_jobs",
   "sourceCount": 12,
   "sourceChecksum": "865d24fc97cb5d8816b7d5a17eb0fc78e3f31d9395d7055e8545aacd39ec4b6f",
-  "canonicalCount": 0,
-  "canonicalChecksum": null,
+  "canonicalCount": 12,
+  "canonicalChecksum": "865d24fc97cb5d8816b7d5a17eb0fc78e3f31d9395d7055e8545aacd39ec4b6f",
   "archiveStatus": "not_run",
   "restoreStatus": "not_run",
   "destructiveAllowlist": []
