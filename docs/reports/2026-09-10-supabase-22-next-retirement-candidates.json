@@ -1,0 +1,313 @@
+{
+  "schemaVersion": "supabase-22-next-retirement-candidates-v1",
+  "asOf": "2026-09-10",
+  "baseCommit": "860027282efec69b060793fe8d0d07d71728eae7",
+  "sourceBoundary": {
+    "productionCalled": false,
+    "remoteApiCalled": false,
+    "providerCalled": false,
+    "inventorySha256": "36e0f20668bb0f7ce25d360418a8ed070a8f24bc148ea9e5fb9a53e714673d3d",
+    "sources": [
+      "docs/reports/2026-09-10-supabase-22-retirement-inventory.json",
+      "docs/superpowers/specs/2026-09-09-supabase-22-table-consolidation-design.md",
+      "docs/superpowers/plans/2026-09-09-supabase-22-table-master.md",
+      "docs/superpowers/plans/2026-09-09-supabase-22-table-production-contract-evidence-gate.md",
+      "supabase/migrations/**",
+      "supabase/operations/**",
+      "app/**",
+      "lib/**",
+      "hooks/**",
+      "scripts/**",
+      "git history"
+    ]
+  },
+  "inventorySummary": {
+    "publicBasePartitionedTableCount": 187,
+    "canonicalTableCount": 22,
+    "legacyTableCount": 165,
+    "legacyDispositionCounts": { "consolidate-after-proof": 2, "unknown": 163 },
+    "estimatedLegacyRowClassCounts": { "empty": 54, "small": 84, "medium": 25, "large": 2 }
+  },
+  "priorWave": {
+    "tableName": "account_deletion_jobs",
+    "canonicalDestination": "maintenance_jobs",
+    "inventoryDisposition": "consolidate-after-proof",
+    "inventoryEstimatedRows": 12,
+    "status": "already-reviewed-first-wave; not in next batch",
+    "remainingEvidence": [
+      "source-canonical per-row parity",
+      "encrypted archive and isolated restore checksum",
+      "closed traffic observation",
+      "dependency and migration-history proof",
+      "rollback evidence",
+      "separate owner approval"
+    ]
+  },
+  "classificationPolicy": {
+    "definitelyActive": "inventory runtime callers are non-zero, or committed runtime code calls a routine whose migration body reads or writes the table",
+    "sensitiveOrDenylisted": "explicit payment boundary or approved audit denylist; this risk tag may overlap definitelyActive",
+    "possibleDeadOrEmpty": "inventory estimated row class is empty and no direct inventory caller or committed runtime RPC caller was found; this is not deadness or DROP readiness",
+    "unknown": "remaining post-prior-wave legacy tables; no destination is inferred from a name, prefix, row estimate, or zero caller count",
+    "destinationPolicy": "only explicit mappings in scripts/generate-supabase-22-retirement-inventory.ts are accepted"
+  },
+  "classifications": {
+    "definitelyActive": {
+      "count": 83,
+      "directInventoryCallerCount": 68,
+      "indirectOrMigrationProvenCount": 15,
+      "indirectTables": [
+        "analysis_beta_pool_local_debits",
+        "analysis_lifecycle_events",
+        "analysis_revenue_ai_routing_attempt_lineages",
+        "analysis_revenue_final_coverage_gates",
+        "analysis_revenue_fresh_provider_evidence",
+        "analysis_revenue_primary_quality_checkpoints",
+        "analysis_revenue_resolver_capacity_reservations",
+        "analysis_revenue_resolver_outcome_overlays",
+        "analysis_revenue_resolver_passes",
+        "analysis_revenue_run_ledgers",
+        "analysis_v2_result_image_objects",
+        "analysis_v2_result_image_purge_outbox",
+        "earlybird_webhook_events",
+        "precheckout_blite_sources",
+        "vertex_ai_budget_reservations"
+      ],
+      "indirectEvidenceSources": [
+        {
+          "tables": ["analysis_beta_pool_local_debits"],
+          "references": ["lib/services/analysis/beta-apify-credit-runtime.ts:420", "supabase/migrations/20260802040000_settle_betatest_apify_credit_reservations.sql"]
+        },
+        {
+          "tables": ["analysis_lifecycle_events"],
+          "references": ["lib/services/analytics-server.ts:125,170", "supabase/migrations/20260805090000_add_analysis_lifecycle_analytics_ledger.sql"]
+        },
+        {
+          "tables": ["analysis_revenue_ai_routing_attempt_lineages", "analysis_revenue_final_coverage_gates", "analysis_revenue_fresh_provider_evidence", "analysis_revenue_primary_quality_checkpoints", "analysis_revenue_resolver_capacity_reservations", "analysis_revenue_resolver_outcome_overlays", "analysis_revenue_resolver_passes", "analysis_revenue_run_ledgers"],
+          "references": ["lib/services/analysis/fresh-provenance-store.ts:134-160", "lib/services/analysis/revenue-final-quality-gate.ts:123-158", "lib/services/analysis/revenue-resolver-capacity.ts:195-252", "supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql", "supabase/migrations/20260811090000_harden_fresh_provenance.sql", "supabase/migrations/20260811110000_add_revenue_gender_routing_attempt_contract.sql"]
+        },
+        {
+          "tables": ["analysis_v2_result_image_objects", "analysis_v2_result_image_purge_outbox"],
+          "references": ["lib/services/media/result-image-registry.ts:11-16", "lib/services/media/result-image-resolver.ts:10-12", "supabase/migrations/20260724123500_add_analysis_v2_result_image_objects.sql"]
+        },
+        {
+          "tables": ["precheckout_blite_sources"],
+          "references": ["lib/services/precheckout/blite-source-store.ts:107-138", "lib/services/analysis/preflight-retention.ts:120", "supabase/migrations/20260813041712_precheckout_blite_single_collection.sql"]
+        },
+        {
+          "tables": ["vertex_ai_budget_reservations"],
+          "references": ["lib/services/ai/vertex-ai-cost-policy.ts:9-10", "supabase/migrations/20260902090000_add_vertex_ai_cost_budget_reservations.sql"]
+        },
+        {
+          "tables": ["earlybird_webhook_events"],
+          "references": ["app/api/webhooks/groble/route.ts:386-506,563", "supabase/migrations/20260717140000_add_groble_earlybird_presale.sql:498-696"]
+        }
+      ],
+      "directTablesAreEnumeratedBy": "docs/reports/2026-09-10-supabase-22-retirement-inventory.json legacyTables[].callerEvidence.callerCount > 0"
+    },
+    "sensitiveOrDenylisted": {
+      "count": 8,
+      "denylistedTables": [
+        "analysis_order_audit_assembly_queue",
+        "analysis_order_audit_bundles",
+        "analysis_order_audit_candidates",
+        "analysis_order_audit_interactions",
+        "payment_orders",
+        "payments",
+        "pending_analysis"
+      ],
+      "sensitivePaymentEvidenceTables": ["earlybird_webhook_events"]
+    },
+    "possibleDeadOrEmpty": {
+      "count": 6,
+      "tables": [
+        "analysis_v2_replay_capture_audit_events",
+        "analysis_v2_replay_capture_authorizations",
+        "analysis_v2_replay_capture_fragments",
+        "analysis_v2_unconfirmed_start_resolutions",
+        "comment_details",
+        "interaction_logs"
+      ],
+      "reason": "all have estimated empty rows and zero direct inventory callers, but migration/catalog dependencies remain"
+    },
+    "unknown": {
+      "count": 68,
+      "tableListSource": "docs/reports/2026-09-10-supabase-22-retirement-inventory.json legacyTables excluding account_deletion_jobs, definitelyActive, sensitiveOrDenylisted, and possibleDeadOrEmpty",
+      "canonicalDestinations": {}
+    }
+  },
+  "nextEvidenceBatch": {
+    "batchSize": 1,
+    "selectionRationale": "smallest post-account_deletion_jobs batch with an explicit committed canonical destination; no other legacy table has a non-null intendedCanonicalDestination in the inventory",
+    "status": "evidence-only-blocked",
+    "tables": [
+      {
+        "tableName": "earlybird_webhook_events",
+        "canonicalDestination": "payment_events",
+        "canonicalDestinationProof": [
+          "scripts/generate-supabase-22-retirement-inventory.ts:225-237 explicit mapping",
+          "scripts/generate-supabase-22-retirement-inventory.test.ts:50 mapping assertion",
+          "scripts/backfill-commerce-operations-canonical.ts:62-76 payment source list",
+          "supabase/migrations/20260909095932_add_commerce_operation_canonical_tables.sql:6-28 canonical payment_events shape"
+        ],
+        "inventoryEvidence": {
+          "estimatedRowCount": 89,
+          "rowCountClass": "small",
+          "dependencyCount": 33,
+          "foreignKeyCount": 1,
+          "viewDependencyCount": 0,
+          "routineDependencyCount": 0,
+          "triggerCount": 1,
+          "policyCount": 0,
+          "runtimeCallerCount": 0,
+          "runtimeReferenceCount": 0,
+          "inventoryDisposition": "consolidate-after-proof",
+          "contractionCandidate": false
+        },
+        "activityEvidence": {
+          "directAppOrLibTableReferences": 0,
+          "directOperationalScriptReferences": 2,
+          "migrationAndOperationFilesReferencingSource": 31,
+          "migrationAndOperationReferenceCount": 188,
+          "legacyRpcCallers": [
+            "finalize_earlybird_groble_payment_by_reference",
+            "finalize_earlybird_groble_payment",
+            "finalize_earlybird_groble_cancel_request",
+            "finalize_earlybird_groble_refund"
+          ],
+          "runtimeProof": "app/api/webhooks/groble/route.ts calls legacy finalization RPCs and only then attempts the disabled-by-default canonical mirror"
+        },
+        "migrationHistoryEvidence": {
+          "sourceIntroducedBy": "supabase/migrations/20260717140000_add_groble_earlybird_presale.sql:101-137",
+          "sourceIntroducedCommit": "8bd917fba3181fa0af45bbb08f7235118d9795a8",
+          "latestSourceEvolution": [
+            "supabase/migrations/20260803193000_finalize_groble_refunded_webhooks.sql",
+            "supabase/migrations/20260803203000_reconcile_refund_before_groble_completion.sql",
+            "supabase/migrations/20260827055155_allow_zero_coupon_paid_order_finalization.sql"
+          ],
+          "canonicalMigrationCommit": "4d9f071716fc43f65c601b1c9ae3dd34dd9ecbd8",
+          "recentHistoryEvidence": [
+            "f4ae64ba533ce1b59addd2da83c12b982e8efaa8",
+            "7d17008b8f2ddb491bb18d75fa88407b3b6783ab",
+            "e0b9bbd82e4f52cdabfb0429fbe8673927b10ae6"
+          ]
+        },
+        "riskTags": [
+          "sensitive-payment-evidence",
+          "legacy-source-remains-authoritative",
+          "canonical-payment-read-and-write-flags-remain-closed"
+        ],
+        "contractionReadiness": "blocked",
+        "contractionAllowlistEntry": null,
+        "destructiveAllowlistEntry": null
+      }
+    ]
+  },
+  "missingProductionEvidence": [
+    {
+      "id": "exact-source-canonical-counts",
+      "gate": "catalog-and-count-baseline",
+      "status": "not-run-production",
+      "query": "SELECT 'earlybird_webhook_events' AS table_name, count(*)::bigint AS exact_rows FROM public.earlybird_webhook_events UNION ALL SELECT 'payment_events', count(*)::bigint FROM public.payment_events;",
+      "requiredResult": "sanitized exact counts with no row payloads; inventory estimates are not sufficient"
+    },
+    {
+      "id": "source-canonical-field-parity",
+      "gate": "per-row-payment-event-parity",
+      "status": "blocked",
+      "query": "WITH s AS (SELECT event_id, idempotency_key, event_type, payment_id, order_id, amount_krw, occurred_at FROM public.earlybird_webhook_events), c AS (SELECT event_id, idempotency_key, event_type, payment_id, order_id, amount_krw, occurred_at FROM public.payment_events) SELECT count(*) FILTER (WHERE s.event_id IS NOT NULL)::bigint AS source_rows, count(*) FILTER (WHERE c.event_id IS NOT NULL)::bigint AS canonical_rows, count(*) FILTER (WHERE s.event_id IS NOT NULL AND c.event_id IS NULL)::bigint AS missing_canonical, count(*) FILTER (WHERE s.event_id IS NULL AND c.event_id IS NOT NULL)::bigint AS extra_canonical, count(*) FILTER (WHERE s.event_id IS NOT NULL AND c.event_id IS NOT NULL AND (s.idempotency_key IS DISTINCT FROM c.idempotency_key OR s.event_type IS DISTINCT FROM c.event_type OR s.payment_id IS DISTINCT FROM c.payment_id OR s.order_id IS DISTINCT FROM c.order_id OR s.amount_krw IS DISTINCT FROM c.amount_krw OR s.occurred_at IS DISTINCT FROM c.occurred_at))::bigint AS field_mismatches FROM s FULL OUTER JOIN c USING (event_id);",
+      "requiredResult": "missing_canonical=0, extra_canonical=0, field_mismatches=0, plus versioned disposition-transform parity and deterministic aggregate checksum equality"
+    },
+    {
+      "id": "catalog-dependency-proof",
+      "gate": "foreign-key-view-routine-trigger-policy-dependency-clean",
+      "status": "not-run-production",
+      "query": "SELECT d_ns.nspname AS dependent_schema, d_rel.relname AS dependent_name, d_rel.relkind, r_ns.nspname AS referenced_schema, r_rel.relname AS referenced_name, d.deptype FROM pg_catalog.pg_depend AS d JOIN pg_catalog.pg_class AS d_rel ON d_rel.oid = d.objid JOIN pg_catalog.pg_namespace AS d_ns ON d_ns.oid = d_rel.relnamespace JOIN pg_catalog.pg_class AS r_rel ON r_rel.oid = d.refobjid JOIN pg_catalog.pg_namespace AS r_ns ON r_ns.oid = r_rel.relnamespace WHERE (r_ns.nspname = 'public' AND r_rel.relname IN ('earlybird_webhook_events','payment_events')) OR (d_ns.nspname = 'public' AND d_rel.relname IN ('earlybird_webhook_events','payment_events')) ORDER BY dependent_schema, dependent_name, referenced_schema, referenced_name;",
+      "requiredResult": "no unresolved source dependency or active legacy writer; every FK/view/routine/trigger/policy/publication/sequence/partition edge is accounted for before any contract proposal"
+    },
+    {
+      "id": "routine-security-and-grants",
+      "gate": "routine-search-path-and-acl-proof",
+      "status": "not-run-production",
+      "query": "SELECT p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid) AS identity_arguments, p.prosecdef, p.proconfig, p.proacl FROM pg_catalog.pg_proc AS p JOIN pg_catalog.pg_depend AS d ON d.objid = p.oid JOIN pg_catalog.pg_class AS c ON c.oid = d.refobjid JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname IN ('earlybird_webhook_events','payment_events') ORDER BY p.proname, identity_arguments;",
+      "requiredResult": "all SECURITY DEFINER routines have reviewed empty search_path and service-role-only execute ACL; no legacy routine dependency remains"
+    },
+    {
+      "id": "rls-trigger-policy-grant-proof",
+      "gate": "rls-acl-trigger-policy-parity",
+      "status": "not-run-production",
+      "query": "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity, count(DISTINCT pol.oid)::bigint AS policy_count, count(DISTINCT trg.oid)::bigint AS trigger_count FROM pg_catalog.pg_class AS c JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_policy AS pol ON pol.polrelid = c.oid LEFT JOIN pg_catalog.pg_trigger AS trg ON trg.tgrelid = c.oid AND NOT trg.tgisinternal WHERE n.nspname = 'public' AND c.relname IN ('earlybird_webhook_events','payment_events') GROUP BY c.relname, c.relrowsecurity, c.relforcerowsecurity ORDER BY c.relname;",
+      "requiredResult": "both relations remain RLS-enabled/forced with reviewed grants, policies, trigger invariants, and no client access"
+    },
+    {
+      "id": "migration-history-alignment",
+      "gate": "remote-migration-history-clean",
+      "status": "not-run-production",
+      "query": "SELECT version, name FROM supabase_migrations.schema_migrations WHERE version IN ('20260717140000','20260803193000','20260803203000','20260827055155','20260909095932') ORDER BY version;",
+      "requiredResult": "owner-authorized migration history exactly matches the reviewed source; no mixed or unapplied dependency migration"
+    },
+    {
+      "id": "legacy-traffic-observation",
+      "gate": "closed-observation-window",
+      "status": "blocked",
+      "query": "SELECT schemaname, funcname, calls::bigint FROM pg_catalog.pg_stat_user_functions WHERE funcname IN ('finalize_earlybird_groble_payment_by_reference','finalize_earlybird_groble_payment','finalize_earlybird_groble_cancel_request','finalize_earlybird_groble_refund') ORDER BY funcname;",
+      "requiredResult": "a separately closed window proves zero legacy writes across webhook routes, RPCs, jobs, scripts, dashboard readers, and external operators; pg_stat counters alone are not sufficient"
+    },
+    {
+      "id": "payment-pending-disposition",
+      "gate": "independent-provider-evidence",
+      "status": "blocked",
+      "query": "SELECT count(*) FILTER (WHERE o.status = 'payment_pending')::bigint AS pending_orders, count(*) FILTER (WHERE o.status = 'payment_pending' AND NOT EXISTS (SELECT 1 FROM public.earlybird_webhook_events AS w WHERE w.order_id = o.id))::bigint AS pending_without_source_event FROM public.earlybird_orders AS o;",
+      "requiredResult": "independent provider evidence and auditable disposition for every pending order; no status mutation or deletion from this report"
+    },
+    {
+      "id": "encrypted-archive-restore",
+      "gate": "archive-manifest-and-isolated-restore",
+      "status": "blocked",
+      "query": null,
+      "requiredResult": "encrypted manifest, exact source/canonical counts and deterministic checksums, isolated restore, and zero restore mismatches"
+    },
+    {
+      "id": "rollback-shadow-read",
+      "gate": "rollback-and-shadow-read",
+      "status": "blocked",
+      "query": null,
+      "requiredResult": "legacy reader remains available/read-only for the full rollback window; canonical shadow reads match before any cutover"
+    },
+    {
+      "id": "genuine-production-bundle",
+      "gate": "global-supabase-22-evidence",
+      "status": "blocked",
+      "query": null,
+      "requiredResult": "genuine completed production bundle, per-order parity, archive/restore, dependency, observation, and owner approval gates all recorded"
+    },
+    {
+      "id": "owner-approval-and-allowlist",
+      "gate": "separate-owner-approval",
+      "status": "blocked",
+      "query": null,
+      "requiredResult": "owner approves an exact future object allowlist and hash; this report intentionally records [] and grants no destructive permission"
+    },
+    {
+      "id": "no-activation-or-canary",
+      "gate": "no-admission-activation-or-real-canary",
+      "status": "blocked",
+      "query": null,
+      "requiredResult": "independent evidence confirms analysis admission and the real 0_min._.00 canary stayed inactive"
+    }
+  ],
+  "allowlists": {
+    "contraction": [],
+    "destructive": [],
+    "emptyAllowlistSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "validation": {
+    "jsonSyntax": "passed",
+    "semanticAssertions": "passed",
+    "inventoryConsistencyAssertions": "passed",
+    "focusedVitest": "blocked: node_modules is absent and vitest/config cannot be resolved",
+    "diffCheck": "passed",
+    "secretScan": "passed"
+  },
+  "destructiveOperations": "refused",
+  "reportConclusion": "The smallest defensible next evidence batch is earlybird_webhook_events -> payment_events, but it is definitely active, payment-sensitive, and blocked from contraction. Possible empty tables remain evidence-only/no-action; no DROP readiness is established from names, estimated rows, or zero caller counts."
+}
