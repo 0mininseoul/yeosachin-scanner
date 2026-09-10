@@ -43,10 +43,64 @@ function normalizeSqlWhitespace(sql: string): string {
     return sql.replace(/\s+/g, ' ').trim();
 }
 
+function maskSqlLiterals(sql: string): string {
+    let masked = '';
+    let index = 0;
+    while (index < sql.length) {
+        if (sql[index] === "'") {
+            masked += "''";
+            index += 1;
+            while (index < sql.length) {
+                if (sql[index] === "'") {
+                    if (sql[index + 1] === "'") {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                if (sql[index] === '\\' && sql[index + 1] !== undefined) index += 2;
+                else index += 1;
+            }
+            continue;
+        }
+        if (sql[index] === '$') {
+            const opener = sql.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+            if (opener) {
+                const closingIndex = sql.indexOf(opener, index + opener.length);
+                if (closingIndex >= 0) {
+                    masked += opener + opener;
+                    index = closingIndex + opener.length;
+                    continue;
+                }
+            }
+        }
+        masked += sql[index];
+        index += 1;
+    }
+    return masked;
+}
+
+function containsDynamicDestructiveSql(sql: string): boolean {
+    const activeSql = stripSqlComments(sql);
+    const doBlockPattern = /\bDO\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)([\s\S]*?)\1/gi;
+    return [...activeSql.matchAll(doBlockPattern)].some((match) => {
+        const codeBody = maskSqlLiterals(match[2]);
+        if (/\bEXECUTE\s+(?:format\s*\(|[A-Za-z_][A-Za-z0-9_]*|E?'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)/i.test(codeBody)) {
+            return true;
+        }
+        return /\b(?:DROP|CREATE|ALTER|TRUNCATE|DELETE|UPDATE|INSERT|GRANT|REVOKE)\b/i.test(codeBody);
+    });
+}
+
 function extractNormalizedDropStatements(sql: string): string[] {
     const activeSql = stripSqlComments(sql);
-    return [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\b[^;]*;)/gim)]
-        .map(match => normalizeSqlWhitespace(match[1]));
+    const drops = [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\b[^;]*(?:;|$))/gim)]
+        .map(match => normalizeSqlWhitespace(match[1]))
+        .map(statement => statement.endsWith(';') ? statement : `${statement};`);
+    return containsDynamicDestructiveSql(sql)
+        ? ['DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW', ...drops]
+        : drops;
 }
 
 function readDraft(): string {
@@ -211,6 +265,7 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         ].join('\n');
         expect(extractNormalizedDropStatements(migrationWithDropInsideDo))
             .toEqual([
+                'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
                 'DROP TABLE public.unapproved_table;',
                 ...EXPECTED_DROP_STATEMENTS,
             ]);
@@ -230,6 +285,35 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         ]);
         expect(extractNormalizedDropStatements(migrationWithThirdTarget))
             .not.toEqual(EXPECTED_DROP_STATEMENTS);
+    });
+
+    it('fails closed for an EOF DROP and dynamically assembled destructive SQL', () => {
+        const migrationWithEofDrop = [
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs',
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithEofDrop)).toEqual([
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+        ]);
+
+        const migrationWithDynamicDrop = [
+            "DO $$ BEGIN EXECUTE 'DR' || 'OP TABLE public.unapproved_table'; END $$;",
+            ...EXPECTED_DROP_STATEMENTS,
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDynamicDrop)).toEqual([
+            'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
+            ...EXPECTED_DROP_STATEMENTS,
+        ]);
+
+        const migrationWithDynamicDdl = [
+            "DO $$ BEGIN EXECUTE format('ALTER %s', 'TABLE public.unapproved_table'); END $$;",
+            ...EXPECTED_DROP_STATEMENTS,
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDynamicDdl)).toEqual([
+            'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
+            ...EXPECTED_DROP_STATEMENTS,
+        ]);
     });
 
     it('fails closed on missing, non-empty, or newly dependent targets', () => {
@@ -291,7 +375,7 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(sql).toContain(
             '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
         );
-        expect(sql).toContain('[[:space:]]+(FUNCTION|PROCEDURE)');
+        expect(sql).toContain('[[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)');
 
         const firstActiveDdlGuard = sql.indexOf('RETIREMENT_GUARD_ACTIVE_DDL');
         const secondActiveDdlGuard = sql.indexOf(
@@ -313,36 +397,51 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(guardBlocks).toHaveLength(2);
         for (const guard of guardBlocks) {
             expect(guard).toContain('activity.datname = pg_catalog.current_database()');
+            expect(guard).toContain("E'/[*]([^*]|[*][^/])*[*]/'");
+            expect(guard).toMatch(/activity\.state\s+IS\s+NULL/);
+            expect(guard).toMatch(/activity\.query\s+IS\s+NULL/);
+            expect(guard).toMatch(/activity\.query\s*=\s*'<insufficient privilege>'/);
             expect(guard).toMatch(
-                /activity\.query\s+IS\s+NULL\s+OR\s+activity\.query\s*=\s*'<insufficient privilege>'\s+OR\s+activity\.query\s+~\*/,
+                /activity\.state\s+IS\s+NULL[\s\S]*OR[\s\S]*activity\.query\s+IS\s+NULL[\s\S]*OR[\s\S]*activity\.query\s*=\s*'<insufficient privilege>'[\s\S]*OR[\s\S]*activity\.state\s*=\s*'active'[\s\S]*~\*/,
             );
             expect(guard).toContain('$retirement_active_ddl_pattern$');
             expect(guard).toContain('(CREATE|ALTER|DROP)[[:space:]]+PUBLICATION');
             expect(guard).toContain(
                 '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
             );
-            expect(guard).toContain('[[:space:]]+(FUNCTION|PROCEDURE)');
+            expect(guard).toContain('[[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)');
+            expect(guard).toContain('retirement_active_ddl_normalized_query');
         }
     });
 
-    it('retains the contiguous scan and precisely guards EXECUTE split literals for both targets', () => {
+    it('retains the contiguous scan and guards the complete reviewed EXECUTE inventory', () => {
         const sql = readMigration();
         expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
-        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE');
+        expect(sql).toContain('RETIREMENT_GUARD_EXECUTE_INVENTORY_CHANGED');
         expect(sql).toContain('retirement_execute_token_pattern');
         expect(sql).toContain('(^|[^[:alnum:]_])EXECUTE([^[:alnum:]_]|$)');
-        expect(sql).toContain(
-            "'comment_'[[:space:]]*\\|\\|[[:space:]]*'details'",
-        );
-        expect(sql).toContain(
-            "'interaction_'[[:space:]]*\\|\\|[[:space:]]*'logs'",
-        );
+        expect(sql).toContain('pg_catalog.pg_get_function_identity_arguments');
+        expect(sql).toContain('pg_catalog.string_agg');
+        expect(sql).toContain('pg_catalog.sha256');
+        expect(sql).toContain('v_execute_routine_inventory_sha256');
         const executeToken = sql.indexOf('retirement_execute_token_pattern');
-        const splitGuardMessage = sql.indexOf(
-            'RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE',
+        const inventoryGuardMessage = sql.indexOf(
+            'RETIREMENT_GUARD_EXECUTE_INVENTORY_CHANGED',
         );
         expect(executeToken).toBeGreaterThanOrEqual(0);
-        expect(executeToken).toBeLessThan(splitGuardMessage);
+        expect(executeToken).toBeLessThan(inventoryGuardMessage);
+
+        const manifest = readManifest() as RetirementManifest & {
+            concurrencyCorrection: {
+                routineExecuteProductionCount: number;
+                routineExecuteProductionInventorySha256: string;
+                rejectsAllExecuteRoutines: boolean;
+            };
+        };
+        expect(manifest.concurrencyCorrection.routineExecuteProductionCount).toBe(19);
+        expect(manifest.concurrencyCorrection.routineExecuteProductionInventorySha256)
+            .toMatch(/^[0-9a-f]{64}$/);
+        expect(manifest.concurrencyCorrection.rejectsAllExecuteRoutines).toBe(false);
     });
 
     it('covers exact restoration of columns, constraints, indexes, RLS policies, and grants', () => {

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "supabase-22-comment-interaction-retirement-v2",
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v3",
   "asOf": "2026-09-10",
   "sourceBoundary": {
     "productionEvidence": "coordinator-independent-read-only-collection",
@@ -161,6 +161,8 @@
     "activeDdlGuardBeforeCatalogEvidence": true,
     "activeDdlGuardImmediatelyBeforeDrops": true,
     "routineExecuteProductionCount": 19,
+    "routineExecuteProductionInventorySha256": "3fdc7ecfc40a9d50d789a4b81fda1e7be9e1488f16d9411833f1ea939f4d51a9",
+    "routineExecuteInventoryGuard": "complete non-system/non-extension prokind f/p EXECUTE-token inventory; sorted jsonb schema/name/identity_arguments/definition entries joined by LF and SHA-256 hashed",
     "splitLiteralProductionMatchCount": 0,
     "rejectsAllExecuteRoutines": false,
     "singleWriterDdlMaintenanceWindowRequired": true,
@@ -191,13 +193,13 @@
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
-    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (12 tests, including isolated PGlite restore drill)",
-    "redEvidence": "captured before implementation: focused run failed 4 tests for the missing advisory/active-DDL/split-literal guards and maintenance-window evidence",
-    "localPostgresql17Drill": "passed: fresh disposable PostgreSQL 17 (10 scenarios: success, all-table/public-schema/explicit-target publications, split-dynamic, unrelated-EXECUTE, nonempty, incoming-dependency, active FUNCTION DDL, active PUBLICATION DDL)",
-    "localPostgresql17Sanity": "passed: fresh disposable PostgreSQL 17 current-database scope and NULL/<insufficient privilege> fail-closed fixture, plus visible current/other-database DDL checks",
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (13 tests, including EOF/dynamic destructive-scope regressions and isolated PGlite restore drill)",
+    "redEvidence": "captured before implementation: focused run failed 3 expected regressions for EOF/dynamic destructive-scope handling, unknown active-DDL visibility, and complete EXECUTE inventory binding",
+    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t, inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
+    "localPostgresql17Sanity": "not-run: no separate sanity probe; all local coverage is recorded in localPostgresql17Drill",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
-    "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",
+    "diffReview": "passed: final staged diff reviewed; exactly four retirement package files changed and no production/deploy/activation/payment action was performed",
     "stagedSecretScan": "passed: gitleaks protect --staged --no-banner --redact"
   },
   "artifacts": {

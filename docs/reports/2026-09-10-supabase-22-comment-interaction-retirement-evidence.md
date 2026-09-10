@@ -1,8 +1,10 @@
 # Supabase 22 comment/interactions retirement approval evidence
 
 Captured 2026-09-10 as an evidence-only package. The production facts below
-were independently collected by the coordinator; this worker made no remote
-service call, applied no Supabase migration, and performed no production DROP.
+were independently collected by the coordinator; the reviewed dynamic-routine
+inventory was collected as one read-only linked aggregate returning only a
+count and deterministic SHA-256, with no routine names or definitions output.
+No Supabase migration was applied and no production DROP was performed.
 The owner has separately approved the exact ordered allowlist below, while the
 generated migration remains approved-but-not-applied. The already verified
 account-deletion post-apply evidence is included through cherry-picked commit
@@ -62,16 +64,19 @@ uncoordinated PostgreSQL DDL.
 Two fail-closed active-DDL checks exclude this migration's own backend and run
 before catalog evidence and immediately before the two drops. They cover
 `CREATE`/`ALTER`/`DROP PUBLICATION` and `CREATE`/`ALTER`/`DROP` (including
-`OR REPLACE`) `FUNCTION`/`PROCEDURE`; a session whose query text is hidden is
-treated as unknown and blocks the rollout. Both checks scope rows to
-`pg_catalog.current_database()` and treat both `NULL` and the PostgreSQL
-`<insufficient privilege>` query sentinel as unknown; the visible-query regex
-branch remains in place. The contiguous routine scan remains,
-and a separate split-literal guard applies only to non-system,
-non-extension `EXECUTE` routines containing the exact pairs
-`'comment_' || 'details'` or `'interaction_' || 'logs'`; production had 19
-`EXECUTE` routines and a split-literal exact-target match count of `0`, so all
-19 are not rejected.
+`OR REPLACE`) `FUNCTION`/`PROCEDURE`/`ROUTINE`; comments between tokens are
+normalized before the visible-query regex branch is evaluated. A same-database
+session whose `state` is `NULL`, whose query is `NULL`, or whose query is the
+PostgreSQL `<insufficient privilege>` sentinel is treated as unknown and
+blocks the rollout, so hidden rows are not discarded by an `active` filter.
+The contiguous routine scan remains, and a complete inventory guard covers all
+non-system, non-extension `prokind` function/procedure definitions containing
+the exact `EXECUTE` token. The reviewed production inventory count is `19`
+with SHA-256
+`3fdc7ecfc40a9d50d789a4b81fda1e7be9e1488f16d9411833f1ea939f4d51a9`, computed
+from sorted JSONB schema/name/identity-argument/definition entries joined by
+LF; this permits the known unrelated dynamic routines while failing closed on
+any addition, removal, edit, or alternate split-literal construction.
 
 The current production relevant active DDL count is `0`. Tracked CI has no
 production `supabase db push` entrypoint. A coordinator-only single-writer DDL
@@ -104,17 +109,19 @@ catalog primitives, so the active guarded DROP section is not executed and no
 production or Management API log evidence is claimed.
 No Management API log evidence was collected or claimed.
 
-A fresh disposable local PostgreSQL 17 drill exercised the active migration's
-success path, all-table/public-schema/explicit-target publication guards,
-split dynamic-routine guard, unrelated `EXECUTE` routine allowance, non-empty
-and incoming-dependency guards, and active `FUNCTION` and `PUBLICATION` DDL
-guards. The drill used only local fixtures and was destroyed after verification;
-it did not call or mutate production.
+The coordinator separately verified one disposable local PostgreSQL 17 cluster
+over TCP `127.0.0.1` with `-U postgres` using exactly three direct probes:
+restricted-role hidden state/query fail-closed (`hidden_guard=t`), EXECUTE
+inventory expected-fingerprint stability followed by routine-mutation
+detection (`inventory_stable=t`, `inventory_mutation_detected=t`), and
+comment-gap plus `FUNCTION`/`PROCEDURE`/`ROUTINE`/`PUBLICATION` active-DDL
+lexical matching (`ddl_lexical=t`). The exact cluster was stopped and trashed
+after verification; no production service was called or mutated.
 
-A follow-up disposable PostgreSQL 17 sanity check verified that the `NULL` and
-`<insufficient privilege>` fixtures fail closed, visible DDL in the current
-database is guarded, and visible DDL in another database is ignored by the
-`current_database()` scope.
+The focused destructive-scope verifier now includes EOF statements and marks
+dynamic assembled DDL in `DO`/`EXECUTE` blocks as requiring review, including
+indented and same-line forms. The active migration still contains exactly the
+approved two non-CASCADE `DROP TABLE` statements.
 
 The manifest's bounded observation conclusion is: within the supplied
 postmaster-start counters and bounded `app/`/`lib/`/`hooks/`/`scripts/`

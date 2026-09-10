@@ -16,19 +16,36 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_stat_activity AS activity
+        CROSS JOIN LATERAL (
+            SELECT pg_catalog.regexp_replace(
+                pg_catalog.regexp_replace(
+                    activity.query,
+                    E'/[*]([^*]|[*][^/])*[*]/',
+                    ' ',
+                    'g'
+                ),
+                E'--[^\\r\\n]*',
+                ' ',
+                'g'
+            ) AS retirement_active_ddl_normalized_query
+        ) AS normalized
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
-          AND activity.state = 'active'
           AND activity.datname = pg_catalog.current_database()
           AND (
+              activity.state IS NULL
+              OR
               activity.query IS NULL
               OR activity.query = '<insufficient privilege>'
-              OR activity.query ~* $retirement_active_ddl_pattern$(?x)
-                  (
-                      (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
-                      [[:space:]]+(FUNCTION|PROCEDURE)
-                    | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
-                  )
-              $retirement_active_ddl_pattern$
+              OR (
+                  activity.state = 'active'
+                  AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                      (
+                          (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                          [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                        | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                      )
+                  $retirement_active_ddl_pattern$
+              )
           )
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
@@ -132,6 +149,8 @@ DO $retirement_evidence_guard$
 DECLARE
     v_comment_rows bigint;
     v_interaction_rows bigint;
+    v_execute_routine_count bigint;
+    v_execute_routine_inventory_sha256 text;
 BEGIN
     SELECT count(*) INTO v_comment_rows FROM public.comment_details;
     IF v_comment_rows <> 0 THEN
@@ -203,11 +222,16 @@ BEGIN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE: a stored function or procedure mentions public.comment_details or public.interaction_logs';
     END IF;
 
-    -- A split literal can construct a reviewed target without a contiguous
-    -- name or pg_depend entry. Limit this guard to EXECUTE routines and the
-    -- two exact literal pairs so unrelated dynamic routines remain allowed.
-    IF EXISTS (
-        SELECT 1
+    -- A complete, deterministic inventory fingerprint covers every reviewed-
+    -- scope EXECUTE routine, including alternate split-literal constructions.
+    -- The reviewed production count and SHA-256 permit known unrelated dynamic
+    -- routines while failing closed on any routine addition, removal, or edit.
+    WITH execute_inventory AS (
+        SELECT stored_routine.oid,
+            routine_schema.nspname,
+            stored_routine.proname,
+            pg_catalog.pg_get_function_identity_arguments(stored_routine.oid) AS identity_arguments,
+            pg_catalog.pg_get_functiondef(stored_routine.oid) AS definition
         FROM pg_catalog.pg_proc AS stored_routine
         JOIN pg_catalog.pg_namespace AS routine_schema
             ON routine_schema.oid = stored_routine.pronamespace
@@ -222,12 +246,34 @@ BEGIN
                 AND extension_dependency.deptype = 'e'
           )
           AND pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_execute_token_pattern$(^|[^[:alnum:]_])EXECUTE([^[:alnum:]_]|$)$retirement_execute_token_pattern$
-          AND (
-              pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_split_comment_pattern$'comment_'[[:space:]]*\|\|[[:space:]]*'details'$retirement_split_comment_pattern$
-              OR pg_catalog.pg_get_functiondef(stored_routine.oid) ~* $retirement_split_interaction_pattern$'interaction_'[[:space:]]*\|\|[[:space:]]*'logs'$retirement_split_interaction_pattern$
-          )
-    ) THEN
-        RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_SPLIT_LITERAL_REFERENCE: an EXECUTE routine constructs a reviewed target from split literals';
+    ), canonical_entries AS (
+        SELECT pg_catalog.jsonb_build_object(
+            'schema', nspname,
+            'name', proname,
+            'identity_arguments', identity_arguments,
+            'definition', definition
+        )::text AS entry
+        FROM execute_inventory
+    )
+    SELECT count(*)::bigint,
+        pg_catalog.encode(
+            pg_catalog.sha256(
+                pg_catalog.convert_to(
+                    coalesce(
+                        pg_catalog.string_agg(entry, pg_catalog.chr(10) ORDER BY entry),
+                        ''
+                    ),
+                    'UTF8'
+                )
+            ),
+            'hex'
+        )
+    INTO v_execute_routine_count, v_execute_routine_inventory_sha256
+    FROM canonical_entries;
+
+    IF v_execute_routine_count IS DISTINCT FROM 19
+       OR v_execute_routine_inventory_sha256 IS DISTINCT FROM '3fdc7ecfc40a9d50d789a4b81fda1e7be9e1488f16d9411833f1ea939f4d51a9' THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_EXECUTE_INVENTORY_CHANGED: reviewed EXECUTE routine inventory differs';
     END IF;
 
     IF EXISTS (
@@ -285,19 +331,36 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_stat_activity AS activity
+        CROSS JOIN LATERAL (
+            SELECT pg_catalog.regexp_replace(
+                pg_catalog.regexp_replace(
+                    activity.query,
+                    E'/[*]([^*]|[*][^/])*[*]/',
+                    ' ',
+                    'g'
+                ),
+                E'--[^\\r\\n]*',
+                ' ',
+                'g'
+            ) AS retirement_active_ddl_normalized_query
+        ) AS normalized
         WHERE activity.pid <> pg_catalog.pg_backend_pid()
-          AND activity.state = 'active'
           AND activity.datname = pg_catalog.current_database()
           AND (
+              activity.state IS NULL
+              OR
               activity.query IS NULL
               OR activity.query = '<insufficient privilege>'
-              OR activity.query ~* $retirement_active_ddl_pattern$(?x)
-                  (
-                      (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
-                      [[:space:]]+(FUNCTION|PROCEDURE)
-                    | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
-                  )
-              $retirement_active_ddl_pattern$
+              OR (
+                  activity.state = 'active'
+                  AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                      (
+                          (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                          [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                        | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                      )
+                  $retirement_active_ddl_pattern$
+              )
           )
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
