@@ -1,14 +1,13 @@
-# Supabase 22 comment/interactions retirement approval evidence
+# Supabase 22 comment/interactions retirement production evidence
 
-Captured 2026-09-10 as an evidence-only package. The production facts below
-were independently collected by the coordinator; the reviewed dynamic-routine
-inventory was collected as one read-only linked aggregate returning only a
-count and deterministic SHA-256, with no routine names or definitions output.
-No Supabase migration was applied and no production DROP was performed.
-The owner has separately approved the exact ordered allowlist below, while the
-generated migration remains approved-but-not-applied. The already verified
-account-deletion post-apply evidence is included through cherry-picked commit
-`18426f8fb5b2d23d5d86c912dc805d7a2bd32220`.
+Captured after coordinator post-apply verification at
+`2026-09-11T02:45:27+09:00`. The pre-apply production facts below and the
+post-apply facts were independently collected by the coordinator; the reviewed
+dynamic-routine inventory was collected as one read-only linked aggregate
+returning only a count and deterministic SHA-256, with no routine names or
+definitions output. The worker did not call Supabase or perform any production
+mutation. The already verified account-deletion post-apply evidence is included
+through cherry-picked commit `18426f8fb5b2d23d5d86c912dc805d7a2bd32220`.
 
 ## Decision
 
@@ -27,9 +26,10 @@ The canonical ordered JSON is
 UTF-8 SHA-256 is
 `a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6`.
 The approved allowlist is bound to the generated migration
-`supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql`.
-The migration is approved-but-not-applied; destructive operations remain
-refused, and the reversible draft SQL remains under `supabase/operations/`.
+`supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql`,
+which is now VERIFIED production applied by the coordinator with destructive
+operations limited to that exact allowlist. The reversible draft SQL remains
+under `supabase/operations/`.
 
 ## Production evidence
 
@@ -59,6 +59,24 @@ refused, and the reversible draft SQL remains under `supabase/operations/`.
   not hidden client backends. The current production relevant active DDL count
   was `0`, and all other supplied evidence matched the package above.
 
+## Post-apply verification
+
+The coordinator verified the following production facts at
+`2026-09-11T02:45:27+09:00`:
+
+- Migration `20260910123053` exists exactly once in remote migration history.
+- The public table count is `185`.
+- `public.comment_details` and `public.interaction_logs` are both absent.
+- Incoming foreign keys, dependent views, routine dependencies, routine
+  mentions, user triggers, all-table publications, public-schema publications,
+  and target publication memberships are all `0`.
+- The isolated CLI post-apply dry-run returned `Remote database is up to date`.
+- Main CI run `34507499334` succeeded, and Vercel status for merge commit
+  `35d3c41f5bfde9c56384b18213d4fe690720baea` succeeded.
+
+This closes the exact-allowlist apply and post-apply verification gates. The
+allowlist and all recorded evidence hashes remain unchanged.
+
 ## Concurrency correction and apply window
 
 The generated migration now takes the fixed transaction-scoped advisory lock
@@ -87,8 +105,8 @@ LF; this permits the known unrelated dynamic routines while failing closed on
 any addition, removal, edit, or alternate split-literal construction.
 
 The current production relevant active DDL count is `0`. Tracked CI has no
-production `supabase db push` entrypoint. A coordinator-only single-writer DDL
-maintenance window is required from final preflight through post-apply
+production `supabase db push` entrypoint. A coordinator-only single-writer DDL maintenance window
+is required from final preflight through post-apply
 verification: only the coordinator may run schema, routine, or publication DDL
 during that interval. Target table locks and the advisory lock alone do not
 block uncoordinated PostgreSQL DDL, so the active-session checks are point-in-
@@ -135,7 +153,8 @@ The manifest's bounded observation conclusion is: within the supplied
 postmaster-start counters and bounded `app/`/`lib/`/`hooks/`/`scripts/`
 inspection, both tables are zero-row and zero-write with no observed
 runtime/dependency use. This supports an owner-approval proposal, not an
-assertion that all future or external use is impossible.
+assertion that all future or external use is impossible; the post-apply
+absence and dependency checks are recorded above.
 
 ## Draft contract and restoration
 
@@ -162,20 +181,18 @@ The generated migration at
 `supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql`
 contains only the reviewed active transaction, fail-closed guards, and the two
 exact non-CASCADE DROP statements. It contains no restore block; the
-coordinator owns its independent exact-allowlist dry-run, apply, and
-post-apply verification.
+coordinator performed the independent exact-allowlist dry-run and apply, then
+completed the post-apply verification recorded above.
 
-## Remaining gates
+## Verified production outcome
 
 1. Owner approval is recorded for exactly the two qualified names and the hash above.
-2. The coordinator-only single-writer DDL maintenance window must remain in
-   force from final preflight through post-apply verification.
-3. The generated migration is approved-but-not-applied and must remain limited
-   to the reviewed destructive scope.
-4. Run a dry-run and apply only that allowlisted migration, then verify remote
-   migration history.
-5. Perform post-apply read-only absence/dependency checks and retain the exact
-   restore SQL as rollback evidence.
+2. The generated migration was applied only within the reviewed destructive scope.
+3. Remote migration history contains the selected migration exactly once.
+4. Post-apply read-only absence and dependency checks passed, and the exact
+   restore SQL remains available as rollback evidence.
 
-No flag activation, real `0_min._.00` canary, `payment_pending` action, landing
-copy change, or production destructive action occurred in this task.
+No flag activation, real `0_min._.00` canary, `payment_pending` action, or
+landing copy change occurred in this task. The worker performed no production
+destructive action; the coordinator's applied migration is the production
+action evidenced above.
