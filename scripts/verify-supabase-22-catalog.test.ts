@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    parseSupabase22CliResponse,
     parseSupabase22CatalogCliArgs,
+    resolveSupabaseCliPath,
     runSupabase22CatalogCli,
     type Supabase22CatalogCliDependencies,
 } from './verify-supabase-22-catalog';
@@ -18,7 +20,32 @@ describe('Supabase 22 catalog verifier CLI', () => {
 
     it('accepts report-only mode and optional manifest marker', () => {
         expect(parseSupabase22CatalogCliArgs(['--report-only', '--manifest', 'catalog.json']))
-            .toEqual({ reportOnly: true, manifestPath: 'catalog.json' });
+            .toEqual({ reportOnly: true, manifestPath: 'catalog.json', projectRef: null });
+    });
+
+    it('accepts an authenticated linked-project reference for read-only collection', () => {
+        expect(parseSupabase22CatalogCliArgs([
+            '--report-only',
+            '--project-ref=ddfugwqninkkofkgnbve',
+        ])).toEqual({
+            reportOnly: true,
+            manifestPath: null,
+            projectRef: 'ddfugwqninkkofkgnbve',
+        });
+    });
+
+    it('strips CLI framing before passing bounded rows to the catalog adapter', () => {
+        expect(parseSupabase22CliResponse(
+            'Initialising login role...\n{"rows":[{"safe":true}],"warning":"untrusted"}\n',
+        )).toEqual({ rows: [{ safe: true }] });
+        expect(() => parseSupabase22CliResponse('not-json')).toThrow(
+            'SUPABASE_22_CATALOG_READ_FAILED',
+        );
+    });
+
+    it('allows the authenticated CLI path to be selected without exposing credentials', () => {
+        expect(resolveSupabaseCliPath('/custom/bin/supabase', 'linux'))
+            .toBe('/custom/bin/supabase');
     });
 
     it('exposes only read-only catalog fragments with explicit service-only ACL inputs', () => {

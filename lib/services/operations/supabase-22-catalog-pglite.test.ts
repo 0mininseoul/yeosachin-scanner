@@ -1,6 +1,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+    SUPABASE_22_CATALOG_PAGE_SIZE,
     SUPABASE_22_CATALOG_ROW_LIMIT,
     adaptSupabase22CatalogRows,
     collectSupabase22CatalogEvidence,
@@ -621,10 +622,88 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             .toEqual(['public.auth_uid', 'public.users_id_seq']);
     });
 
+    it('accepts grouped dependency details with summary resolution flags', () => {
+        const snapshot = adaptSupabase22CatalogRows({
+            tables: [],
+            policies: [],
+            acls: [],
+            routines: [],
+            dependencies: [{
+                object_name: 'public.users',
+                resolved: true,
+                allowed: true,
+                dependency_details: [{
+                    dependent_object: 'public.users',
+                    referenced_object: 'public.users_id_seq',
+                    dependency_type: 'n',
+                    class_id: 'pg_class',
+                    ref_class_id: 'pg_class',
+                    object_sub_id: 0,
+                    ref_object_sub_id: 0,
+                    resolved: true,
+                    allowed: true,
+                }],
+            }],
+            foreignKeys: [],
+            triggers: [],
+            views: [],
+            sequences: [],
+            partitions: [],
+            publications: [],
+            migrationHistory: [],
+            legacyWriters: [],
+        });
+
+        expect(snapshot.dependencies[0]?.details).toHaveLength(1);
+    });
+
     it('uses an observed activity boolean for legacy-writer rows instead of a null placeholder', () => {
         const query = SUPABASE_22_CATALOG_QUERIES.legacyWriters;
         expect(query).toContain('pg_catalog.pg_stat_activity');
         expect(query).toContain('EXISTS');
         expect(query).not.toContain('NULL::boolean');
+    });
+
+    it('paginates a dependency catalog larger than one bounded response', async () => {
+        const dependencyQueries: string[] = [];
+        const dependencyRow = (index: number) => ({
+            object_name: `public.dependency_${index}`,
+            dependent_object: `public.dependency_${index}`,
+            referenced_object: 'public.users',
+            dependency_type: 'n',
+            class_id: 'pg_class',
+            ref_class_id: 'pg_class',
+            object_sub_id: 0,
+            ref_object_sub_id: 0,
+            resolved: true,
+            allowed: true,
+        });
+
+        const evidence = await collectSupabase22CatalogEvidence({
+            query: async sql => {
+                if (sql.includes('FROM pg_catalog.pg_depend AS dependency')) {
+                    dependencyQueries.push(sql);
+                    const offset = Number(sql.match(/OFFSET (\d+)\s*$/i)?.[1] ?? -1);
+                    if (offset === 0) {
+                        return {
+                            rows: Array.from({ length: SUPABASE_22_CATALOG_PAGE_SIZE + 1 }, (_, index) =>
+                                dependencyRow(index)),
+                            rowCount: SUPABASE_22_CATALOG_PAGE_SIZE + 1,
+                        };
+                    }
+                    if (offset === SUPABASE_22_CATALOG_PAGE_SIZE) {
+                        return { rows: [dependencyRow(9999)], rowCount: 1 };
+                    }
+                }
+                return { rows: [], rowCount: 0 };
+            },
+        });
+
+        expect(evidence.status).toBe('blocked');
+        expect(dependencyQueries).toHaveLength(2);
+        expect(dependencyQueries[0]).toMatch(/LIMIT \d+ OFFSET 0\s*$/i);
+        expect(dependencyQueries[1]).toMatch(
+            new RegExp(`LIMIT \\d+ OFFSET ${SUPABASE_22_CATALOG_PAGE_SIZE}\\s*$`, 'i'),
+        );
     });
 });

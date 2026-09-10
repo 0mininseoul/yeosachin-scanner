@@ -993,7 +993,11 @@ export function evaluateSupabase22Catalog(
  * from a truncated one, so collection fails closed.
  */
 export const SUPABASE_22_CATALOG_ROW_LIMIT = 2048;
-const SUPABASE_22_CATALOG_SENTINEL_LIMIT = SUPABASE_22_CATALOG_ROW_LIMIT + 1;
+/** Keep each management API response comfortably below its output boundary. */
+export const SUPABASE_22_CATALOG_PAGE_SIZE = 256;
+/** Bound the total number of pages while still covering the live catalog with margin. */
+export const SUPABASE_22_CATALOG_MAX_PAGES = 128;
+const SUPABASE_22_CATALOG_SENTINEL_LIMIT = `${SUPABASE_22_CATALOG_PAGE_SIZE + 1} OFFSET 0`;
 
 /** Read-only catalog query executed through an injected service-role connection. */
 export const SUPABASE_22_CATALOG_QUERY = `
@@ -1714,6 +1718,9 @@ const DEPENDENCY_DETAIL_ROW_KEYS = [
     'dependent_object', 'referenced_object', 'dependency_type', 'class_id', 'ref_class_id',
     'object_sub_id', 'ref_object_sub_id', 'resolved', 'allowed',
 ] as const;
+const DEPENDENCY_DETAIL_OPTIONAL_ROW_KEYS = DEPENDENCY_DETAIL_ROW_KEYS.filter(
+    key => key !== 'resolved' && key !== 'allowed',
+);
 
 function parseRawDependencyDetail(value: unknown): Supabase22CatalogDependencyDetail {
     const row = parseCatalogRow(value, [...DEPENDENCY_DETAIL_ROW_KEYS]);
@@ -1964,7 +1971,7 @@ export function adaptSupabase22CatalogRows(
             || typeof row.allowed !== 'boolean') {
             throw new Error('SUPABASE_22_CATALOG_ROW_INVALID');
         }
-        const detailKeysPresent = DEPENDENCY_DETAIL_ROW_KEYS.some(key =>
+        const detailKeysPresent = DEPENDENCY_DETAIL_OPTIONAL_ROW_KEYS.some(key =>
             Object.prototype.hasOwnProperty.call(row, key));
         const hasDetails = row.dependency_details !== undefined;
         if (hasDetails && detailKeysPresent) {
@@ -2071,29 +2078,62 @@ function normalizeBoundedCatalogRows(value: unknown): readonly unknown[] {
     return rows;
 }
 
-export async function collectSupabase22CatalogEvidence(
+function buildSupabase22CatalogPageQuery(sql: string, offset: number): string {
+    const trimmed = sql.trim();
+    const withoutLimit = trimmed.replace(
+        /\s+LIMIT\s+\d+(?:\s+OFFSET\s+\d+)?$/i,
+        '',
+    );
+    if (withoutLimit === trimmed || !Number.isSafeInteger(offset) || offset < 0) {
+        throw new Error('SUPABASE_22_CATALOG_QUERY_NOT_PAGINATABLE');
+    }
+    return `${withoutLimit}\nLIMIT ${SUPABASE_22_CATALOG_PAGE_SIZE + 1} OFFSET ${offset}`;
+}
+
+export async function collectSupabase22CatalogSnapshot(
     client: Supabase22CatalogQueryClient,
-): Promise<Supabase22CatalogEvidence> {
+): Promise<Supabase22CatalogSnapshot> {
     const queries = Object.entries(SUPABASE_22_CATALOG_QUERIES);
     const rowSets: Record<string, readonly unknown[]> = {};
     for (const [name, sql] of queries) {
-        const sqlWithoutLiterals = sql.replace(/'(?:''|[^'])*'/g, "''");
-        if (!/^\s*SELECT\b/i.test(sql)
-            || !/\bLIMIT\s+\d+\s*$/im.test(sql.trim())
-            || /\b(?:DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE|GRANT|REVOKE)\b/i.test(sqlWithoutLiterals)) {
-            throw new Error('SUPABASE_22_CATALOG_QUERY_NOT_READ_ONLY');
+        const rows: unknown[] = [];
+        let complete = false;
+        for (let page = 0; page < SUPABASE_22_CATALOG_MAX_PAGES; page += 1) {
+            const offset = page * SUPABASE_22_CATALOG_PAGE_SIZE;
+            const pageSql = page === 0 ? sql : buildSupabase22CatalogPageQuery(sql, offset);
+            const sqlWithoutLiterals = pageSql.replace(/'(?:''|[^'])*'/g, "''");
+            if (!/^\s*SELECT\b/i.test(pageSql)
+                || !/\bLIMIT\s+\d+\s+OFFSET\s+\d+\s*$/im.test(pageSql.trim())
+                || /\b(?:DROP|TRUNCATE|ALTER|INSERT|UPDATE|DELETE|GRANT|REVOKE)\b/i.test(sqlWithoutLiterals)) {
+                throw new Error('SUPABASE_22_CATALOG_QUERY_NOT_READ_ONLY');
+            }
+            let raw: unknown;
+            try {
+                raw = await client.query(pageSql);
+            } catch {
+                throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
+            }
+            const pageRows = normalizeBoundedCatalogRows(raw);
+            if (pageRows.length > SUPABASE_22_CATALOG_PAGE_SIZE) {
+                rows.push(...pageRows.slice(0, SUPABASE_22_CATALOG_PAGE_SIZE));
+                continue;
+            }
+            rows.push(...pageRows);
+            complete = true;
+            break;
         }
-        let raw: unknown;
-        try {
-            raw = await client.query(sql);
-        } catch {
-            throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
-        }
-        rowSets[name] = normalizeBoundedCatalogRows(raw);
+        if (!complete) throw new Error('SUPABASE_22_CATALOG_RESULT_TRUNCATED');
+        rowSets[name] = rows;
     }
-    return evaluateSupabase22Catalog(adaptSupabase22CatalogRows(
+    return adaptSupabase22CatalogRows(
         rowSets as Supabase22CatalogRows,
-    ));
+    );
+}
+
+export async function collectSupabase22CatalogEvidence(
+    client: Supabase22CatalogQueryClient,
+): Promise<Supabase22CatalogEvidence> {
+    return evaluateSupabase22Catalog(await collectSupabase22CatalogSnapshot(client));
 }
 
 export type Supabase22FamilyReaderInput = Readonly<{
