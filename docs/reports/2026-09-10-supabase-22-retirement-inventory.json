@@ -1,0 +1,5068 @@
+{
+  "schemaVersion": "supabase-22-retirement-inventory-v1",
+  "generatedFrom": {
+    "projectRefSupplied": true,
+    "readOnly": true
+  },
+  "publicBasePartitionedTableCount": 187,
+  "canonicalTableCount": 22,
+  "legacyTableCount": 165,
+  "canonicalTables": [
+    {
+      "tableName": "account_lifecycle",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "account_lifecycle",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_artifacts",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 24,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_artifacts",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_audit_bundles",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 31,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_audit_bundles",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_cache",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_cache",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_costs",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 32,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_costs",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_events",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 28,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_events",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_jobs",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 34,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "analysis_jobs",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_preflights",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 315,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 479,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 4,
+        "routineDependencyCount": 0,
+        "triggerCount": 7,
+        "policyCount": 5
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 7
+      },
+      "intendedCanonicalDestination": "analysis_preflights",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_provider_runs",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 3,
+        "referenceCount": 5
+      },
+      "intendedCanonicalDestination": "analysis_provider_runs",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_requests",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 209,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 241,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 15,
+        "routineDependencyCount": 0,
+        "triggerCount": 7,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 20,
+        "referenceCount": 44
+      },
+      "intendedCanonicalDestination": "analysis_requests",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_results",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 1566,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 66,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 5
+      },
+      "intendedCanonicalDestination": "analysis_results",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_orders",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 159,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 151,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 2,
+        "routineDependencyCount": 0,
+        "triggerCount": 9,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 7
+      },
+      "intendedCanonicalDestination": "earlybird_orders",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_waitlist",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 39,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 28,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "earlybird_waitlist",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "fulfillment_jobs",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 51,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "fulfillment_jobs",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "landing_leads",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 5696,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 54,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 2,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": "landing_leads",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "maintenance_jobs",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 33,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "maintenance_jobs",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "notification_outbox",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "notification_outbox",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "payment_events",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 26,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "payment_events",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "result_feedback",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 13,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 7
+      },
+      "intendedCanonicalDestination": "result_feedback",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "system_configuration",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "system_configuration",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "system_leases",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 23,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": "system_leases",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "users",
+      "tableClass": "canonical",
+      "relationClass": "base",
+      "estimatedRowCount": 482,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 79,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 4,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 13,
+        "referenceCount": 31
+      },
+      "intendedCanonicalDestination": "users",
+      "disposition": "retain",
+      "reason": "canonical survivor in the approved 22-table contract",
+      "contractionCandidate": false
+    }
+  ],
+  "legacyTables": [
+    {
+      "tableName": "account_classification_audit",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 64,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 26,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "account_deletion_jobs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 12,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": "maintenance_jobs",
+      "disposition": "consolidate-after-proof",
+      "reason": "catalog dependencies are present; archive/restore, parity, traffic, and dependency proof are required",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "account_e2e_test_runners",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "account_ledger_rollout_state",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "account_paid_evidence",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 55,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 14,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "ai_analysis_cache",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 402,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 10,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 7
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_anonymous_preflight_attempts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 4740,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_anonymous_profile_cache",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2470,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 9,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_anonymous_profile_cache_locks",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 6,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_apify_credit_snapshots",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 10,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 24,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_access_grants",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_access_policy",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 14,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_pool_allocations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 57,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_pool_local_debits",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 9,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_pool_reservation_archive",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 8,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_pool_reservations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 44,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_beta_runtime_gate",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 11,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_gemini_usage_expectations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 40,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 3,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_interaction_evidence",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 20,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_interaction_jobs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 38,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 3
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_interaction_scores",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 40,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 3
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_lifecycle_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 20,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_order_audit_assembly_queue",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 25,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_order_audit_bundles",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 100,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_order_audit_candidates",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 53,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_order_audit_interactions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 39,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_pipeline_jobs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1294,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 202,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 6
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_preflight_acquisition_cost_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3812,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_preflight_failures",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 5116,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_preflight_provider_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 343,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 117,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 11,
+        "routineDependencyCount": 0,
+        "triggerCount": 3,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 2,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_progress_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 359,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 2,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_progress_state",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 118,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 50,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 2,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_provider_admission_budgets",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 40,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_provider_admission_leases",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 64,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_provider_cost_ledger",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 24,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 48,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 7,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 3,
+        "referenceCount": 3
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_provider_usage_expectations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 24,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 4,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_result_share_observations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_ai_routing_attempt_lineages",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_cost_operations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 115,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_dispatch_guards",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_final_coverage_gates",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_fresh_provider_evidence",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 40,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_primary_quality_checkpoints",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 46,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_resolver_capacity_reservations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_resolver_outcome_overlays",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_resolver_passes",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 39,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_revenue_run_ledgers",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 66,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_step_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 90,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 29,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 3,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 2,
+        "referenceCount": 3
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_target_interactors",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 95,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 36,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_active_profile_heartbeats",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_ai_attempts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 12207,
+      "rowCountClass": "large",
+      "dependencyEvidence": {
+        "dependencyCount": 150,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 14,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 3,
+        "referenceCount": 4
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_ai_global_result_cache",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 49,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_ai_result_checkpoints",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 70,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 2,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_ai_scoring_stage_checkpoints",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_apify_secret_ref_prune_guard",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_candidate_feature_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 28,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_candidate_feature_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 117,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_candidate_score_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_candidate_score_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 62,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_cost_attributions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 161,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 35,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 5,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_cost_rollup_snapshots",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 122,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 184,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 62,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_dag_batch_results",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 543,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 34,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_dag_batch_topology",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 547,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 24,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_dag_scopes",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 118,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 26,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_dag_stage_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 189,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 75,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_failure_receipts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 111,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 11,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_female_results",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 529,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 46,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_gemini_leases",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 8,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 43,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_gender_resolution_metrics",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 15,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 59,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_gender_routing_candidates",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 64,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_gender_routing_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 84,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_historical_legacy_dispatch_terminalization_receipts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 5,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 53,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_media_artifacts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1941,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 48,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_mutual_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 39,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_narrative_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_narrative_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_partner_safety_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_partner_safety_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_preliminary_score_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_preliminary_score_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 31,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_private_name_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 32,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_private_name_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 24,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_private_results",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1201,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 24,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_fetch_batches",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 50,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_fetch_outcomes",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 45,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_fetch_telemetry",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1104,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 49,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_provider_canary_experiments",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 107,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_provider_canary_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 144,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_profile_repair_canary_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 98,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_provider_cleanup_intents",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 111,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 11,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_provider_execution_policies",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 36,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 20,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_provider_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 635,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 137,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 11,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 3,
+        "referenceCount": 4
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_recovery_provider_run_adoptions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 75,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 4,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_relationship_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 48,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_relationship_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 25,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_relationship_sides",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 66,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_replay_capture_audit_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 13,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_replay_capture_authoriz\u0061tions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 128,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_replay_capture_fragments",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 61,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_coverage_telemetry",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 9,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 31,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_image_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 5,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_image_objects",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 59,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_image_purge_outbox",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 28,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_revision_female_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 79,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 42,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_revisions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 44,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_result_summaries",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 9,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 71,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 6,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_reverse_like_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_reverse_like_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 20,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_scheduler_operations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3423,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 31,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_intents",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 4,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 89,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 4,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_scan_locators",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 9,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 22,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_source_rows",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 89,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 35,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_score_audit_sources",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 25,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_selfhosted_auth_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 42,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 29,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 2,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_target_evidence_manifests",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 43,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_test_entitlement_consumptions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 58,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "analysis_v2_unconfirmed_start_resolutions",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 23,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "comment_details",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "demo_analysis_fixtures",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 2,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 2
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "demo_analysis_runs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 14,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_adoption_policy_failure_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 11,
+        "foreignKeyCount": 4,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_checkout_reconciliations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 4,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_concierge_batch_cohort_members",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 30,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 37,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_concierge_batch_target_lineage_repairs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 30,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_concierge_snapshot_conflict_recoveries",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 33,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_first15_canary_provider_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 9,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 27,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_fulfillments",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 66,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 49,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_partial_adoption_second_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 14,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_payment_discord_outbox",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 10,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 19,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_pfe_target_evidence_start_rejection_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 4,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_pfe3_media_artifact_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 22,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_plan_inventory",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_profile_evidence_failure_recoveries",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_profile_fetch_exhaustion_recoveries",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_schema_failure_recoveries",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 7,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_terminal_unavailable_exhaustion_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 12,
+        "foreignKeyCount": 3,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_apify_transient_admission_resumes",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 7,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_apify_transient_replays",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 17,
+        "foreignKeyCount": 6,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_concierge_copy_corrections",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 18,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_concierge_publications",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 22,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_concierge_replays",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 2,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 39,
+        "foreignKeyCount": 6,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_lease_policy_failure_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 14,
+        "foreignKeyCount": 4,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_policy_identity_replays",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_profile_ai_diagnostic_replays",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v211_relationship_lineage_failure_rearms",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 15,
+        "foreignKeyCount": 5,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v212_concierge_copy_corrections",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v213_concierge_copy_corrections",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_v214_concierge_gemini_copy_corrections",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "earlybird_webhook_events",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 89,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 33,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": "payment_events",
+      "disposition": "consolidate-after-proof",
+      "reason": "catalog dependencies are present; archive/restore, parity, traffic, and dependency proof are required",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "gemini_token_usage",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 16535,
+      "rowCountClass": "large",
+      "dependencyEvidence": {
+        "dependencyCount": 29,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 7,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 3
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "interaction_logs",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 13,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "kakao_signup_discord_outbox",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 444,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 25,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "payment_orders",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 10,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "sensitive payment boundary lacks independent owner evidence; no action",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "payments",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 16,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "sensitive payment boundary lacks independent owner evidence; no action",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "pending_analysis",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 21,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 2
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "sensitive payment boundary lacks independent owner evidence; no action",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "precheckout_blite_cache",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 3,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 40,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "precheckout_blite_dispatches",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 40,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "precheckout_blite_sources",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 35,
+        "foreignKeyCount": 2,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "private_accounts",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 4861,
+      "rowCountClass": "medium",
+      "dependencyEvidence": {
+        "dependencyCount": 20,
+        "foreignKeyCount": 1,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 5,
+        "referenceCount": 5
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "scraper_provider_usage",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 49,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 57,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 6,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 1
+      },
+      "callerEvidence": {
+        "callerCount": 1,
+        "referenceCount": 1
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "selfhosted_profile_request_start_gate",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 6,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "sentry_discord_alert_outbox",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 1,
+      "rowCountClass": "small",
+      "dependencyEvidence": {
+        "dependencyCount": 28,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 0,
+        "routineDependencyCount": 0,
+        "triggerCount": 0,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    },
+    {
+      "tableName": "vertex_ai_budget_reservations",
+      "tableClass": "legacy",
+      "relationClass": "base",
+      "estimatedRowCount": 0,
+      "rowCountClass": "empty",
+      "dependencyEvidence": {
+        "dependencyCount": 73,
+        "foreignKeyCount": 0,
+        "viewDependencyCount": 9,
+        "routineDependencyCount": 0,
+        "triggerCount": 1,
+        "policyCount": 0
+      },
+      "callerEvidence": {
+        "callerCount": 0,
+        "referenceCount": 0
+      },
+      "intendedCanonicalDestination": null,
+      "disposition": "unknown",
+      "reason": "canonical destination is unproven; disposition remains unknown/no-action pending owner evidence",
+      "contractionCandidate": false
+    }
+  ],
+  "runtimeCallerCounts": {
+    "account_classification_audit": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "account_deletion_jobs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "account_e2e_test_runners": {
+      "callerCount": 1,
+      "referenceCount": 2
+    },
+    "account_ledger_rollout_state": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "account_lifecycle": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "account_paid_evidence": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "ai_analysis_cache": {
+      "callerCount": 1,
+      "referenceCount": 7
+    },
+    "analysis_anonymous_preflight_attempts": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_anonymous_profile_cache": {
+      "callerCount": 1,
+      "referenceCount": 2
+    },
+    "analysis_anonymous_profile_cache_locks": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_apify_credit_snapshots": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_artifacts": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_audit_bundles": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_beta_access_grants": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_access_policy": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_pool_allocations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_pool_local_debits": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_pool_reservation_archive": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_pool_reservations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_beta_runtime_gate": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_cache": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_costs": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_events": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_gemini_usage_expectations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_interaction_evidence": {
+      "callerCount": 1,
+      "referenceCount": 2
+    },
+    "analysis_interaction_jobs": {
+      "callerCount": 1,
+      "referenceCount": 3
+    },
+    "analysis_interaction_scores": {
+      "callerCount": 1,
+      "referenceCount": 3
+    },
+    "analysis_jobs": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_lifecycle_events": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_order_audit_assembly_queue": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_order_audit_bundles": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_order_audit_candidates": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_order_audit_interactions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_pipeline_jobs": {
+      "callerCount": 5,
+      "referenceCount": 6
+    },
+    "analysis_preflight_acquisition_cost_events": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_preflight_failures": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_preflight_provider_runs": {
+      "callerCount": 2,
+      "referenceCount": 2
+    },
+    "analysis_preflights": {
+      "callerCount": 5,
+      "referenceCount": 7
+    },
+    "analysis_progress_events": {
+      "callerCount": 2,
+      "referenceCount": 2
+    },
+    "analysis_progress_state": {
+      "callerCount": 2,
+      "referenceCount": 2
+    },
+    "analysis_provider_admission_budgets": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_provider_admission_leases": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_provider_cost_ledger": {
+      "callerCount": 3,
+      "referenceCount": 3
+    },
+    "analysis_provider_runs": {
+      "callerCount": 3,
+      "referenceCount": 5
+    },
+    "analysis_provider_usage_expectations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_requests": {
+      "callerCount": 20,
+      "referenceCount": 44
+    },
+    "analysis_result_share_observations": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_results": {
+      "callerCount": 5,
+      "referenceCount": 5
+    },
+    "analysis_revenue_ai_routing_attempt_lineages": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_cost_operations": {
+      "callerCount": 1,
+      "referenceCount": 2
+    },
+    "analysis_revenue_dispatch_guards": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_revenue_final_coverage_gates": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_fresh_provider_evidence": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_primary_quality_checkpoints": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_resolver_capacity_reservations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_resolver_outcome_overlays": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_resolver_passes": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_revenue_run_ledgers": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_step_events": {
+      "callerCount": 2,
+      "referenceCount": 3
+    },
+    "analysis_target_interactors": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_active_profile_heartbeats": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_ai_attempts": {
+      "callerCount": 3,
+      "referenceCount": 4
+    },
+    "analysis_v2_ai_global_result_cache": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_ai_result_checkpoints": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_ai_scoring_stage_checkpoints": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_apify_secret_ref_prune_guard": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_candidate_feature_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_candidate_feature_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_candidate_score_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_candidate_score_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_cost_attributions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_cost_rollup_snapshots": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_dag_batch_results": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_dag_batch_topology": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_dag_scopes": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_dag_stage_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_failure_receipts": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_female_results": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_gemini_leases": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_gender_resolution_metrics": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_gender_routing_candidates": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_gender_routing_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_historical_legacy_dispatch_terminalization_receipts": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_media_artifacts": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_mutual_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_narrative_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_narrative_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_partner_safety_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_partner_safety_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_preliminary_score_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_preliminary_score_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_private_name_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_private_name_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_private_results": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_profile_fetch_batches": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_profile_fetch_outcomes": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_profile_fetch_telemetry": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_profile_provider_canary_experiments": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_profile_provider_canary_runs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_profile_repair_canary_runs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_provider_cleanup_intents": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_provider_execution_policies": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_provider_runs": {
+      "callerCount": 3,
+      "referenceCount": 4
+    },
+    "analysis_v2_recovery_provider_run_adoptions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_relationship_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_relationship_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_relationship_sides": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_replay_capture_audit_events": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_replay_capture_authoriz\u0061tions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_replay_capture_fragments": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_coverage_telemetry": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_image_manifests": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_image_objects": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_image_purge_outbox": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_revision_female_rows": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_revisions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_result_summaries": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_reverse_like_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_reverse_like_rows": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_scheduler_operations": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_score_audit_intents": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_score_audit_rows": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_score_audit_runs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_score_audit_scan_locators": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_score_audit_source_rows": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_score_audit_sources": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_selfhosted_auth_runs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "analysis_v2_target_evidence_manifests": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_test_entitlement_consumptions": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "analysis_v2_unconfirmed_start_resolutions": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "comment_details": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "demo_analysis_fixtures": {
+      "callerCount": 1,
+      "referenceCount": 2
+    },
+    "demo_analysis_runs": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "earlybird_adoption_policy_failure_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_checkout_reconciliations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_concierge_batch_cohort_members": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_concierge_batch_target_lineage_repairs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_concierge_snapshot_conflict_recoveries": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_first15_canary_provider_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_fulfillments": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_orders": {
+      "callerCount": 5,
+      "referenceCount": 7
+    },
+    "earlybird_partial_adoption_second_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_payment_discord_outbox": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_pfe3_media_artifact_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_pfe_target_evidence_start_rejection_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_plan_inventory": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "earlybird_profile_evidence_failure_recoveries": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_profile_fetch_exhaustion_recoveries": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_schema_failure_recoveries": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_terminal_unavailable_exhaustion_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_apify_transient_admission_resumes": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_apify_transient_replays": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_concierge_copy_corrections": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_concierge_publications": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_concierge_replays": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_lease_policy_failure_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_policy_identity_replays": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_profile_ai_diagnostic_replays": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v211_relationship_lineage_failure_rearms": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v212_concierge_copy_corrections": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v213_concierge_copy_corrections": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_v214_concierge_gemini_copy_corrections": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "earlybird_waitlist": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "earlybird_webhook_events": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "fulfillment_jobs": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "gemini_token_usage": {
+      "callerCount": 1,
+      "referenceCount": 3
+    },
+    "interaction_logs": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "kakao_signup_discord_outbox": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "landing_leads": {
+      "callerCount": 2,
+      "referenceCount": 2
+    },
+    "maintenance_jobs": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "notification_outbox": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "payment_events": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "payment_orders": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "payments": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "pending_analysis": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "precheckout_blite_cache": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "precheckout_blite_dispatches": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "precheckout_blite_sources": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "private_accounts": {
+      "callerCount": 5,
+      "referenceCount": 5
+    },
+    "result_feedback": {
+      "callerCount": 5,
+      "referenceCount": 7
+    },
+    "scraper_provider_usage": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "selfhosted_profile_request_start_gate": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "sentry_discord_alert_outbox": {
+      "callerCount": 0,
+      "referenceCount": 0
+    },
+    "system_configuration": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "system_leases": {
+      "callerCount": 1,
+      "referenceCount": 1
+    },
+    "users": {
+      "callerCount": 13,
+      "referenceCount": 31
+    },
+    "vertex_ai_budget_reservations": {
+      "callerCount": 0,
+      "referenceCount": 0
+    }
+  },
+  "contractionCandidateAllowlist": [],
+  "contractionCandidateAllowlistSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "destructiveOperations": "refused"
+}
