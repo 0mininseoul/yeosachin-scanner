@@ -4,36 +4,96 @@
 BEGIN;
 
 -- Resolve the exact base relations before taking locks. A missing or replaced
--- relation aborts the transaction instead of being silently skipped.
+-- relation aborts the transaction instead of being silently skipped. The OIDs
+-- are kept in transaction-local custom GUCs so the post-lock check can detect
+-- same-name relation replacement without creating a helper object.
 DO $retirement_relation_guard$
+DECLARE
+    v_comment_oid oid;
+    v_interaction_oid oid;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_class AS c
-        JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND c.relname = 'comment_details'
-          AND c.relkind = 'r'
-    ) THEN
+    SELECT c.oid
+    INTO v_comment_oid
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'comment_details'
+      AND c.relkind = 'r';
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.comment_details';
     END IF;
+    PERFORM pg_catalog.set_config(
+        'retirement.expected_comment_details_oid',
+        v_comment_oid::text,
+        true
+    );
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM pg_catalog.pg_class AS c
-        JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-          AND c.relname = 'interaction_logs'
-          AND c.relkind = 'r'
-    ) THEN
+    SELECT c.oid
+    INTO v_interaction_oid
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'interaction_logs'
+      AND c.relkind = 'r';
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.interaction_logs';
     END IF;
+    PERFORM pg_catalog.set_config(
+        'retirement.expected_interaction_logs_oid',
+        v_interaction_oid::text,
+        true
+    );
 END;
 $retirement_relation_guard$;
 
 -- Serialize against concurrent writes and dependency creation. The exact
 -- qualified names are deliberately repeated so this lock cannot widen scope.
 LOCK TABLE public.comment_details, public.interaction_logs IN ACCESS EXCLUSIVE MODE;
+
+-- Re-resolve after locking. If a same-name relation replaced either reviewed
+-- table before the lock, fail closed before reading rows or dependencies.
+DO $retirement_relation_revalidation_guard$
+DECLARE
+    v_comment_oid oid;
+    v_comment_relkind "char";
+    v_interaction_oid oid;
+    v_interaction_relkind "char";
+BEGIN
+    SELECT c.oid, c.relkind
+    INTO v_comment_oid, v_comment_relkind
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'comment_details';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.comment_details';
+    END IF;
+    IF v_comment_relkind <> 'r'
+       OR v_comment_oid::text IS DISTINCT FROM pg_catalog.current_setting(
+           'retirement.expected_comment_details_oid',
+           true
+       ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.comment_details';
+    END IF;
+
+    SELECT c.oid, c.relkind
+    INTO v_interaction_oid, v_interaction_relkind
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relname = 'interaction_logs';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.interaction_logs';
+    END IF;
+    IF v_interaction_relkind <> 'r'
+       OR v_interaction_oid::text IS DISTINCT FROM pg_catalog.current_setting(
+           'retirement.expected_interaction_logs_oid',
+           true
+       ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.interaction_logs';
+    END IF;
+END;
+$retirement_relation_revalidation_guard$;
 
 DO $retirement_evidence_guard$
 DECLARE
@@ -98,6 +158,18 @@ BEGIN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_DEPENDENCY: a routine depends on public.comment_details or public.interaction_logs';
     END IF;
 
+    -- pg_depend does not capture every PL/pgSQL body or literal dynamic SQL
+    -- reference. Scan the current definitions token-by-token and abort on any
+    -- mention; false positives are intentionally fail-closed.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS stored_routine
+        WHERE stored_routine.prokind IN ('f', 'p')
+          AND pg_catalog.pg_get_functiondef(stored_routine.oid) ~* E'\\m(comment_details|interaction_logs)\\M'
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE: a stored function or procedure mentions public.comment_details or public.interaction_logs';
+    END IF;
+
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_trigger AS user_trigger
@@ -108,6 +180,27 @@ BEGIN
           AND target.relname IN ('comment_details', 'interaction_logs')
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_USER_TRIGGER: a user trigger exists on public.comment_details or public.interaction_logs';
+    END IF;
+
+    -- Publications can include a target without a pg_publication_rel row.
+    -- Reject all-table publications and any publication scoped to public in
+    -- addition to retaining the explicit-table membership guard below.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_publication AS publication
+        WHERE publication.puballtables
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_PUBLICATION_ALL_TABLES: a publication includes all tables';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_publication_namespace AS publication_schema
+        JOIN pg_catalog.pg_namespace AS target_schema
+            ON target_schema.oid = publication_schema.pnnspid
+        WHERE target_schema.nspname = 'public'
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_PUBLICATION_SCHEMA: a publication includes schema public';
     END IF;
 
     IF EXISTS (

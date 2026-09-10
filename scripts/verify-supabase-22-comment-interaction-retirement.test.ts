@@ -44,7 +44,7 @@ function normalizeSqlWhitespace(sql: string): string {
 }
 
 function extractNormalizedDropStatements(sql: string): string[] {
-    return (stripSqlComments(sql).match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [])
+    return (stripSqlComments(sql).match(/\bDROP\b[^;]*;/gi) ?? [])
         .map(normalizeSqlWhitespace);
 }
 
@@ -175,7 +175,6 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         ) ?? [];
         const dropStatements = extractNormalizedDropStatements(migration);
         expect(destructiveStatements).toHaveLength(TARGETS.length);
-        expect(dropStatements).toHaveLength(TARGETS.length);
         expect(dropStatements).toEqual(EXPECTED_DROP_STATEMENTS);
         expect(destructiveStatements.map(normalizeSqlWhitespace)).toEqual(dropStatements);
         expect(dropStatements.every(statement => !/\bCASCADE\b/i.test(statement))).toBe(true);
@@ -183,6 +182,22 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(activeMigration).not.toMatch(
             /\b(?:TRUNCATE|DELETE|UPDATE|INSERT|CREATE|ALTER|RENAME|GRANT|REVOKE)\b/i,
         );
+    });
+
+    it('rejects non-table DROP forms in the active statement allowlist', () => {
+        const migrationWithNonTableDrop = [
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+            'DROP PROCEDURE public.legacy_cleanup();',
+        ].join('\n');
+
+        expect(extractNormalizedDropStatements(migrationWithNonTableDrop)).toEqual([
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+            'DROP PROCEDURE public.legacy_cleanup();',
+        ]);
+        expect(extractNormalizedDropStatements(migrationWithNonTableDrop))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
     });
 
     it('rejects a comma-separated third DROP TABLE target', () => {
@@ -212,10 +227,25 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(sql).toContain('RETIREMENT_GUARD_INCOMING_DEPENDENCY');
         expect(sql).toContain('RETIREMENT_GUARD_DEPENDENT_VIEW');
         expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEPENDENCY');
+        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
         expect(sql).toContain('RETIREMENT_GUARD_USER_TRIGGER');
+        expect(sql).toContain('RETIREMENT_GUARD_TABLE_REPLACED');
         expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_MEMBERSHIP');
+        expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_ALL_TABLES');
+        expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_SCHEMA');
+        expect(sql).toContain('pg_catalog.set_config(');
+        expect(sql).toContain('retirement.expected_comment_details_oid');
+        expect(sql).toContain('retirement.expected_interaction_logs_oid');
+        expect(sql).toContain('pg_catalog.current_setting(');
         expect(sql).toContain("dep.classid = 'pg_catalog.pg_rewrite'::regclass");
         expect(sql).toContain("dep.classid = 'pg_catalog.pg_proc'::regclass");
+        expect(sql).toContain('pg_catalog.pg_get_functiondef');
+        expect(sql).toContain("pg_catalog.pg_publication AS publication");
+        expect(sql).toContain('publication.puballtables');
+        expect(sql).toContain('pg_catalog.pg_publication_namespace');
+        expect(sql.indexOf('LOCK TABLE')).toBeLessThan(sql.indexOf('RETIREMENT_GUARD_TABLE_REPLACED'));
+        expect(sql.indexOf('RETIREMENT_GUARD_TABLE_REPLACED'))
+            .toBeLessThan(sql.indexOf('SELECT count(*) INTO v_comment_rows'));
         expect(sql).toContain(
             'LOCK TABLE public.comment_details, public.interaction_logs IN ACCESS EXCLUSIVE MODE',
         );

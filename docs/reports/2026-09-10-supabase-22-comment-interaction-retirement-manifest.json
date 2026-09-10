@@ -167,7 +167,7 @@
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
-    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (7 tests, including isolated PGlite restore drill)",
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (9 tests, including isolated PGlite restore drill)",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
     "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",
