@@ -1,11 +1,13 @@
 {
-  "schemaVersion": "supabase-22-comment-interaction-retirement-v4",
-  "asOf": "2026-09-10",
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v5",
+  "asOf": "2026-09-11",
   "sourceBoundary": {
-    "productionEvidence": "coordinator-independent-read-only-collection",
+    "productionEvidence": "coordinator-independent-read-only-post-apply-collection",
     "remoteServiceCalledByWorker": false,
     "supabaseMigrationAppliedByWorker": false,
-    "productionDropPerformed": false,
+    "productionDropPerformed": true,
+    "productionDropPerformedByWorker": false,
+    "productionMigrationAppliedByCoordinator": true,
     "flagActivationPerformed": false,
     "realCanaryStarted": false,
     "paymentPendingAction": "not-performed",
@@ -29,7 +31,7 @@
   ],
   "destructiveAllowlistCanonicalJson": "[\"public.comment_details\",\"public.interaction_logs\"]",
   "destructiveAllowlistSha256": "a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6",
-  "destructiveOperations": "refused",
+  "destructiveOperations": "applied-exact-allowlist",
   "zeroRowDataset": {
     "canonicalJson": "[{\"table\":\"public.comment_details\",\"rows\":[]},{\"table\":\"public.interaction_logs\",\"rows\":[]}]",
     "sha256": "bb705113dc6c51ea03e76a8d92f1b1e644809809f6d15615b69b4a2ea36a56ad",
@@ -182,19 +184,39 @@
   },
   "retirementDecision": {
     "evidenceSupportsRetirementProposal": true,
-    "status": "approved-not-applied",
-    "destructiveOperations": "refused",
+    "status": "VERIFIED",
+    "destructiveOperations": "applied-exact-allowlist",
     "ownerApproval": "approved",
     "allowlistSource": "top-level destructiveAllowlist",
     "migrationFileCreated": true,
-    "migrationFilePath": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql"
+    "migrationFilePath": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql",
+    "appliedBy": "coordinator",
+    "verifiedAt": "2026-09-11T02:45:27+09:00"
   },
-  "remainingGates": [
-    "the generated migration remains approved-but-not-applied until the coordinator's exact-allowlist rollout window",
-    "migration dry-run with the exact two-object allowlist",
-    "apply only the approved migration and verify remote migration history",
-    "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
-  ],
+  "postApplyVerification": {
+    "verifiedAt": "2026-09-11T02:45:27+09:00",
+    "remoteMigrationHistory": {
+      "migrationVersion": "20260910123053",
+      "migrationFileName": "20260910123053_retire_comment_interaction_evidence.sql",
+      "occurrences": 1,
+      "existsExactlyOnce": true
+    },
+    "publicTableCount": 185,
+    "targetTablesAbsent": [
+      "public.comment_details",
+      "public.interaction_logs"
+    ],
+    "incomingForeignKeys": 0,
+    "dependentViews": 0,
+    "routineDependencies": 0,
+    "routineMentions": 0,
+    "userTriggers": 0,
+    "allTablePublications": 0,
+    "publicSchemaPublications": 0,
+    "targetPublicationMemberships": 0,
+    "isolatedCliPostApplyDryRun": "Remote database is up to date"
+  },
+  "remainingGates": [],
   "validation": {
     "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (14 tests, including backend-type-scoped NULL-state regression, EOF/dynamic destructive-scope regressions, and isolated PGlite restore drill)",
     "redEvidence": "captured before implementation: focused run failed the expected backend-type-scoped NULL-state regression for benign non-client background activity while retaining unknown client/backend fail-closed checks",
@@ -202,8 +224,10 @@
     "localPostgresql17Sanity": "not-run: no separate sanity probe; all local coverage is recorded in localPostgresql17Drill",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
-    "diffReview": "passed: final staged diff reviewed; exactly four retirement package files changed and no production/deploy/activation/payment action was performed",
-    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner --redact"
+    "diffReview": "passed: final staged diff reviewed; only the post-apply retirement report, manifest, and focused contract test changed; migration SQL and production/deploy/activation/payment surfaces were untouched",
+    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner --redact",
+    "mainCi": "succeeded: run 34507499334",
+    "vercel": "succeeded: merge commit 35d3c41f5bfde9c56384b18213d4fe690720baea"
   },
   "artifacts": {
     "evidenceReport": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md",

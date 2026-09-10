@@ -129,6 +129,7 @@ function extractRestoreSql(sql: string): string {
 }
 
 type RetirementManifest = {
+    schemaVersion: string;
     destructiveAllowlist: readonly string[];
     destructiveAllowlistCanonicalJson: string;
     destructiveAllowlistSha256: string;
@@ -156,10 +157,34 @@ type RetirementManifest = {
     };
     retirementDecision: {
         status: string;
+        destructiveOperations: string;
         ownerApproval: string;
         migrationFileCreated: boolean;
         migrationFilePath: string;
+        appliedBy: string;
+        verifiedAt: string;
     };
+    postApplyVerification: {
+        verifiedAt: string;
+        remoteMigrationHistory: {
+            migrationVersion: string;
+            migrationFileName: string;
+            occurrences: number;
+            existsExactlyOnce: boolean;
+        };
+        publicTableCount: number;
+        targetTablesAbsent: readonly string[];
+        incomingForeignKeys: number;
+        dependentViews: number;
+        routineDependencies: number;
+        routineMentions: number;
+        userTriggers: number;
+        allTablePublications: number;
+        publicSchemaPublications: number;
+        targetPublicationMemberships: number;
+        isolatedCliPostApplyDryRun: string;
+    };
+    remainingGates: readonly string[];
     validation: {
         focusedTests: string;
         localPostgresql17Drill: string;
@@ -209,7 +234,7 @@ async function queryRows<T>(db: PGlite, sql: string): Promise<readonly T[]> {
     return result.rows;
 }
 
-describe('Supabase 22 comment/interactions retirement approval package', () => {
+describe('Supabase 22 comment/interactions retirement package', () => {
     it('uses the single CLI-generated migration path and keeps the draft outside migrations', () => {
         expect(SQL_PATH.startsWith(`${MIGRATIONS_DIR}/`)).toBe(false);
         expect(existsSync(SQL_PATH)).toBe(true);
@@ -672,6 +697,7 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
 
     it('binds the exact ordered allowlist and deterministic zero-row checksum', () => {
         const manifest = readManifest();
+        expect(manifest.schemaVersion).toBe('supabase-22-comment-interaction-retirement-v5');
         expect(manifest.destructiveAllowlist).toEqual([...TARGETS]);
         expect(manifest.destructiveAllowlistCanonicalJson).toBe(ALLOWLIST_CANONICAL_JSON);
         expect(createHash('sha256').update(ALLOWLIST_CANONICAL_JSON, 'utf8').digest('hex'))
@@ -679,7 +705,7 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(manifest.destructiveAllowlistSha256).toBe(ALLOWLIST_SHA256);
         expect(extractNormalizedDropStatements(readMigration()))
             .toEqual(EXPECTED_DROP_STATEMENTS);
-        expect(manifest.destructiveOperations).toBe('refused');
+        expect(manifest.destructiveOperations).toBe('applied-exact-allowlist');
         expect(manifest.zeroRowDataset.canonicalJson).toBe(ZERO_ROW_DATASET_CANONICAL_JSON);
         expect(manifest.zeroRowDataset.sha256).toBe(ZERO_ROW_DATASET_SHA256);
         expect(manifest.zeroRowDataset.rowCount).toBe(0);
@@ -693,10 +719,34 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(manifest.restoreEvidence.tables).toEqual([...TARGETS]);
         expect(manifest.observationConclusion.status).toBe('bounded');
         expect(manifest.observationConclusion.conclusion).toContain('bounded');
-        expect(manifest.retirementDecision.status).toBe('approved-not-applied');
+        expect(manifest.retirementDecision.status).toBe('VERIFIED');
+        expect(manifest.retirementDecision.destructiveOperations).toBe('applied-exact-allowlist');
         expect(manifest.retirementDecision.ownerApproval).toBe('approved');
         expect(manifest.retirementDecision.migrationFileCreated).toBe(true);
         expect(manifest.retirementDecision.migrationFilePath).toBe(MIGRATION_RELATIVE_PATH);
+        expect(manifest.retirementDecision.appliedBy).toBe('coordinator');
+        expect(manifest.retirementDecision.verifiedAt).toBe('2026-09-11T02:45:27+09:00');
+
+        expect(manifest.postApplyVerification.verifiedAt).toBe('2026-09-11T02:45:27+09:00');
+        expect(manifest.postApplyVerification.remoteMigrationHistory).toEqual({
+            migrationVersion: '20260910123053',
+            migrationFileName: MIGRATION_FILE_NAME,
+            occurrences: 1,
+            existsExactlyOnce: true,
+        });
+        expect(manifest.postApplyVerification.publicTableCount).toBe(185);
+        expect(manifest.postApplyVerification.targetTablesAbsent).toEqual([...TARGETS]);
+        expect(manifest.postApplyVerification.incomingForeignKeys).toBe(0);
+        expect(manifest.postApplyVerification.dependentViews).toBe(0);
+        expect(manifest.postApplyVerification.routineDependencies).toBe(0);
+        expect(manifest.postApplyVerification.routineMentions).toBe(0);
+        expect(manifest.postApplyVerification.userTriggers).toBe(0);
+        expect(manifest.postApplyVerification.allTablePublications).toBe(0);
+        expect(manifest.postApplyVerification.publicSchemaPublications).toBe(0);
+        expect(manifest.postApplyVerification.targetPublicationMemberships).toBe(0);
+        expect(manifest.postApplyVerification.isolatedCliPostApplyDryRun)
+            .toBe('Remote database is up to date');
+        expect(manifest.remainingGates).toEqual([]);
 
         const concurrency = (manifest as RetirementManifest & {
             concurrencyCorrection: {
@@ -756,7 +806,7 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toContain('isolated PGlite restore drill');
         expect(report).toContain('bounded observation conclusion');
         expect(report).toContain('owner approval');
-        expect(report).toContain('approved-but-not-applied');
+        expect(report).toContain('VERIFIED production applied');
         expect(report).toContain(MIGRATION_RELATIVE_PATH);
         expect(report).toContain('No flag activation');
         expect(report).toContain('No Management API log evidence was collected or claimed.');
@@ -767,6 +817,11 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toContain('uncoordinated PostgreSQL DDL');
         expect(report).toContain('split-literal');
         expect(report).toContain('background_null_state_activity=2');
+        expect(report).toContain('Migration `20260910123053` exists exactly once');
+        expect(report).toContain('public table count is `185`');
+        expect(report).toContain('Remote database is up to date');
+        expect(report).toContain('Main CI run `34507499334` succeeded');
+        expect(report).toContain('35d3c41f5bfde9c56384b18213d4fe690720baea');
         const manifest = readManifest();
         expect(manifest.validation.localPostgresql17Drill)
             .toContain('restricted-client hidden state/query visibility');
