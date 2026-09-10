@@ -4,12 +4,12 @@ import { canonicalJsonHash } from '@/lib/services/commerce/canonical-commerce-st
 import {
     canonicalOperationsStore,
     isCanonicalFamilyWriteEnabled,
-    mirrorCanonicalAccountDeletionJob,
     maintenanceMarker,
     queueCanonicalMaintenanceJob,
     withCanonicalMirrorTimeout,
     type AccountLifecycleInput,
 } from '@/lib/services/operations/canonical-operations-store';
+import { accountDeletionCanonicalAdapter } from './account-deletion-canonical-adapter';
 import {
     createResultImageR2Writer,
     loadResultImageR2Config,
@@ -58,7 +58,8 @@ export async function deleteAccountPermanently(
     const appendLifecycle = dependencies.appendLifecycle
         ?? canonicalOperationsStore.appendAccountLifecycle;
     const queueMaintenanceJob = dependencies.queueMaintenanceJob ?? queueCanonicalMaintenanceJob;
-    const mirrorMaintenanceJob = dependencies.mirrorMaintenanceJob ?? mirrorCanonicalAccountDeletionJob;
+    const mirrorMaintenanceJob = dependencies.mirrorMaintenanceJob
+        ?? accountDeletionCanonicalAdapter.mirrorMaintenanceJob;
     const recordLifecycle = async (
         eventKind: AccountLifecycleInput['eventKind'],
         state: string,

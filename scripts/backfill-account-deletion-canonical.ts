@@ -228,6 +228,21 @@ function projectionChecksum(rows: readonly AccountDeletionCanonicalProjection[])
     return digest.digest('hex');
 }
 
+function flatPayloadSemanticallyEqual(
+    left: AccountDeletionCanonicalProjection['payload'],
+    right: AccountDeletionCanonicalProjection['payload'],
+): boolean {
+    const leftEntries = Object.entries(left)
+        .sort(([leftKey], [rightKey]) => Buffer.compare(Buffer.from(leftKey, 'utf8'), Buffer.from(rightKey, 'utf8')));
+    const rightEntries = Object.entries(right)
+        .sort(([leftKey], [rightKey]) => Buffer.compare(Buffer.from(leftKey, 'utf8'), Buffer.from(rightKey, 'utf8')));
+    if (leftEntries.length !== rightEntries.length) return false;
+    return leftEntries.every(([key, value], index) => {
+        const rightEntry = rightEntries[index];
+        return rightEntry?.[0] === key && rightEntry?.[1] === value;
+    });
+}
+
 export function compareAccountDeletionParity(
     sourceRows: readonly AccountDeletionCanonicalProjection[],
     canonicalRows: readonly AccountDeletionCanonicalProjection[],
@@ -247,7 +262,7 @@ export function compareAccountDeletionParity(
         if (source.kind !== canonical.kind) mismatchFields.add('kind');
         if (source.canonicalState !== canonical.canonicalState) mismatchFields.add('state');
         if (source.contentHash !== canonical.contentHash) mismatchFields.add('content_hash');
-        if (JSON.stringify(source.payload) !== JSON.stringify(canonical.payload)) {
+        if (!flatPayloadSemanticallyEqual(source.payload, canonical.payload)) {
             mismatchFields.add('payload');
         }
     }

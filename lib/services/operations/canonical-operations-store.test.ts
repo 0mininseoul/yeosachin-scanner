@@ -181,19 +181,10 @@ describe('canonical operations store', () => {
         })).resolves.toEqual({ status: 'recorded', duplicate: false });
     });
 
-    it('mirrors an account deletion source row through a typed service RPC', async () => {
-        const accountId = '6d809496-1cb8-4e4f-a081-8efc14a7a64c';
-        const rpc = vi.fn(async (name: string, params: Record<string, unknown>) => {
-            expect(name).toBe('mirror_account_deletion_job_v1');
-            expect(params).toEqual({ p_account_id: accountId });
-            return { data: { status: 'mirrored', duplicate: false }, error: null };
-        });
-        const store = createCanonicalOperationsStore({ rpc });
+    it('keeps the transitional account-deletion mirror out of the permanent store surface', () => {
+        const store = createCanonicalOperationsStore({ rpc: vi.fn() });
 
-        await expect(store.mirrorAccountDeletionJob(accountId)).resolves.toEqual({
-            status: 'mirrored',
-            duplicate: false,
-        });
+        expect('mirrorAccountDeletionJob' in store).toBe(false);
     });
 
     it('rejects empty or non-derived configuration content hashes before the RPC', async () => {

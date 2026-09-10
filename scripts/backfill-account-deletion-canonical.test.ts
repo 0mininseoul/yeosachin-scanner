@@ -63,6 +63,36 @@ describe('account deletion canonical report-only backfill', () => {
         });
     });
 
+    it('compares flat JSONB payloads semantically despite key order and detects value changes', () => {
+        const projection = buildAccountDeletionCanonicalProjection(source);
+        const reorderedPayload = {
+            source_updated_at: projection.payload.source_updated_at,
+            completed_at: projection.payload.completed_at,
+            database_purged_at: projection.payload.database_purged_at,
+            objects_purged_at: projection.payload.objects_purged_at,
+            requested_at: projection.payload.requested_at,
+            legacy_state: projection.payload.legacy_state,
+            source_key_hash: projection.payload.source_key_hash,
+            source_table: projection.payload.source_table,
+        } as typeof projection.payload;
+        const reorderedProjection = {
+            ...projection,
+            payload: reorderedPayload,
+        };
+
+        expect(compareAccountDeletionParity([projection], [reorderedProjection])).toMatchObject({
+            status: 'match',
+            mismatchFields: [],
+        });
+        expect(compareAccountDeletionParity([projection], [{
+            ...reorderedProjection,
+            payload: { ...reorderedPayload, legacy_state: 'requested' },
+        }])).toMatchObject({
+            status: 'mismatch',
+            mismatchFields: ['payload'],
+        });
+    });
+
     it('enforces a bounded report-only page and refuses mutation options', async () => {
         const records = Array.from({ length: 101 }, (_, index) => ({
             ...source,
