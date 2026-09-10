@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "supabase-22-comment-interaction-retirement-v1",
+  "schemaVersion": "supabase-22-comment-interaction-retirement-v4",
   "asOf": "2026-09-10",
   "sourceBoundary": {
     "productionEvidence": "coordinator-independent-read-only-collection",
@@ -151,31 +151,64 @@
     },
     "idxScanInterpretation": "A nonzero idx_scan on a result_id index can be caused by parent-side foreign-key cascade checks when analysis_results rows are deleted; it is not direct-use proof."
   },
+  "concurrencyCorrection": {
+    "fixedTransactionAdvisoryLock": "pg_advisory_xact_lock(22091010, 22)",
+    "serializesCoordinatedCopiesOnly": true,
+    "blocksUncoordinatedPostgresqlDdl": false,
+    "activeDdlCurrentDatabaseScoped": true,
+    "activeDdlClientBackendUnknownStateOrQueryFailsClosed": true,
+    "activeDdlUnknownBackendTypeFailsClosed": true,
+    "activeDdlKnownNonClientBackgroundNullStateAllowed": true,
+    "activeDdlGuardBeforeCatalogEvidence": true,
+    "activeDdlGuardImmediatelyBeforeDrops": true,
+    "routineExecuteProductionCount": 19,
+    "routineExecuteProductionInventorySha256": "3fdc7ecfc40a9d50d789a4b81fda1e7be9e1488f16d9411833f1ea939f4d51a9",
+    "routineExecuteInventoryGuard": "complete non-system/non-extension prokind f/p EXECUTE-token inventory; sorted jsonb schema/name/identity_arguments/definition entries joined by LF and SHA-256 hashed",
+    "splitLiteralProductionMatchCount": 0,
+    "rejectsAllExecuteRoutines": false,
+    "singleWriterDdlMaintenanceWindowRequired": true,
+    "coordinatorOnlyFromFinalPreflightThroughPostApplyVerification": true,
+    "currentProductionActiveRelevantDdlCount": 0,
+    "currentProductionBackgroundNullStateActivityCount": 2,
+    "currentProductionBackgroundNullStateActivity": "exactly pg_cron launcher and pg_net 0.19.5 worker; each query visible and state NULL; known non-client background NULL-state activity",
+    "trackedCiProductionDbPushEntrypoint": false,
+    "targetOrAdvisoryLocksAloneBlockUncoordinatedDdl": false,
+    "catalogShareLockPrivileges": {
+      "pg_proc": false,
+      "pg_publication": false,
+      "pg_publication_namespace": false,
+      "pg_publication_rel": false
+    }
+  },
   "retirementDecision": {
     "evidenceSupportsRetirementProposal": true,
-    "status": "ready-for-owner-approval",
+    "status": "approved-not-applied",
     "destructiveOperations": "refused",
-    "ownerApproval": "pending",
+    "ownerApproval": "approved",
     "allowlistSource": "top-level destructiveAllowlist",
-    "migrationFileCreated": false
+    "migrationFileCreated": true,
+    "migrationFilePath": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql"
   },
   "remainingGates": [
-    "owner approval for exactly the ordered destructiveAllowlist and its SHA-256",
-    "create a separately reviewed timestamped file under supabase/migrations only after approval",
+    "the generated migration remains approved-but-not-applied until the coordinator's exact-allowlist rollout window",
     "migration dry-run with the exact two-object allowlist",
     "apply only the approved migration and verify remote migration history",
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
-    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (7 tests, including isolated PGlite restore drill)",
-    "typecheck": "not-run",
+    "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (14 tests, including backend-type-scoped NULL-state regression, EOF/dynamic destructive-scope regressions, and isolated PGlite restore drill)",
+    "redEvidence": "captured before implementation: focused run failed the expected backend-type-scoped NULL-state regression for benign non-client background activity while retaining unknown client/backend fail-closed checks",
+    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t for restricted-client hidden state/query visibility; backend_type IS NULL is covered only by the focused guard-structure test; inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
+    "localPostgresql17Sanity": "not-run: no separate sanity probe; all local coverage is recorded in localPostgresql17Drill",
+    "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
-    "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",
-    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner"
+    "diffReview": "passed: final staged diff reviewed; exactly four retirement package files changed and no production/deploy/activation/payment action was performed",
+    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner --redact"
   },
   "artifacts": {
     "evidenceReport": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md",
     "manifest": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-manifest.json",
-    "draftSql": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql"
+    "draftSql": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql",
+    "migrationSql": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql"
   }
 }

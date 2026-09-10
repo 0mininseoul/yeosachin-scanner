@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = process.cwd();
 const MIGRATIONS_DIR = resolve(REPO_ROOT, 'supabase/migrations');
+const MIGRATION_FILE_NAME = '20260910123053_retire_comment_interaction_evidence.sql';
+const MIGRATION_RELATIVE_PATH = `supabase/migrations/${MIGRATION_FILE_NAME}`;
+const MIGRATION_PATH = resolve(MIGRATIONS_DIR, MIGRATION_FILE_NAME);
 const SQL_PATH = resolve(
     REPO_ROOT,
     'supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql',
@@ -19,6 +22,9 @@ const REPORT_PATH = resolve(
     'docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md',
 );
 const TARGETS = ['public.comment_details', 'public.interaction_logs'] as const;
+const EXPECTED_DROP_STATEMENTS = TARGETS.map(table => `DROP TABLE ${table};`);
+const ALLOWLIST_CANONICAL_JSON = JSON.stringify(TARGETS);
+const ALLOWLIST_SHA256 = 'a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6';
 const ZERO_ROW_DATASET_CANONICAL_JSON = JSON.stringify([
     { table: TARGETS[0], rows: [] },
     { table: TARGETS[1], rows: [] },
@@ -27,8 +33,82 @@ const ZERO_ROW_DATASET_SHA256 = createHash('sha256')
     .update(ZERO_ROW_DATASET_CANONICAL_JSON, 'utf8')
     .digest('hex');
 
+function stripSqlComments(sql: string): string {
+    return sql
+        .replace(/--[^\r\n]*/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+function normalizeSqlWhitespace(sql: string): string {
+    return sql.replace(/\s+/g, ' ').trim();
+}
+
+function maskSqlLiterals(sql: string): string {
+    let masked = '';
+    let index = 0;
+    while (index < sql.length) {
+        if (sql[index] === "'") {
+            masked += "''";
+            index += 1;
+            while (index < sql.length) {
+                if (sql[index] === "'") {
+                    if (sql[index + 1] === "'") {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                if (sql[index] === '\\' && sql[index + 1] !== undefined) index += 2;
+                else index += 1;
+            }
+            continue;
+        }
+        if (sql[index] === '$') {
+            const opener = sql.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+            if (opener) {
+                const closingIndex = sql.indexOf(opener, index + opener.length);
+                if (closingIndex >= 0) {
+                    masked += opener + opener;
+                    index = closingIndex + opener.length;
+                    continue;
+                }
+            }
+        }
+        masked += sql[index];
+        index += 1;
+    }
+    return masked;
+}
+
+function containsDynamicDestructiveSql(sql: string): boolean {
+    const activeSql = stripSqlComments(sql);
+    const doBlockPattern = /\bDO\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)([\s\S]*?)\1/gi;
+    return [...activeSql.matchAll(doBlockPattern)].some((match) => {
+        const codeBody = maskSqlLiterals(match[2]);
+        if (/\bEXECUTE\s+(?:format\s*\(|[A-Za-z_][A-Za-z0-9_]*|E?'|\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)/i.test(codeBody)) {
+            return true;
+        }
+        return /\b(?:DROP|CREATE|ALTER|TRUNCATE|DELETE|UPDATE|INSERT|GRANT|REVOKE)\b/i.test(codeBody);
+    });
+}
+
+function extractNormalizedDropStatements(sql: string): string[] {
+    const activeSql = stripSqlComments(sql);
+    const drops = [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\b[^;]*(?:;|$))/gim)]
+        .map(match => normalizeSqlWhitespace(match[1]))
+        .map(statement => statement.endsWith(';') ? statement : `${statement};`);
+    return containsDynamicDestructiveSql(sql)
+        ? ['DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW', ...drops]
+        : drops;
+}
+
 function readDraft(): string {
     return readFileSync(SQL_PATH, 'utf8');
+}
+
+function readMigration(): string {
+    return readFileSync(MIGRATION_PATH, 'utf8');
 }
 
 function extractRestoreSql(sql: string): string {
@@ -78,9 +158,11 @@ type RetirementManifest = {
         status: string;
         ownerApproval: string;
         migrationFileCreated: boolean;
+        migrationFilePath: string;
     };
     validation: {
         focusedTests: string;
+        localPostgresql17Drill: string;
         lint: string;
         diffReview: string;
         stagedSecretScan: string;
@@ -128,25 +210,115 @@ async function queryRows<T>(db: PGlite, sql: string): Promise<readonly T[]> {
 }
 
 describe('Supabase 22 comment/interactions retirement approval package', () => {
-    it('keeps the draft outside migrations and does not create a migration file', () => {
+    it('uses the single CLI-generated migration path and keeps the draft outside migrations', () => {
         expect(SQL_PATH.startsWith(`${MIGRATIONS_DIR}/`)).toBe(false);
         expect(existsSync(SQL_PATH)).toBe(true);
-        expect(existsSync(resolve(
-            MIGRATIONS_DIR,
-            '20260910_retire_comment_interaction_evidence_draft.sql',
-        ))).toBe(false);
+        expect(existsSync(resolve(MIGRATIONS_DIR, '20260910_retire_comment_interaction_evidence_draft.sql')))
+            .toBe(false);
+        expect(existsSync(MIGRATION_PATH)).toBe(true);
+        expect(readdirSync(MIGRATIONS_DIR)
+            .filter(fileName => fileName.endsWith('_retire_comment_interaction_evidence.sql')))
+            .toEqual([MIGRATION_FILE_NAME]);
+        expect(readMigration()).not.toContain('RESTORE ONLY');
+        expect(readMigration()).not.toContain('/*');
     });
 
-    it('contains exactly the two qualified destructive targets', () => {
-        const dropStatements = readDraft().match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
-        expect(dropStatements).toHaveLength(TARGETS.length);
-        expect(dropStatements.map(statement => statement.match(/public\.[a-z_]+/i)?.[0]))
-            .toEqual([...TARGETS]);
+    it('binds the generated migration to exactly the two qualified destructive targets', () => {
+        const migration = readMigration();
+        const activeMigration = stripSqlComments(migration);
+        const destructiveStatements = activeMigration.match(
+            /\b(?:DROP\s+(?:TABLE|SCHEMA|VIEW|MATERIALIZED\s+VIEW|FUNCTION|INDEX|SEQUENCE|TYPE|DOMAIN|POLICY|TRIGGER)|TRUNCATE\s+TABLE)\b[^;]*;/gi,
+        ) ?? [];
+        const dropStatements = extractNormalizedDropStatements(migration);
+        expect(destructiveStatements).toHaveLength(TARGETS.length);
+        expect(dropStatements).toEqual(EXPECTED_DROP_STATEMENTS);
+        expect(destructiveStatements.map(normalizeSqlWhitespace)).toEqual(dropStatements);
         expect(dropStatements.every(statement => !/\bCASCADE\b/i.test(statement))).toBe(true);
+        expect(migration).not.toMatch(/\bDROP\s+TABLE\b[^;]*\bCASCADE\b/i);
+        expect(activeMigration.match(
+            /(?:^|[;\r\n])\s*(?:TRUNCATE|DELETE|UPDATE|INSERT|CREATE|ALTER|RENAME|GRANT|REVOKE)\b/gim,
+        ) ?? []).toEqual([]);
+    });
+
+    it('rejects non-table DROP forms in the active statement allowlist', () => {
+        const migrationWithNonTableDrop = [
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+            'DROP PROCEDURE public.legacy_cleanup();',
+        ].join('\n');
+
+        expect(extractNormalizedDropStatements(migrationWithNonTableDrop)).toEqual([
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+            'DROP PROCEDURE public.legacy_cleanup();',
+        ]);
+        expect(extractNormalizedDropStatements(migrationWithNonTableDrop))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
+
+        const migrationWithDropInsideDo = [
+            'DO $$',
+            'BEGIN',
+            '    DROP TABLE public.unapproved_table;',
+            'END;',
+            '$$;',
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDropInsideDo))
+            .toEqual([
+                'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
+                'DROP TABLE public.unapproved_table;',
+                ...EXPECTED_DROP_STATEMENTS,
+            ]);
+        expect(extractNormalizedDropStatements(migrationWithDropInsideDo))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
+    });
+
+    it('rejects a comma-separated third DROP TABLE target', () => {
+        const migrationWithThirdTarget = [
+            'DROP TABLE public.comment_details, public.unapproved_table;',
+            'DROP TABLE public.interaction_logs;',
+        ].join('\n');
+
+        expect(extractNormalizedDropStatements(migrationWithThirdTarget)).toEqual([
+            'DROP TABLE public.comment_details, public.unapproved_table;',
+            'DROP TABLE public.interaction_logs;',
+        ]);
+        expect(extractNormalizedDropStatements(migrationWithThirdTarget))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
+    });
+
+    it('fails closed for an EOF DROP and dynamically assembled destructive SQL', () => {
+        const migrationWithEofDrop = [
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs',
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithEofDrop)).toEqual([
+            'DROP TABLE public.comment_details;',
+            'DROP TABLE public.interaction_logs;',
+        ]);
+
+        const migrationWithDynamicDrop = [
+            "DO $$ BEGIN EXECUTE 'DR' || 'OP TABLE public.unapproved_table'; END $$;",
+            ...EXPECTED_DROP_STATEMENTS,
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDynamicDrop)).toEqual([
+            'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
+            ...EXPECTED_DROP_STATEMENTS,
+        ]);
+
+        const migrationWithDynamicDdl = [
+            "DO $$ BEGIN EXECUTE format('ALTER %s', 'TABLE public.unapproved_table'); END $$;",
+            ...EXPECTED_DROP_STATEMENTS,
+        ].join('\n');
+        expect(extractNormalizedDropStatements(migrationWithDynamicDdl)).toEqual([
+            'DYNAMIC_DESTRUCTIVE_SQL_REQUIRES_REVIEW',
+            ...EXPECTED_DROP_STATEMENTS,
+        ]);
     });
 
     it('fails closed on missing, non-empty, or newly dependent targets', () => {
-        const sql = readDraft();
+        const sql = readMigration();
         expect(sql).toContain("c.relname = 'comment_details'");
         expect(sql).toContain("c.relname = 'interaction_logs'");
         expect(sql).toContain('SELECT count(*) INTO v_comment_rows FROM public.comment_details');
@@ -158,13 +330,136 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(sql).toContain('RETIREMENT_GUARD_INCOMING_DEPENDENCY');
         expect(sql).toContain('RETIREMENT_GUARD_DEPENDENT_VIEW');
         expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEPENDENCY');
+        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
         expect(sql).toContain('RETIREMENT_GUARD_USER_TRIGGER');
+        expect(sql).toContain('RETIREMENT_GUARD_TABLE_REPLACED');
         expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_MEMBERSHIP');
+        expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_ALL_TABLES');
+        expect(sql).toContain('RETIREMENT_GUARD_PUBLICATION_SCHEMA');
+        expect(sql).toContain('pg_catalog.set_config(');
+        expect(sql).toContain('retirement.expected_comment_details_oid');
+        expect(sql).toContain('retirement.expected_interaction_logs_oid');
+        expect(sql).toContain('pg_catalog.current_setting(');
         expect(sql).toContain("dep.classid = 'pg_catalog.pg_rewrite'::regclass");
         expect(sql).toContain("dep.classid = 'pg_catalog.pg_proc'::regclass");
+        expect(sql).toContain('pg_catalog.pg_get_functiondef');
+        expect(sql).toContain("pg_catalog.pg_publication AS publication");
+        expect(sql).toContain('publication.puballtables');
+        expect(sql).toContain('pg_catalog.pg_publication_namespace');
+        expect(sql.indexOf('LOCK TABLE')).toBeLessThan(sql.indexOf('RETIREMENT_GUARD_TABLE_REPLACED'));
+        expect(sql.indexOf('RETIREMENT_GUARD_TABLE_REPLACED'))
+            .toBeLessThan(sql.indexOf('SELECT count(*) INTO v_comment_rows'));
         expect(sql).toContain(
             'LOCK TABLE public.comment_details, public.interaction_logs IN ACCESS EXCLUSIVE MODE',
         );
+    });
+
+    it('serializes coordinated copies and guards both catalog evidence and drops from active DDL', () => {
+        const sql = readMigration();
+        const beginIndex = sql.indexOf('BEGIN;');
+        expect(beginIndex).toBeGreaterThanOrEqual(0);
+        const firstSqlAfterBegin = sql
+            .slice(beginIndex + 'BEGIN;'.length)
+            .replace(/^\s*--[^\r\n]*(?:\r?\n|$)/gm, '')
+            .trimStart();
+        expect(firstSqlAfterBegin).toMatch(
+            /^SELECT pg_catalog\.pg_advisory_xact_lock\(22091010, 22\);/,
+        );
+        expect(sql).toContain('serializes coordinated copies');
+        expect(sql).toContain('does not block uncoordinated PostgreSQL DDL');
+
+        expect(sql.match(/RETIREMENT_GUARD_ACTIVE_DDL/g)).toHaveLength(2);
+        expect(sql).toMatch(
+            /activity\.pid\s*<>\s*pg_catalog\.pg_backend_pid\(\)[\s\S]*activity\.state\s*=\s*'active'[\s\S]*activity\.query[\s\S]*~\*/,
+        );
+        expect(sql).toContain('(CREATE|ALTER|DROP)[[:space:]]+PUBLICATION');
+        expect(sql).toContain(
+            '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
+        );
+        expect(sql).toContain('[[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)');
+
+        const firstActiveDdlGuard = sql.indexOf('RETIREMENT_GUARD_ACTIVE_DDL');
+        const secondActiveDdlGuard = sql.indexOf(
+            'RETIREMENT_GUARD_ACTIVE_DDL',
+            firstActiveDdlGuard + 1,
+        );
+        const catalogEvidence = sql.indexOf('RETIREMENT_GUARD_PUBLICATION_ALL_TABLES');
+        const firstDrop = sql.indexOf('DROP TABLE public.comment_details;');
+        expect(firstActiveDdlGuard).toBeLessThan(catalogEvidence);
+        expect(secondActiveDdlGuard).toBeGreaterThan(catalogEvidence);
+        expect(secondActiveDdlGuard).toBeLessThan(firstDrop);
+    });
+
+    it('scopes both active DDL guards to the current database and fails closed on hidden query text', () => {
+        const sql = readMigration();
+        const guardBlocks = [...sql.matchAll(
+            /DO \$retirement_active_ddl_guard\$[\s\S]*?\$retirement_active_ddl_guard\$;/g,
+        )].map(match => match[0]);
+        expect(guardBlocks).toHaveLength(2);
+        for (const guard of guardBlocks) {
+            expect(guard).toContain('activity.datname = pg_catalog.current_database()');
+            expect(guard).toContain("E'/[*]([^*]|[*][^/])*[*]/'");
+            expect(guard).toMatch(/activity\.state\s+IS\s+NULL/);
+            expect(guard).toMatch(/activity\.query\s+IS\s+NULL/);
+            expect(guard).toMatch(/activity\.query\s*=\s*'<insufficient privilege>'/);
+            expect(guard).toMatch(
+                /activity\.state\s+IS\s+NULL[\s\S]*OR[\s\S]*activity\.query\s+IS\s+NULL[\s\S]*OR[\s\S]*activity\.query\s*=\s*'<insufficient privilege>'[\s\S]*OR[\s\S]*activity\.state\s*=\s*'active'[\s\S]*~\*/,
+            );
+            expect(guard).toContain('$retirement_active_ddl_pattern$');
+            expect(guard).toContain('(CREATE|ALTER|DROP)[[:space:]]+PUBLICATION');
+            expect(guard).toContain(
+                '(CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)',
+            );
+            expect(guard).toContain('[[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)');
+            expect(guard).toContain('retirement_active_ddl_normalized_query');
+        }
+    });
+
+    it('allows benign non-client background NULL state while retaining client fail-closed checks', () => {
+        const sql = readMigration();
+        const guardBlocks = [...sql.matchAll(
+            /DO \$retirement_active_ddl_guard\$[\s\S]*?\$retirement_active_ddl_guard\$;/g,
+        )].map(match => match[0]);
+        expect(guardBlocks).toHaveLength(2);
+
+        for (const guard of guardBlocks) {
+            // Background workers such as pg_cron and pg_net can legitimately
+            // report state NULL. Unknown visibility remains fail-closed for
+            // client backends, including hidden state/query and active DDL.
+            expect(guard).toMatch(
+                /activity\.backend_type\s+IS\s+NULL\s+OR\s+\(\s*activity\.backend_type\s*=\s*'client backend'\s+AND\s+\([\s\S]*activity\.state\s+IS\s+NULL[\s\S]*activity\.query\s+IS\s+NULL[\s\S]*activity\.query\s*=\s*'<insufficient privilege>'[\s\S]*activity\.state\s*=\s*'active'[\s\S]*retirement_active_ddl_normalized_query\s+~\*/,
+            );
+        }
+    });
+
+    it('retains the contiguous scan and guards the complete reviewed EXECUTE inventory', () => {
+        const sql = readMigration();
+        expect(sql).toContain('RETIREMENT_GUARD_ROUTINE_DEFINITION_REFERENCE');
+        expect(sql).toContain('RETIREMENT_GUARD_EXECUTE_INVENTORY_CHANGED');
+        expect(sql).toContain('retirement_execute_token_pattern');
+        expect(sql).toContain('(^|[^[:alnum:]_])EXECUTE([^[:alnum:]_]|$)');
+        expect(sql).toContain('pg_catalog.pg_get_function_identity_arguments');
+        expect(sql).toContain('pg_catalog.string_agg');
+        expect(sql).toContain('pg_catalog.sha256');
+        expect(sql).toContain('v_execute_routine_inventory_sha256');
+        const executeToken = sql.indexOf('retirement_execute_token_pattern');
+        const inventoryGuardMessage = sql.indexOf(
+            'RETIREMENT_GUARD_EXECUTE_INVENTORY_CHANGED',
+        );
+        expect(executeToken).toBeGreaterThanOrEqual(0);
+        expect(executeToken).toBeLessThan(inventoryGuardMessage);
+
+        const manifest = readManifest() as RetirementManifest & {
+            concurrencyCorrection: {
+                routineExecuteProductionCount: number;
+                routineExecuteProductionInventorySha256: string;
+                rejectsAllExecuteRoutines: boolean;
+            };
+        };
+        expect(manifest.concurrencyCorrection.routineExecuteProductionCount).toBe(19);
+        expect(manifest.concurrencyCorrection.routineExecuteProductionInventorySha256)
+            .toMatch(/^[0-9a-f]{64}$/);
+        expect(manifest.concurrencyCorrection.rejectsAllExecuteRoutines).toBe(false);
     });
 
     it('covers exact restoration of columns, constraints, indexes, RLS policies, and grants', () => {
@@ -378,10 +673,12 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
     it('binds the exact ordered allowlist and deterministic zero-row checksum', () => {
         const manifest = readManifest();
         expect(manifest.destructiveAllowlist).toEqual([...TARGETS]);
-        const canonicalJson = JSON.stringify(manifest.destructiveAllowlist);
-        expect(manifest.destructiveAllowlistCanonicalJson).toBe(canonicalJson);
-        expect(createHash('sha256').update(canonicalJson, 'utf8').digest('hex'))
-            .toBe(manifest.destructiveAllowlistSha256);
+        expect(manifest.destructiveAllowlistCanonicalJson).toBe(ALLOWLIST_CANONICAL_JSON);
+        expect(createHash('sha256').update(ALLOWLIST_CANONICAL_JSON, 'utf8').digest('hex'))
+            .toBe(ALLOWLIST_SHA256);
+        expect(manifest.destructiveAllowlistSha256).toBe(ALLOWLIST_SHA256);
+        expect(extractNormalizedDropStatements(readMigration()))
+            .toEqual(EXPECTED_DROP_STATEMENTS);
         expect(manifest.destructiveOperations).toBe('refused');
         expect(manifest.zeroRowDataset.canonicalJson).toBe(ZERO_ROW_DATASET_CANONICAL_JSON);
         expect(manifest.zeroRowDataset.sha256).toBe(ZERO_ROW_DATASET_SHA256);
@@ -396,9 +693,58 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(manifest.restoreEvidence.tables).toEqual([...TARGETS]);
         expect(manifest.observationConclusion.status).toBe('bounded');
         expect(manifest.observationConclusion.conclusion).toContain('bounded');
-        expect(manifest.retirementDecision.status).toBe('ready-for-owner-approval');
-        expect(manifest.retirementDecision.ownerApproval).toBe('pending');
-        expect(manifest.retirementDecision.migrationFileCreated).toBe(false);
+        expect(manifest.retirementDecision.status).toBe('approved-not-applied');
+        expect(manifest.retirementDecision.ownerApproval).toBe('approved');
+        expect(manifest.retirementDecision.migrationFileCreated).toBe(true);
+        expect(manifest.retirementDecision.migrationFilePath).toBe(MIGRATION_RELATIVE_PATH);
+
+        const concurrency = (manifest as RetirementManifest & {
+            concurrencyCorrection: {
+                fixedTransactionAdvisoryLock: string;
+                serializesCoordinatedCopiesOnly: boolean;
+                blocksUncoordinatedPostgresqlDdl: boolean;
+                activeDdlCurrentDatabaseScoped: boolean;
+                activeDdlClientBackendUnknownStateOrQueryFailsClosed: boolean;
+                activeDdlUnknownBackendTypeFailsClosed: boolean;
+                activeDdlKnownNonClientBackgroundNullStateAllowed: boolean;
+                activeDdlGuardBeforeCatalogEvidence: boolean;
+                activeDdlGuardImmediatelyBeforeDrops: boolean;
+                splitLiteralProductionMatchCount: number;
+                rejectsAllExecuteRoutines: boolean;
+                singleWriterDdlMaintenanceWindowRequired: boolean;
+                coordinatorOnlyFromFinalPreflightThroughPostApplyVerification: boolean;
+                currentProductionActiveRelevantDdlCount: number;
+                currentProductionBackgroundNullStateActivityCount: number;
+                currentProductionBackgroundNullStateActivity: string;
+                trackedCiProductionDbPushEntrypoint: boolean;
+                targetOrAdvisoryLocksAloneBlockUncoordinatedDdl: boolean;
+            };
+        }).concurrencyCorrection;
+        expect(concurrency.fixedTransactionAdvisoryLock).toBe(
+            'pg_advisory_xact_lock(22091010, 22)',
+        );
+        expect(concurrency.serializesCoordinatedCopiesOnly).toBe(true);
+        expect(concurrency.blocksUncoordinatedPostgresqlDdl).toBe(false);
+        expect(concurrency.activeDdlCurrentDatabaseScoped).toBe(true);
+        expect(concurrency.activeDdlClientBackendUnknownStateOrQueryFailsClosed).toBe(true);
+        expect(concurrency.activeDdlUnknownBackendTypeFailsClosed).toBe(true);
+        expect(concurrency.activeDdlKnownNonClientBackgroundNullStateAllowed).toBe(true);
+        expect(concurrency.activeDdlGuardBeforeCatalogEvidence).toBe(true);
+        expect(concurrency.activeDdlGuardImmediatelyBeforeDrops).toBe(true);
+        expect(concurrency.splitLiteralProductionMatchCount).toBe(0);
+        expect(concurrency.rejectsAllExecuteRoutines).toBe(false);
+        expect(concurrency.singleWriterDdlMaintenanceWindowRequired).toBe(true);
+        expect(concurrency.coordinatorOnlyFromFinalPreflightThroughPostApplyVerification)
+            .toBe(true);
+        expect(concurrency.currentProductionActiveRelevantDdlCount).toBe(0);
+        expect(concurrency.currentProductionBackgroundNullStateActivityCount).toBe(2);
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('pg_cron launcher');
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('pg_net 0.19.5 worker');
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('state NULL');
+        expect(concurrency.currentProductionBackgroundNullStateActivity)
+            .toContain('background NULL-state activity');
+        expect(concurrency.trackedCiProductionDbPushEntrypoint).toBe(false);
+        expect(concurrency.targetOrAdvisoryLocksAloneBlockUncoordinatedDdl).toBe(false);
     });
 
     it('records the evidence and explicitly preserves non-production gates', () => {
@@ -410,7 +756,21 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toContain('isolated PGlite restore drill');
         expect(report).toContain('bounded observation conclusion');
         expect(report).toContain('owner approval');
+        expect(report).toContain('approved-but-not-applied');
+        expect(report).toContain(MIGRATION_RELATIVE_PATH);
         expect(report).toContain('No flag activation');
         expect(report).toContain('No Management API log evidence was collected or claimed.');
+        expect(report).toContain('single-writer DDL maintenance window');
+        expect(report).toContain('coordinator-only');
+        expect(report).toContain('current production relevant active DDL count is `0`');
+        expect(report).toMatch(/Tracked CI has no\s+production `supabase db push` entrypoint/);
+        expect(report).toContain('uncoordinated PostgreSQL DDL');
+        expect(report).toContain('split-literal');
+        expect(report).toContain('background_null_state_activity=2');
+        const manifest = readManifest();
+        expect(manifest.validation.localPostgresql17Drill)
+            .toContain('restricted-client hidden state/query visibility');
+        expect(manifest.validation.localPostgresql17Drill)
+            .toContain('backend_type IS NULL is covered only by the focused guard-structure test');
     });
 });
