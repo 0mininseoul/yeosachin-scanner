@@ -9,6 +9,7 @@ import {
     withCanonicalMirrorTimeout,
     type AccountLifecycleInput,
 } from '@/lib/services/operations/canonical-operations-store';
+import { accountDeletionCanonicalAdapter } from './account-deletion-canonical-adapter';
 import {
     createResultImageR2Writer,
     loadResultImageR2Config,
@@ -25,8 +26,10 @@ type Dependencies = {
     deleteObject?: (objectKey: string) => Promise<void>;
     deleteAuthUser?: (accountId: string) => Promise<void>;
     dualWrite?: boolean;
+    dualWriteMaintenance?: boolean;
     appendLifecycle?: (input: AccountLifecycleInput) => Promise<unknown>;
     queueMaintenanceJob?: (input: Parameters<typeof queueCanonicalMaintenanceJob>[0]) => Promise<unknown>;
+    mirrorMaintenanceJob?: (accountId: string) => Promise<unknown>;
 };
 
 export class AccountDeletionError extends Error {
@@ -50,9 +53,13 @@ export async function deleteAccountPermanently(
     const id = z.string().uuid().parse(accountId);
     const rpc = dependencies.rpc ?? ((name, params) => supabaseAdmin.rpc(name, params));
     const dualWrite = dependencies.dualWrite ?? isCanonicalFamilyWriteEnabled('account');
+    const dualWriteMaintenance = dependencies.dualWriteMaintenance
+        ?? isCanonicalFamilyWriteEnabled('maintenance');
     const appendLifecycle = dependencies.appendLifecycle
         ?? canonicalOperationsStore.appendAccountLifecycle;
     const queueMaintenanceJob = dependencies.queueMaintenanceJob ?? queueCanonicalMaintenanceJob;
+    const mirrorMaintenanceJob = dependencies.mirrorMaintenanceJob
+        ?? accountDeletionCanonicalAdapter.mirrorMaintenanceJob;
     const recordLifecycle = async (
         eventKind: AccountLifecycleInput['eventKind'],
         state: string,
@@ -84,11 +91,27 @@ export async function deleteAccountPermanently(
             throw new AccountDeletionError('ACCOUNT_DELETION_LIFECYCLE_UNAVAILABLE');
         }
     };
+    const mirrorSourceJob = async (): Promise<void> => {
+        if (!dualWriteMaintenance) return;
+        try {
+            await withCanonicalMirrorTimeout(() => mirrorMaintenanceJob(id));
+        } catch {
+            try {
+                await withCanonicalMirrorTimeout(() => queueMaintenanceJob(
+                    maintenanceMarker('recovery', id, 'account-deletion-maintenance-mirror'),
+                ));
+            } catch {
+                // The legacy deletion job remains authoritative while the
+                // canonical mirror is unavailable. No fallback is destructive.
+            }
+        }
+    };
     await recordLifecycle('deletion_requested', 'started:begin', { phase: 'begin' });
     const begin = await rpc('begin_account_deletion_v1', { p_account_id: id });
     if (begin.error) throw new AccountDeletionError('ACCOUNT_DELETION_BEGIN_FAILED');
     const parsed = beginResultSchema.safeParse(begin.data);
     if (!parsed.success) throw new AccountDeletionError('ACCOUNT_DELETION_RESULT_INVALID');
+    await mirrorSourceJob();
     await recordLifecycle('deletion_requested', 'completed:begin', {
         phase: 'begin',
         state: parsed.data.state,
@@ -162,6 +185,7 @@ export async function deleteAccountPermanently(
         if (finalized.error) {
             throw new AccountDeletionError('ACCOUNT_DELETION_DATABASE_PURGE_FAILED');
         }
+        await mirrorSourceJob();
         await recordLifecycle('database_purged', 'completed:database', {
             phase: 'database',
             object_count: parsed.data.objectKeys.length,
@@ -197,5 +221,6 @@ export async function deleteAccountPermanently(
     if (completed.error || completed.data !== true) {
         throw new AccountDeletionError('ACCOUNT_DELETION_COMPLETION_FAILED');
     }
+    await mirrorSourceJob();
     await recordLifecycle('retired', 'completed:completion', { phase: 'completion' });
 }
