@@ -83,7 +83,7 @@
         },
         {
           "tables": ["analysis_revenue_ai_routing_attempt_lineages", "analysis_revenue_final_coverage_gates", "analysis_revenue_fresh_provider_evidence", "analysis_revenue_primary_quality_checkpoints", "analysis_revenue_resolver_capacity_reservations", "analysis_revenue_resolver_outcome_overlays", "analysis_revenue_resolver_passes", "analysis_revenue_run_ledgers"],
-          "references": ["lib/services/analysis/fresh-provenance-store.ts:134-160", "lib/services/analysis/revenue-final-quality-gate.ts:123-158", "lib/services/analysis/revenue-resolver-capacity.ts:195-252", "supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql", "supabase/migrations/20260811110000_add_revenue_gender_routing_attempt_contract.sql"]
+          "references": ["lib/services/analysis/fresh-provenance-store.ts:134-160", "lib/services/analysis/revenue-final-quality-gate.ts:123-158", "lib/services/analysis/revenue-resolver-capacity.ts:195-252", "supabase/migrations/20260810100000_add_revenue_cost_operation_ledger.sql", "supabase/migrations/20260811090000_harden_fresh_provenance.sql", "supabase/migrations/20260811110000_add_revenue_gender_routing_attempt_contract.sql"]
         },
         {
           "tables": ["analysis_v2_result_image_objects", "analysis_v2_result_image_purge_outbox"],
