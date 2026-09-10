@@ -169,8 +169,8 @@
     "singleWriterDdlMaintenanceWindowRequired": true,
     "coordinatorOnlyFromFinalPreflightThroughPostApplyVerification": true,
     "currentProductionActiveRelevantDdlCount": 0,
-    "currentProductionHiddenActivityCount": 2,
-    "currentProductionHiddenActivity": "exactly pg_cron launcher and pg_net 0.19.5 worker; each query visible and state NULL; known non-client background activity",
+    "currentProductionBackgroundNullStateActivityCount": 2,
+    "currentProductionBackgroundNullStateActivity": "exactly pg_cron launcher and pg_net 0.19.5 worker; each query visible and state NULL; known non-client background NULL-state activity",
     "trackedCiProductionDbPushEntrypoint": false,
     "targetOrAdvisoryLocksAloneBlockUncoordinatedDdl": false,
     "catalogShareLockPrivileges": {
@@ -198,7 +198,7 @@
   "validation": {
     "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (14 tests, including backend-type-scoped NULL-state regression, EOF/dynamic destructive-scope regressions, and isolated PGlite restore drill)",
     "redEvidence": "captured before implementation: focused run failed the expected backend-type-scoped NULL-state regression for benign non-client background activity while retaining unknown client/backend fail-closed checks",
-    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t for unknown client/backend visibility, inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
+    "localPostgresql17Drill": "passed: coordinator-verified one disposable PostgreSQL 17 cluster over TCP 127.0.0.1 with -U postgres and exactly three direct probes: hidden_guard=t for restricted-client hidden state/query visibility; backend_type IS NULL is covered only by the focused guard-structure test; inventory_stable=t, inventory_mutation_detected=t, ddl_lexical=t; exact cluster stopped and trashed",
     "localPostgresql17Sanity": "not-run: no separate sanity probe; all local coverage is recorded in localPostgresql17Drill",
     "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",

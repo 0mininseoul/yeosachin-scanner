@@ -53,7 +53,7 @@ refused, and the reversible draft SQL remains under `supabase/operations/`.
   `public.analysis_results` can make PostgreSQL use a child `result_id` index
   for foreign-key cascade checks. The index counters therefore do not override
   the zero-row, zero-write, dependency, and runtime evidence above.
-- The supplied activity evidence had `hidden_activity=2`, consisting exactly
+- The supplied activity evidence had `background_null_state_activity=2`, consisting exactly
   of the pg_cron launcher and pg_net 0.19.5 worker. Both rows had visible
   queries and `state` `NULL`; they were known non-client background activity,
   not hidden client backends. The current production relevant active DDL count

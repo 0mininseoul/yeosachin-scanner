@@ -162,6 +162,7 @@ type RetirementManifest = {
     };
     validation: {
         focusedTests: string;
+        localPostgresql17Drill: string;
         lint: string;
         diffReview: string;
         stagedSecretScan: string;
@@ -713,8 +714,8 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
                 singleWriterDdlMaintenanceWindowRequired: boolean;
                 coordinatorOnlyFromFinalPreflightThroughPostApplyVerification: boolean;
                 currentProductionActiveRelevantDdlCount: number;
-                currentProductionHiddenActivityCount: number;
-                currentProductionHiddenActivity: string;
+                currentProductionBackgroundNullStateActivityCount: number;
+                currentProductionBackgroundNullStateActivity: string;
                 trackedCiProductionDbPushEntrypoint: boolean;
                 targetOrAdvisoryLocksAloneBlockUncoordinatedDdl: boolean;
             };
@@ -736,10 +737,12 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(concurrency.coordinatorOnlyFromFinalPreflightThroughPostApplyVerification)
             .toBe(true);
         expect(concurrency.currentProductionActiveRelevantDdlCount).toBe(0);
-        expect(concurrency.currentProductionHiddenActivityCount).toBe(2);
-        expect(concurrency.currentProductionHiddenActivity).toContain('pg_cron launcher');
-        expect(concurrency.currentProductionHiddenActivity).toContain('pg_net 0.19.5 worker');
-        expect(concurrency.currentProductionHiddenActivity).toContain('state NULL');
+        expect(concurrency.currentProductionBackgroundNullStateActivityCount).toBe(2);
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('pg_cron launcher');
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('pg_net 0.19.5 worker');
+        expect(concurrency.currentProductionBackgroundNullStateActivity).toContain('state NULL');
+        expect(concurrency.currentProductionBackgroundNullStateActivity)
+            .toContain('background NULL-state activity');
         expect(concurrency.trackedCiProductionDbPushEntrypoint).toBe(false);
         expect(concurrency.targetOrAdvisoryLocksAloneBlockUncoordinatedDdl).toBe(false);
     });
@@ -763,5 +766,11 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toMatch(/Tracked CI has no\s+production `supabase db push` entrypoint/);
         expect(report).toContain('uncoordinated PostgreSQL DDL');
         expect(report).toContain('split-literal');
+        expect(report).toContain('background_null_state_activity=2');
+        const manifest = readManifest();
+        expect(manifest.validation.localPostgresql17Drill)
+            .toContain('restricted-client hidden state/query visibility');
+        expect(manifest.validation.localPostgresql17Drill)
+            .toContain('backend_type IS NULL is covered only by the focused guard-structure test');
     });
 });
