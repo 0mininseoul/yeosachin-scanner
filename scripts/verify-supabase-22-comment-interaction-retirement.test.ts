@@ -22,6 +22,7 @@ const REPORT_PATH = resolve(
     'docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md',
 );
 const TARGETS = ['public.comment_details', 'public.interaction_logs'] as const;
+const EXPECTED_DROP_STATEMENTS = TARGETS.map(table => `DROP TABLE ${table};`);
 const ALLOWLIST_CANONICAL_JSON = JSON.stringify(TARGETS);
 const ALLOWLIST_SHA256 = 'a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6';
 const ZERO_ROW_DATASET_CANONICAL_JSON = JSON.stringify([
@@ -31,6 +32,21 @@ const ZERO_ROW_DATASET_CANONICAL_JSON = JSON.stringify([
 const ZERO_ROW_DATASET_SHA256 = createHash('sha256')
     .update(ZERO_ROW_DATASET_CANONICAL_JSON, 'utf8')
     .digest('hex');
+
+function stripSqlComments(sql: string): string {
+    return sql
+        .replace(/--[^\r\n]*/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
+function normalizeSqlWhitespace(sql: string): string {
+    return sql.replace(/\s+/g, ' ').trim();
+}
+
+function extractNormalizedDropStatements(sql: string): string[] {
+    return (stripSqlComments(sql).match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [])
+        .map(normalizeSqlWhitespace);
+}
 
 function readDraft(): string {
     return readFileSync(SQL_PATH, 'utf8');
@@ -153,17 +169,34 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
 
     it('binds the generated migration to exactly the two qualified destructive targets', () => {
         const migration = readMigration();
-        const destructiveStatements = migration.match(
+        const activeMigration = stripSqlComments(migration);
+        const destructiveStatements = activeMigration.match(
             /\b(?:DROP\s+(?:TABLE|SCHEMA|VIEW|MATERIALIZED\s+VIEW|FUNCTION|INDEX|SEQUENCE|TYPE|DOMAIN|POLICY|TRIGGER)|TRUNCATE\s+TABLE)\b[^;]*;/gi,
         ) ?? [];
-        const dropStatements = migration.match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
+        const dropStatements = extractNormalizedDropStatements(migration);
         expect(destructiveStatements).toHaveLength(TARGETS.length);
         expect(dropStatements).toHaveLength(TARGETS.length);
-        expect(dropStatements.map(statement => statement.match(/public\.[a-z_]+/i)?.[0]))
-            .toEqual([...TARGETS]);
-        expect(destructiveStatements).toEqual(dropStatements);
+        expect(dropStatements).toEqual(EXPECTED_DROP_STATEMENTS);
+        expect(destructiveStatements.map(normalizeSqlWhitespace)).toEqual(dropStatements);
         expect(dropStatements.every(statement => !/\bCASCADE\b/i.test(statement))).toBe(true);
         expect(migration).not.toMatch(/\bDROP\s+TABLE\b[^;]*\bCASCADE\b/i);
+        expect(activeMigration).not.toMatch(
+            /\b(?:TRUNCATE|DELETE|UPDATE|INSERT|CREATE|ALTER|RENAME|GRANT|REVOKE)\b/i,
+        );
+    });
+
+    it('rejects a comma-separated third DROP TABLE target', () => {
+        const migrationWithThirdTarget = [
+            'DROP TABLE public.comment_details, public.unapproved_table;',
+            'DROP TABLE public.interaction_logs;',
+        ].join('\n');
+
+        expect(extractNormalizedDropStatements(migrationWithThirdTarget)).toEqual([
+            'DROP TABLE public.comment_details, public.unapproved_table;',
+            'DROP TABLE public.interaction_logs;',
+        ]);
+        expect(extractNormalizedDropStatements(migrationWithThirdTarget))
+            .not.toEqual(EXPECTED_DROP_STATEMENTS);
     });
 
     it('fails closed on missing, non-empty, or newly dependent targets', () => {
@@ -403,9 +436,8 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(createHash('sha256').update(ALLOWLIST_CANONICAL_JSON, 'utf8').digest('hex'))
             .toBe(ALLOWLIST_SHA256);
         expect(manifest.destructiveAllowlistSha256).toBe(ALLOWLIST_SHA256);
-        const migrationDrops = readMigration().match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
-        expect(migrationDrops.map(statement => statement.match(/public\.[a-z_]+/i)?.[0]))
-            .toEqual([...TARGETS]);
+        expect(extractNormalizedDropStatements(readMigration()))
+            .toEqual(EXPECTED_DROP_STATEMENTS);
         expect(manifest.destructiveOperations).toBe('refused');
         expect(manifest.zeroRowDataset.canonicalJson).toBe(ZERO_ROW_DATASET_CANONICAL_JSON);
         expect(manifest.zeroRowDataset.sha256).toBe(ZERO_ROW_DATASET_SHA256);
