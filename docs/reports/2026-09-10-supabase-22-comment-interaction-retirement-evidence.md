@@ -53,8 +53,8 @@ The deterministic zero-row dataset is the compact UTF-8 JSON
 `[{"table":"public.comment_details","rows":[]},{"table":"public.interaction_logs","rows":[]}]`,
 with SHA-256
 `bb705113dc6c51ea03e76a8d92f1b1e644809809f6d15615b69b4a2ea36a56ad`. Archive
-encryption is excepted for this package because No row payload exists to encrypt;
-the exception does not waive schema restoration or verification.
+encryption is excepted for this package. No row payload exists to encrypt; the
+exception does not waive schema restoration or verification.
 
 The focused test runs an isolated PGlite restore drill: it extracts only the
 commented restore block, creates minimal `anon`, `authenticated`, and
@@ -67,11 +67,11 @@ catalog primitives, so the active guarded DROP section is not executed and no
 production or Management API log evidence is claimed.
 No Management API log evidence was collected or claimed.
 
-Bounded observation conclusion (the manifest's bounded observation conclusion): within the supplied postmaster-start counters
-and bounded `app/`/`lib/`/`hooks/`/`scripts/` inspection, both tables are
-zero-row and zero-write with no observed runtime/dependency use. This supports
-an owner-approval proposal, not an assertion that all future or external use is
-impossible.
+The manifest's bounded observation conclusion is: within the supplied
+postmaster-start counters and bounded `app/`/`lib/`/`hooks/`/`scripts/`
+inspection, both tables are zero-row and zero-write with no observed
+runtime/dependency use. This supports an owner-approval proposal, not an
+assertion that all future or external use is impossible.
 
 ## Draft contract and restoration
 
