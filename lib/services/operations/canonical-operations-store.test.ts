@@ -29,6 +29,21 @@ function migrationSql(): string {
     );
 }
 
+function accountDeletionMigrationSql(): string {
+    const migration = readdirSync(join(process.cwd(), 'supabase/migrations'))
+        .filter(name => name.endsWith('_prepare_account_deletion_canonical_wave.sql'))
+        .sort();
+    if (migration.length !== 1) {
+        throw new Error(
+            `Expected one account-deletion canonical migration, found ${migration.length}`,
+        );
+    }
+    return readFileSync(
+        join(process.cwd(), 'supabase/migrations', migration[0]),
+        'utf8',
+    );
+}
+
 describe('operations canonical migration contract', () => {
     it('adds bounded recovery indexes and lease fence columns', () => {
         const sql = migrationSql();
@@ -74,6 +89,23 @@ describe('operations canonical migration contract', () => {
         expect(sql).toContain('p_retry_after_seconds');
         expect(sql).toContain("p_outcome NOT IN ('sent', 'retryable', 'dead')");
         expect(sql).toContain("p_outcome NOT IN ('succeeded', 'retryable', 'blocked')");
+    });
+
+    it('keeps account-deletion mapping additive and source-authoritative', () => {
+        const sql = accountDeletionMigrationSql();
+        expect(sql).toContain('CREATE FUNCTION public.mirror_account_deletion_job_v1');
+        expect(sql).toContain('public.account_deletion_jobs');
+        expect(sql).toContain('public.maintenance_jobs');
+        expect(sql).toContain("'source_table'");
+        expect(sql).toContain("'source_key_hash'");
+        expect(sql).toContain("'legacy_state'");
+        expect(sql).toContain('ACCOUNT_DELETION_SOURCE_REGRESSION');
+        expect(sql).toContain('SET search_path = \'\'');
+        expect(sql).toContain('FOR SHARE');
+        expect(sql).toContain('ON CONFLICT (kind, target_key_hash) DO NOTHING');
+        expect(sql).toContain('REVOKE EXECUTE ON FUNCTION public.mirror_account_deletion_job_v1');
+        expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.mirror_account_deletion_job_v1');
+        expect(sql).not.toMatch(/\bDROP\s+(?:TABLE|COLUMN|FUNCTION)\b|\bTRUNCATE\b|\bDELETE\s+FROM\s+public\.account_deletion_jobs\b/i);
     });
 });
 
@@ -147,6 +179,21 @@ describe('canonical operations store', () => {
             contentHash: canonicalJsonHash('system-configuration', config),
             effectiveAt: null,
         })).resolves.toEqual({ status: 'recorded', duplicate: false });
+    });
+
+    it('mirrors an account deletion source row through a typed service RPC', async () => {
+        const accountId = '6d809496-1cb8-4e4f-a081-8efc14a7a64c';
+        const rpc = vi.fn(async (name: string, params: Record<string, unknown>) => {
+            expect(name).toBe('mirror_account_deletion_job_v1');
+            expect(params).toEqual({ p_account_id: accountId });
+            return { data: { status: 'mirrored', duplicate: false }, error: null };
+        });
+        const store = createCanonicalOperationsStore({ rpc });
+
+        await expect(store.mirrorAccountDeletionJob(accountId)).resolves.toEqual({
+            status: 'mirrored',
+            duplicate: false,
+        });
     });
 
     it('rejects empty or non-derived configuration content hashes before the RPC', async () => {

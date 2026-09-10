@@ -117,6 +117,9 @@ const maintenanceInputSchema = z.object({
     ...input,
     payload: parseJsonObject(input.payload, 'CANONICAL_OPERATIONS_INPUT_INVALID'),
 }));
+const accountDeletionMaintenanceInputSchema = z.object({
+    accountId: uuidSchema,
+}).strict();
 const notificationFinishInputSchema = z.object({
     outboxId: uuidSchema,
     leaseToken: uuidSchema,
@@ -156,6 +159,7 @@ export type AccountLifecycleInput = z.input<typeof lifecycleInputSchema>;
 export type SystemConfigurationInput = z.input<typeof configurationInputSchema>;
 export type SystemLeaseInput = z.infer<typeof leaseInputSchema>;
 export type MaintenanceJobInput = z.input<typeof maintenanceInputSchema>;
+export type AccountDeletionMaintenanceInput = z.infer<typeof accountDeletionMaintenanceInputSchema>;
 export type NotificationFinishInput = z.infer<typeof notificationFinishInputSchema>;
 export type MaintenanceFinishInput = z.infer<typeof maintenanceFinishInputSchema>;
 export type CanonicalClaimInput = z.infer<typeof claimInputSchema>;
@@ -353,6 +357,7 @@ export interface CanonicalOperationsStore {
     recordSystemConfiguration(input: SystemConfigurationInput): Promise<unknown>;
     acquireSystemLease(input: SystemLeaseInput): Promise<SystemLeaseResult>;
     enqueueMaintenanceJob(input: MaintenanceJobInput): Promise<unknown>;
+    mirrorAccountDeletionJob(accountId: string): Promise<unknown>;
     claimNotificationOutbox(input: CanonicalClaimInput): Promise<ReadonlyArray<Record<string, unknown>>>;
     finishNotificationOutbox(input: NotificationFinishInput): Promise<unknown>;
     reconcileStaleNotificationOutboxClaims(limit?: number): Promise<unknown>;
@@ -488,6 +493,16 @@ export function createCanonicalOperationsStore(
             return parseOperationResult(data);
         },
 
+        async mirrorAccountDeletionJob(accountId: string) {
+            const parsed = parseInput(accountDeletionMaintenanceInputSchema, { accountId });
+            const data = await callRpc(
+                dependencies.rpc,
+                'mirror_account_deletion_job_v1',
+                { p_account_id: parsed.accountId },
+            );
+            return parseOperationResult(data);
+        },
+
         async claimNotificationOutbox(input: CanonicalClaimInput) {
             const parsed = parseInput(claimInputSchema, input);
             const data = await callRpc(dependencies.rpc, 'claim_notification_outbox_v1', {
@@ -565,6 +580,13 @@ export function queueCanonicalMaintenanceJob(input: MaintenanceJobInput): Promis
         return Promise.reject(new CanonicalOperationsError('CANONICAL_MAINTENANCE_UNAVAILABLE'));
     }
     return canonicalOperationsStore.enqueueMaintenanceJob(input);
+}
+
+export function mirrorCanonicalAccountDeletionJob(accountId: string): Promise<unknown> {
+    if (!isCanonicalFamilyWriteEnabled('maintenance')) {
+        return Promise.reject(new CanonicalOperationsError('CANONICAL_MAINTENANCE_UNAVAILABLE'));
+    }
+    return canonicalOperationsStore.mirrorAccountDeletionJob(accountId);
 }
 
 export type ShadowRow = Readonly<{
