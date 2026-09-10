@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = process.cwd();
 const MIGRATIONS_DIR = resolve(REPO_ROOT, 'supabase/migrations');
+const MIGRATION_FILE_NAME = '20260910123053_retire_comment_interaction_evidence.sql';
+const MIGRATION_RELATIVE_PATH = `supabase/migrations/${MIGRATION_FILE_NAME}`;
+const MIGRATION_PATH = resolve(MIGRATIONS_DIR, MIGRATION_FILE_NAME);
 const SQL_PATH = resolve(
     REPO_ROOT,
     'supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql',
@@ -19,6 +22,8 @@ const REPORT_PATH = resolve(
     'docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md',
 );
 const TARGETS = ['public.comment_details', 'public.interaction_logs'] as const;
+const ALLOWLIST_CANONICAL_JSON = JSON.stringify(TARGETS);
+const ALLOWLIST_SHA256 = 'a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6';
 const ZERO_ROW_DATASET_CANONICAL_JSON = JSON.stringify([
     { table: TARGETS[0], rows: [] },
     { table: TARGETS[1], rows: [] },
@@ -29,6 +34,10 @@ const ZERO_ROW_DATASET_SHA256 = createHash('sha256')
 
 function readDraft(): string {
     return readFileSync(SQL_PATH, 'utf8');
+}
+
+function readMigration(): string {
+    return readFileSync(MIGRATION_PATH, 'utf8');
 }
 
 function extractRestoreSql(sql: string): string {
@@ -78,6 +87,7 @@ type RetirementManifest = {
         status: string;
         ownerApproval: string;
         migrationFileCreated: boolean;
+        migrationFilePath: string;
     };
     validation: {
         focusedTests: string;
@@ -128,25 +138,36 @@ async function queryRows<T>(db: PGlite, sql: string): Promise<readonly T[]> {
 }
 
 describe('Supabase 22 comment/interactions retirement approval package', () => {
-    it('keeps the draft outside migrations and does not create a migration file', () => {
+    it('uses the single CLI-generated migration path and keeps the draft outside migrations', () => {
         expect(SQL_PATH.startsWith(`${MIGRATIONS_DIR}/`)).toBe(false);
         expect(existsSync(SQL_PATH)).toBe(true);
-        expect(existsSync(resolve(
-            MIGRATIONS_DIR,
-            '20260910_retire_comment_interaction_evidence_draft.sql',
-        ))).toBe(false);
+        expect(existsSync(resolve(MIGRATIONS_DIR, '20260910_retire_comment_interaction_evidence_draft.sql')))
+            .toBe(false);
+        expect(existsSync(MIGRATION_PATH)).toBe(true);
+        expect(readdirSync(MIGRATIONS_DIR)
+            .filter(fileName => fileName.endsWith('_retire_comment_interaction_evidence.sql')))
+            .toEqual([MIGRATION_FILE_NAME]);
+        expect(readMigration()).not.toContain('RESTORE ONLY');
+        expect(readMigration()).not.toContain('/*');
     });
 
-    it('contains exactly the two qualified destructive targets', () => {
-        const dropStatements = readDraft().match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
+    it('binds the generated migration to exactly the two qualified destructive targets', () => {
+        const migration = readMigration();
+        const destructiveStatements = migration.match(
+            /\b(?:DROP\s+(?:TABLE|SCHEMA|VIEW|MATERIALIZED\s+VIEW|FUNCTION|INDEX|SEQUENCE|TYPE|DOMAIN|POLICY|TRIGGER)|TRUNCATE\s+TABLE)\b[^;]*;/gi,
+        ) ?? [];
+        const dropStatements = migration.match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
+        expect(destructiveStatements).toHaveLength(TARGETS.length);
         expect(dropStatements).toHaveLength(TARGETS.length);
         expect(dropStatements.map(statement => statement.match(/public\.[a-z_]+/i)?.[0]))
             .toEqual([...TARGETS]);
+        expect(destructiveStatements).toEqual(dropStatements);
         expect(dropStatements.every(statement => !/\bCASCADE\b/i.test(statement))).toBe(true);
+        expect(migration).not.toMatch(/\bDROP\s+TABLE\b[^;]*\bCASCADE\b/i);
     });
 
     it('fails closed on missing, non-empty, or newly dependent targets', () => {
-        const sql = readDraft();
+        const sql = readMigration();
         expect(sql).toContain("c.relname = 'comment_details'");
         expect(sql).toContain("c.relname = 'interaction_logs'");
         expect(sql).toContain('SELECT count(*) INTO v_comment_rows FROM public.comment_details');
@@ -378,10 +399,13 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
     it('binds the exact ordered allowlist and deterministic zero-row checksum', () => {
         const manifest = readManifest();
         expect(manifest.destructiveAllowlist).toEqual([...TARGETS]);
-        const canonicalJson = JSON.stringify(manifest.destructiveAllowlist);
-        expect(manifest.destructiveAllowlistCanonicalJson).toBe(canonicalJson);
-        expect(createHash('sha256').update(canonicalJson, 'utf8').digest('hex'))
-            .toBe(manifest.destructiveAllowlistSha256);
+        expect(manifest.destructiveAllowlistCanonicalJson).toBe(ALLOWLIST_CANONICAL_JSON);
+        expect(createHash('sha256').update(ALLOWLIST_CANONICAL_JSON, 'utf8').digest('hex'))
+            .toBe(ALLOWLIST_SHA256);
+        expect(manifest.destructiveAllowlistSha256).toBe(ALLOWLIST_SHA256);
+        const migrationDrops = readMigration().match(/\bDROP\s+TABLE\b[^;]*;/gi) ?? [];
+        expect(migrationDrops.map(statement => statement.match(/public\.[a-z_]+/i)?.[0]))
+            .toEqual([...TARGETS]);
         expect(manifest.destructiveOperations).toBe('refused');
         expect(manifest.zeroRowDataset.canonicalJson).toBe(ZERO_ROW_DATASET_CANONICAL_JSON);
         expect(manifest.zeroRowDataset.sha256).toBe(ZERO_ROW_DATASET_SHA256);
@@ -396,9 +420,10 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(manifest.restoreEvidence.tables).toEqual([...TARGETS]);
         expect(manifest.observationConclusion.status).toBe('bounded');
         expect(manifest.observationConclusion.conclusion).toContain('bounded');
-        expect(manifest.retirementDecision.status).toBe('ready-for-owner-approval');
-        expect(manifest.retirementDecision.ownerApproval).toBe('pending');
-        expect(manifest.retirementDecision.migrationFileCreated).toBe(false);
+        expect(manifest.retirementDecision.status).toBe('approved-not-applied');
+        expect(manifest.retirementDecision.ownerApproval).toBe('approved');
+        expect(manifest.retirementDecision.migrationFileCreated).toBe(true);
+        expect(manifest.retirementDecision.migrationFilePath).toBe(MIGRATION_RELATIVE_PATH);
     });
 
     it('records the evidence and explicitly preserves non-production gates', () => {
@@ -410,6 +435,8 @@ describe('Supabase 22 comment/interactions retirement approval package', () => {
         expect(report).toContain('isolated PGlite restore drill');
         expect(report).toContain('bounded observation conclusion');
         expect(report).toContain('owner approval');
+        expect(report).toContain('approved-but-not-applied');
+        expect(report).toContain(MIGRATION_RELATIVE_PATH);
         expect(report).toContain('No flag activation');
         expect(report).toContain('No Management API log evidence was collected or claimed.');
     });

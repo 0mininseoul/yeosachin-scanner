@@ -3,13 +3,17 @@
 Captured 2026-09-10 as an evidence-only package. The production facts below
 were independently collected by the coordinator; this worker made no remote
 service call, applied no Supabase migration, and performed no production DROP.
-The already verified account-deletion post-apply evidence is included through
-cherry-picked commit `18426f8fb5b2d23d5d86c912dc805d7a2bd32220`.
+The owner has separately approved the exact ordered allowlist below, while the
+generated migration remains approved-but-not-applied. The already verified
+account-deletion post-apply evidence is included through cherry-picked commit
+`18426f8fb5b2d23d5d86c912dc805d7a2bd32220`.
 
 ## Decision
 
-The evidence supports proposing retirement of exactly these two qualified
-relations, subject to owner approval:
+The owner approved production retirement of exactly these two qualified
+relations:
+
+This package records owner approval for that exact ordered allowlist and hash.
 
 ```text
 public.comment_details
@@ -20,9 +24,10 @@ The canonical ordered JSON is
 `["public.comment_details","public.interaction_logs"]`; its deterministic
 UTF-8 SHA-256 is
 `a616d2972b931904113f18fb075850ef13cba0a384ea3b819740ee2f012dabe6`.
-The allowlist is proposed for approval only. Destructive operations remain
-refused, no migration file has been added under `supabase/migrations`, and the
-draft SQL is kept under `supabase/operations/`.
+The approved allowlist is bound to the generated migration
+`supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql`.
+The migration is approved-but-not-applied; destructive operations remain
+refused, and the reversible draft SQL remains under `supabase/operations/`.
 
 ## Production evidence
 
@@ -76,10 +81,10 @@ assertion that all future or external use is impossible.
 ## Draft contract and restoration
 
 `supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql`
-is the only SQL artifact for this proposal. It takes an access-exclusive lock
-on the exact two tables, fails closed if either table is missing, non-empty, or
-has an incoming foreign key, dependent view/routine, user trigger, or
-publication membership, then issues only:
+remains the reversible SQL artifact for this package. It takes an
+access-exclusive lock on the exact two tables, fails closed if either table is
+missing, non-empty, or has an incoming foreign key, dependent view/routine,
+user trigger, or publication membership, then issues only:
 
 ```sql
 DROP TABLE public.comment_details;
@@ -94,11 +99,18 @@ original column order/defaults, primary keys, outgoing foreign keys and checks,
 grants. Keeping the restore block commented prevents an accidental drop-and-
 recreate cycle when the draft is inspected or run after approval.
 
+The generated migration at
+`supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql`
+contains only the reviewed active transaction, fail-closed guards, and the two
+exact non-CASCADE DROP statements. It contains no restore block; the
+coordinator owns its independent exact-allowlist dry-run, apply, and
+post-apply verification.
+
 ## Remaining gates
 
-1. Owner approval must cover exactly the two qualified names and the hash above.
-2. After approval, create a timestamped migration containing only the reviewed
-   destructive scope; this package deliberately creates no migration file.
+1. Owner approval is recorded for exactly the two qualified names and the hash above.
+2. The generated migration is approved-but-not-applied and must remain limited
+   to the reviewed destructive scope.
 3. Run a dry-run and apply only that allowlisted migration, then verify remote
    migration history.
 4. Perform post-apply read-only absence/dependency checks and retain the exact

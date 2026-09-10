@@ -153,29 +153,30 @@
   },
   "retirementDecision": {
     "evidenceSupportsRetirementProposal": true,
-    "status": "ready-for-owner-approval",
+    "status": "approved-not-applied",
     "destructiveOperations": "refused",
-    "ownerApproval": "pending",
+    "ownerApproval": "approved",
     "allowlistSource": "top-level destructiveAllowlist",
-    "migrationFileCreated": false
+    "migrationFileCreated": true,
+    "migrationFilePath": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql"
   },
   "remainingGates": [
-    "owner approval for exactly the ordered destructiveAllowlist and its SHA-256",
-    "create a separately reviewed timestamped file under supabase/migrations only after approval",
+    "the generated migration remains approved-but-not-applied until the coordinator's exact-allowlist rollout window",
     "migration dry-run with the exact two-object allowlist",
     "apply only the approved migration and verify remote migration history",
     "post-apply read-only verification of object absence, dependency absence, and rollback readiness"
   ],
   "validation": {
     "focusedTests": "passed: vitest run scripts/verify-supabase-22-comment-interaction-retirement.test.ts (7 tests, including isolated PGlite restore drill)",
-    "typecheck": "not-run",
+    "typecheck": "passed: npx tsc --noEmit --pretty false",
     "lint": "passed: eslint scripts/verify-supabase-22-comment-interaction-retirement.test.ts",
     "diffReview": "passed: origin/main diff reviewed; exactly four retirement package files and the account-deletion post-apply evidence commit are in scope",
-    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner"
+    "stagedSecretScan": "passed: gitleaks protect --staged --no-banner --redact"
   },
   "artifacts": {
     "evidenceReport": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-evidence.md",
     "manifest": "docs/reports/2026-09-10-supabase-22-comment-interaction-retirement-manifest.json",
-    "draftSql": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql"
+    "draftSql": "supabase/operations/20260910_retire_comment_interaction_evidence_draft.sql",
+    "migrationSql": "supabase/migrations/20260910123053_retire_comment_interaction_evidence.sql"
   }
 }
