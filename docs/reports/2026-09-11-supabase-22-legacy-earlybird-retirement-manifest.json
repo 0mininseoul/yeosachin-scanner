@@ -129,6 +129,24 @@
     "runtimeTrafficProof": "static and catalog caller evidence only; pg_stat_user_functions not used"
   },
   "rollbackSource": "supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql",
+  "restoreStatus": "verified",
+  "restoreEvidence": {
+    "environment": "isolated-pglite",
+    "schemaVerified": true,
+    "typedColumnParityVerified": true,
+    "canonicalRowsUnchanged": true,
+    "tables": [
+      "earlybird_concierge_batch_target_lineage_repairs",
+      "earlybird_partial_adoption_second_rearms",
+      "earlybird_profile_evidence_failure_recoveries",
+      "earlybird_v211_apify_transient_admission_resumes",
+      "earlybird_v211_concierge_copy_corrections",
+      "earlybird_v212_concierge_copy_corrections",
+      "earlybird_v213_concierge_copy_corrections",
+      "earlybird_v214_concierge_gemini_copy_corrections"
+    ]
+  },
+  "verificationOperation": "supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql",
   "rolloutStatus": "not_applied",
   "evidenceStatus": "READY_FOR_REVIEW_NOT_APPLIED",
   "productionMutation": "refused",
@@ -137,5 +155,12 @@
     "analysisAdmission": "unchanged",
     "realCanary": "not_run",
     "externalServices": "not_accessed"
+  },
+  "validation": {
+    "focusedRetirementTests": "pending branch verification",
+    "isolatedRestoreDrill": "passed: 11 tests in scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts",
+    "lint": "pending branch verification",
+    "build": "pending branch verification",
+    "diffReview": "pending branch verification"
   }
 }

@@ -47,7 +47,7 @@
 - Consumes: the eight-table allowlist and production aggregate evidence in Global Constraints.
 - Produces: explicit `destinationFor(tableName) === 'maintenance_jobs'` mappings and a versioned manifest consumed by migration tests and rollout verification.
 
-- [ ] **Step 1: Add failing exact-mapping tests**
+- [x] **Step 1: Add failing exact-mapping tests**
 
   Extend the existing destination test with all eight literal names and add negative assertions for `earlybird_webhook_events`, `earlybird_fulfillments`, `earlybird_payment_discord_outbox`, `earlybird_first15_canary_provider_rearms`, and `earlybird_v211_concierge_publications`.
 
@@ -57,21 +57,21 @@
 
   Expected: failure because the eight destinations are not yet explicit.
 
-- [ ] **Step 3: Add only the eight explicit mappings**
+- [x] **Step 3: Add only the eight explicit mappings**
 
   Add eight literal entries to the existing destination map. Do not add prefix matching or infer any additional destination.
 
-- [ ] **Step 4: Create the manifest**
+- [x] **Step 4: Create the manifest**
 
   Record schema version `supabase-22-legacy-earlybird-retirement-v1`, baseline commit `e2edd2d18a8425721ce8e52f671230e9a1ff3231`, public counts `185 -> 177`, the ordered table allowlist, counts `3,1,2,1,1,1,1,1`, expected total `11`, canonical destination `maintenance_jobs`, exact routine signatures, no-`CASCADE`, rollback source, and rollout status `not_applied`. Store no UUID, row payload, credential, project ref, or secret.
 
-- [ ] **Step 5: Verify mapping tests pass**
+- [x] **Step 5: Verify mapping tests pass**
 
   Run: `npx vitest run scripts/generate-supabase-22-retirement-inventory.test.ts`
 
   Expected: all tests pass.
 
-- [ ] **Step 6: Commit the contract**
+- [x] **Step 6: Commit the contract**
 
   Run: `git add scripts/generate-supabase-22-retirement-inventory.ts scripts/generate-supabase-22-retirement-inventory.test.ts docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-manifest.json docs/superpowers/plans/2026-09-11-supabase-legacy-earlybird-broad-retirement.md && git commit -m "docs: freeze broad earlybird retirement contract"`
 
@@ -85,7 +85,7 @@
 - Consumes: manifest exact allowlists/counts and existing `maintenance_jobs(kind, target_key_hash, state, payload, content_hash, created_at, updated_at)`.
 - Produces: 11 deterministic `maintenance_jobs` rows and absence of exactly eight source tables and their orphaned routines.
 
-- [ ] **Step 1: Write failing static contract tests**
+- [x] **Step 1: Write failing static contract tests**
 
   Assert a transaction-scoped advisory lock, `5s` lock timeout, bounded statement timeout, exact public baseline count 185, exact ordered allowlist hash, exact counts, source catalog/dependency assertions, explicit routine signatures, `DROP ...` without `CASCADE`, post-copy parity assertions, and final public count 177. Add tests that reject a ninth table, dynamic identifier input, truncated SQL, missing EOF commit, or a broadened destructive statement.
 
@@ -95,25 +95,25 @@
 
   Expected: failure because the migration is empty.
 
-- [ ] **Step 3: Implement deterministic canonical copy**
+- [x] **Step 3: Implement deterministic canonical copy**
 
   In one explicit transaction, lock the wave, assert every source table and canonical table shape, then insert one canonical row per source row. Derive `kind` as `rearm`, `replay`, or `recovery`; derive `target_key_hash` from a versioned domain string, source table, and the complete primary-key JSON; set `state='succeeded'`; store `legacy_source_table`, `legacy_primary_key`, `legacy_row`, and `schema_version=1` in payload; compute `content_hash` from canonicalized payload text. Use `ON CONFLICT (kind, target_key_hash) DO UPDATE` only when the existing `content_hash` is identical; raise on conflicting content.
 
-- [ ] **Step 4: Assert parity before destructive DDL**
+- [x] **Step 4: Assert parity before destructive DDL**
 
   For each source, compare exact source count with canonical rows filtered by `payload->>'legacy_source_table'`. Compare deterministic aggregates of source `to_jsonb(row)` and canonical `payload->'legacy_row'`. Require exactly 11 total canonical rows.
 
-- [ ] **Step 5: Drop the exact orphaned routine signatures and tables**
+- [x] **Step 5: Drop the exact orphaned routine signatures and tables**
 
   Revoke execution where applicable, drop only the manifest routine identities, then issue eight literal `DROP TABLE public.<name>` statements without `CASCADE`. Assert all targets/routines are absent, the canonical parity rows remain 11, and the public base/partitioned count is 177 before commit.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
   Run: `npx vitest run scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts`
 
   Expected: all tests pass, including disposable PGlite apply and parity assertions.
 
-- [ ] **Step 7: Commit the migration**
+- [x] **Step 7: Commit the migration**
 
   Run: `git add supabase/migrations/20260911001903_retire_legacy_earlybird_recovery_tables.sql scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts && git commit -m "feat: retire legacy earlybird recovery tables"`
 
@@ -130,29 +130,29 @@
 - Consumes: canonical payload contract from Task 2.
 - Produces: isolated restore proof and sanitized coordinator pre/post verification output.
 
-- [ ] **Step 1: Write failing restore and verifier tests**
+- [x] **Step 1: Write failing restore and verifier tests**
 
   Require the restore operation to reject non-isolated databases through an explicit caller-set guard, recreate all eight exact schemas/constraints, restore typed values from `legacy_row`, and prove source/canonical count and checksum parity. Require the verifier to emit only table/routine names, counts, hashes, boolean dependency facts, and migration occurrence counts.
 
-- [ ] **Step 2: Implement isolated restore SQL**
+- [x] **Step 2: Implement isolated restore SQL**
 
   Recreate the exact eight table definitions using committed historical migrations as the schema source, populate them from the canonical JSON payload with explicit casts for every column, and compare deterministic checksums. Do not delete canonical rows.
 
-- [ ] **Step 3: Implement sanitized verification SQL**
+- [x] **Step 3: Implement sanitized verification SQL**
 
   Provide `preflight` and `postapply` modes controlled by a session-local setting. Preflight must prove baseline 185, counts, dependencies, routine identities, canonical table shape, and no publications. Postapply must prove final 177, target/routine absence, exact 11 canonical records, checksum parity metadata, migration-history occurrence one, and no unexpected public-table delta.
 
-- [ ] **Step 4: Run the PGlite restore drill**
+- [x] **Step 4: Run the PGlite restore drill**
 
   Run: `npx vitest run scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts`
 
   Expected: apply, restore, type-level field parity, and destructive-scope tests all pass.
 
-- [ ] **Step 5: Write pre-apply evidence**
+- [x] **Step 5: Write pre-apply evidence**
 
   Record the exact evidence, exclusions, risks, rollback procedure, and status `READY_FOR_REVIEW_NOT_APPLIED`. State explicitly that payment tables, active functions, activation flags, and the real canary are out of scope.
 
-- [ ] **Step 6: Commit verification artifacts**
+- [x] **Step 6: Commit verification artifacts**
 
   Run: `git add supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-evidence.md docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-manifest.json && git commit -m "test: prove earlybird retirement recovery"`
 

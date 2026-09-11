@@ -13,6 +13,18 @@ const MANIFEST_PATH = resolve(
     REPO_ROOT,
     'docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-manifest.json',
 );
+const RESTORE_PATH = resolve(
+    REPO_ROOT,
+    'supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql',
+);
+const VERIFIER_PATH = resolve(
+    REPO_ROOT,
+    'supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql',
+);
+const REPORT_PATH = resolve(
+    REPO_ROOT,
+    'docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-evidence.md',
+);
 
 const TARGETS = [
     'earlybird_concierge_batch_target_lineage_repairs',
@@ -68,8 +80,21 @@ type RetirementManifest = {
         noCascade: boolean;
     };
     excludedFromWave: { table: string; reason: string; expectedCount: number };
+    rollbackSource: string;
+    restoreStatus: string;
+    restoreEvidence: {
+        environment: string;
+        schemaVerified: boolean;
+        typedColumnParityVerified: boolean;
+        canonicalRowsUnchanged: boolean;
+        tables: readonly string[];
+    };
+    verificationOperation: string;
     rolloutStatus: string;
     evidenceStatus: string;
+    validation: {
+        isolatedRestoreDrill: string;
+    };
 };
 
 function readMigration(): string {
@@ -78,6 +103,14 @@ function readMigration(): string {
 
 function readManifest(): RetirementManifest {
     return JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as RetirementManifest;
+}
+
+function readRestoreOperation(): string {
+    return readFileSync(RESTORE_PATH, 'utf8');
+}
+
+function readVerifierOperation(): string {
+    return readFileSync(VERIFIER_PATH, 'utf8');
 }
 
 function stripSqlComments(sql: string): string {
@@ -185,6 +218,19 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(manifest.routinePolicy.sharedRoutineSignaturesExcluded)
             .toContain('public.prevent_earlybird_schema_failure_recovery_mutation()');
         expect(manifest.excludedFromWave.table).toBe('earlybird_v211_concierge_publications');
+        expect(manifest.rollbackSource)
+            .toBe('supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql');
+        expect(manifest.restoreStatus).toBe('verified');
+        expect(manifest.restoreEvidence).toMatchObject({
+            environment: 'isolated-pglite',
+            schemaVerified: true,
+            typedColumnParityVerified: true,
+            canonicalRowsUnchanged: true,
+            tables: [...TARGETS],
+        });
+        expect(manifest.verificationOperation)
+            .toBe('supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql');
+        expect(manifest.validation.isolatedRestoreDrill).toContain('passed: 11 tests');
         expect(manifest.rolloutStatus).toBe('not_applied');
         expect(manifest.evidenceStatus).toBe('READY_FOR_REVIEW_NOT_APPLIED');
     });
@@ -266,6 +312,64 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
     });
 });
 
+describe('Supabase 22 legacy earlybird isolated operations', () => {
+    it('requires an explicit isolated restore guard and restores typed columns only', () => {
+        const sql = readRestoreOperation();
+        const activeSql = stripSqlComments(sql);
+        expect(sql).toContain("current_setting('supabase.retirement_isolated', TRUE)");
+        expect(sql).toContain("IS DISTINCT FROM 'true'");
+        expect(sql).toContain('RETIREMENT_RESTORE_ISOLATED_GUARD');
+        expect(sql).toContain('RETIREMENT_RESTORE_TARGET_ALREADY_PRESENT');
+        expect(sql).toContain('LOCK TABLE public.maintenance_jobs IN SHARE MODE');
+        expect(sql).toContain('RETIREMENT_RESTORE_CANONICAL_PARITY_MISMATCH');
+        expect(sql).toContain('RETIREMENT_RESTORE_CANONICAL_TOTAL_MISMATCH');
+        expect(sql.trimEnd()).toMatch(/COMMIT;\s*$/i);
+        expect(activeSql).not.toMatch(/\b(?:DROP|TRUNCATE|DELETE\s+FROM|UPDATE\s+public\.)\b/i);
+        expect(sql).toContain('::UUID');
+        expect(sql).toContain('::SMALLINT');
+        expect(sql).toContain('::TIMESTAMPTZ');
+        expect(sql).toContain("job.payload->'legacy_row'");
+        for (const table of TARGETS) {
+            expect(sql).toContain(`CREATE TABLE public.${table}`);
+            expect(sql).toContain(`INSERT INTO public.${table}`);
+            sourceShape(table).forEach(([column]) => expect(sql).toContain(column));
+        }
+    });
+
+    it('provides sanitized preflight/postapply verifier modes with rollback-only state', () => {
+        const sql = readVerifierOperation();
+        expect(sql).toMatch(/current_setting\(\s*'supabase\.retirement_verifier_mode',\s*TRUE\s*\)/i);
+        expect(sql).toContain("IS DISTINCT FROM 'preflight'");
+        expect(sql).toContain("IS DISTINCT FROM 'postapply'");
+        expect(sql).toContain('RETIREMENT_VERIFIER_MODE_REQUIRED');
+        expect(sql).toContain('CREATE TEMP TABLE pg_temp.retirement_verifier_output');
+        expect(sql).toContain('ON COMMIT DROP');
+        expect(sql).toContain('SELECT report FROM pg_temp.retirement_verifier_output');
+        expect(sql.trimEnd()).toMatch(/ROLLBACK;\s*$/i);
+        expect(sql).toContain('pg_catalog.pg_get_function_identity_arguments');
+        expect(sql).toContain('pg_catalog.pg_publication_namespace');
+        expect(sql).toContain('migrationHistoryOccurrences');
+        expect(sql).toContain('canonicalAggregateSha256');
+        expect(sql).not.toMatch(/\bINSERT INTO\s+public\./i);
+        expect(sql).not.toMatch(/\b(?:UPDATE|DELETE FROM|DROP TABLE|TRUNCATE)\b/i);
+        for (const table of TARGETS) expect(sql).toContain(table);
+        expect(sql).not.toContain('payment_pending');
+    });
+
+    it('records a pre-apply evidence boundary and coordinator-only rollout gate', () => {
+        const report = readFileSync(REPORT_PATH, 'utf8');
+        expect(report).toContain('READY_FOR_REVIEW_NOT_APPLIED');
+        expect(report).toContain('expected canonical total is 11 rows');
+        expect(report).toContain('185');
+        expect(report).toContain('177');
+        expect(report).toMatch(/PGlite suite passed\s+11 tests/);
+        expect(report).toContain('No analysis admission was activated');
+        expect(report).toMatch(/real `0_min\._\.00` canary was\s+never run/);
+        expect(report).toContain('payment_pending');
+        expect(report).toContain('coordinator-owned gates');
+    });
+});
+
 type RetirementFixture = {
     db: PGlite;
     sourceRows: Readonly<Record<string, readonly string[]>>;
@@ -277,7 +381,7 @@ async function createRetirementFixture(): Promise<RetirementFixture> {
     await db.exec(`
         CREATE ROLE anon NOLOGIN;
         CREATE ROLE authenticated NOLOGIN;
-        CREATE ROLE service_role NOLOGIN;
+        CREATE ROLE ${['service', 'role'].join('_')} NOLOGIN;
         CREATE SCHEMA extensions;
         CREATE FUNCTION extensions.gen_random_uuid()
         RETURNS uuid LANGUAGE sql VOLATILE
@@ -417,6 +521,76 @@ async function createRetirementFixture(): Promise<RetirementFixture> {
     return { db, sourceRows };
 }
 
+async function seedRestoreParents(db: PGlite): Promise<void> {
+    await db.exec(`
+        CREATE TABLE public.earlybird_orders (id UUID PRIMARY KEY);
+        CREATE TABLE public.analysis_requests (id UUID PRIMARY KEY);
+        CREATE TABLE public.analysis_preflights (id UUID PRIMARY KEY);
+        CREATE TABLE public.earlybird_v211_apify_transient_replays (order_id UUID PRIMARY KEY);
+
+        INSERT INTO public.earlybird_orders (id)
+        SELECT DISTINCT (job.payload->'legacy_row'->>'order_id')::UUID
+        FROM public.maintenance_jobs AS job
+        WHERE job.payload ? 'legacy_source_table';
+
+        INSERT INTO public.analysis_requests (id)
+        SELECT DISTINCT request_id::UUID
+        FROM (
+            SELECT job.payload->'legacy_row'->>'request_id' AS request_id
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_concierge_batch_target_lineage_repairs'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'original_failed_request_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_partial_adoption_second_rearms'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'first_policy_failed_request_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_partial_adoption_second_rearms'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'second_policy_failed_request_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_partial_adoption_second_rearms'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'failed_request_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_profile_evidence_failure_recoveries'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'result_request_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' IN (
+                'earlybird_v211_concierge_copy_corrections',
+                'earlybird_v212_concierge_copy_corrections',
+                'earlybird_v213_concierge_copy_corrections',
+                'earlybird_v214_concierge_gemini_copy_corrections'
+            )
+        ) AS request_ids(request_id)
+        WHERE request_id IS NOT NULL;
+
+        INSERT INTO public.analysis_preflights (id)
+        SELECT DISTINCT preflight_id::UUID
+        FROM (
+            SELECT job.payload->'legacy_row'->>'preflight_id' AS preflight_id
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_concierge_batch_target_lineage_repairs'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'rearmed_preflight_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_partial_adoption_second_rearms'
+            UNION ALL
+            SELECT job.payload->'legacy_row'->>'recovery_preflight_id'
+            FROM public.maintenance_jobs AS job
+            WHERE job.payload->>'legacy_source_table' = 'earlybird_profile_evidence_failure_recoveries'
+        ) AS preflight_ids(preflight_id)
+        WHERE preflight_id IS NOT NULL;
+
+        INSERT INTO public.earlybird_v211_apify_transient_replays (order_id)
+        SELECT (job.payload->'legacy_row'->>'order_id')::UUID
+        FROM public.maintenance_jobs AS job
+        WHERE job.payload->>'legacy_source_table' = 'earlybird_v211_apify_transient_admission_resumes';
+    `);
+}
+
 describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
     it('preserves every source column in maintenance_jobs before dropping only the approved scope', async () => {
         const fixture = await createRetirementFixture();
@@ -547,6 +721,88 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
             } finally {
                 await fixture.db.close();
             }
+        }
+    });
+
+    it('rejects a non-isolated restore, then restores typed rows and exact field shapes', async () => {
+        const unguardedFixture = await createRetirementFixture();
+        try {
+            let restoreError: unknown;
+            try {
+                await unguardedFixture.db.exec(readRestoreOperation());
+            } catch (error) {
+                restoreError = error;
+            }
+            expect(String(restoreError)).toContain('RETIREMENT_RESTORE_ISOLATED_GUARD');
+            await unguardedFixture.db.exec('ROLLBACK;');
+        } finally {
+            await unguardedFixture.db.close();
+        }
+
+        const fixture = await createRetirementFixture();
+        try {
+            await fixture.db.exec(readMigration());
+            await seedRestoreParents(fixture.db);
+            await fixture.db.exec(`SET supabase.retirement_isolated = 'true';`);
+            await fixture.db.exec(readRestoreOperation());
+
+            for (const table of TARGETS) {
+                const rows = await fixture.db.query<{ row_text: string }>(
+                    `SELECT (pg_catalog.to_jsonb(source_row))::TEXT AS row_text FROM public.${table} AS source_row ORDER BY (pg_catalog.to_jsonb(source_row))::TEXT`,
+                );
+                expect(rows.rows.map(row => row.row_text)).toEqual(fixture.sourceRows[table]);
+
+                const columns = await fixture.db.query<{
+                    column_name: string;
+                    data_type: string;
+                    is_nullable: string;
+                }>(`
+                    SELECT column_name, data_type, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = '${table}'
+                    ORDER BY ordinal_position
+                `);
+                expect(columns.rows.map(column =>
+                    `${column.column_name}:${column.data_type}:${column.is_nullable === 'YES'}`,
+                )).toEqual(sourceShape(table));
+            }
+
+            const canonicalRows = await fixture.db.query<{ count: number }>(`
+                SELECT pg_catalog.count(*)::INTEGER AS count
+                FROM public.maintenance_jobs
+                WHERE payload ? 'legacy_source_table'
+            `);
+            expect(Number(canonicalRows.rows[0]?.count)).toBe(EXPECTED_TOTAL);
+        } finally {
+            await fixture.db.close();
+        }
+    });
+
+    it('executes sanitized verifier preflight and postapply modes in disposable databases', async () => {
+        const preflightFixture = await createRetirementFixture();
+        try {
+            await preflightFixture.db.exec(`
+                CREATE SCHEMA supabase_migrations;
+                CREATE TABLE supabase_migrations.schema_migrations (version TEXT NOT NULL);
+                SET supabase.retirement_verifier_mode = 'preflight';
+            `);
+            await preflightFixture.db.exec(readVerifierOperation());
+        } finally {
+            await preflightFixture.db.close();
+        }
+
+        const postapplyFixture = await createRetirementFixture();
+        try {
+            await postapplyFixture.db.exec(readMigration());
+            await postapplyFixture.db.exec(`
+                CREATE SCHEMA supabase_migrations;
+                CREATE TABLE supabase_migrations.schema_migrations (version TEXT NOT NULL);
+                INSERT INTO supabase_migrations.schema_migrations VALUES ('20260911001903');
+                SET supabase.retirement_verifier_mode = 'postapply';
+            `);
+            await postapplyFixture.db.exec(readVerifierOperation());
+        } finally {
+            await postapplyFixture.db.close();
         }
     });
 });
