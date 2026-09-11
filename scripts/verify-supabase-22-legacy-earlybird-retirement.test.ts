@@ -663,22 +663,22 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
         }> = [
             {
                 name: 'baseline',
-                mutate: db => db.exec('DROP TABLE public.retirement_fixture_000;'),
+                mutate: async db => { await db.exec('DROP TABLE public.retirement_fixture_000;'); },
                 expectedError: 'RETIREMENT_GUARD_PUBLIC_TABLE_COUNT',
             },
             {
                 name: 'source-count',
-                mutate: db => db.exec("DELETE FROM public.earlybird_profile_evidence_failure_recoveries WHERE order_id = '00000000-0000-4000-8000-000000000006';"),
+                mutate: async db => { await db.exec("DELETE FROM public.earlybird_profile_evidence_failure_recoveries WHERE order_id = '00000000-0000-4000-8000-000000000006';"); },
                 expectedError: 'RETIREMENT_GUARD_SOURCE_COUNT',
             },
             {
                 name: 'shape',
-                mutate: db => db.exec('ALTER TABLE public.earlybird_v213_concierge_copy_corrections ADD COLUMN unexpected_shape TEXT;'),
+                mutate: async db => { await db.exec('ALTER TABLE public.earlybird_v213_concierge_copy_corrections ADD COLUMN unexpected_shape TEXT;'); },
                 expectedError: 'RETIREMENT_GUARD_SOURCE_SHAPE',
             },
             {
                 name: 'routine',
-                mutate: db => db.exec('DROP FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(uuid,uuid,uuid,text,text,text,jsonb,text,jsonb);'),
+                mutate: async db => { await db.exec('DROP FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(uuid,uuid,uuid,text,text,text,jsonb,text,jsonb);'); },
                 expectedError: 'RETIREMENT_GUARD_ROUTINE_MISSING',
             },
             {
