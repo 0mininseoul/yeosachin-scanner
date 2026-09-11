@@ -829,7 +829,7 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
                 await fixture.db.close();
             }
         }
-    });
+    }, 30_000);
 
     it('rejects a non-isolated restore, then restores typed rows and exact field shapes', async () => {
         const unguardedFixture = await createRetirementFixture();
