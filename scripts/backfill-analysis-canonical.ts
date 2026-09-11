@@ -118,6 +118,7 @@ export interface BackfillReport {
     scanned: number;
     complete: number;
     blocked: number;
+    readBarrierBlocked: boolean;
     checksum: string | null;
     nextCursor: string | null;
     families: Readonly<Record<AnalysisCanonicalBackfillFamily, BackfillFamilyReport>>;
@@ -2676,6 +2677,7 @@ async function readFamily(
     let sourceHasMore = false;
     let canonicalHasMore = false;
     let blocked = 0;
+    let readBlocked = false;
     for (const table of spec.legacy) {
         const tableKey = tablePositionKey(table);
         if (cursorTableCompleted(cursor, table)) {
@@ -2704,6 +2706,7 @@ async function readFamily(
             if (!page.hasMore) completed.push(tableKey);
         } catch {
             sourceComplete = false;
+            readBlocked = true;
             blocked += 1;
             if (priorPosition) positions[tableKey] = priorPosition;
         }
@@ -2727,6 +2730,7 @@ async function readFamily(
         if (!page.hasMore) completed.push(canonicalTableKey);
     } catch {
         canonicalComplete = false;
+        readBlocked = true;
         blocked += 1;
         if (canonicalPriorPosition) positions[canonicalTableKey] = canonicalPriorPosition;
     }
@@ -2801,7 +2805,7 @@ async function readFamily(
         legacyPages,
         blocked,
         hasMore: sourceHasMore || canonicalHasMore,
-        readBlocked: blocked > 0,
+        readBlocked,
     };
 }
 
@@ -3114,13 +3118,17 @@ function applyReadBlockedReport(reason: string): BackfillApplyReport {
     };
 }
 
-function invalidReport(mode: 'report_only' | 'apply' = 'report_only'): BackfillReport {
+function invalidReport(
+    mode: 'report_only' | 'apply' = 'report_only',
+    readBarrierBlocked = false,
+): BackfillReport {
     return {
         status: 'blocked',
         mode,
         scanned: 0,
         complete: 0,
         blocked: 1,
+        readBarrierBlocked,
         checksum: null,
         nextCursor: null,
         families: Object.fromEntries(
@@ -3218,10 +3226,10 @@ export async function backfillAnalysisCanonical(input: {
                 .order('id', { ascending: true })
                 .limit(limit + 1);
         } catch {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit + 1) {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         if (incomingSourcePosition && sourceResult.data.length > 0) {
             const firstPosition = rowCursorPosition(sourceResult.data[0], sourceSpec);
@@ -3229,18 +3237,20 @@ export async function backfillAnalysisCanonical(input: {
                 ? compareCursorPositions(incomingSourcePosition, firstPosition, sourceSpec)
                 : null;
             if (firstOrder === null || firstOrder >= 0) {
-                return invalidReport(apply ? 'apply' : 'report_only');
+                return invalidReport(apply ? 'apply' : 'report_only', true);
             }
         }
         sourceHasMore = sourceResult.data.length > limit;
         if (sourceHasMore && !isSourceRow(sourceResult.data[limit])) {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         sourcePage = sourceHasMore ? sourceResult.data.slice(0, limit) : sourceResult.data;
         const validRows = sourcePage.filter(isSourceRow);
         sourceBlocked = sourcePage.length - validRows.length;
         selectedRequestIds = validRows.map(row => row.id);
-        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) return invalidReport(apply ? 'apply' : 'report_only');
+        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) {
+            return invalidReport(apply ? 'apply' : 'report_only', true);
+        }
         if (validRows.length > 0 && sourceHasMore) {
             const row = validRows.at(-1)!;
             positions[sourcePositionKey] = {
@@ -3262,6 +3272,10 @@ export async function backfillAnalysisCanonical(input: {
     let applyFailed = false;
     let applyBlocked = 0;
     let readBarrierBlocked = sourceBlocked > 0;
+    // Preserve the pre-existing apply gate: any family blocker, including a
+    // projection blocker, keeps apply stopped even though the public read
+    // barrier signal below reports only caught read/query/cursor failures.
+    let applyBarrierBlocked = sourceBlocked > 0;
     const completedTables = new Set<string>(
         familyCursor ? familyCursor.completed : [],
     );
@@ -3294,6 +3308,7 @@ export async function backfillAnalysisCanonical(input: {
         familyReports[spec.family] = report;
         if (!apply && parity.status !== 'match') familyEvidence[spec.family] = parity;
         readBarrierBlocked ||= family.readBlocked;
+        applyBarrierBlocked ||= family.blocked > 0;
         familyBlocked += family.blocked;
         familyHasMore ||= family.hasMore;
         family.completed.forEach(table => completedTables.add(table));
@@ -3316,7 +3331,7 @@ export async function backfillAnalysisCanonical(input: {
                     lastProcessedPosition: null,
                     stopped: false,
                 };
-            } else if (readBarrierBlocked) {
+            } else if (applyBarrierBlocked) {
                 result = {
                     report: applyReadBlockedReport('read_blocked'),
                     lastProcessedPosition: null,
@@ -3341,7 +3356,7 @@ export async function backfillAnalysisCanonical(input: {
     }
 
     let postParityBlocked = false;
-    if (apply && !readBarrierBlocked) {
+    if (apply && !applyBarrierBlocked) {
         for (const { spec } of familyResults) {
             if (spec.deferred) continue;
             const expected = applyRun.appliedMutations
@@ -3402,7 +3417,7 @@ export async function backfillAnalysisCanonical(input: {
             };
         }
     }
-    if (apply && applyRun.stopped && !readBarrierBlocked && applyRun.stopTableKey) {
+    if (apply && applyRun.stopped && !applyBarrierBlocked && applyRun.stopTableKey) {
         let stopReached = false;
         for (const spec of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
             for (const table of spec.legacy) {
@@ -3429,7 +3444,7 @@ export async function backfillAnalysisCanonical(input: {
         Object.keys(positions).length > 0
         || (apply && applyRun.stopped && selectedRequestIds.length > 0)
     );
-    const nextCursor = apply && (readBarrierBlocked || applyParityBlocked)
+    const nextCursor = apply && (applyBarrierBlocked || applyParityBlocked)
         ? restartedFromIncompatibleCursor ? null : input.cursor ?? null
         : hasCursorContinuation
         ? Buffer.from(JSON.stringify({
@@ -3455,12 +3470,13 @@ export async function backfillAnalysisCanonical(input: {
     );
     return {
         status: apply
-            ? (readBarrierBlocked || applyFailed || applyBlocked > 0 || applyParityBlocked ? 'blocked' : 'applied')
+            ? (applyBarrierBlocked || applyFailed || applyBlocked > 0 || applyParityBlocked ? 'blocked' : 'applied')
             : (blockedResult ? 'blocked' : 'report_only'),
         mode: apply ? 'apply' : 'report_only',
         scanned: continuingFamilyPage ? selectedRequestIds.length : sourcePage.length,
         complete: reportComplete,
         blocked: sourceBlocked + familyBlocked,
+        readBarrierBlocked,
         checksum: reportChecksum,
         nextCursor,
         families: familyReports,

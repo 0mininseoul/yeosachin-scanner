@@ -202,6 +202,74 @@ describe('bounded analysis canonical backfill tooling', () => {
             .resolves.toMatchObject({ status: 'blocked', blocked: 1, scanned: 0 });
     });
 
+    it('keeps a projection blocker separate from the read barrier', async () => {
+        const request = sourceRows.slice(0, 1);
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_requests'
+                    ? request
+                    : table === 'analysis_pipeline_jobs'
+                        ? [{
+                            request_id: request[0]!.id,
+                            job_key: 'job:blocked',
+                            kind: 'collection',
+                            status: 'unknown',
+                            dispatch_generation: 0,
+                            attempt_count: 1,
+                            required_job_keys: [],
+                            track: 'analysis',
+                            batch: null,
+                            created_at: '2026-09-01T00:00:00.000Z',
+                            updated_at: '2026-09-01T00:00:01.000Z',
+                            lease_expires_at: null,
+                            completion_fanout_hash: null,
+                        }]
+                        : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn().mockReturnThis(),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({ data, error: null }),
+                };
+                return chain;
+            }),
+        };
+
+        const report = await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+
+        expect(report).toMatchObject({
+            readBarrierBlocked: false,
+            families: {
+                jobs: { parity: { status: 'blocked', mismatchPaths: ['source.evidence'] } },
+            },
+        });
+    });
+
+    it('marks a thrown read failure as a read barrier', async () => {
+        const request = sourceRows.slice(0, 1);
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_requests' ? request : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn().mockReturnThis(),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn(async () => {
+                        if (table === 'analysis_pipeline_jobs') throw new Error('cursor read failed');
+                        return { data, error: null };
+                    }),
+                };
+                return chain;
+            }),
+        };
+
+        const report = await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
+
+        expect(report).toMatchObject({ readBarrierBlocked: true });
+    });
+
     it('advances across multiple bounded pages at the deterministic source keyset boundary', async () => {
         const rows: AnalysisBackfillSourceRow[] = Array.from({ length: 205 }, (_, index) => ({
             id: `123e4567-e89b-42d3-a456-42661417${String(index).padStart(4, '0')}`,
