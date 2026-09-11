@@ -228,14 +228,14 @@ BEGIN
                 OR v_job.attempt_count IS DISTINCT FROM (p_row->>'attemptCount')::INTEGER
                 OR v_job.dependency_count IS DISTINCT FROM (p_row->>'dependencyCount')::INTEGER
                 OR v_job.next_attempt_at IS DISTINCT FROM (p_row->>'nextAttemptAt')::TIMESTAMPTZ
-                OR v_job.lease_expires_at IS DISTINCT FROM CASE
+                OR v_job.lease_expires_at IS DISTINCT FROM (CASE
                     WHEN p_row->>'leaseExpiresAt' IS NULL THEN NULL
                     ELSE (p_row->>'leaseExpiresAt')::TIMESTAMPTZ
-                END
-                OR v_job.completion_hash IS DISTINCT FROM CASE
+                END)
+                OR v_job.completion_hash IS DISTINCT FROM (CASE
                     WHEN p_row->>'completionHash' IS NULL THEN NULL
                     ELSE p_row->>'completionHash'
-                END
+                END)
                 OR v_job.payload->>'source' IS DISTINCT FROM p_row->'payload'->>'source'
                 OR v_job.payload->>'sourceHash' IS DISTINCT FROM p_source_hash
                 OR v_job.payload IS DISTINCT FROM p_row->'payload'
@@ -540,14 +540,14 @@ BEGIN
            OR v_cost.operation_key IS DISTINCT FROM p_row->>'operationKey'
            OR v_cost.stage IS DISTINCT FROM p_row->>'stage'
            OR v_cost.currency IS DISTINCT FROM p_row->>'currency'
-           OR v_cost.amount_known IS DISTINCT FROM CASE
+           OR v_cost.amount_known IS DISTINCT FROM (CASE
                WHEN p_row->>'amountKnown' IS NULL THEN NULL
                ELSE (p_row->>'amountKnown')::NUMERIC
-           END
-           OR v_cost.amount_conservative IS DISTINCT FROM CASE
+           END)
+           OR v_cost.amount_conservative IS DISTINCT FROM (CASE
                WHEN p_row->>'amountConservative' IS NULL THEN NULL
                ELSE (p_row->>'amountConservative')::NUMERIC
-           END
+           END)
            OR v_cost.usage_unknown IS DISTINCT FROM (p_row->>'usageUnknown')::BOOLEAN
            OR v_cost.payload IS DISTINCT FROM p_row->'payload'
            OR v_cost.retention_class IS DISTINCT FROM p_row->>'retentionClass'
@@ -592,14 +592,14 @@ BEGIN
            OR v_cost.operation_key IS DISTINCT FROM p_row->>'operationKey'
            OR v_cost.stage IS DISTINCT FROM p_row->>'stage'
            OR v_cost.currency IS DISTINCT FROM p_row->>'currency'
-           OR v_cost.amount_known IS DISTINCT FROM CASE
+           OR v_cost.amount_known IS DISTINCT FROM (CASE
                WHEN p_row->>'amountKnown' IS NULL THEN NULL
                ELSE (p_row->>'amountKnown')::NUMERIC
-           END
-           OR v_cost.amount_conservative IS DISTINCT FROM CASE
+           END)
+           OR v_cost.amount_conservative IS DISTINCT FROM (CASE
                WHEN p_row->>'amountConservative' IS NULL THEN NULL
                ELSE (p_row->>'amountConservative')::NUMERIC
-           END
+           END)
            OR v_cost.usage_unknown IS DISTINCT FROM (p_row->>'usageUnknown')::BOOLEAN
            OR v_cost.payload IS DISTINCT FROM p_row->'payload'
            OR v_cost.retention_class IS DISTINCT FROM p_row->>'retentionClass'
