@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    ANALYSIS_CANONICAL_BACKFILL_APPLY_ACKNOWLEDGEMENT,
     ANALYSIS_CANONICAL_BACKFILL_FAMILIES,
     BACKFILL_MAX_LIMIT,
     backfillAnalysisCanonical,
@@ -402,10 +403,20 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(from).not.toHaveBeenCalled();
     });
 
-    it('rejects destructive and apply CLI options', () => {
-        for (const option of ['--apply', '--drop', '--truncate', '--delete', '--mutate']) {
-            expect(() => parseBackfillCliArgs([option])).toThrow('report-only');
+    it('keeps report-only as the default and guards apply CLI options', () => {
+        for (const option of ['--drop', '--truncate', '--delete', '--mutate']) {
+            expect(() => parseBackfillCliArgs([option])).toThrow('destructive');
         }
+        expect(() => parseBackfillCliArgs(['--apply'])).toThrow('acknowledgement');
+        expect(parseBackfillCliArgs([
+            '--apply',
+            `--acknowledge=${ANALYSIS_CANONICAL_BACKFILL_APPLY_ACKNOWLEDGEMENT}`,
+        ])).toEqual({
+            limit: BACKFILL_MAX_LIMIT,
+            reportOnly: false,
+            apply: true,
+            acknowledgement: ANALYSIS_CANONICAL_BACKFILL_APPLY_ACKNOWLEDGEMENT,
+        });
         expect(parseBackfillCliArgs(['--limit=100', '--report-only'])).toEqual({
             limit: 100,
             reportOnly: true,
