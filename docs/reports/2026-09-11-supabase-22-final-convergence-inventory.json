@@ -112,9 +112,9 @@
       "specFile": "scripts/backfill-analysis-canonical.ts",
       "declaredLegacySpecCount": 27,
       "auditSpecCount": 4,
-      "executableSpecCount": 23,
-      "wave1SourceAllowlistCount": 23,
-      "deferredUnmappedConsolidateCount": 78
+      "executableSpecCount": 21,
+      "wave1SourceAllowlistCount": 21,
+      "deferredUnmappedConsolidateCount": 80
     },
     "commerceOperations": {
       "specFile": "scripts/backfill-commerce-operations-canonical.ts",
@@ -184,16 +184,14 @@
     "wave1AnalysisCanonicalization": {
       "status": "not-applied-executable-specs-only",
       "adapterSpecFile": "scripts/backfill-analysis-canonical.ts",
-      "adapterSpecCount": 23,
+      "adapterSpecCount": 21,
       "sourceAllowlist": [
-        "ai_analysis_cache",
         "analysis_pipeline_jobs",
         "analysis_progress_events",
         "analysis_progress_state",
         "analysis_provider_cost_ledger",
         "analysis_step_events",
         "analysis_target_interactors",
-        "analysis_v2_ai_global_result_cache",
         "analysis_v2_candidate_feature_manifests",
         "analysis_v2_candidate_feature_rows",
         "analysis_v2_candidate_score_manifests",
@@ -210,9 +208,10 @@
         "analysis_v2_relationship_sides",
         "analysis_v2_target_evidence_manifests"
       ],
-      "sourceAllowlistCount": 23,
+      "sourceAllowlistCount": 21,
       "deferredReason": "no concrete current source spec, projection, identity/cursor rule, or reader; source remains authoritative",
       "deferredSourceAllowlist": [
+        "ai_analysis_cache",
         "analysis_anonymous_preflight_attempts",
         "analysis_anonymous_profile_cache",
         "analysis_anonymous_profile_cache_locks",
@@ -238,6 +237,7 @@
         "analysis_revenue_run_ledgers",
         "analysis_v2_active_profile_heartbeats",
         "analysis_v2_ai_attempts",
+        "analysis_v2_ai_global_result_cache",
         "analysis_v2_ai_result_checkpoints",
         "analysis_v2_ai_scoring_stage_checkpoints",
         "analysis_v2_failure_receipts",
@@ -780,7 +780,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_cache",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_cache-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3353,7 +3353,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_cache",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_cache-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [

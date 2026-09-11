@@ -31,7 +31,7 @@ The review report at `d8cd4525` is closed by these document-only corrections:
 
 | Finding | Correction recorded in this baseline |
 |---|---|
-| P1-1 source coverage | The inventory narrows Wave 1 to 23 explicit analysis specs and keeps Wave 2 executable allowlist empty because the commerce report-only CLI has no wired `readBatch`/`readCanonicalBatch`. It names 78 deferred analysis and 37 deferred commerce consolidate rows; the two cross-wave declarations are explicit. |
+| P1-1 source coverage | The inventory narrows Wave 1 to 21 request-safe executable analysis sources. The two cache specs, `ai_analysis_cache` and `analysis_v2_ai_global_result_cache`, declare `requestIdColumn: null` and are rejected by the existing reader, so they are deferred. Wave 2 remains empty because the commerce report-only CLI has no wired `readBatch`/`readCanonicalBatch`; the inventory names 80 deferred analysis and 37 deferred commerce consolidate rows, with the two cross-wave declarations explicit. |
 | P1-2 retry destination | Analysis retries use `analysis_events` operational `canonical_retry` markers through `enqueue_analysis_canonical_retry`; `maintenance_jobs` is not an analysis retry destination. |
 | P1-3 private accounts | `private_accounts` is now blocked with no canonical destination or destructive proposal until its profile/result-artifact field, identity, owner/publication, reader, dual-write, rollback, and archive contract is proven. |
 | P1-4 cohort cardinality/callers | `earlybird_concierge_batch_cohort_members` is now blocked pending order-wide uniqueness or deterministic cohort/member identity plus lossless frozen-manifest mapping. `scripts/warm-reimage-g1.ts` and `scripts/warm-reimage-g2.ts` are counted as operational callers. |
@@ -113,16 +113,18 @@ The 17 blocked tables are:
 `pending_analysis`, `private_accounts`,
 `earlybird_concierge_batch_cohort_members`.
 
-Wave 1 has an exact 23-table analysis source allowlist, matching the explicit
-legacy specs in `scripts/backfill-analysis-canonical.ts`. It covers five
-executable families (jobs, events, artifacts, costs, and cache). The inventory
-names the other 78 analysis consolidate rows as deferred, including the two
-cross-wave names declared by
-the commerce file. Wave 2 has an empty executable allowlist: its current
-report-only function declares 12 names but has no wired `readBatch` or
-`readCanonicalBatch`; the 37 non-blocked commerce consolidate rows are named
-as deferred and the cohort source is blocked. Both canonicalization waves are
-source-authoritative with exact empty destructive allowlists.
+Wave 1 has an exact 21-table request-safe executable analysis source allowlist.
+The source file still declares 23 non-audit specs, but the
+`ai_analysis_cache` and `analysis_v2_ai_global_result_cache` specs declare
+`requestIdColumn: null`, which the existing reader rejects; both are therefore
+deferred. The five defined families are jobs, events, artifacts, costs, and
+cache, and the inventory names the other 80 analysis consolidate rows as
+deferred, including the two cross-wave names declared by the commerce file.
+Wave 2 has an empty executable allowlist: its current report-only function
+declares 12 names but has no wired `readBatch` or `readCanonicalBatch`; the 37
+non-blocked commerce consolidate rows are named as deferred and the cohort
+source is blocked. Both canonicalization waves are source-authoritative with
+exact empty destructive allowlists.
 
 The four `analysis_order_audit_*` sources are in the separate
 `auditEvidenceWave`, which is blocked evidence-only and independent of Wave 1

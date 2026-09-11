@@ -41,7 +41,7 @@ no application, migration, or test code is changed by this handoff.
 
 | Finding | Explicit correction |
 |---|---|
-| P1-1 source coverage | Wave 1 contains only the 23 legacy names with explicit specs in `scripts/backfill-analysis-canonical.ts`; Wave 2 has an empty executable allowlist because `scripts/backfill-commerce-operations-canonical.ts` has no wired `readBatch`/`readCanonicalBatch`. The remaining 78 analysis and 37 commerce consolidate rows are named as deferred, and the two cross-wave declarations are called out separately. |
+| P1-1 source coverage | Wave 1 contains only the 21 request-safe executable legacy names from `scripts/backfill-analysis-canonical.ts`; its two cache specs, `ai_analysis_cache` and `analysis_v2_ai_global_result_cache`, declare `requestIdColumn: null` and are rejected by the existing reader, so they are deferred. Wave 2 has an empty executable allowlist because `scripts/backfill-commerce-operations-canonical.ts` has no wired `readBatch`/`readCanonicalBatch`. The remaining 80 analysis and 37 commerce consolidate rows are named as deferred, and the two cross-wave declarations are called out separately. |
 | P1-2 retry destination | Analysis retry markers use `enqueue_analysis_canonical_retry` and the existing `analysis_events` operational `canonical_retry` contract; `maintenance_jobs` is explicitly excluded from the analysis retry path. |
 | P1-3 private accounts | `private_accounts` is blocked, outside Wave 1, with no canonical destination or destructive proposal until a lossless profile/result-artifact contract covers fields, identity, ownership, publication, readers, dual-write, and rollback. |
 | P1-4 cohort cardinality/callers | `earlybird_concierge_batch_cohort_members` is blocked until order-wide uniqueness or a deterministic cohort/member identity and lossless frozen-manifest projection are proven. The inventory counts `scripts/warm-reimage-g1.ts` and `scripts/warm-reimage-g2.ts` as operational callers. |
@@ -89,15 +89,18 @@ The canonical set, in the approved order, is:
 
 The inventory contains exact machine-readable arrays:
 
-- `waves.wave1AnalysisCanonicalization.sourceAllowlist`: exactly 23 analysis
-  source tables covered by the current explicit specs in
-  `scripts/backfill-analysis-canonical.ts`. They cover five executable source
-  families (jobs, events, artifacts, costs, and cache).
-- `waves.wave1AnalysisCanonicalization.deferredSourceAllowlist`: exactly 78
-  analysis consolidate rows with no current source spec/reader. The two
-  commerce-file declarations `analysis_v2_recovery_provider_run_adoptions`
-  and `analysis_v2_gemini_leases` are included here as named cross-wave
-  deferred sources, not as Wave 1 sources.
+- `waves.wave1AnalysisCanonicalization.sourceAllowlist`: exactly 21
+  request-safe executable analysis source tables from the current specs in
+  `scripts/backfill-analysis-canonical.ts`. The file still declares 23
+  non-audit specs, but `ai_analysis_cache` and
+  `analysis_v2_ai_global_result_cache` have `requestIdColumn: null` and the
+  existing reader rejects them, so both remain deferred. The five defined
+  source families are jobs, events, artifacts, costs, and cache.
+- `waves.wave1AnalysisCanonicalization.deferredSourceAllowlist`: exactly 80
+  analysis consolidate rows. This includes the two rejected cache specs and
+  the two commerce-file declarations `analysis_v2_recovery_provider_run_adoptions`
+  and `analysis_v2_gemini_leases` as named cross-wave deferred sources, not as
+  Wave 1 sources.
 - `waves.wave2CommerceOperationsCanonicalization.sourceAllowlist`: `[]`.
   The current commerce function declares 12 names but has no wired
   `readBatch` or `readCanonicalBatch`, so none is executable. Its 37
@@ -171,17 +174,21 @@ an inferred pass.
 
 ## Wave 1: mapped analysis canonicalization, additive only
 
-**Purpose:** Converge only the 23 analysis source tables with explicit current
-specs in `scripts/backfill-analysis-canonical.ts` into five executable source
-families (jobs, events, artifacts, costs, and cache), without deleting source
-data. The 78 other analysis consolidate rows are deferred and are not part of
+**Purpose:** Converge only the 21 request-safe executable analysis source
+tables from the current specs in `scripts/backfill-analysis-canonical.ts`
+across five defined source families (jobs, events, artifacts, costs, and
+cache), without deleting source data. The two cache specs with
+`requestIdColumn: null` are rejected by the existing reader and, together with
+the other 78 analysis consolidate rows, make 80 deferred analysis rows outside
 this wave.
 
 - [ ] Use the existing analysis canonicalization plan and its named files for
-  the five executable families: jobs, events, artifacts, costs, and cache.
-  Reuse existing aggregate names and keep the 23 allowlisted sources
-  authoritative during rollback. `analysis_order_audit_*` is excluded and is
-  handled only by the blocked audit-evidence wave below.
+  the five defined families: jobs, events, artifacts, costs, and cache.
+  Reuse existing aggregate names and keep the 21 allowlisted sources
+  authoritative during rollback. The two cache specs with
+  `requestIdColumn: null` remain deferred because the existing reader rejects
+  them. `analysis_order_audit_*` is excluded and is handled only by the blocked
+  audit-evidence wave below.
 - [ ] Add server-only, typed dual-write adapters behind family flags, all
   defaulting to `false`. If a transaction cannot dual-write, append a bounded
   operational retry marker through the existing
