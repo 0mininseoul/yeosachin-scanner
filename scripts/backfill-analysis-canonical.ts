@@ -118,6 +118,7 @@ export interface BackfillReport {
     scanned: number;
     complete: number;
     blocked: number;
+    readBarrierBlocked: boolean;
     checksum: string | null;
     nextCursor: string | null;
     families: Readonly<Record<AnalysisCanonicalBackfillFamily, BackfillFamilyReport>>;
@@ -2676,6 +2677,7 @@ async function readFamily(
     let sourceHasMore = false;
     let canonicalHasMore = false;
     let blocked = 0;
+    let readBlocked = false;
     for (const table of spec.legacy) {
         const tableKey = tablePositionKey(table);
         if (cursorTableCompleted(cursor, table)) {
@@ -2704,6 +2706,7 @@ async function readFamily(
             if (!page.hasMore) completed.push(tableKey);
         } catch {
             sourceComplete = false;
+            readBlocked = true;
             blocked += 1;
             if (priorPosition) positions[tableKey] = priorPosition;
         }
@@ -2727,6 +2730,7 @@ async function readFamily(
         if (!page.hasMore) completed.push(canonicalTableKey);
     } catch {
         canonicalComplete = false;
+        readBlocked = true;
         blocked += 1;
         if (canonicalPriorPosition) positions[canonicalTableKey] = canonicalPriorPosition;
     }
@@ -2801,7 +2805,7 @@ async function readFamily(
         legacyPages,
         blocked,
         hasMore: sourceHasMore || canonicalHasMore,
-        readBlocked: blocked > 0,
+        readBlocked,
     };
 }
 
@@ -3114,13 +3118,17 @@ function applyReadBlockedReport(reason: string): BackfillApplyReport {
     };
 }
 
-function invalidReport(mode: 'report_only' | 'apply' = 'report_only'): BackfillReport {
+function invalidReport(
+    mode: 'report_only' | 'apply' = 'report_only',
+    readBarrierBlocked = false,
+): BackfillReport {
     return {
         status: 'blocked',
         mode,
         scanned: 0,
         complete: 0,
         blocked: 1,
+        readBarrierBlocked,
         checksum: null,
         nextCursor: null,
         families: Object.fromEntries(
@@ -3218,10 +3226,10 @@ export async function backfillAnalysisCanonical(input: {
                 .order('id', { ascending: true })
                 .limit(limit + 1);
         } catch {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit + 1) {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         if (incomingSourcePosition && sourceResult.data.length > 0) {
             const firstPosition = rowCursorPosition(sourceResult.data[0], sourceSpec);
@@ -3229,18 +3237,20 @@ export async function backfillAnalysisCanonical(input: {
                 ? compareCursorPositions(incomingSourcePosition, firstPosition, sourceSpec)
                 : null;
             if (firstOrder === null || firstOrder >= 0) {
-                return invalidReport(apply ? 'apply' : 'report_only');
+                return invalidReport(apply ? 'apply' : 'report_only', true);
             }
         }
         sourceHasMore = sourceResult.data.length > limit;
         if (sourceHasMore && !isSourceRow(sourceResult.data[limit])) {
-            return invalidReport(apply ? 'apply' : 'report_only');
+            return invalidReport(apply ? 'apply' : 'report_only', true);
         }
         sourcePage = sourceHasMore ? sourceResult.data.slice(0, limit) : sourceResult.data;
         const validRows = sourcePage.filter(isSourceRow);
         sourceBlocked = sourcePage.length - validRows.length;
         selectedRequestIds = validRows.map(row => row.id);
-        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) return invalidReport(apply ? 'apply' : 'report_only');
+        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) {
+            return invalidReport(apply ? 'apply' : 'report_only', true);
+        }
         if (validRows.length > 0 && sourceHasMore) {
             const row = validRows.at(-1)!;
             positions[sourcePositionKey] = {
@@ -3461,6 +3471,7 @@ export async function backfillAnalysisCanonical(input: {
         scanned: continuingFamilyPage ? selectedRequestIds.length : sourcePage.length,
         complete: reportComplete,
         blocked: sourceBlocked + familyBlocked,
+        readBarrierBlocked,
         checksum: reportChecksum,
         nextCursor,
         families: familyReports,
