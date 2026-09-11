@@ -586,7 +586,24 @@ BEGIN
          WHERE request_id = p_request_id
            AND idempotency_key = v_idempotency_key
          FOR UPDATE;
-        IF NOT FOUND OR v_cost.source_hash IS DISTINCT FROM v_source_hash THEN
+        IF NOT FOUND
+           OR v_cost.source_hash IS DISTINCT FROM v_source_hash
+           OR v_cost.provider IS DISTINCT FROM p_row->>'provider'
+           OR v_cost.operation_key IS DISTINCT FROM p_row->>'operationKey'
+           OR v_cost.stage IS DISTINCT FROM p_row->>'stage'
+           OR v_cost.currency IS DISTINCT FROM p_row->>'currency'
+           OR v_cost.amount_known IS DISTINCT FROM CASE
+               WHEN p_row->>'amountKnown' IS NULL THEN NULL
+               ELSE (p_row->>'amountKnown')::NUMERIC
+           END
+           OR v_cost.amount_conservative IS DISTINCT FROM CASE
+               WHEN p_row->>'amountConservative' IS NULL THEN NULL
+               ELSE (p_row->>'amountConservative')::NUMERIC
+           END
+           OR v_cost.usage_unknown IS DISTINCT FROM (p_row->>'usageUnknown')::BOOLEAN
+           OR v_cost.payload IS DISTINCT FROM p_row->'payload'
+           OR v_cost.retention_class IS DISTINCT FROM p_row->>'retentionClass'
+           OR v_cost.recorded_at IS DISTINCT FROM (p_row->>'recordedAt')::TIMESTAMPTZ THEN
             RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
                 USING ERRCODE = '22023';
         END IF;
