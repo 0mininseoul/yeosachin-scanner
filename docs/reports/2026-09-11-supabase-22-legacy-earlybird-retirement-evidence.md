@@ -2,13 +2,18 @@
 
 ## Status and scope
 
-`READY_FOR_REVIEW_NOT_APPLIED`. This branch prepares, tests, and documents a
-single guarded migration; it does not apply the migration to production.
+`VERIFIED`. The coordinator supplied sanitized, independently collected
+production evidence after the successful selective application of migration
+`20260911001903`. This worker did not access Supabase, use production
+credentials, or perform any production mutation.
 
-The first production apply attempt rolled back because SQLSTATE 2BP01
-reported a trigger dependency while the migration tried to drop a target
-function first. Corrective status: pending; no retry or production apply has
-been performed.
+The first production apply attempt failed with SQLSTATE 2BP01 because a trigger
+dependency blocked the initial function-drop ordering, and it fully rolled
+back. Corrective PR #566 merged as `9d87d1f55ba1b6769b910e0e0cedb555b38a8bd6`
+after an independent Luna max `PASS`; all PR checks and post-merge CI/Vercel
+were green. The second apply then succeeded once, using the reviewed migration
+whose SHA-256 is
+`8ea5a2b92c21a2dae8dda2e2497a4b82d2125acbbd0ab2ad77119152cb4a5506`.
 
 The approved destructive scope is exactly eight public tables:
 
@@ -27,6 +32,26 @@ before DDL and verifies 177 after DDL. It removes the eight observed
 table-owned triggers first, then drops only the 14 exact routine signatures
 recorded in the manifest and eight literal table statements; no wildcard,
 prefix, dynamically assembled identifier, or `CASCADE` operation is present.
+
+## Production rollout evidence
+
+The coordinator's fresh, sanitized sequence was:
+
+- The fresh dry-run listed exactly `20260911001903`.
+- Fresh preflight reported 185 public base/partitioned tables, 11 source rows,
+  0 canonical rows, and 0 migration-history occurrences.
+- The first apply had already failed with SQLSTATE 2BP01 and fully rolled back;
+  the second apply succeeded once after corrective PR #566.
+- Sequential postapply reported 177 public base/partitioned tables,
+  `targetTablesAbsent=8`, `orphanedRoutinesAbsent=14`,
+  `canonicalRowCount=11`, `canonicalShapeVerified=true`,
+  `migrationHistoryOccurrences=1`, `allTablePublications=0`,
+  `publicSchemaPublications=0`, and `targetPublicationMemberships=0`.
+- An independent migration-history read showed version `20260911001903`
+  exactly once.
+
+These facts are production evidence only; no secret, project reference, UUID,
+or raw row payload is recorded here.
 
 ## Production evidence boundary
 
@@ -105,16 +130,17 @@ and postapply execution.
 ## Rollback and activation boundary
 
 Rollback evidence is limited to the isolated restore operation and its
-disposable PGlite drill. No production restore, migration apply, Supabase
-remote connection, Vercel operation, provider call, Auth operation, payment
-operation, or external-service call was performed by this branch.
+disposable PGlite drill. No production restore, Supabase remote connection,
+Vercel operation, provider call, Auth operation, payment operation, or
+external-service call was performed by this worker; the coordinator performed
+the single selective migration application recorded above.
 
 The following remain unchanged and out of scope: payment records and
 `payment_pending`, users and Auth identities, admission flags, active
 analysis functions, retained result-summary routines, and all provider state.
 No analysis admission was activated, and the real `0_min._.00` canary was
-never run. Production rollout, migration-history verification, and any
-postapply evidence remain coordinator-owned gates.
+never run. No payment state changed. The production rollout and
+migration-history/postapply evidence above remain coordinator-owned facts.
 
 ## Local verification caveat
 

@@ -103,6 +103,30 @@ const SHARED_SCHEMA_RECOVERY_ROUTINE =
 
 type RetirementManifest = {
     schemaVersion: string;
+    asOf: string;
+    sourceBoundary: {
+        workerProductionAccess: boolean;
+        workerProductionMutation: boolean;
+        coordinatorProductionMigrationApplied: boolean;
+        activationPerformed: boolean;
+        realCanaryStarted: boolean;
+        paymentStateChanged: boolean;
+        secretsProjectRefsUuidsRawRowsIncluded: boolean;
+    };
+    correctiveReview: {
+        pullRequest: number;
+        mergeCommit: string;
+        independentLunaMax: string;
+        pullRequestChecks: string;
+        postMergeCi: string;
+        vercel: string;
+    };
+    migrationEvidence: {
+        version: string;
+        sha256: string;
+        file: string;
+        selectiveProductionApplication: boolean;
+    };
     baselineCommit: string;
     publicBasePartitionedTableCount: { before: number; after: number; delta: number };
     destructiveAllowlist: readonly string[];
@@ -118,6 +142,39 @@ type RetirementManifest = {
         noCascade: boolean;
     };
     excludedFromWave: { table: string; reason: string; expectedCount: number };
+    productionEvidence: {
+        freshDryRun: {
+            listedMigrationVersions: readonly string[];
+            exactOnly: boolean;
+        };
+        freshPreflight: {
+            publicBasePartitionedTableCount: number;
+            sourceRowCount: number;
+            canonicalRowCount: number;
+            migrationHistoryOccurrences: number;
+        };
+        secondApply: {
+            attemptNumber: number;
+            status: string;
+            successfulApplications: number;
+        };
+        sequentialPostapply: {
+            publicBasePartitionedTableCount: number;
+            targetTablesAbsent: number;
+            orphanedRoutinesAbsent: number;
+            canonicalRowCount: number;
+            canonicalShapeVerified: boolean;
+            migrationHistoryOccurrences: number;
+            allTablePublications: number;
+            publicSchemaPublications: number;
+            targetPublicationMemberships: number;
+        };
+        independentMigrationHistory: {
+            migrationVersion: string;
+            occurrences: number;
+            existsExactlyOnce: boolean;
+        };
+    };
     rollbackSource: string;
     restoreStatus: string;
     restoreEvidence: {
@@ -130,9 +187,12 @@ type RetirementManifest = {
     verificationOperation: string;
     rolloutStatus: string;
     evidenceStatus: string;
+    productionMutation: string;
     firstApplyAttempt: {
         migrationVersion: string;
         status: string;
+        failed: boolean;
+        rollbackStatus: string;
         reason: string;
         correctiveStatus: string;
     };
@@ -247,6 +307,30 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
     it('binds the manifest to the exact eight-table, 11-row, 185-to-177 contract', () => {
         const manifest = readManifest();
         expect(manifest.schemaVersion).toBe('supabase-22-legacy-earlybird-retirement-v1');
+        expect(manifest.asOf).toBe('2026-09-11');
+        expect(manifest.sourceBoundary).toEqual({
+            workerProductionAccess: false,
+            workerProductionMutation: false,
+            coordinatorProductionMigrationApplied: true,
+            activationPerformed: false,
+            realCanaryStarted: false,
+            paymentStateChanged: false,
+            secretsProjectRefsUuidsRawRowsIncluded: false,
+        });
+        expect(manifest.correctiveReview).toEqual({
+            pullRequest: 566,
+            mergeCommit: '9d87d1f55ba1b6769b910e0e0cedb555b38a8bd6',
+            independentLunaMax: 'PASS',
+            pullRequestChecks: 'green',
+            postMergeCi: 'green',
+            vercel: 'green',
+        });
+        expect(manifest.migrationEvidence).toEqual({
+            version: '20260911001903',
+            sha256: '8ea5a2b92c21a2dae8dda2e2497a4b82d2125acbbd0ab2ad77119152cb4a5506',
+            file: 'supabase/migrations/20260911001903_retire_legacy_earlybird_recovery_tables.sql',
+            selectiveProductionApplication: true,
+        });
         expect(manifest.baselineCommit).toBe('e2edd2d18a8425721ce8e52f671230e9a1ff3231');
         expect(manifest.publicBasePartitionedTableCount).toEqual({ before: 185, after: 177, delta: -8 });
         expect(manifest.destructiveAllowlist).toEqual([...TARGETS]);
@@ -276,13 +360,49 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(manifest.verificationOperation)
             .toBe('supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql');
         expect(manifest.validation.isolatedRestoreDrill).toContain('14-test');
-        expect(manifest.rolloutStatus).toBe('not_applied');
-        expect(manifest.evidenceStatus).toBe('READY_FOR_REVIEW_NOT_APPLIED');
+        expect(manifest.productionEvidence).toEqual({
+            freshDryRun: {
+                listedMigrationVersions: ['20260911001903'],
+                exactOnly: true,
+            },
+            freshPreflight: {
+                publicBasePartitionedTableCount: 185,
+                sourceRowCount: 11,
+                canonicalRowCount: 0,
+                migrationHistoryOccurrences: 0,
+            },
+            secondApply: {
+                attemptNumber: 2,
+                status: 'succeeded',
+                successfulApplications: 1,
+            },
+            sequentialPostapply: {
+                publicBasePartitionedTableCount: 177,
+                targetTablesAbsent: 8,
+                orphanedRoutinesAbsent: 14,
+                canonicalRowCount: 11,
+                canonicalShapeVerified: true,
+                migrationHistoryOccurrences: 1,
+                allTablePublications: 0,
+                publicSchemaPublications: 0,
+                targetPublicationMemberships: 0,
+            },
+            independentMigrationHistory: {
+                migrationVersion: '20260911001903',
+                occurrences: 1,
+                existsExactlyOnce: true,
+            },
+        });
+        expect(manifest.rolloutStatus).toBe('VERIFIED');
+        expect(manifest.evidenceStatus).toBe('VERIFIED');
+        expect(manifest.productionMutation).toBe('refused');
         expect(manifest.firstApplyAttempt).toEqual({
             migrationVersion: '20260911001903',
             status: 'rolled_back',
+            failed: true,
+            rollbackStatus: 'fully_rolled_back',
             reason: 'SQLSTATE 2BP01: trigger dependency prevented DROP FUNCTION',
-            correctiveStatus: 'pending',
+            correctiveStatus: 'resolved_by_pr_566',
         });
     });
 
@@ -454,20 +574,36 @@ describe('Supabase 22 legacy earlybird isolated operations', () => {
         expect(sql).not.toContain('payment_pending');
     });
 
-    it('records a pre-apply evidence boundary and coordinator-only rollout gate', () => {
+    it('records final production evidence and the coordinator-only rollout boundary', () => {
         const report = readFileSync(REPORT_PATH, 'utf8');
-        expect(report).toContain('READY_FOR_REVIEW_NOT_APPLIED');
-        expect(report).toContain('first production apply attempt rolled back');
+        expect(report).toContain('`VERIFIED`');
+        expect(report).toContain('fresh dry-run listed exactly `20260911001903`');
+        expect(report).toContain('Fresh preflight reported 185 public base/partitioned tables, 11 source rows');
+        expect(report).toContain('second apply succeeded once');
+        expect(report).toContain('targetTablesAbsent=8');
+        expect(report).toContain('orphanedRoutinesAbsent=14');
+        expect(report).toContain('canonicalRowCount=11');
+        expect(report).toContain('canonicalShapeVerified=true');
+        expect(report).toContain('migrationHistoryOccurrences=1');
+        expect(report).toContain('allTablePublications=0');
+        expect(report).toContain('publicSchemaPublications=0');
+        expect(report).toContain('targetPublicationMemberships=0');
+        expect(report).toMatch(/An independent migration-history read showed version `20260911001903`\s+exactly once/);
+        expect(report).toContain('first production apply attempt failed');
         expect(report).toContain('SQLSTATE 2BP01');
-        expect(report).toContain('Corrective status: pending');
+        expect(report).toContain('fully rolled back');
+        expect(report).toContain('Corrective PR #566 merged as `9d87d1f55ba1b6769b910e0e0cedb555b38a8bd6`');
+        expect(report).toContain('independent Luna max `PASS`');
+        expect(report).toContain('8ea5a2b92c21a2dae8dda2e2497a4b82d2125acbbd0ab2ad77119152cb4a5506');
         expect(report).toContain('expected canonical total is 11 rows');
         expect(report).toContain('185');
         expect(report).toContain('177');
         expect(report).toMatch(/PGlite suite passed\s+14 tests/);
         expect(report).toContain('No analysis admission was activated');
         expect(report).toMatch(/real `0_min\._\.00` canary was\s+never run/);
+        expect(report).toContain('No payment state changed');
         expect(report).toContain('payment_pending');
-        expect(report).toContain('coordinator-owned gates');
+        expect(report).toContain('coordinator-owned facts');
     });
 });
 
