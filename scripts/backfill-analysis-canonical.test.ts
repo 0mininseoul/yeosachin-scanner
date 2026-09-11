@@ -49,6 +49,7 @@ describe('bounded analysis canonical backfill tooling', () => {
         const tables: string[] = [];
         const chain = {
             select: vi.fn().mockReturnThis(),
+            in: vi.fn().mockReturnThis(),
             order: vi.fn().mockReturnThis(),
             limit: vi.fn().mockResolvedValue({ data: [], error: null }),
         };
@@ -61,10 +62,25 @@ describe('bounded analysis canonical backfill tooling', () => {
 
         await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
 
-        for (const family of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
-            expect(tables).toContain(family.canonicalTable);
-            expect(tables).toEqual(expect.arrayContaining([...family.legacyTables]));
-        }
+        const executableSources = ANALYSIS_CANONICAL_BACKFILL_FAMILIES.flatMap(family => family.legacyTables);
+        expect(executableSources).toHaveLength(21);
+        expect(new Set(executableSources)).toHaveLength(21);
+        expect(tables).toEqual(expect.arrayContaining(executableSources));
+        expect(tables).toEqual(expect.arrayContaining(
+            ANALYSIS_CANONICAL_BACKFILL_FAMILIES
+                .filter(family => !family.deferred)
+                .map(family => family.canonicalTable),
+        ));
+        expect(tables).not.toEqual(expect.arrayContaining([
+            'ai_analysis_cache',
+            'analysis_v2_ai_global_result_cache',
+            'analysis_cache',
+            'analysis_audit_bundles',
+            'analysis_order_audit_assembly_queue',
+            'analysis_order_audit_bundles',
+            'analysis_order_audit_candidates',
+            'analysis_order_audit_interactions',
+        ]));
         expect(chain.limit).toHaveBeenCalled();
         expect(chain.limit.mock.calls.every(([value]) => value === 101)).toBe(true);
     });
@@ -124,6 +140,33 @@ describe('bounded analysis canonical backfill tooling', () => {
         });
         expect(report).not.toHaveProperty('requestIds');
         expect(JSON.stringify(report)).not.toContain(sourceRows[0]!.id);
+        expect(Object.keys(report.families).sort()).toEqual([
+            'artifacts', 'audit', 'cache', 'costs', 'events', 'jobs',
+        ]);
+        const deferredFamily = {
+            source: { count: 0, checksum: null, complete: false },
+            canonical: { count: 0, checksum: null, complete: false },
+            parity: { status: 'blocked', mismatchPaths: ['source.missing'] },
+            logical: {
+                sourceCount: 0,
+                canonicalCount: 0,
+                sourceChecksum: null,
+                canonicalChecksum: null,
+            },
+            requiredFields: [],
+            targetEvidence: {
+                sourceCount: 0,
+                canonicalCount: 0,
+                sourceChecksum: null,
+                canonicalChecksum: null,
+                sourceInteractionCount: 0,
+                canonicalInteractionCount: 0,
+                sourceInteractionChecksum: null,
+                canonicalInteractionChecksum: null,
+            },
+        };
+        expect(report.families.cache).toEqual(deferredFamily);
+        expect(report.families.audit).toEqual(deferredFamily);
         expect(chain.order).toHaveBeenNthCalledWith(1, 'created_at', { ascending: true });
         expect(chain.order).toHaveBeenNthCalledWith(2, 'id', { ascending: true });
         expect(chain.limit).toHaveBeenCalledWith(101);
@@ -226,11 +269,34 @@ describe('bounded analysis canonical backfill tooling', () => {
             created_at: `2026-09-01T00:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
             updated_at: `2026-09-01T01:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
         }));
+        const eventSource = {
+            id: 'event:1',
+            request_id: sourceRows[0]!.id,
+            revision: 1,
+            status: 'source',
+            created_at: '2026-09-01T00:00:00.000Z',
+            updated_at: '2026-09-01T00:00:00.000Z',
+        };
+        const eventCanonical = {
+            id: 'event:1',
+            request_id: sourceRows[0]!.id,
+            kind: 'progress',
+            state: 'canonical',
+            created_at: '2026-09-01T00:00:00.000Z',
+        };
         let jobsRead = 0;
         const boundaries: string[] = [];
         const client = {
             from: vi.fn((table: string) => {
-                const data = table === 'analysis_pipeline_jobs' && jobsRead++ === 0 ? jobs : [];
+                const data = table === 'analysis_requests'
+                    ? sourceRows
+                    : table === 'analysis_pipeline_jobs' && jobsRead++ === 0
+                        ? jobs
+                        : table === 'analysis_progress_state'
+                            ? [eventSource]
+                            : table === 'analysis_events'
+                                ? [eventCanonical]
+                                : [];
                 const chain = {
                     select: vi.fn().mockReturnThis(),
                     in: vi.fn().mockReturnThis(),
@@ -246,7 +312,7 @@ describe('bounded analysis canonical backfill tooling', () => {
         };
 
         const first = await backfillAnalysisCanonical({ client, limit: 100, reportOnly: true });
-        await backfillAnalysisCanonical({
+        const second = await backfillAnalysisCanonical({
             client,
             limit: 100,
             cursor: first.nextCursor,
@@ -254,6 +320,22 @@ describe('bounded analysis canonical backfill tooling', () => {
         });
 
         expect(first.nextCursor).toBeTruthy();
+        expect(first.families.jobs.parity).toEqual({
+            status: 'blocked',
+            mismatchPaths: ['source.missing'],
+        });
+        expect(second.families.jobs.parity).toEqual({
+            status: 'blocked',
+            mismatchPaths: ['source.missing'],
+        });
+        expect(first.families.events.parity).toEqual({
+            status: 'mismatch',
+            mismatchPaths: ['logical.row.fields'],
+        });
+        expect(second.families.events.parity).toEqual({
+            status: 'mismatch',
+            mismatchPaths: ['logical.row.fields'],
+        });
         expect(boundaries).toHaveLength(1);
         expect(boundaries[0]).toContain('created_at.gt.');
         expect(boundaries[0]).toContain('job_key.gt.');
