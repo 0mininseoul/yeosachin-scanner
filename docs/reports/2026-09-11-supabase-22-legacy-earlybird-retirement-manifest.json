@@ -1,5 +1,29 @@
 {
   "schemaVersion": "supabase-22-legacy-earlybird-retirement-v1",
+  "asOf": "2026-09-11",
+  "sourceBoundary": {
+    "workerProductionAccess": false,
+    "workerProductionMutation": false,
+    "coordinatorProductionMigrationApplied": true,
+    "activationPerformed": false,
+    "realCanaryStarted": false,
+    "paymentStateChanged": false,
+    "secretsProjectRefsUuidsRawRowsIncluded": false
+  },
+  "correctiveReview": {
+    "pullRequest": 566,
+    "mergeCommit": "9d87d1f55ba1b6769b910e0e0cedb555b38a8bd6",
+    "independentLunaMax": "PASS",
+    "pullRequestChecks": "green",
+    "postMergeCi": "green",
+    "vercel": "green"
+  },
+  "migrationEvidence": {
+    "version": "20260911001903",
+    "sha256": "8ea5a2b92c21a2dae8dda2e2497a4b82d2125acbbd0ab2ad77119152cb4a5506",
+    "file": "supabase/migrations/20260911001903_retire_legacy_earlybird_recovery_tables.sql",
+    "selectiveProductionApplication": true
+  },
   "baselineCommit": "e2edd2d18a8425721ce8e52f671230e9a1ff3231",
   "publicBasePartitionedTableCount": {
     "before": 185,
@@ -128,6 +152,41 @@
     "trackFunctions": "none",
     "runtimeTrafficProof": "static and catalog caller evidence only; pg_stat_user_functions not used"
   },
+  "productionEvidence": {
+    "freshDryRun": {
+      "listedMigrationVersions": [
+        "20260911001903"
+      ],
+      "exactOnly": true
+    },
+    "freshPreflight": {
+      "publicBasePartitionedTableCount": 185,
+      "sourceRowCount": 11,
+      "canonicalRowCount": 0,
+      "migrationHistoryOccurrences": 0
+    },
+    "secondApply": {
+      "attemptNumber": 2,
+      "status": "succeeded",
+      "successfulApplications": 1
+    },
+    "sequentialPostapply": {
+      "publicBasePartitionedTableCount": 177,
+      "targetTablesAbsent": 8,
+      "orphanedRoutinesAbsent": 14,
+      "canonicalRowCount": 11,
+      "canonicalShapeVerified": true,
+      "migrationHistoryOccurrences": 1,
+      "allTablePublications": 0,
+      "publicSchemaPublications": 0,
+      "targetPublicationMemberships": 0
+    },
+    "independentMigrationHistory": {
+      "migrationVersion": "20260911001903",
+      "occurrences": 1,
+      "existsExactlyOnce": true
+    }
+  },
   "rollbackSource": "supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql",
   "restoreStatus": "verified",
   "restoreEvidence": {
@@ -147,15 +206,17 @@
     ]
   },
   "verificationOperation": "supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql",
-  "rolloutStatus": "not_applied",
-  "evidenceStatus": "READY_FOR_REVIEW_NOT_APPLIED",
+  "rolloutStatus": "VERIFIED",
+  "evidenceStatus": "VERIFIED",
   "firstApplyAttempt": {
     "migrationVersion": "20260911001903",
     "status": "rolled_back",
+    "failed": true,
+    "rollbackStatus": "fully_rolled_back",
     "reason": "SQLSTATE 2BP01: trigger dependency prevented DROP FUNCTION",
-    "correctiveStatus": "pending"
+    "correctiveStatus": "resolved_by_pr_566"
   },
-  "productionMutation": "refused",
+  "productionMutation": "selective_migration_applied",
   "activationBoundary": {
     "paymentPending": "unchanged",
     "analysisAdmission": "unchanged",
@@ -165,9 +226,9 @@
   "validation": {
     "focusedRetirementTests": "passed: 14 tests in scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts, including canonical conflict and verifier drift cases",
     "isolatedRestoreDrill": "passed: isolated restore/verifier cases in the 14-test scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts suite",
-    "lint": "passed: targeted eslint for the two inventory files and retirement test",
+    "lint": "passed: targeted eslint for scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts",
     "build": "passed: npm run build with loopback build-only placeholder variables",
-    "diffReview": "passed: git diff --check and intended-file status review",
+    "diffReview": "passed: git diff --check; only the two final evidence files and retirement contract test changed",
     "fullRepositoryTest": "attempted: three pre-existing lib/observability/server-sdk.test.ts failures, then stalled and was stopped"
   }
 }
