@@ -9,6 +9,172 @@ SET LOCAL statement_timeout = '2min';
 -- either the source records or their canonical destination.
 SELECT pg_catalog.pg_advisory_xact_lock(22091109, 22);
 
+-- Advisory locks serialize only coordinated copies. Fail closed when another
+-- same-database client can be changing function/procedure or publication
+-- catalog state, while allowing known background workers with NULL state.
+DO $retirement_active_ddl_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_stat_activity AS activity
+        CROSS JOIN LATERAL (
+            SELECT pg_catalog.regexp_replace(
+                pg_catalog.regexp_replace(
+                    activity.query,
+                    E'/[*]([^*]|[*][^/])*[*]/',
+                    ' ',
+                    'g'
+                ),
+                E'--[^\\r\\n]*',
+                ' ',
+                'g'
+            ) AS retirement_active_ddl_normalized_query
+        ) AS normalized
+        WHERE activity.pid <> pg_catalog.pg_backend_pid()
+          AND activity.datname = pg_catalog.current_database()
+          AND (
+              activity.backend_type IS NULL
+              OR (
+                  activity.backend_type = 'client backend'
+                  AND (
+                      activity.state IS NULL
+                      OR activity.query IS NULL
+                      OR activity.query = '<insufficient privilege>'
+                      OR (
+                          activity.state = 'active'
+                          AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                              (
+                                  (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                                  [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                                | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                              )
+                          $retirement_active_ddl_pattern$
+                      )
+                  )
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
+    END IF;
+END;
+$retirement_active_ddl_guard$;
+
+-- Capture the exact relation OIDs before inspection. Transaction-local GUCs
+-- let the post-lock guard detect same-name replacement without helper objects.
+DO $retirement_relation_guard$
+DECLARE
+    v_relation_oid OID;
+BEGIN
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'maintenance_jobs'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.maintenance_jobs';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_maintenance_jobs_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_concierge_batch_target_lineage_repairs'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_concierge_batch_target_lineage_repairs';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_concierge_batch_target_lineage_repairs_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_partial_adoption_second_rearms'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_partial_adoption_second_rearms';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_partial_adoption_second_rearms_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_profile_evidence_failure_recoveries'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_profile_evidence_failure_recoveries';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_profile_evidence_failure_recoveries_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_v211_apify_transient_admission_resumes'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_v211_apify_transient_admission_resumes';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_v211_apify_transient_admission_resumes_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_v211_concierge_copy_corrections'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_v211_concierge_copy_corrections';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_v211_concierge_copy_corrections_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_v212_concierge_copy_corrections'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_v212_concierge_copy_corrections';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_v212_concierge_copy_corrections_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_v213_concierge_copy_corrections'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_v213_concierge_copy_corrections';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_v213_concierge_copy_corrections_oid', v_relation_oid::TEXT, true);
+
+    SELECT relation_row.oid INTO v_relation_oid
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public'
+      AND relation_row.relname = 'earlybird_v214_concierge_gemini_copy_corrections'
+      AND relation_row.relkind = 'r';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_MISSING: public.earlybird_v214_concierge_gemini_copy_corrections';
+    END IF;
+    PERFORM pg_catalog.set_config('retirement.expected_earlybird_v214_concierge_gemini_copy_corrections_oid', v_relation_oid::TEXT, true);
+END;
+$retirement_relation_guard$;
+
 DO $retirement_baseline_guard$
 DECLARE
     v_public_table_count BIGINT;
@@ -37,6 +203,105 @@ LOCK TABLE public.maintenance_jobs,
     public.earlybird_v213_concierge_copy_corrections,
     public.earlybird_v214_concierge_gemini_copy_corrections
     IN ACCESS EXCLUSIVE MODE;
+
+-- Re-resolve after locking. A same-name replacement before LOCK TABLE would
+-- otherwise let later catalog checks inspect a different relation.
+DO $retirement_relation_revalidation_guard$
+DECLARE
+    v_relation_oid OID;
+    v_relation_kind "char";
+BEGIN
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'maintenance_jobs';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_maintenance_jobs_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.maintenance_jobs';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_concierge_batch_target_lineage_repairs';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_concierge_batch_target_lineage_repairs_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_concierge_batch_target_lineage_repairs';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_partial_adoption_second_rearms';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_partial_adoption_second_rearms_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_partial_adoption_second_rearms';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_profile_evidence_failure_recoveries';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_profile_evidence_failure_recoveries_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_profile_evidence_failure_recoveries';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_v211_apify_transient_admission_resumes';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_v211_apify_transient_admission_resumes_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_v211_apify_transient_admission_resumes';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_v211_concierge_copy_corrections';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_v211_concierge_copy_corrections_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_v211_concierge_copy_corrections';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_v212_concierge_copy_corrections';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_v212_concierge_copy_corrections_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_v212_concierge_copy_corrections';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_v213_concierge_copy_corrections';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_v213_concierge_copy_corrections_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_v213_concierge_copy_corrections';
+    END IF;
+
+    SELECT relation_row.oid, relation_row.relkind INTO v_relation_oid, v_relation_kind
+    FROM pg_catalog.pg_class AS relation_row
+    JOIN pg_catalog.pg_namespace AS relation_schema
+      ON relation_schema.oid = relation_row.relnamespace
+    WHERE relation_schema.nspname = 'public' AND relation_row.relname = 'earlybird_v214_concierge_gemini_copy_corrections';
+    IF NOT FOUND OR v_relation_kind <> 'r'
+       OR v_relation_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting('retirement.expected_earlybird_v214_concierge_gemini_copy_corrections_oid', true) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_TABLE_REPLACED: public.earlybird_v214_concierge_gemini_copy_corrections';
+    END IF;
+END;
+$retirement_relation_revalidation_guard$;
 
 DO $retirement_catalog_guard$
 DECLARE
@@ -391,6 +656,7 @@ DO $retirement_routine_guard$
 DECLARE
     v_signature TEXT;
     v_routine OID;
+    v_routine_index INTEGER := 0;
 BEGIN
     FOREACH v_signature IN ARRAY ARRAY[
         'public.prevent_earlybird_concierge_batch_target_lineage_repair_mutation()',
@@ -440,6 +706,12 @@ BEGIN
         ) THEN
             RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_IDENTITY_MISMATCH: %', v_signature;
         END IF;
+        v_routine_index := v_routine_index + 1;
+        PERFORM pg_catalog.set_config(
+            'retirement.expected_routine_' || pg_catalog.lpad(v_routine_index::TEXT, 2, '0') || '_oid',
+            v_routine::TEXT,
+            true
+        );
     END LOOP;
 END;
 $retirement_routine_guard$;
@@ -513,6 +785,142 @@ $retirement_routine_caller_guard$;
 
 -- Each insert is explicit so table identifiers and primary-key bindings are
 -- reviewable. The complete source row remains in canonical JSONB.
+CREATE TEMP TABLE pg_temp.retirement_expected_canonical_rows (
+    kind TEXT NOT NULL,
+    target_key_hash TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    content_hash TEXT NOT NULL,
+    PRIMARY KEY (kind, target_key_hash)
+) ON COMMIT DROP;
+
+-- Materialize the exact incoming rows before touching canonical conflicts. A
+-- conflict is safe only when the existing row is succeeded and both payload
+-- and content_hash are byte-for-byte/equality exact; otherwise abort.
+INSERT INTO pg_temp.retirement_expected_canonical_rows (
+    kind, target_key_hash, payload, content_hash
+)
+WITH incoming AS (
+    SELECT
+        'recovery'::TEXT AS kind,
+        'earlybird_concierge_batch_target_lineage_repairs'::TEXT AS source_table,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_concierge_batch_target_lineage_repairs',
+            'legacy_primary_key', pg_catalog.jsonb_build_object(
+                'cohort_key', source_row.cohort_key,
+                'order_id', source_row.order_id
+            ),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        ) AS payload
+    FROM public.earlybird_concierge_batch_target_lineage_repairs AS source_row
+    UNION ALL
+    SELECT
+        'rearm'::TEXT,
+        'earlybird_partial_adoption_second_rearms'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_partial_adoption_second_rearms',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_partial_adoption_second_rearms AS source_row
+    UNION ALL
+    SELECT
+        'recovery'::TEXT,
+        'earlybird_profile_evidence_failure_recoveries'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_profile_evidence_failure_recoveries',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_profile_evidence_failure_recoveries AS source_row
+    UNION ALL
+    SELECT
+        'rearm'::TEXT,
+        'earlybird_v211_apify_transient_admission_resumes'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_v211_apify_transient_admission_resumes',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_v211_apify_transient_admission_resumes AS source_row
+    UNION ALL
+    SELECT
+        'replay'::TEXT,
+        'earlybird_v211_concierge_copy_corrections'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_v211_concierge_copy_corrections',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_v211_concierge_copy_corrections AS source_row
+    UNION ALL
+    SELECT
+        'replay'::TEXT,
+        'earlybird_v212_concierge_copy_corrections'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_v212_concierge_copy_corrections',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_v212_concierge_copy_corrections AS source_row
+    UNION ALL
+    SELECT
+        'replay'::TEXT,
+        'earlybird_v213_concierge_copy_corrections'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_v213_concierge_copy_corrections',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_v213_concierge_copy_corrections AS source_row
+    UNION ALL
+    SELECT
+        'replay'::TEXT,
+        'earlybird_v214_concierge_gemini_copy_corrections'::TEXT,
+        pg_catalog.jsonb_build_object(
+            'legacy_source_table', 'earlybird_v214_concierge_gemini_copy_corrections',
+            'legacy_primary_key', pg_catalog.jsonb_build_object('order_id', source_row.order_id),
+            'legacy_row', pg_catalog.to_jsonb(source_row),
+            'schema_version', 1
+        )
+    FROM public.earlybird_v214_concierge_gemini_copy_corrections AS source_row
+), prepared AS (
+    SELECT kind,
+        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+            'supabase-22-legacy-earlybird-retirement-v1:' || kind || ':'
+            || source_table || ':' || (payload->'legacy_primary_key')::TEXT,
+            'UTF8'
+        )), 'hex') AS target_key_hash,
+        payload,
+        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(payload::TEXT, 'UTF8')), 'hex') AS content_hash
+    FROM incoming
+)
+SELECT kind, target_key_hash, payload, content_hash
+FROM prepared;
+
+DO $retirement_canonical_conflict_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_temp.retirement_expected_canonical_rows AS expected
+        JOIN public.maintenance_jobs AS actual
+          ON actual.kind = expected.kind
+         AND actual.target_key_hash = expected.target_key_hash
+        WHERE actual.state IS DISTINCT FROM 'succeeded'
+           OR actual.payload IS DISTINCT FROM expected.payload
+           OR actual.content_hash IS DISTINCT FROM expected.content_hash
+    ) THEN
+        RAISE EXCEPTION 'MAINTENANCE_CONTENT_CONFLICT: existing canonical row is not succeeded with the exact payload and content_hash';
+    END IF;
+END;
+$retirement_canonical_conflict_guard$;
+
 WITH incoming AS (
     SELECT
         'recovery'::TEXT AS kind,
@@ -550,10 +958,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -580,10 +985,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -610,10 +1012,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -640,10 +1039,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -670,10 +1066,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -700,10 +1093,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -730,10 +1120,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 WITH incoming AS (
     SELECT
@@ -760,10 +1147,7 @@ INSERT INTO public.maintenance_jobs AS maintenance(
 )
 SELECT kind, target_key_hash, 'succeeded', payload, content_hash
 FROM prepared
-ON CONFLICT (kind, target_key_hash) DO UPDATE
-SET updated_at = EXCLUDED.updated_at
-WHERE maintenance.content_hash = EXCLUDED.content_hash
-  AND maintenance.payload = EXCLUDED.payload;
+ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
 DO $retirement_parity_guard$
 DECLARE
@@ -894,6 +1278,93 @@ BEGIN
     END IF;
 END;
 $retirement_parity_guard$;
+
+-- Repeat the visibility fence immediately before the exact destructive
+-- allowlist. The target locks do not block uncoordinated routine/publication
+-- DDL, so the coordinator still needs a single-writer DDL window.
+DO $retirement_active_ddl_guard$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_stat_activity AS activity
+        CROSS JOIN LATERAL (
+            SELECT pg_catalog.regexp_replace(
+                pg_catalog.regexp_replace(
+                    activity.query,
+                    E'/[*]([^*]|[*][^/])*[*]/',
+                    ' ',
+                    'g'
+                ),
+                E'--[^\\r\\n]*',
+                ' ',
+                'g'
+            ) AS retirement_active_ddl_normalized_query
+        ) AS normalized
+        WHERE activity.pid <> pg_catalog.pg_backend_pid()
+          AND activity.datname = pg_catalog.current_database()
+          AND (
+              activity.backend_type IS NULL
+              OR (
+                  activity.backend_type = 'client backend'
+                  AND (
+                      activity.state IS NULL
+                      OR activity.query IS NULL
+                      OR activity.query = '<insufficient privilege>'
+                      OR (
+                          activity.state = 'active'
+                          AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
+                              (
+                                  (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
+                                  [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                                | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
+                              )
+                          $retirement_active_ddl_pattern$
+                      )
+                  )
+              )
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ACTIVE_DDL: another active publication or function/procedure DDL session is present';
+    END IF;
+END;
+$retirement_active_ddl_guard$;
+
+-- Revalidate every reviewed routine identity after all evidence reads. A
+-- same-signature drop/recreate gets a new OID and aborts before any DROP.
+DO $retirement_routine_revalidation_guard$
+DECLARE
+    v_signature TEXT;
+    v_routine OID;
+    v_routine_index INTEGER := 0;
+BEGIN
+    FOREACH v_signature IN ARRAY ARRAY[
+        'public.prevent_earlybird_concierge_batch_target_lineage_repair_mutation()',
+        'public.reconcile_exact_three_concierge_target_lineage(text)',
+        'public.prevent_earlybird_partial_adoption_second_rearm_mutation()',
+        'public.rearm_earlybird_partial_adoption_second_failure(uuid,uuid,timestamp with time zone)',
+        'public.recover_earlybird_profile_evidence_failed_fulfillment(uuid,uuid,timestamp with time zone)',
+        'public.resume_earlybird_v211_apify_transient_admission(uuid,timestamp with time zone)',
+        'public.prevent_earlybird_v211_concierge_copy_correction_mutation()',
+        'public.correct_earlybird_v211_concierge_copy(uuid,uuid,uuid,text,text,text,jsonb)',
+        'public.prevent_earlybird_v212_concierge_copy_correction_mutation()',
+        'public.correct_earlybird_v212_concierge_copy(uuid,uuid,uuid,text,text,text,text,jsonb)',
+        'public.prevent_earlybird_v213_concierge_copy_correction_mutation()',
+        'public.correct_earlybird_v213_concierge_copy(uuid,uuid,uuid,text,text,text,text,jsonb)',
+        'public.prevent_earlybird_v214_concierge_gemini_copy_correction_mutation()',
+        'public.correct_earlybird_v214_concierge_gemini_copy(uuid,uuid,uuid,text,text,text,jsonb,text,jsonb)'
+    ] LOOP
+        v_routine_index := v_routine_index + 1;
+        v_routine := pg_catalog.to_regprocedure(v_signature);
+        IF v_routine IS NULL
+           OR v_routine::TEXT IS DISTINCT FROM pg_catalog.current_setting(
+               'retirement.expected_routine_' || pg_catalog.lpad(v_routine_index::TEXT, 2, '0') || '_oid',
+               true
+           ) THEN
+            RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_REPLACED: %', v_signature;
+        END IF;
+    END LOOP;
+END;
+$retirement_routine_revalidation_guard$;
 
 -- Revoke before dropping the exact orphaned identities. Shared schema
 -- recovery trigger routines are intentionally not listed here.

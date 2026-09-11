@@ -97,7 +97,7 @@
 
 - [x] **Step 3: Implement deterministic canonical copy**
 
-  In one explicit transaction, lock the wave, assert every source table and canonical table shape, then insert one canonical row per source row. Derive `kind` as `rearm`, `replay`, or `recovery`; derive `target_key_hash` from a versioned domain string, source table, and the complete primary-key JSON; set `state='succeeded'`; store `legacy_source_table`, `legacy_primary_key`, `legacy_row`, and `schema_version=1` in payload; compute `content_hash` from canonicalized payload text. Use `ON CONFLICT (kind, target_key_hash) DO UPDATE` only when the existing `content_hash` is identical; raise on conflicting content.
+  In one explicit transaction, lock the wave, assert every source table and canonical table shape, then insert one canonical row per source row. Derive `kind` as `rearm`, `replay`, or `recovery`; derive `target_key_hash` from a versioned domain string, source table, and the complete primary-key JSON; set `state='succeeded'`; store `legacy_source_table`, `legacy_primary_key`, `legacy_row`, and `schema_version=1` in payload; compute `content_hash` from canonicalized payload text. Materialize the exact incoming payload/key/hash set, fail closed unless any existing conflict is already `succeeded` with exactly matching payload and `content_hash`, and use `ON CONFLICT (kind, target_key_hash) DO NOTHING` so timestamps are never silently changed.
 
 - [x] **Step 4: Assert parity before destructive DDL**
 
@@ -140,7 +140,7 @@
 
 - [x] **Step 3: Implement sanitized verification SQL**
 
-  Provide `preflight` and `postapply` modes controlled by a session-local setting. Preflight must prove baseline 185, counts, dependencies, routine identities, canonical table shape, and no publications. Postapply must prove final 177, target/routine absence, exact 11 canonical records, checksum parity metadata, migration-history occurrence one, and no unexpected public-table delta.
+  Provide `preflight` and `postapply` modes controlled by a session-local setting. Both modes scope canonical count/hash and state/content checks to the exact eight `legacy_source_table` values and raise on mismatched actual values; preflight must prove baseline 185, counts, dependencies, routine identities, canonical table shape, and no publications, while postapply must prove final 177, target/routine absence, exact 11 canonical records, checksum parity metadata, migration-history occurrence one, and no unexpected public-table delta.
 
 - [x] **Step 4: Run the PGlite restore drill**
 

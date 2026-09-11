@@ -230,7 +230,7 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         });
         expect(manifest.verificationOperation)
             .toBe('supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql');
-        expect(manifest.validation.isolatedRestoreDrill).toContain('12-test');
+        expect(manifest.validation.isolatedRestoreDrill).toContain('14-test');
         expect(manifest.rolloutStatus).toBe('not_applied');
         expect(manifest.evidenceStatus).toBe('READY_FOR_REVIEW_NOT_APPLIED');
     });
@@ -251,6 +251,32 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(activeSql).toContain('pg_catalog.to_regprocedure');
         expect(activeSql).toContain('pg_catalog.pg_get_function_identity_arguments');
         expect(activeSql).toContain('RETIREMENT_GUARD_RETAINED_ROUTINE_CALLER');
+        expect(activeSql).toContain('RETIREMENT_GUARD_ACTIVE_DDL');
+        expect(activeSql).toContain('activity.backend_type');
+        expect(activeSql).toContain('activity.datname = pg_catalog.current_database()');
+        expect(activeSql).toContain('pg_catalog.set_config(');
+        expect(activeSql).toContain('retirement.expected_maintenance_jobs_oid');
+        expect(activeSql).toContain('retirement.expected_earlybird_v214_concierge_gemini_copy_corrections_oid');
+        expect(activeSql).toContain('RETIREMENT_GUARD_TABLE_REPLACED');
+        expect(activeSql).toContain('retirement.expected_routine_');
+        expect(activeSql).toContain('pg_catalog.lpad(v_routine_index::TEXT, 2, \'0\')');
+        expect(activeSql).toContain('RETIREMENT_GUARD_ROUTINE_REPLACED');
+        expect(activeSql.match(/RETIREMENT_GUARD_ACTIVE_DDL/g)).toHaveLength(2);
+        const activeDdlGuards = [...activeSql.matchAll(
+            /DO \$retirement_active_ddl_guard\$[\s\S]*?\$retirement_active_ddl_guard\$;/g,
+        )].map(match => match[0]);
+        expect(activeDdlGuards).toHaveLength(2);
+        activeDdlGuards.forEach(guard => {
+            expect(guard).toContain('activity.datname = pg_catalog.current_database()');
+            expect(guard).toContain('activity.backend_type IS NULL');
+            expect(guard).toContain("activity.backend_type = 'client backend'");
+            expect(guard).toContain("activity.query = '<insufficient privilege>'");
+            expect(guard).toContain('$retirement_active_ddl_pattern$');
+        });
+        TARGETS.forEach(table => {
+            expect(activeSql).toContain(`retirement.expected_${table}_oid`);
+            expect(activeSql).toContain(`RETIREMENT_GUARD_TABLE_REPLACED: public.${table}`);
+        });
         expect(activeSql.indexOf('RETIREMENT_GUARD'))
             .toBeLessThan(activeSql.indexOf('DROP TABLE'));
         expect(activeSql.trimEnd()).toMatch(/COMMIT;\s*$/i);
@@ -305,7 +331,10 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(sql).toContain("legacy_primary_key");
         expect(sql).toContain("legacy_row");
         expect(sql).toContain("schema_version");
-        expect(sql).toContain("ON CONFLICT (kind, target_key_hash) DO UPDATE");
+        expect(sql).toContain("ON CONFLICT (kind, target_key_hash) DO NOTHING");
+        expect(sql).not.toContain("ON CONFLICT (kind, target_key_hash) DO UPDATE");
+        expect(sql).toContain('retirement_expected_canonical_rows');
+        expect(sql).toContain('retirement_canonical_conflict_guard');
         expect(sql).toContain('MAINTENANCE_CONTENT_CONFLICT');
         expect(sql).toContain('RETIREMENT_GUARD_CANONICAL_TOTAL');
         expect(sql).toContain('RETIREMENT_GUARD_CANONICAL_PARITY');
@@ -350,6 +379,11 @@ describe('Supabase 22 legacy earlybird isolated operations', () => {
         expect(sql).toContain('pg_catalog.pg_publication_namespace');
         expect(sql).toContain('migrationHistoryOccurrences');
         expect(sql).toContain('canonicalAggregateSha256');
+        expect(sql).toContain('RETIREMENT_VERIFIER_PREFLIGHT_SOURCE_MISMATCH');
+        expect(sql).toContain('RETIREMENT_VERIFIER_PREFLIGHT_CATALOG_MISMATCH');
+        expect(sql).toContain('RETIREMENT_VERIFIER_POSTAPPLY_MISMATCH');
+        expect(sql).toContain('RETIREMENT_VERIFIER_CANONICAL_CONFLICT');
+        expect(sql).toMatch(/payload->>'legacy_source_table'\s+IN\s*\([\s\S]*earlybird_v214_concierge_gemini_copy_corrections/);
         expect(sql).not.toMatch(/\bINSERT INTO\s+public\./i);
         expect(sql).not.toMatch(/\b(?:UPDATE|DELETE FROM|DROP TABLE|TRUNCATE)\b/i);
         for (const table of TARGETS) expect(sql).toContain(table);
@@ -362,7 +396,7 @@ describe('Supabase 22 legacy earlybird isolated operations', () => {
         expect(report).toContain('expected canonical total is 11 rows');
         expect(report).toContain('185');
         expect(report).toContain('177');
-        expect(report).toMatch(/PGlite suite passed\s+11 tests/);
+        expect(report).toMatch(/PGlite suite passed\s+14 tests/);
         expect(report).toContain('No analysis admission was activated');
         expect(report).toMatch(/real `0_min\._\.00` canary was\s+never run/);
         expect(report).toContain('payment_pending');
@@ -655,6 +689,71 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
         }
     });
 
+    it('fails closed on canonical conflicts unless state, payload, and content_hash are exact', async () => {
+        const scenarios = [
+            { name: 'state', state: 'queued', payload: 'expected.payload', hash: "pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(payload::TEXT, 'UTF8')), 'hex')" },
+            { name: 'payload', state: 'succeeded', payload: "expected.payload || '{\"drift\": true}'::JSONB", hash: "pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(payload::TEXT, 'UTF8')), 'hex')" },
+            { name: 'content-hash', state: 'succeeded', payload: 'expected.payload', hash: "pg_catalog.repeat('b', 64)" },
+        ] as const;
+
+        for (const scenario of scenarios) {
+            const fixture = await createRetirementFixture();
+            try {
+                await fixture.db.exec(`
+                    WITH expected AS (
+                        SELECT
+                            'recovery'::TEXT AS kind,
+                            pg_catalog.jsonb_build_object(
+                                'legacy_source_table', 'earlybird_concierge_batch_target_lineage_repairs',
+                                'legacy_primary_key', pg_catalog.jsonb_build_object(
+                                    'cohort_key', source_row.cohort_key,
+                                    'order_id', source_row.order_id
+                                ),
+                                'legacy_row', pg_catalog.to_jsonb(source_row),
+                                'schema_version', 1
+                            ) AS payload
+                        FROM public.earlybird_concierge_batch_target_lineage_repairs AS source_row
+                        ORDER BY source_row.order_id
+                        LIMIT 1
+                    ), conflict AS (
+                        SELECT
+                            kind,
+                            pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                                'supabase-22-legacy-earlybird-retirement-v1:' || kind
+                                || ':earlybird_concierge_batch_target_lineage_repairs:'
+                                || (payload->'legacy_primary_key')::TEXT,
+                                'UTF8'
+                            )), 'hex') AS target_key_hash,
+                            ${scenario.payload} AS payload
+                        FROM expected
+                    )
+                    INSERT INTO public.maintenance_jobs (kind, target_key_hash, state, payload, content_hash)
+                    SELECT kind, target_key_hash, '${scenario.state}', payload,
+                           ${scenario.hash}
+                    FROM conflict;
+                `);
+
+                let migrationError: unknown;
+                try {
+                    await fixture.db.exec(readMigration());
+                } catch (error) {
+                    migrationError = error;
+                }
+                expect(migrationError, scenario.name).toBeDefined();
+                expect(String(migrationError), scenario.name).toContain('MAINTENANCE_CONTENT_CONFLICT');
+                await fixture.db.exec('ROLLBACK;');
+
+                const sourceStillExists = await fixture.db.query<{ count: number }>(`
+                    SELECT pg_catalog.count(*)::INTEGER AS count
+                    FROM public.earlybird_concierge_batch_target_lineage_repairs
+                `);
+                expect(Number(sourceStillExists.rows[0]?.count), scenario.name).toBe(3);
+            } finally {
+                await fixture.db.close();
+            }
+        }
+    });
+
     it('fails closed on baseline, source-count, shape, routine, and caller drift', async () => {
         const scenarios: ReadonlyArray<{
             name: string;
@@ -801,6 +900,68 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
                 SET supabase.retirement_verifier_mode = 'postapply';
             `);
             await postapplyFixture.db.exec(readVerifierOperation());
+        } finally {
+            await postapplyFixture.db.close();
+        }
+    });
+
+    it('raises on verifier source/canonical drift while ignoring out-of-scope legacy source values', async () => {
+        const preflightFixture = await createRetirementFixture();
+        try {
+            await preflightFixture.db.exec(`
+                DELETE FROM public.earlybird_profile_evidence_failure_recoveries
+                WHERE order_id = '00000000-0000-4000-8000-000000000006';
+                SET supabase.retirement_verifier_mode = 'preflight';
+            `);
+            let verifierError: unknown;
+            try {
+                await preflightFixture.db.exec(readVerifierOperation());
+            } catch (error) {
+                verifierError = error;
+            }
+            expect(String(verifierError)).toContain('RETIREMENT_VERIFIER_PREFLIGHT_SOURCE_MISMATCH');
+            await preflightFixture.db.exec('ROLLBACK;');
+        } finally {
+            await preflightFixture.db.close();
+        }
+
+        const postapplyFixture = await createRetirementFixture();
+        try {
+            await postapplyFixture.db.exec(readMigration());
+            await postapplyFixture.db.exec(`
+                CREATE SCHEMA supabase_migrations;
+                CREATE TABLE supabase_migrations.schema_migrations (version TEXT NOT NULL);
+                INSERT INTO supabase_migrations.schema_migrations VALUES ('20260911001903');
+                INSERT INTO public.maintenance_jobs (kind, target_key_hash, state, payload, content_hash)
+                SELECT 'audit_assembly', pg_catalog.repeat('c', 64), 'succeeded',
+                       '{"legacy_source_table":"unapproved_legacy","legacy_row":{"fixture":true}}'::JSONB,
+                       pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                           '{"legacy_row":{"fixture":true},"legacy_source_table":"unapproved_legacy"}'::JSONB::TEXT,
+                           'UTF8'
+                       )), 'hex');
+                SET supabase.retirement_verifier_mode = 'postapply';
+            `);
+            await postapplyFixture.db.exec(readVerifierOperation());
+
+            await postapplyFixture.db.exec(`
+                UPDATE public.maintenance_jobs
+                SET state = 'queued'
+                WHERE id = (
+                    SELECT id
+                    FROM public.maintenance_jobs
+                    WHERE payload->>'legacy_source_table' = 'earlybird_concierge_batch_target_lineage_repairs'
+                    LIMIT 1
+                );
+                SET supabase.retirement_verifier_mode = 'postapply';
+            `);
+            let verifierError: unknown;
+            try {
+                await postapplyFixture.db.exec(readVerifierOperation());
+            } catch (error) {
+                verifierError = error;
+            }
+            expect(String(verifierError)).toContain('RETIREMENT_VERIFIER_CANONICAL_CONFLICT');
+            await postapplyFixture.db.exec('ROLLBACK;');
         } finally {
             await postapplyFixture.db.close();
         }

@@ -157,8 +157,8 @@
     "externalServices": "not_accessed"
   },
   "validation": {
-    "focusedRetirementTests": "passed: 2 files, 16 tests",
-    "isolatedRestoreDrill": "passed: isolated restore/verifier cases in the 12-test scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts suite",
+    "focusedRetirementTests": "passed: 14 tests in scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts, including canonical conflict and verifier drift cases",
+    "isolatedRestoreDrill": "passed: isolated restore/verifier cases in the 14-test scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts suite",
     "lint": "passed: targeted eslint for the two inventory files and retirement test",
     "build": "passed: npm run build with loopback build-only placeholder variables",
     "diffReview": "passed: git diff --check and intended-file status review",

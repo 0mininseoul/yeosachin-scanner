@@ -34,6 +34,13 @@ therefore retains fail-closed catalog checks and a stored-function-definition
 scan, while treating application/runtime ownership as an explicit coordinator
 review gate.
 
+The migration also uses the reviewed active-DDL/client-backend fence before
+catalog inspection and again immediately before destructive DDL. It captures
+the canonical and eight source relation OIDs before locking and revalidates
+them after locking, and captures/revalidates all 14 exact routine identities
+before the drop allowlist. The advisory and relation locks serialize only this
+coordinated wave; the coordinator still owns the single-writer DDL window.
+
 `earlybird_v211_concierge_publications` is intentionally excluded from this
 wave. Its helper
 `analysis_v2_is_first_payment_concierge_publication(uuid)` is referenced by
@@ -57,9 +64,11 @@ The migration copies each source row into `maintenance_jobs` with:
 
 Before any destructive statement, the transaction checks each exact source
 count, source-to-canonical aggregate hash, and the total of 11 canonical rows.
-Conflict handling updates only an identical existing payload; a content
-conflict aborts the transaction. The terminal guard rechecks canonical count,
-target absence, routine absence, and public table count before commit.
+Canonical conflicts are accepted only when the existing row is `succeeded` and
+its payload and `content_hash` exactly match the incoming row; conflicts with
+bad state, payload, or hash abort before any drop, and accepted conflicts do
+not update timestamps. The terminal guard rechecks canonical count, target
+absence, routine absence, and public table count before commit.
 
 ## Isolated recovery and verification
 
@@ -73,15 +82,17 @@ parity. It never deletes or rewrites `maintenance_jobs` rows.
 
 `supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql`
 supports caller-selected `preflight` and `postapply` modes through the
-session-local `supabase.retirement_verifier_mode` setting. It emits only
-relation/routine names, counts, SHA-256 hashes, boolean dependency facts, and
-migration-history occurrence counts; its temporary report table is rolled
+session-local `supabase.retirement_verifier_mode` setting. It scopes canonical
+count/hash and state/content checks to the exact eight
+`legacy_source_table` values, raises on mismatched actual values, and emits
+only relation/routine names, counts, SHA-256 hashes, boolean dependency facts,
+and migration-history occurrence counts; its temporary report table is rolled
 back before return. Preflight covers the baseline count, eight source counts,
 canonical shape, dependencies, exact routine identities, and publications.
 Postapply covers the final count, eight-table/14-routine absence, canonical
 row count and hash, publications, and exactly-one migration-history entry.
 
-The disposable PGlite suite passed 11 tests, including migration apply and
+The disposable PGlite suite passed 14 tests, including migration apply and
 parity, baseline/source-count/shape/routine/caller fail-closed cases, the
 non-isolated restore rejection, typed field parity, and verifier preflight
 and postapply execution.
@@ -102,8 +113,8 @@ postapply evidence remain coordinator-owned gates.
 
 ## Local verification caveat
 
-The focused retirement suites passed 16 tests across two files, including the
-12-test PGlite retirement suite. Targeted ESLint passed, and `npm run build`
+The focused retirement suite passed 14 tests in the retirement contract file,
+including canonical conflict and verifier drift cases. Targeted ESLint passed, and `npm run build`
 passed with loopback build-only placeholder
 variables because this worker environment does not provide Supabase settings.
 The full `npm test` run was attempted; it reported three unrelated failures in

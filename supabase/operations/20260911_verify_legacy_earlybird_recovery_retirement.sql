@@ -35,8 +35,11 @@ DECLARE
         'supabase.retirement_verifier_mode', TRUE
     );
     v_public_table_count BIGINT;
+    v_source_total BIGINT;
+    v_source_mismatch_count BIGINT;
     v_canonical_count BIGINT;
     v_canonical_hash TEXT;
+    v_canonical_conflict_count BIGINT;
     v_canonical_shape BOOLEAN;
     v_incoming_fk_count BIGINT := 0;
     v_dependent_view_count BIGINT := 0;
@@ -56,8 +59,16 @@ BEGIN
 
     SELECT pg_catalog.count(*) INTO v_canonical_count
     FROM public.maintenance_jobs AS job
-    WHERE job.state = 'succeeded'
-      AND job.payload ? 'legacy_source_table';
+    WHERE job.payload->>'legacy_source_table' IN (
+        'earlybird_concierge_batch_target_lineage_repairs',
+        'earlybird_partial_adoption_second_rearms',
+        'earlybird_profile_evidence_failure_recoveries',
+        'earlybird_v211_apify_transient_admission_resumes',
+        'earlybird_v211_concierge_copy_corrections',
+        'earlybird_v212_concierge_copy_corrections',
+        'earlybird_v213_concierge_copy_corrections',
+        'earlybird_v214_concierge_gemini_copy_corrections'
+    );
     SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
         COALESCE(pg_catalog.string_agg(
             (job.payload->'legacy_row')::TEXT,
@@ -65,8 +76,40 @@ BEGIN
         ), ''), 'UTF8'
     )), 'hex') INTO v_canonical_hash
     FROM public.maintenance_jobs AS job
-    WHERE job.state = 'succeeded'
-      AND job.payload ? 'legacy_source_table';
+    WHERE job.payload->>'legacy_source_table' IN (
+        'earlybird_concierge_batch_target_lineage_repairs',
+        'earlybird_partial_adoption_second_rearms',
+        'earlybird_profile_evidence_failure_recoveries',
+        'earlybird_v211_apify_transient_admission_resumes',
+        'earlybird_v211_concierge_copy_corrections',
+        'earlybird_v212_concierge_copy_corrections',
+        'earlybird_v213_concierge_copy_corrections',
+        'earlybird_v214_concierge_gemini_copy_corrections'
+    );
+
+    SELECT pg_catalog.count(*) INTO v_canonical_conflict_count
+    FROM public.maintenance_jobs AS job
+    WHERE job.payload->>'legacy_source_table' IN (
+        'earlybird_concierge_batch_target_lineage_repairs',
+        'earlybird_partial_adoption_second_rearms',
+        'earlybird_profile_evidence_failure_recoveries',
+        'earlybird_v211_apify_transient_admission_resumes',
+        'earlybird_v211_concierge_copy_corrections',
+        'earlybird_v212_concierge_copy_corrections',
+        'earlybird_v213_concierge_copy_corrections',
+        'earlybird_v214_concierge_gemini_copy_corrections'
+    )
+      AND (
+          job.state IS DISTINCT FROM 'succeeded'
+          OR job.payload IS NULL
+          OR job.content_hash IS DISTINCT FROM pg_catalog.encode(
+              pg_catalog.sha256(pg_catalog.convert_to(job.payload::TEXT, 'UTF8')),
+              'hex'
+          )
+      );
+    IF v_canonical_conflict_count <> 0 THEN
+        RAISE EXCEPTION 'RETIREMENT_VERIFIER_CANONICAL_CONFLICT: exact legacy canonical rows must be succeeded with matching content_hash';
+    END IF;
 
     SELECT EXISTS (
         SELECT 1
@@ -124,6 +167,46 @@ BEGIN
             pg_catalog.jsonb_build_object('table', 'earlybird_v213_concierge_copy_corrections', 'count', (SELECT pg_catalog.count(*) FROM public.earlybird_v213_concierge_copy_corrections), 'expected', 1),
             pg_catalog.jsonb_build_object('table', 'earlybird_v214_concierge_gemini_copy_corrections', 'count', (SELECT pg_catalog.count(*) FROM public.earlybird_v214_concierge_gemini_copy_corrections), 'expected', 1)
         ) INTO v_source_counts;
+
+        SELECT COALESCE(pg_catalog.sum(actual_count)::BIGINT, 0::BIGINT),
+               COALESCE(pg_catalog.sum(
+                   CASE WHEN actual_count <> expected_count THEN 1 ELSE 0 END
+               )::BIGINT, 0::BIGINT)
+          INTO v_source_total, v_source_mismatch_count
+        FROM (
+            SELECT pg_catalog.count(*) AS actual_count, 3::BIGINT AS expected_count
+            FROM public.earlybird_concierge_batch_target_lineage_repairs
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_partial_adoption_second_rearms
+            UNION ALL
+            SELECT pg_catalog.count(*), 2::BIGINT
+            FROM public.earlybird_profile_evidence_failure_recoveries
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_v211_apify_transient_admission_resumes
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_v211_concierge_copy_corrections
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_v212_concierge_copy_corrections
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_v213_concierge_copy_corrections
+            UNION ALL
+            SELECT pg_catalog.count(*), 1::BIGINT
+            FROM public.earlybird_v214_concierge_gemini_copy_corrections
+        ) AS source_contract;
+        IF v_public_table_count <> 185
+           OR v_source_total <> 11
+           OR v_source_mismatch_count <> 0
+           OR NOT v_canonical_shape THEN
+            RAISE EXCEPTION 'RETIREMENT_VERIFIER_PREFLIGHT_SOURCE_MISMATCH';
+        END IF;
+        IF v_canonical_count <> 0 THEN
+            RAISE EXCEPTION 'RETIREMENT_VERIFIER_PREFLIGHT_CANONICAL_MISMATCH: expected zero exact legacy canonical rows, found %', v_canonical_count;
+        END IF;
 
         SELECT pg_catalog.count(*) INTO v_incoming_fk_count
         FROM pg_catalog.pg_constraint AS fk
@@ -230,12 +313,23 @@ BEGIN
             WHERE version = '20260911001903';
         END IF;
 
+        IF v_incoming_fk_count <> 0
+           OR v_dependent_view_count <> 0
+           OR v_routine_dependency_count <> 0
+           OR v_routine_identity_count <> 14
+           OR v_all_table_publication_count <> 0
+           OR v_public_schema_publication_count <> 0
+           OR v_target_publication_count <> 0
+           OR v_migration_occurrences <> 0 THEN
+            RAISE EXCEPTION 'RETIREMENT_VERIFIER_PREFLIGHT_CATALOG_MISMATCH';
+        END IF;
+
         INSERT INTO pg_temp.retirement_verifier_output(report)
         VALUES (pg_catalog.jsonb_build_object(
             'mode', v_mode,
             'publicBasePartitionedTableCount', v_public_table_count,
             'sourceCounts', v_source_counts,
-            'sourceCountTotal', 11,
+            'sourceCountTotal', v_source_total,
             'canonicalRowCount', v_canonical_count,
             'canonicalShapeVerified', v_canonical_shape,
             'incomingForeignKeys', v_incoming_fk_count,
@@ -315,6 +409,18 @@ BEGIN
             SELECT pg_catalog.count(*) INTO v_migration_occurrences
             FROM supabase_migrations.schema_migrations
             WHERE version = '20260911001903';
+        END IF;
+
+        IF v_public_table_count <> 177
+           OR v_target_absence_count <> 8
+           OR v_routine_absence_count <> 14
+           OR v_canonical_count <> 11
+           OR NOT v_canonical_shape
+           OR v_all_table_publication_count <> 0
+           OR v_public_schema_publication_count <> 0
+           OR v_target_publication_count <> 0
+           OR v_migration_occurrences <> 1 THEN
+            RAISE EXCEPTION 'RETIREMENT_VERIFIER_POSTAPPLY_MISMATCH';
         END IF;
 
         INSERT INTO pg_temp.retirement_verifier_output(report)
