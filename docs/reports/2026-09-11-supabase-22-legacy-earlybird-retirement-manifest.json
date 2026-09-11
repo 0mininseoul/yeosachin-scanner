@@ -157,10 +157,11 @@
     "externalServices": "not_accessed"
   },
   "validation": {
-    "focusedRetirementTests": "pending branch verification",
-    "isolatedRestoreDrill": "passed: 11 tests in scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts",
-    "lint": "pending branch verification",
-    "build": "pending branch verification",
-    "diffReview": "pending branch verification"
+    "focusedRetirementTests": "passed: 2 files, 16 tests",
+    "isolatedRestoreDrill": "passed: isolated restore/verifier cases in the 12-test scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts suite",
+    "lint": "passed: targeted eslint for the two inventory files and retirement test",
+    "build": "passed: npm run build with loopback build-only placeholder variables",
+    "diffReview": "passed: git diff --check and intended-file status review",
+    "fullRepositoryTest": "attempted: three pre-existing lib/observability/server-sdk.test.ts failures, then stalled and was stopped"
   }
 }

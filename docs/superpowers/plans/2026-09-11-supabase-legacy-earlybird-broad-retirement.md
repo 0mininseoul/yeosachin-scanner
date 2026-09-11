@@ -165,19 +165,19 @@
 - Consumes: Tasks 1-3.
 - Produces: a clean reviewed branch ready for PR; no production mutation.
 
-- [ ] **Step 1: Run focused suites**
+- [x] **Step 1: Run focused suites**
 
   Run: `npx vitest run scripts/generate-supabase-22-retirement-inventory.test.ts scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts`
 
   Expected: all tests pass.
 
-- [ ] **Step 2: Run lint and type/build gates**
+- [x] **Step 2: Run lint and type/build gates**
 
   Run: `npx eslint scripts/generate-supabase-22-retirement-inventory.ts scripts/generate-supabase-22-retirement-inventory.test.ts scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts && npm run build`
 
   Expected: exit 0 for both commands.
 
-- [ ] **Step 3: Validate repository safety**
+- [x] **Step 3: Validate repository safety**
 
   Run: `git diff --check && git status --short && rg -n "service_role|SUPABASE_ACCESS_TOKEN|postgres(ql)?://|0_min\._\.00" docs/reports/2026-09-11-supabase-22-legacy-earlybird-retirement-* supabase/operations/20260911_* scripts/verify-supabase-22-legacy-earlybird-retirement.test.ts`
 

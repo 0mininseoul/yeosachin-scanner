@@ -230,7 +230,7 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         });
         expect(manifest.verificationOperation)
             .toBe('supabase/operations/20260911_verify_legacy_earlybird_recovery_retirement.sql');
-        expect(manifest.validation.isolatedRestoreDrill).toContain('passed: 11 tests');
+        expect(manifest.validation.isolatedRestoreDrill).toContain('12-test');
         expect(manifest.rolloutStatus).toBe('not_applied');
         expect(manifest.evidenceStatus).toBe('READY_FOR_REVIEW_NOT_APPLIED');
     });

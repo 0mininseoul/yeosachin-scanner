@@ -99,3 +99,14 @@ analysis functions, retained result-summary routines, and all provider state.
 No analysis admission was activated, and the real `0_min._.00` canary was
 never run. Production rollout, migration-history verification, and any
 postapply evidence remain coordinator-owned gates.
+
+## Local verification caveat
+
+The focused retirement suites passed 16 tests across two files, including the
+12-test PGlite retirement suite. Targeted ESLint passed, and `npm run build`
+passed with loopback build-only placeholder
+variables because this worker environment does not provide Supabase settings.
+The full `npm test` run was attempted; it reported three unrelated failures in
+`lib/observability/server-sdk.test.ts` around the installed Axiom/BigInt runtime
+boundary and then stalled in the larger suite, so it was stopped. No failure
+from the retirement files was observed in that run.
