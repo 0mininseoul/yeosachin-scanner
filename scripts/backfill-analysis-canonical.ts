@@ -14,6 +14,8 @@ export type AnalysisCanonicalBackfillFamily =
     | 'artifacts'
     | 'costs'
     | 'cache'
+    // Retained for normalized-row compatibility with the canonical audit
+    // reader; audit source tables are not executable backfill specs.
     | 'audit';
 
 export interface AnalysisBackfillSourceRow {
@@ -50,7 +52,7 @@ export interface BackfillBatch {
 
 export interface AnalysisBackfillParitySummary {
     status: 'match' | 'mismatch' | 'blocked';
-    mismatchPaths: string[];
+    mismatchPaths: readonly string[];
 }
 
 export interface BackfillFamilyReport {
@@ -107,6 +109,8 @@ export interface AnalysisCanonicalBackfillFamilySpec {
     legacy: readonly BackfillTableSpec[];
     canonicalTable: string;
     canonical: BackfillTableSpec;
+    /** A destination retained for the canonical family map without an executable Wave 1 source. */
+    deferred?: boolean;
 }
 
 /**
@@ -316,23 +320,10 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
     },
     {
         family: 'cache',
-        legacyTables: Object.freeze(['ai_analysis_cache', 'analysis_v2_ai_global_result_cache']),
-        legacy: Object.freeze([
-            {
-                table: 'ai_analysis_cache',
-                columns: 'id, created_at, updated_at',
-                timeColumn: 'updated_at',
-                keyColumn: 'id',
-                requestIdColumn: null,
-            },
-            {
-                table: 'analysis_v2_ai_global_result_cache',
-                columns: 'cache_key, stage, result_hash, created_at, expires_at',
-                timeColumn: 'created_at',
-                keyColumn: 'cache_key',
-                requestIdColumn: null,
-            },
-        ]),
+        // Cache sources are explicitly outside Wave 1: they do not carry a
+        // request-safe identity and must not be queried, even report-only.
+        legacyTables: Object.freeze([]),
+        legacy: Object.freeze([]),
         canonicalTable: 'analysis_cache',
         canonical: {
             table: 'analysis_cache',
@@ -340,41 +331,15 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
             timeColumn: 'updated_at',
             keyColumn: 'id',
         },
+        deferred: true,
     },
     {
         family: 'audit',
-        legacyTables: Object.freeze([
-            'analysis_order_audit_assembly_queue',
-            'analysis_order_audit_bundles',
-            'analysis_order_audit_candidates',
-            'analysis_order_audit_interactions',
-        ]),
-        legacy: Object.freeze([
-            {
-                table: 'analysis_order_audit_assembly_queue',
-                columns: 'request_id, status, created_at, updated_at',
-                timeColumn: 'updated_at',
-                keyColumn: 'request_id',
-            },
-            {
-                table: 'analysis_order_audit_bundles',
-                columns: 'request_id, version, bundle_hash, completeness_status, cost_status, assembled_at, created_at',
-                timeColumn: 'assembled_at',
-                keyColumn: 'version',
-            },
-            {
-                table: 'analysis_order_audit_candidates',
-                columns: 'request_id, version, candidate_id, final_inclusion_state, created_at',
-                timeColumn: 'created_at',
-                keyColumn: 'candidate_id',
-            },
-            {
-                table: 'analysis_order_audit_interactions',
-                columns: 'request_id, version, ordinal, signal, completeness_status, created_at',
-                timeColumn: 'created_at',
-                keyColumn: 'ordinal',
-            },
-        ]),
+        // Audit evidence belongs to its own blocked wave. Keep the family in
+        // the report contract, but do not make either its legacy sources or
+        // canonical destination executable here.
+        legacyTables: Object.freeze([]),
+        legacy: Object.freeze([]),
         canonicalTable: 'analysis_audit_bundles',
         canonical: {
             table: 'analysis_audit_bundles',
@@ -382,6 +347,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
             timeColumn: 'created_at',
             keyColumn: 'id',
         },
+        deferred: true,
     },
 ]);
 
@@ -398,12 +364,13 @@ interface BoundedBackfillPage {
     hasMore: boolean;
 }
 
-interface AnalysisBackfillCursorV2 {
-    version: 3;
+interface AnalysisBackfillCursorV4 {
+    version: 4;
     positions: Record<string, AnalysisBackfillCursorPosition>;
     requestIds: readonly string[];
     sourceHasMore: boolean;
     completed: readonly string[];
+    familyEvidence: Readonly<Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>>>;
 }
 
 interface AnalysisBackfillCursorV1 {
@@ -414,7 +381,7 @@ interface AnalysisBackfillCursorV1 {
     sourceHash: string;
 }
 
-type ParsedBackfillCursor = AnalysisBackfillCursorV1 | AnalysisBackfillCursorV2;
+type ParsedBackfillCursor = AnalysisBackfillCursorV1 | AnalysisBackfillCursorV4;
 
 function isSourceRow(value: unknown): value is AnalysisBackfillSourceRow {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -483,6 +450,58 @@ export function encodeBackfillCursor(row: AnalysisBackfillSourceRow): string {
     return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
 }
 
+const BACKFILL_PARITY_PATHS = new Set([
+    'row.count',
+    'row.order',
+    'row.fields',
+    'source.missing',
+    'canonical.missing',
+    'source.evidence',
+    'canonical.evidence',
+    'logical.row.count',
+    'logical.row.identity',
+    'logical.row.fields',
+]);
+
+function isKnownBackfillFamily(value: string): value is AnalysisCanonicalBackfillFamily {
+    return ANALYSIS_CANONICAL_BACKFILL_FAMILIES.some(spec => spec.family === value);
+}
+
+function parseFamilyEvidence(value: unknown): Readonly<Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>>> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('Analysis canonical backfill cursor is unknown.');
+    }
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > ANALYSIS_CANONICAL_BACKFILL_FAMILIES.length) {
+        throw new Error('Analysis canonical backfill cursor is unknown.');
+    }
+    const evidence: Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>> = {};
+    for (const [family, raw] of entries) {
+        if (!isKnownBackfillFamily(family) || !raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new Error('Analysis canonical backfill cursor is unknown.');
+        }
+        const record = raw as Record<string, unknown>;
+        if (
+            Object.keys(record).length !== 2
+            || (record.status !== 'mismatch' && record.status !== 'blocked')
+            || !Array.isArray(record.mismatchPaths)
+            || record.mismatchPaths.length < 1
+            || record.mismatchPaths.length > BACKFILL_PARITY_PATHS.size
+            || record.mismatchPaths.some(path => (
+                typeof path !== 'string' || !BACKFILL_PARITY_PATHS.has(path)
+            ))
+            || new Set(record.mismatchPaths).size !== record.mismatchPaths.length
+        ) {
+            throw new Error('Analysis canonical backfill cursor is unknown.');
+        }
+        evidence[family] = {
+            status: record.status as Exclude<AnalysisBackfillParitySummary['status'], 'match'>,
+            mismatchPaths: Object.freeze([...(record.mismatchPaths as string[])]),
+        };
+    }
+    return Object.freeze(evidence);
+}
+
 function parseBackfillCursor(value: string): ParsedBackfillCursor {
     if (typeof value !== 'string' || value.length < 1 || value.length > 16_384) {
         throw new Error('Analysis canonical backfill cursor is unknown.');
@@ -530,14 +549,15 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         };
     }
     if (
-        row.version !== 3
+        row.version !== 4
         || !row.positions
         || typeof row.positions !== 'object'
         || Array.isArray(row.positions)
         || (row.requestIds !== undefined && (!Array.isArray(row.requestIds) || row.requestIds.length > BACKFILL_MAX_LIMIT))
         || (row.sourceHasMore !== undefined && typeof row.sourceHasMore !== 'boolean')
         || (row.completed !== undefined && (!Array.isArray(row.completed) || row.completed.length > 512))
-        || Object.keys(row).some(key => !['version', 'positions', 'requestIds', 'sourceHasMore', 'completed'].includes(key))
+        || !Object.prototype.hasOwnProperty.call(row, 'familyEvidence')
+        || Object.keys(row).some(key => !['version', 'positions', 'requestIds', 'sourceHasMore', 'completed', 'familyEvidence'].includes(key))
     ) {
         throw new Error('Analysis canonical backfill cursor is unknown.');
     }
@@ -596,12 +616,14 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
     if (row.sourceHasMore === true && !positions[`${SOURCE_TABLE}:created_at:id`]) {
         throw new Error('Analysis canonical backfill cursor is unknown.');
     }
+    const familyEvidence = parseFamilyEvidence(row.familyEvidence);
     return {
-        version: 3,
+        version: 4,
         positions,
         requestIds: Object.freeze([...(requestIds as string[])]),
         sourceHasMore: row.sourceHasMore ?? false,
         completed: Object.freeze([...(completed as string[])]),
+        familyEvidence,
     };
 }
 
@@ -1190,6 +1212,21 @@ function emptyFamilyReport(): BackfillFamilyReport {
     };
 }
 
+function mergeParityEvidence(
+    current: AnalysisBackfillParitySummary,
+    prior: AnalysisBackfillParitySummary | undefined,
+): AnalysisBackfillParitySummary {
+    if (!prior || prior.status === 'match') return current;
+    if (current.status === 'match') return {
+        status: prior.status,
+        mismatchPaths: [...prior.mismatchPaths],
+    };
+    return {
+        status: prior.status === 'blocked' || current.status === 'blocked' ? 'blocked' : 'mismatch',
+        mismatchPaths: [...new Set([...prior.mismatchPaths, ...current.mismatchPaths])],
+    };
+}
+
 function tablePositionKey(table: BackfillTableSpec): string {
     return `${table.table}:${table.timeColumn}:${table.keyColumn}`;
 }
@@ -1224,7 +1261,7 @@ function cursorPosition(
     cursor: ParsedBackfillCursor | null,
     spec: BackfillTableSpec,
 ): AnalysisBackfillCursorPosition | null {
-    if (!cursor || cursor.version !== 3) return null;
+    if (!cursor || cursor.version !== 4) return null;
     return cursor.positions[tablePositionKey(spec)] ?? null;
 }
 
@@ -1232,7 +1269,7 @@ function cursorTableCompleted(
     cursor: ParsedBackfillCursor | null,
     table: BackfillTableSpec,
 ): boolean {
-    return cursor?.version === 3
+    return cursor?.version === 4
         && cursor.completed.includes(tablePositionKey(table));
 }
 
@@ -1387,6 +1424,18 @@ async function readFamily(
     blocked: number;
     hasMore: boolean;
 }> {
+    if (spec.deferred || spec.legacy.length === 0) {
+        // Keep the five-family report shape while making deferred families a
+        // visible blocked result. In particular, do not read a canonical cache
+        // destination without an executable, request-safe legacy source.
+        return {
+            report: emptyFamilyReport(),
+            positions: {},
+            completed: [],
+            blocked: 1,
+            hasMore: false,
+        };
+    }
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
     const completed: string[] = [];
     const legacyRows: Record<string, unknown>[] = [];
@@ -1539,9 +1588,9 @@ export async function backfillAnalysisCanonical(input: {
         }
     }
     const sourcePositionKey = `${SOURCE_TABLE}:created_at:id`;
-    const continuingFamilyPage = cursor?.version === 3
+    const continuingFamilyPage = cursor?.version === 4
         && Object.keys(cursor.positions).some(key => key !== sourcePositionKey);
-    const familyCursor = continuingFamilyPage && cursor?.version === 3 ? cursor : null;
+    const familyCursor = continuingFamilyPage && cursor?.version === 4 ? cursor : null;
     let sourceHasMore = false;
     let sourcePage: unknown[] = [];
     let sourceBlocked = 0;
@@ -1561,7 +1610,7 @@ export async function backfillAnalysisCanonical(input: {
                 sourceQuery = sourceQuery.or(
                     `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`,
                 );
-            } else if (cursor?.version === 3) {
+            } else if (cursor?.version === 4) {
                 const position = cursor.positions[sourcePositionKey];
                 if (position) {
                     if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
@@ -1602,6 +1651,11 @@ export async function backfillAnalysisCanonical(input: {
     const completedTables = new Set<string>(
         familyCursor ? familyCursor.completed : [],
     );
+    const priorFamilyEvidence: Readonly<Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>>> =
+        cursor?.version === 4 ? cursor.familyEvidence : {};
+    const familyEvidence: Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>> = {
+        ...priorFamilyEvidence,
+    };
     for (const spec of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
         const family = await readFamily(
             client,
@@ -1610,7 +1664,15 @@ export async function backfillAnalysisCanonical(input: {
             familyCursor,
             selectedRequestIds,
         );
-        familyReports[spec.family] = family.report;
+        const parity = mergeParityEvidence(
+            family.report.parity,
+            priorFamilyEvidence[spec.family],
+        );
+        const report = parity === family.report.parity
+            ? family.report
+            : { ...family.report, parity };
+        familyReports[spec.family] = report;
+        if (parity.status !== 'match') familyEvidence[spec.family] = parity;
         familyBlocked += family.blocked;
         familyHasMore ||= family.hasMore;
         family.completed.forEach(table => completedTables.add(table));
@@ -1631,12 +1693,13 @@ export async function backfillAnalysisCanonical(input: {
     const hasContinuation = familyHasMore || sourceHasMore;
     const nextCursor = hasContinuation && Object.keys(positions).length > 0
         ? Buffer.from(JSON.stringify({
-            version: 3,
+            version: 4,
             positions,
             requestIds: familyHasMore ? selectedRequestIds : [],
             sourceHasMore,
             completed: [...completedTables],
-        } satisfies AnalysisBackfillCursorV2), 'utf8')
+            familyEvidence,
+        } satisfies AnalysisBackfillCursorV4), 'utf8')
             .toString('base64url')
         : null;
     const reportComplete = continuingFamilyPage
