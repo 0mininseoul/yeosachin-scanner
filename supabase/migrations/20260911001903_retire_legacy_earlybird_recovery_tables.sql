@@ -41,7 +41,11 @@ BEGIN
                       OR activity.query IS NULL
                       OR activity.query = '<insufficient privilege>'
                       OR (
-                          activity.state = 'active'
+                          activity.state IN (
+                              'active',
+                              'idle in transaction',
+                              'idle in transaction (aborted)'
+                          )
                           AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
                               (
                                   (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
@@ -1311,7 +1315,11 @@ BEGIN
                       OR activity.query IS NULL
                       OR activity.query = '<insufficient privilege>'
                       OR (
-                          activity.state = 'active'
+                          activity.state IN (
+                              'active',
+                              'idle in transaction',
+                              'idle in transaction (aborted)'
+                          )
                           AND normalized.retirement_active_ddl_normalized_query ~* $retirement_active_ddl_pattern$(?x)
                               (
                                   (CREATE[[:space:]]+OR[[:space:]]+REPLACE|CREATE|ALTER|DROP)
@@ -1397,15 +1405,6 @@ REVOKE ALL ON FUNCTION public.prevent_earlybird_v214_concierge_gemini_copy_corre
 REVOKE ALL ON FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(UUID, UUID, UUID, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB)
     FROM PUBLIC, anon, authenticated, service_role;
 
-DROP TABLE public.earlybird_concierge_batch_target_lineage_repairs;
-DROP TABLE public.earlybird_partial_adoption_second_rearms;
-DROP TABLE public.earlybird_profile_evidence_failure_recoveries;
-DROP TABLE public.earlybird_v211_apify_transient_admission_resumes;
-DROP TABLE public.earlybird_v211_concierge_copy_corrections;
-DROP TABLE public.earlybird_v212_concierge_copy_corrections;
-DROP TABLE public.earlybird_v213_concierge_copy_corrections;
-DROP TABLE public.earlybird_v214_concierge_gemini_copy_corrections;
-
 DROP FUNCTION public.prevent_earlybird_concierge_batch_target_lineage_repair_mutation();
 DROP FUNCTION public.reconcile_exact_three_concierge_target_lineage(text);
 DROP FUNCTION public.prevent_earlybird_partial_adoption_second_rearm_mutation();
@@ -1420,6 +1419,15 @@ DROP FUNCTION public.prevent_earlybird_v213_concierge_copy_correction_mutation()
 DROP FUNCTION public.correct_earlybird_v213_concierge_copy(uuid,uuid,uuid,text,text,text,text,jsonb);
 DROP FUNCTION public.prevent_earlybird_v214_concierge_gemini_copy_correction_mutation();
 DROP FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(uuid,uuid,uuid,text,text,text,jsonb,text,jsonb);
+
+DROP TABLE public.earlybird_concierge_batch_target_lineage_repairs;
+DROP TABLE public.earlybird_partial_adoption_second_rearms;
+DROP TABLE public.earlybird_profile_evidence_failure_recoveries;
+DROP TABLE public.earlybird_v211_apify_transient_admission_resumes;
+DROP TABLE public.earlybird_v211_concierge_copy_corrections;
+DROP TABLE public.earlybird_v212_concierge_copy_corrections;
+DROP TABLE public.earlybird_v213_concierge_copy_corrections;
+DROP TABLE public.earlybird_v214_concierge_gemini_copy_corrections;
 
 DO $retirement_terminal_guard$
 DECLARE

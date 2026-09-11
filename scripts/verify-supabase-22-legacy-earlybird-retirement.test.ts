@@ -142,8 +142,8 @@ function containsDynamicDestructiveSql(sql: string): boolean {
 
 function expectedDropStatements(): string[] {
     return [
-        ...TARGETS.map(table => `DROP TABLE public.${table};`),
         ...ROUTINES.map(signature => `DROP FUNCTION ${signature};`),
+        ...TARGETS.map(table => `DROP TABLE public.${table};`),
     ];
 }
 
@@ -271,7 +271,13 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
             expect(guard).toContain('activity.backend_type IS NULL');
             expect(guard).toContain("activity.backend_type = 'client backend'");
             expect(guard).toContain("activity.query = '<insufficient privilege>'");
+            expect(guard).toMatch(
+                /activity\.state\s+IN\s*\(\s*'active'\s*,\s*'idle in transaction'\s*,\s*'idle in transaction \(aborted\)'\s*\)/,
+            );
             expect(guard).toContain('$retirement_active_ddl_pattern$');
+            expect(guard).toMatch(
+                /activity\.state\s+IS\s+NULL[\s\S]*activity\.query\s+IS\s+NULL[\s\S]*activity\.query\s*=\s*'<insufficient privilege>'[\s\S]*activity\.state\s+IN\s*\(\s*'active'\s*,\s*'idle in transaction'\s*,\s*'idle in transaction \(aborted\)'\s*\)[\s\S]*retirement_active_ddl_normalized_query\s+~\*/,
+            );
         });
         TARGETS.forEach(table => {
             expect(activeSql).toContain(`retirement.expected_${table}_oid`);
@@ -290,6 +296,8 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(drops).toEqual(expectedDropStatements().map(statement => statement.toLowerCase()));
         expect(drops.filter(statement => /\bdrop table\b/.test(statement))).toHaveLength(TARGETS.length);
         expect(drops.filter(statement => /\bdrop function\b/.test(statement))).toHaveLength(ROUTINES.length);
+        expect(drops.slice(0, ROUTINES.length).every(statement => /\bdrop function\b/.test(statement))).toBe(true);
+        expect(drops.slice(ROUTINES.length).every(statement => /\bdrop table\b/.test(statement))).toBe(true);
         expect(sql).not.toMatch(/\bCASCADE\b/i);
         expect(stripSqlComments(sql)).not.toMatch(/\bEXECUTE\s+(?:format|v_|sql|drop|create|alter)/i);
         expect(sql).not.toContain('earlybird_v211_concierge_publications');
