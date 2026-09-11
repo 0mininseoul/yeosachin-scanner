@@ -14,6 +14,8 @@ export type AnalysisCanonicalBackfillFamily =
     | 'artifacts'
     | 'costs'
     | 'cache'
+    // Retained for normalized-row compatibility with the canonical audit
+    // reader; audit source tables are not executable backfill specs.
     | 'audit';
 
 export interface AnalysisBackfillSourceRow {
@@ -107,6 +109,8 @@ export interface AnalysisCanonicalBackfillFamilySpec {
     legacy: readonly BackfillTableSpec[];
     canonicalTable: string;
     canonical: BackfillTableSpec;
+    /** A destination retained for the canonical family map without an executable Wave 1 source. */
+    deferred?: boolean;
 }
 
 /**
@@ -316,23 +320,10 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
     },
     {
         family: 'cache',
-        legacyTables: Object.freeze(['ai_analysis_cache', 'analysis_v2_ai_global_result_cache']),
-        legacy: Object.freeze([
-            {
-                table: 'ai_analysis_cache',
-                columns: 'id, created_at, updated_at',
-                timeColumn: 'updated_at',
-                keyColumn: 'id',
-                requestIdColumn: null,
-            },
-            {
-                table: 'analysis_v2_ai_global_result_cache',
-                columns: 'cache_key, stage, result_hash, created_at, expires_at',
-                timeColumn: 'created_at',
-                keyColumn: 'cache_key',
-                requestIdColumn: null,
-            },
-        ]),
+        // Cache sources are explicitly outside Wave 1: they do not carry a
+        // request-safe identity and must not be queried, even report-only.
+        legacyTables: Object.freeze([]),
+        legacy: Object.freeze([]),
         canonicalTable: 'analysis_cache',
         canonical: {
             table: 'analysis_cache',
@@ -340,48 +331,7 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
             timeColumn: 'updated_at',
             keyColumn: 'id',
         },
-    },
-    {
-        family: 'audit',
-        legacyTables: Object.freeze([
-            'analysis_order_audit_assembly_queue',
-            'analysis_order_audit_bundles',
-            'analysis_order_audit_candidates',
-            'analysis_order_audit_interactions',
-        ]),
-        legacy: Object.freeze([
-            {
-                table: 'analysis_order_audit_assembly_queue',
-                columns: 'request_id, status, created_at, updated_at',
-                timeColumn: 'updated_at',
-                keyColumn: 'request_id',
-            },
-            {
-                table: 'analysis_order_audit_bundles',
-                columns: 'request_id, version, bundle_hash, completeness_status, cost_status, assembled_at, created_at',
-                timeColumn: 'assembled_at',
-                keyColumn: 'version',
-            },
-            {
-                table: 'analysis_order_audit_candidates',
-                columns: 'request_id, version, candidate_id, final_inclusion_state, created_at',
-                timeColumn: 'created_at',
-                keyColumn: 'candidate_id',
-            },
-            {
-                table: 'analysis_order_audit_interactions',
-                columns: 'request_id, version, ordinal, signal, completeness_status, created_at',
-                timeColumn: 'created_at',
-                keyColumn: 'ordinal',
-            },
-        ]),
-        canonicalTable: 'analysis_audit_bundles',
-        canonical: {
-            table: 'analysis_audit_bundles',
-            columns: 'id, request_id, version, kind, candidate_key, ordinal, state, content_hash, idempotency_key, retention_class, payload, created_at',
-            timeColumn: 'created_at',
-            keyColumn: 'id',
-        },
+        deferred: true,
     },
 ]);
 
@@ -1387,6 +1337,18 @@ async function readFamily(
     blocked: number;
     hasMore: boolean;
 }> {
+    if (spec.deferred || spec.legacy.length === 0) {
+        // Keep the five-family report shape while making deferred families a
+        // visible blocked result. In particular, do not read a canonical cache
+        // destination without an executable, request-safe legacy source.
+        return {
+            report: emptyFamilyReport(),
+            positions: {},
+            completed: [],
+            blocked: 1,
+            hasMore: false,
+        };
+    }
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
     const completed: string[] = [];
     const legacyRows: Record<string, unknown>[] = [];
