@@ -1405,6 +1405,26 @@ REVOKE ALL ON FUNCTION public.prevent_earlybird_v214_concierge_gemini_copy_corre
 REVOKE ALL ON FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(UUID, UUID, UUID, TEXT, TEXT, TEXT, JSONB, TEXT, JSONB)
     FROM PUBLIC, anon, authenticated, service_role;
 
+-- Remove the eight observed table-owned triggers before dropping their exact
+-- target routines. The two triggers using the shared schema-recovery routine
+-- are removed here, but that shared routine itself remains in service.
+DROP TRIGGER prevent_earlybird_concierge_batch_target_lineage_repair_mutation
+    ON public.earlybird_concierge_batch_target_lineage_repairs;
+DROP TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+    ON public.earlybird_partial_adoption_second_rearms;
+DROP TRIGGER prevent_earlybird_profile_evidence_failure_recovery_mutation
+    ON public.earlybird_profile_evidence_failure_recoveries;
+DROP TRIGGER prevent_earlybird_v211_apify_transient_admission_resume_mutation
+    ON public.earlybird_v211_apify_transient_admission_resumes;
+DROP TRIGGER prevent_earlybird_v211_concierge_copy_correction_mutation
+    ON public.earlybird_v211_concierge_copy_corrections;
+DROP TRIGGER prevent_earlybird_v212_concierge_copy_correction_mutation
+    ON public.earlybird_v212_concierge_copy_corrections;
+DROP TRIGGER prevent_earlybird_v213_concierge_copy_correction_mutation
+    ON public.earlybird_v213_concierge_copy_corrections;
+DROP TRIGGER prevent_earlybird_v214_concierge_gemini_copy_correction_mutation
+    ON public.earlybird_v214_concierge_gemini_copy_corrections;
+
 DROP FUNCTION public.prevent_earlybird_concierge_batch_target_lineage_repair_mutation();
 DROP FUNCTION public.reconcile_exact_three_concierge_target_lineage(text);
 DROP FUNCTION public.prevent_earlybird_partial_adoption_second_rearm_mutation();

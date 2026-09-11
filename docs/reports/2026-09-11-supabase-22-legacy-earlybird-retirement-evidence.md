@@ -5,6 +5,11 @@
 `READY_FOR_REVIEW_NOT_APPLIED`. This branch prepares, tests, and documents a
 single guarded migration; it does not apply the migration to production.
 
+The first production apply attempt rolled back because SQLSTATE 2BP01
+reported a trigger dependency while the migration tried to drop a target
+function first. Corrective status: pending; no retry or production apply has
+been performed.
+
 The approved destructive scope is exactly eight public tables:
 
 - `earlybird_concierge_batch_target_lineage_repairs` — 3 rows
@@ -18,10 +23,10 @@ The approved destructive scope is exactly eight public tables:
 
 The expected canonical total is 11 rows in `public.maintenance_jobs`. The
 guarded migration requires the public base/partitioned table count to be 185
-before DDL and verifies 177 after DDL. It drops only the 14 exact routine
-signatures recorded in the manifest and eight literal table statements; no
-wildcard, prefix, dynamically assembled identifier, or `CASCADE` operation is
-present.
+before DDL and verifies 177 after DDL. It removes the eight observed
+table-owned triggers first, then drops only the 14 exact routine signatures
+recorded in the manifest and eight literal table statements; no wildcard,
+prefix, dynamically assembled identifier, or `CASCADE` operation is present.
 
 ## Production evidence boundary
 
