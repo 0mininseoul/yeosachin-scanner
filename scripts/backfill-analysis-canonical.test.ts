@@ -342,6 +342,57 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(boundaries[0]).toContain('job_key.gt.');
     });
 
+    it('quotes nested timestamp and job-key literals in raw keyset boundaries', async () => {
+        const requestId = sourceRows[0]!.id;
+        const targetTable = 'analysis_v2_relationship_manifests';
+        const jobs = [
+            {
+                request_id: requestId,
+                job_key: 'job:aaa.key',
+                created_at: '2026-09-01T00:00:00.000Z',
+            },
+            {
+                request_id: requestId,
+                job_key: 'job:bbb.key',
+                created_at: '2026-09-01T00:00:00.000Z',
+            },
+        ];
+        let jobsRead = 0;
+        const boundaries: string[] = [];
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_requests'
+                    ? sourceRows.slice(0, 1)
+                    : table === targetTable
+                        ? jobsRead++ === 0 ? jobs : jobsRead === 2 ? [jobs[0]] : [jobs[1]]
+                        : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn((expression: string) => {
+                        if (table === targetTable) boundaries.push(expression);
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({ data, error: null }),
+                };
+                return chain;
+            }),
+        };
+
+        const first = await backfillAnalysisCanonical({ client, limit: 1, reportOnly: true });
+        await backfillAnalysisCanonical({
+            client,
+            limit: 1,
+            cursor: first.nextCursor,
+            reportOnly: true,
+        });
+
+        expect(boundaries).toHaveLength(1);
+        expect(boundaries[0]).toContain('created_at.gt."2026-09-01T00:00:00.000000Z"');
+        expect(boundaries[0]).toContain('job_key.gt."job:aaa.key"');
+    });
+
     it('rejects an unknown cursor before querying the source boundary', async () => {
         const from = vi.fn();
         await expect(backfillAnalysisCanonical({
@@ -541,6 +592,166 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(boundaries).toHaveLength(1);
         expect(boundaries[0]).toContain('topology_kind.gt.');
         expect(boundaries[0]).toContain('batch.gt.');
+    });
+
+    it('keeps cost attribution apply identity on source_operation_key while escaping operation boundaries', async () => {
+        const requestId = sourceRows[0]!.id;
+        const attribution = {
+            request_id: requestId,
+            source_kind: 'gemini',
+            source_operation_key: 'operation:aaa.key',
+            source_identity_hash: 'a'.repeat(64),
+            attributed_at: '2026-09-01T00:00:00.000Z',
+            updated_at: '2026-09-01T00:00:00.000Z',
+        };
+        const nextAttribution = {
+            ...attribution,
+            source_operation_key: 'operation:bbb.key',
+        };
+        const rpcCalls: Array<Record<string, unknown>> = [];
+        const boundaries: string[] = [];
+        let attributionReads = 0;
+        let applyPhase = true;
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_requests'
+                    ? sourceRows.slice(0, 1)
+                    : table === 'analysis_v2_cost_attributions'
+                        ? applyPhase
+                            ? [attribution]
+                            : attributionReads++ === 0 ? [attribution, nextAttribution] : [nextAttribution]
+                        : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn((expression: string) => {
+                        if (table === 'analysis_v2_cost_attributions') boundaries.push(expression);
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({ data, error: null }),
+                };
+                return chain;
+            }),
+            rpc: vi.fn(async (_name: string, params: Record<string, unknown>) => {
+                rpcCalls.push(params);
+                return { data: { status: 'applied' }, error: null };
+            }),
+        };
+
+        const report = await backfillAnalysisCanonical({
+            client,
+            limit: 1,
+            apply: true,
+            acknowledgement: ANALYSIS_CANONICAL_BACKFILL_APPLY_ACKNOWLEDGEMENT,
+        });
+
+        expect(report.families.costs.apply).toMatchObject({ attempted: 1, applied: 1, failed: 0 });
+        expect(rpcCalls[0]).toMatchObject({
+            p_source_key: attribution.source_operation_key,
+            p_source_hash: attribution.source_identity_hash,
+            p_row: expect.objectContaining({
+                sourceHash: attribution.source_identity_hash,
+                idempotencyKey: `analysis-backfill:v1:analysis_v2_cost_attributions:${attribution.source_operation_key}`,
+            }),
+        });
+        applyPhase = false;
+        attributionReads = 0;
+
+        const firstBoundaryPage = await backfillAnalysisCanonical({
+            client,
+            limit: 1,
+            reportOnly: true,
+        });
+        expect(firstBoundaryPage.nextCursor).toBeTruthy();
+        await backfillAnalysisCanonical({
+            client,
+            limit: 1,
+            cursor: firstBoundaryPage.nextCursor,
+            reportOnly: true,
+        });
+
+        expect(boundaries).toHaveLength(1);
+        expect(boundaries[0]).toContain('attributed_at.gt."2026-09-01T00:00:00.000000Z"');
+        expect(boundaries[0]).toContain('source_operation_key.gt."operation:aaa.key"');
+    });
+
+    it('restarts on an incompatible v4 composite continuation', async () => {
+        const incompatibleV4 = Buffer.from(JSON.stringify({
+            version: 4,
+            positions: {
+                'analysis_v2_dag_batch_topology:created_at:batch': {
+                    createdAt: '2026-09-01T00:00:00.000Z',
+                    requestId: sourceRows[0]!.id,
+                    key: '0',
+                    rowHash: 'a'.repeat(64),
+                },
+            },
+            requestIds: [sourceRows[0]!.id],
+            sourceHasMore: false,
+            completed: [],
+            familyEvidence: {},
+        }), 'utf8').toString('base64url');
+        const sourceBoundaryCalls: string[] = [];
+        const client = {
+            from: vi.fn((table: string) => {
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn((expression: string) => {
+                        if (table === 'analysis_requests') sourceBoundaryCalls.push(expression);
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({
+                        data: table === 'analysis_requests' ? sourceRows : [],
+                        error: table === 'analysis_pipeline_jobs' ? { message: 'blocked' } : null,
+                    }),
+                };
+                return chain;
+            }),
+        };
+
+        const report = await backfillAnalysisCanonical({
+            client,
+            limit: 100,
+            cursor: incompatibleV4,
+            reportOnly: true,
+        });
+
+        expect(report.scanned).toBe(2);
+        expect(sourceBoundaryCalls).toHaveLength(0);
+
+        const applyReport = await backfillAnalysisCanonical({
+            client,
+            limit: 1,
+            cursor: incompatibleV4,
+            apply: true,
+            acknowledgement: ANALYSIS_CANONICAL_BACKFILL_APPLY_ACKNOWLEDGEMENT,
+        });
+        expect(applyReport.nextCursor).toBeNull();
+    });
+
+    it('emits the explicit v5 cursor format for a source continuation', async () => {
+        const client = {
+            from: vi.fn((table: string) => {
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({
+                        data: table === 'analysis_requests' ? sourceRows : [],
+                        error: null,
+                    }),
+                };
+                return chain;
+            }),
+        };
+
+        const report = await backfillAnalysisCanonical({ client, limit: 1, reportOnly: true });
+
+        expect(report.nextCursor).toBeTruthy();
+        expect(JSON.parse(Buffer.from(report.nextCursor!, 'base64url').toString('utf8')).version).toBe(5);
     });
 
     it('normalizes live target manifests and interactions into bidirectional logical evidence', () => {

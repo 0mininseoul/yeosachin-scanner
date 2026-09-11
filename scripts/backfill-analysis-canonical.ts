@@ -519,8 +519,19 @@ interface BackfillApplyFamilyResult {
     stopped: boolean;
 }
 
+const COMPOSITE_CURSOR_VERSION = 5;
+
 interface AnalysisBackfillCursorV4 {
     version: 4;
+    positions: Record<string, AnalysisBackfillCursorPosition>;
+    requestIds: readonly string[];
+    sourceHasMore: boolean;
+    completed: readonly string[];
+    familyEvidence: Readonly<Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>>>;
+}
+
+interface AnalysisBackfillCursorV5 {
+    version: typeof COMPOSITE_CURSOR_VERSION;
     positions: Record<string, AnalysisBackfillCursorPosition>;
     requestIds: readonly string[];
     sourceHasMore: boolean;
@@ -536,7 +547,14 @@ interface AnalysisBackfillCursorV1 {
     sourceHash: string;
 }
 
-type ParsedBackfillCursor = AnalysisBackfillCursorV1 | AnalysisBackfillCursorV4;
+type ParsedBackfillCursor = AnalysisBackfillCursorV1 | AnalysisBackfillCursorV4 | AnalysisBackfillCursorV5;
+
+class IncompatibleBackfillCursorError extends Error {
+    constructor() {
+        super('Analysis canonical backfill cursor version 4 cannot resume composite pagination; restarting.');
+        this.name = 'IncompatibleBackfillCursorError';
+    }
+}
 
 function timestampMicros(value: string): bigint | null {
     const match = TIMESTAMP_PATTERN.exec(value);
@@ -775,8 +793,11 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
             sourceHash: row.sourceHash,
         };
     }
+    const cursorVersion = row.version === 4 || row.version === COMPOSITE_CURSOR_VERSION
+        ? row.version
+        : null;
     if (
-        row.version !== 4
+        cursorVersion === null
         || !row.positions
         || typeof row.positions !== 'object'
         || Array.isArray(row.positions)
@@ -808,6 +829,7 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         throw new Error('Analysis canonical backfill cursor is unknown.');
     }
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
+    let incompatibleComposite = false;
     for (const [table, value] of Object.entries(row.positions as Record<string, unknown>)) {
         if (table.length < 1 || table.length > 256 || !isKnownBackfillPositionKey(table)) {
             throw new Error('Analysis canonical backfill cursor is unknown.');
@@ -831,7 +853,11 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
             throw new Error('Analysis canonical backfill cursor is unknown.');
         }
         const sourcePosition = table === `${SOURCE_TABLE}:created_at:id`;
-        const normalizedKey = canonicalCursorKey(position.key, positionSpec);
+        const compositeCursor = cursorColumns(positionSpec).length > 1;
+        const normalizedKey = cursorVersion === 4 && compositeCursor
+            ? canonicalCursorKey(position.key, positionSpec)
+                ?? canonicalCursorKey(position.key, { ...positionSpec, cursorColumns: undefined })
+            : canonicalCursorKey(position.key, positionSpec);
         if (
             (position.requestId === '') !== sourcePosition
             || normalizedKey === null
@@ -839,6 +865,7 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         ) {
             throw new Error('Analysis canonical backfill cursor is unknown.');
         }
+        incompatibleComposite ||= cursorVersion === 4 && compositeCursor;
         positions[table] = {
             createdAt: normalizePgTimestamp(position.createdAt)!,
             requestId: position.requestId,
@@ -850,14 +877,17 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         throw new Error('Analysis canonical backfill cursor is unknown.');
     }
     const familyEvidence = parseFamilyEvidence(row.familyEvidence);
-    return {
-        version: 4,
+    if (incompatibleComposite) throw new IncompatibleBackfillCursorError();
+    const cursorState = {
         positions,
         requestIds: Object.freeze([...(requestIds as string[])]),
         sourceHasMore: row.sourceHasMore ?? false,
         completed: Object.freeze([...(completed as string[])]),
         familyEvidence,
     };
+    return cursorVersion === 4
+        ? { version: 4, ...cursorState }
+        : { version: COMPOSITE_CURSOR_VERSION, ...cursorState };
 }
 
 function isKnownBackfillPositionKey(value: string): boolean {
@@ -1459,13 +1489,14 @@ function applySourceIdentity(
     row: Record<string, unknown>,
 ): { requestId: string; sourceKey: string; sourceHash: string; envelope: string } | null {
     const position = rowCursorPosition(row, table);
-    if (!position || !position.requestId) return null;
+    const sourceKey = sourceIdentityKey(row, table);
+    if (!position || !position.requestId || !sourceKey) return null;
     const envelope = sourceEnvelope(table.table, row);
     if (!envelope) return null;
     return {
         requestId: position.requestId,
-        sourceKey: position.key,
-        sourceHash: stableHash({ sourceTable: table.table, sourceKey: position.key, row }),
+        sourceKey,
+        sourceHash: stableHash({ sourceTable: table.table, sourceKey, row }),
         envelope,
     };
 }
@@ -2030,13 +2061,21 @@ export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs {
             const next = argv[index + 1];
             if (!next) throw new Error('Analysis canonical backfill requires --cursor value.');
             index += 1;
-            parseBackfillCursor(next);
+            try {
+                parseBackfillCursor(next);
+            } catch (error) {
+                if (!(error instanceof IncompatibleBackfillCursorError)) throw error;
+            }
             cursor = next;
             continue;
         }
         if (arg.startsWith('--cursor=')) {
             const next = arg.slice('--cursor='.length);
-            parseBackfillCursor(next);
+            try {
+                parseBackfillCursor(next);
+            } catch (error) {
+                if (!(error instanceof IncompatibleBackfillCursorError)) throw error;
+            }
             cursor = next;
             continue;
         }
@@ -2113,6 +2152,27 @@ function tablePositionKey(table: BackfillTableSpec): string {
 
 const INTEGER_KEY_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const CURSOR_KEY_SEPARATOR = '|';
+const POSTGREST_LITERAL_QUOTE_PATTERN = /[,.:()"\\\s]/;
+
+/**
+ * `.or()` receives a raw PostgREST expression.  Keep this value un-percent-
+ * encoded: postgrest-js appends it through URLSearchParams, which performs the
+ * URL encoding exactly once.  PostgREST-style quotes protect reserved
+ * separators inside a literal; quotes and backslashes inside the value are
+ * escaped before wrapping it.
+ */
+function postgrestFilterLiteral(value: string): string {
+    if (!POSTGREST_LITERAL_QUOTE_PATTERN.test(value)) return value;
+    return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+function postgrestFilterTerm(column: string, operator: string, value: string): string {
+    return `${column}.${operator}.${postgrestFilterLiteral(value)}`;
+}
+
+function postgrestFilterIn(column: string, values: readonly string[]): string {
+    return `${column}.in.(${values.map(postgrestFilterLiteral).join(',')})`;
+}
 
 function cursorColumns(spec: BackfillTableSpec): readonly BackfillCursorColumn[] {
     return spec.cursorColumns ?? [{
@@ -2192,6 +2252,15 @@ function canonicalCursorKey(value: unknown, spec: BackfillTableSpec): string | n
     }
     const parts = cursorKeyParts(value, spec);
     return parts ? parts.join(CURSOR_KEY_SEPARATOR) : null;
+}
+
+function sourceIdentityKey(value: Record<string, unknown>, spec: BackfillTableSpec): string | null {
+    const rawKey = Object.prototype.hasOwnProperty.call(value, spec.keyColumn)
+        ? value[spec.keyColumn]
+        : value.id;
+    // Pagination may use a schema composite, but source/RPC identity remains
+    // the pre-composite keyColumn contract for every legacy source.
+    return canonicalCursorKey(rawKey, { ...spec, cursorColumns: undefined });
 }
 
 function cursorKeyFromRow(value: Record<string, unknown>, spec: BackfillTableSpec): string | null {
@@ -2283,7 +2352,7 @@ function cursorPosition(
     cursor: ParsedBackfillCursor | null,
     spec: BackfillTableSpec,
 ): AnalysisBackfillCursorPosition | null {
-    if (!cursor || cursor.version !== 4) return null;
+    if (!cursor || (cursor.version !== 4 && cursor.version !== COMPOSITE_CURSOR_VERSION)) return null;
     return cursor.positions[tablePositionKey(spec)] ?? null;
 }
 
@@ -2291,7 +2360,7 @@ function cursorTableCompleted(
     cursor: ParsedBackfillCursor | null,
     table: BackfillTableSpec,
 ): boolean {
-    return cursor?.version === 4
+    return (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION)
         && cursor.completed.includes(tablePositionKey(table));
 }
 
@@ -2347,20 +2416,24 @@ function keysetBoundaryExpression(
     const keys = cursorKeyParts(position.key, spec);
     if (!keys) return null;
     const prefix = [
-        `${spec.timeColumn}.eq.${position.createdAt}`,
-        `${requestIdColumn}.eq.${position.requestId}`,
+        postgrestFilterTerm(spec.timeColumn, 'eq', position.createdAt),
+        postgrestFilterTerm(requestIdColumn, 'eq', position.requestId),
     ];
     const clauses = [
-        `${spec.timeColumn}.gt.${position.createdAt}`,
-        `and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.gt.${position.requestId})`,
+        postgrestFilterTerm(spec.timeColumn, 'gt', position.createdAt),
+        `and(${postgrestFilterTerm(spec.timeColumn, 'eq', position.createdAt)},${postgrestFilterTerm(requestIdColumn, 'gt', position.requestId)})`,
     ];
     for (let index = 0; index < keys.length; index += 1) {
         const equalPrefix = [...prefix];
         for (let prior = 0; prior < index; prior += 1) {
-            equalPrefix.push(`${cursorColumns(spec)[prior]!.column}.eq.${keys[prior]!}`);
+            equalPrefix.push(postgrestFilterTerm(
+                cursorColumns(spec)[prior]!.column,
+                'eq',
+                keys[prior]!,
+            ));
         }
         const column = cursorColumns(spec)[index]!.column;
-        clauses.push(`and(${[...equalPrefix, `${column}.gt.${keys[index]!}`].join(',')})`);
+        clauses.push(`and(${[...equalPrefix, postgrestFilterTerm(column, 'gt', keys[index]!)].join(',')})`);
     }
     return clauses.join(',');
 }
@@ -2434,7 +2507,7 @@ async function readBoundedTable(
             // Lightweight adapters used by the regression suite may expose
             // only PostgREST's OR builder.  Keep the selected UUID set in the
             // expression; production clients use `in` above.
-            query = query.or(`${requestIdColumn}.in.(${selectedRequestIds.join(',')})`);
+            query = query.or(postgrestFilterIn(requestIdColumn, selectedRequestIds));
         } else {
             throw new Error('request selection filter unavailable');
         }
@@ -2449,7 +2522,11 @@ async function readBoundedTable(
         } else if (query.or) {
             // The fallback is still request-constrained and only contains
             // no selected IDs, so it cannot match a real request row.
-            query = query.or(`${requestIdColumn}.eq.00000000-0000-4000-8000-000000000000`);
+            query = query.or(postgrestFilterTerm(
+                requestIdColumn,
+                'eq',
+                '00000000-0000-4000-8000-000000000000',
+            ));
         } else {
             throw new Error('request selection filter unavailable');
         }
@@ -2463,7 +2540,11 @@ async function readBoundedTable(
         } else if (query.eq) {
             query = query.eq(requestIdColumn, '00000000-0000-4000-8000-000000000000');
         } else if (query.or) {
-            query = query.or(`${requestIdColumn}.eq.00000000-0000-4000-8000-000000000000`);
+            query = query.or(postgrestFilterTerm(
+                requestIdColumn,
+                'eq',
+                '00000000-0000-4000-8000-000000000000',
+            ));
         } else {
             throw new Error('request selection filter unavailable');
         }
@@ -3057,20 +3138,31 @@ export async function backfillAnalysisCanonical(input: {
     }
     const client = input.client ?? (supabaseAdmin as unknown as AnalysisBackfillClient);
     let cursor: ParsedBackfillCursor | null = null;
+    let restartedFromIncompatibleCursor = false;
     if (input.cursor !== undefined && input.cursor !== null) {
         try {
             cursor = parseBackfillCursor(input.cursor);
-        } catch {
-            return invalidReport(apply ? 'apply' : 'report_only');
+        } catch (error) {
+            if (!(error instanceof IncompatibleBackfillCursorError)) {
+                return invalidReport(apply ? 'apply' : 'report_only');
+            }
+            // v4 positions on a newly composite table cannot be resumed
+            // without knowing the missing identity component. Restart from
+            // the source page rather than guessing a boundary.
+            cursor = null;
+            restartedFromIncompatibleCursor = true;
         }
     }
     const sourcePositionKey = `${SOURCE_TABLE}:created_at:id`;
-    const continuingFamilyPage = cursor?.version === 4
+    const continuingFamilyPage = (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION)
         && (
             Object.keys(cursor.positions).some(key => key !== sourcePositionKey)
             || cursor.requestIds.length > 0
         );
-    const familyCursor = continuingFamilyPage && cursor?.version === 4 ? cursor : null;
+    const familyCursor = continuingFamilyPage
+        && (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION)
+        ? cursor
+        : null;
     let sourceHasMore = false;
     let sourcePage: unknown[] = [];
     let sourceBlocked = 0;
@@ -3088,14 +3180,14 @@ export async function backfillAnalysisCanonical(input: {
             if (cursor?.version === 1) {
                 if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
                 sourceQuery = sourceQuery.or(
-                    `created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`,
+                    `${postgrestFilterTerm('created_at', 'gt', cursor.createdAt)},and(${postgrestFilterTerm('created_at', 'eq', cursor.createdAt)},${postgrestFilterTerm('id', 'gt', cursor.id)})`,
                 );
-            } else if (cursor?.version === 4) {
+            } else if (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION) {
                 const position = cursor.positions[sourcePositionKey];
                 if (position) {
                     if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
                     sourceQuery = sourceQuery.or(
-                        `created_at.gt.${position.createdAt},and(created_at.eq.${position.createdAt},id.gt.${position.key})`,
+                        `${postgrestFilterTerm('created_at', 'gt', position.createdAt)},and(${postgrestFilterTerm('created_at', 'eq', position.createdAt)},${postgrestFilterTerm('id', 'gt', position.key)})`,
                     );
                 }
             }
@@ -3143,7 +3235,9 @@ export async function backfillAnalysisCanonical(input: {
         familyCursor ? familyCursor.completed : [],
     );
     const priorFamilyEvidence: Readonly<Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>>> =
-        cursor?.version === 4 ? cursor.familyEvidence : {};
+        (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION)
+            ? cursor.familyEvidence
+            : {};
     const familyEvidence: Partial<Record<AnalysisCanonicalBackfillFamily, AnalysisBackfillParitySummary>> = {
         ...priorFamilyEvidence,
     };
@@ -3305,16 +3399,16 @@ export async function backfillAnalysisCanonical(input: {
         || (apply && applyRun.stopped && selectedRequestIds.length > 0)
     );
     const nextCursor = apply && (readBarrierBlocked || applyParityBlocked)
-        ? input.cursor ?? null
+        ? restartedFromIncompatibleCursor ? null : input.cursor ?? null
         : hasCursorContinuation
         ? Buffer.from(JSON.stringify({
-            version: 4,
+            version: COMPOSITE_CURSOR_VERSION,
             positions,
             requestIds: (familyHasMore || (apply && applyRun.stopped)) ? selectedRequestIds : [],
             sourceHasMore,
             completed: [...completedTables],
             familyEvidence,
-        } satisfies AnalysisBackfillCursorV4), 'utf8')
+        } satisfies AnalysisBackfillCursorV5), 'utf8')
             .toString('base64url')
         : null;
     const reportComplete = continuingFamilyPage
