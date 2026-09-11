@@ -50,6 +50,15 @@ interface BackfillQuery {
     }>;
 }
 
+type BackfillKeyType = 'text' | 'bigint' | 'integer' | 'smallint';
+
+interface BackfillCursorColumn {
+    column: string;
+    keyType?: BackfillKeyType;
+    keyMinimum?: string;
+    keyMaximum?: string;
+}
+
 export interface AnalysisBackfillClient {
     from(table: string): BackfillQuery;
     rpc?(
@@ -128,10 +137,15 @@ interface BackfillTableSpec {
     timeColumn: string;
     keyColumn: string;
     /** PostgreSQL key type; numeric keys must never be compared as strings. */
-    keyType?: 'text' | 'bigint' | 'integer' | 'smallint';
+    keyType?: BackfillKeyType;
     /** Schema-level bounds for numeric key columns, retained as decimal text. */
     keyMinimum?: string;
     keyMaximum?: string;
+    /**
+     * Ordered identity columns after request_id.  Composite primary keys must
+     * be represented in full so a timestamp tie remains strictly resumable.
+     */
+    cursorColumns?: readonly BackfillCursorColumn[];
     /** Mutable source tables require a row-hash freshness fence before apply. */
     freshnessFence?: 'row_hash';
     /** Null means that this legacy table has no request-safe request identity. */
@@ -169,6 +183,8 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'request_id, job_key, track, kind, batch, required_job_keys, status, dispatch_generation, attempt_count, lease_expires_at, completion_fanout_hash, created_at, updated_at',
                 timeColumn: 'created_at',
                 keyColumn: 'job_key',
+                // Schema PK: (request_id, job_key).
+                cursorColumns: Object.freeze([{ column: 'job_key' }]),
                 freshnessFence: 'row_hash' as const,
             },
             {
@@ -182,6 +198,8 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'request_id, stage_kind, created_at',
                 timeColumn: 'created_at',
                 keyColumn: 'stage_kind',
+                // Schema PK: (request_id, stage_kind).
+                cursorColumns: Object.freeze([{ column: 'stage_kind' }]),
             },
             {
                 table: 'analysis_v2_dag_batch_topology',
@@ -191,6 +209,16 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 keyType: 'integer' as const,
                 keyMinimum: '0',
                 keyMaximum: '100000',
+                // Schema PK: (request_id, topology_kind, batch).
+                cursorColumns: Object.freeze([
+                    { column: 'topology_kind' },
+                    {
+                        column: 'batch',
+                        keyType: 'integer' as const,
+                        keyMinimum: '0',
+                        keyMaximum: '100000',
+                    },
+                ]),
             },
             {
                 table: 'analysis_v2_dag_batch_results',
@@ -200,6 +228,16 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 keyType: 'integer' as const,
                 keyMinimum: '0',
                 keyMaximum: '100000',
+                // Schema PK: (request_id, result_kind, batch).
+                cursorColumns: Object.freeze([
+                    { column: 'result_kind' },
+                    {
+                        column: 'batch',
+                        keyType: 'integer' as const,
+                        keyMinimum: '0',
+                        keyMaximum: '100000',
+                    },
+                ]),
             },
         ]),
         canonicalTable: 'analysis_jobs',
@@ -228,6 +266,13 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 keyType: 'bigint' as const,
                 keyMinimum: '1',
                 keyMaximum: '9007199254740991',
+                // Schema PK: (request_id, seq).
+                cursorColumns: Object.freeze([{
+                    column: 'seq',
+                    keyType: 'bigint' as const,
+                    keyMinimum: '1',
+                    keyMaximum: '9007199254740991',
+                }]),
             },
             {
                 table: 'analysis_step_events',
@@ -325,6 +370,8 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'request_id, artifact_key, artifact_kind, content_sha256, expires_at, created_at, deleted_at',
                 timeColumn: 'created_at',
                 keyColumn: 'artifact_key',
+                // Schema PK: (request_id, artifact_key).
+                cursorColumns: Object.freeze([{ column: 'artifact_key' }]),
             },
         ]),
         canonicalTable: 'analysis_artifacts',
@@ -348,6 +395,11 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'request_id, source_kind, source_operation_key, source_identity_hash, attributed_at, updated_at',
                 timeColumn: 'attributed_at',
                 keyColumn: 'source_operation_key',
+                // Schema PK: (request_id, source_kind, source_operation_key).
+                cursorColumns: Object.freeze([
+                    { column: 'source_kind' },
+                    { column: 'source_operation_key' },
+                ]),
             },
             {
                 table: 'analysis_v2_cost_rollup_snapshots',
@@ -2060,9 +2112,19 @@ function tablePositionKey(table: BackfillTableSpec): string {
 }
 
 const INTEGER_KEY_PATTERN = /^(?:0|[1-9][0-9]*)$/;
+const CURSOR_KEY_SEPARATOR = '|';
 
-function integerKeyBounds(spec: BackfillTableSpec): { minimum: bigint; maximum: bigint } | null {
-    const keyType = spec.keyType;
+function cursorColumns(spec: BackfillTableSpec): readonly BackfillCursorColumn[] {
+    return spec.cursorColumns ?? [{
+        column: spec.keyColumn,
+        keyType: spec.keyType,
+        keyMinimum: spec.keyMinimum,
+        keyMaximum: spec.keyMaximum,
+    }];
+}
+
+function integerKeyBounds(column: BackfillCursorColumn): { minimum: bigint; maximum: bigint } | null {
+    const keyType = column.keyType;
     if (keyType !== 'bigint' && keyType !== 'integer' && keyType !== 'smallint') {
         return null;
     }
@@ -2073,8 +2135,8 @@ function integerKeyBounds(spec: BackfillTableSpec): { minimum: bigint; maximum: 
     };
     const bounds = defaults[keyType];
     try {
-        const minimum = BigInt(spec.keyMinimum ?? bounds.minimum);
-        const maximum = BigInt(spec.keyMaximum ?? bounds.maximum);
+        const minimum = BigInt(column.keyMinimum ?? bounds.minimum);
+        const maximum = BigInt(column.keyMaximum ?? bounds.maximum);
         return minimum <= maximum ? { minimum, maximum } : null;
     } catch {
         return null;
@@ -2086,8 +2148,8 @@ function integerKeyBounds(spec: BackfillTableSpec): { minimum: bigint; maximum: 
  * the cursor wire representation textual, but canonicalize through BigInt so
  * ordering never falls back to lexicographic comparison or lossy Number math.
  */
-function canonicalCursorKey(value: unknown, spec: BackfillTableSpec): string | null {
-    if (spec.keyType === 'bigint' || spec.keyType === 'integer' || spec.keyType === 'smallint') {
+function canonicalCursorColumn(value: unknown, column: BackfillCursorColumn): string | null {
+    if (column.keyType === 'bigint' || column.keyType === 'integer' || column.keyType === 'smallint') {
         let numeric: bigint;
         try {
             if (typeof value === 'bigint') {
@@ -2103,11 +2165,46 @@ function canonicalCursorKey(value: unknown, spec: BackfillTableSpec): string | n
         } catch {
             return null;
         }
-        const bounds = integerKeyBounds(spec);
+        const bounds = integerKeyBounds(column);
         if (!bounds || numeric < bounds.minimum || numeric > bounds.maximum) return null;
         return numeric.toString();
     }
     return typeof value === 'string' && KEY_PATTERN.test(value) ? value : null;
+}
+
+function cursorKeyParts(value: unknown, spec: BackfillTableSpec): string[] | null {
+    if (typeof value !== 'string') return null;
+    const columns = cursorColumns(spec);
+    const rawParts = columns.length === 1
+        ? [value]
+        : value.split(CURSOR_KEY_SEPARATOR);
+    if (rawParts.length !== columns.length) return null;
+    const normalized = rawParts.map((part, index) => canonicalCursorColumn(part, columns[index]!));
+    if (normalized.some((part): part is null => part === null)) return null;
+    return normalized as string[];
+}
+
+function canonicalCursorKey(value: unknown, spec: BackfillTableSpec): string | null {
+    const columns = cursorColumns(spec);
+    if (columns.length === 1) {
+        const normalized = canonicalCursorColumn(value, columns[0]!);
+        return normalized;
+    }
+    const parts = cursorKeyParts(value, spec);
+    return parts ? parts.join(CURSOR_KEY_SEPARATOR) : null;
+}
+
+function cursorKeyFromRow(value: Record<string, unknown>, spec: BackfillTableSpec): string | null {
+    const columns = cursorColumns(spec);
+    const rawParts = columns.map((column) => {
+        if (Object.prototype.hasOwnProperty.call(value, column.column)) {
+            return value[column.column];
+        }
+        return columns.length === 1 ? value.id : undefined;
+    });
+    const normalized = rawParts.map((part, index) => canonicalCursorColumn(part, columns[index]!));
+    if (normalized.some((part): part is null => part === null)) return null;
+    return (normalized as string[]).join(CURSOR_KEY_SEPARATOR);
 }
 
 function tableSpecForPositionKey(positionKey: string): BackfillTableSpec | null {
@@ -2134,32 +2231,39 @@ function compareCursorPositions(
     spec: BackfillTableSpec,
 ): number | null {
     if (!isSafeTimestamp(left.createdAt) || !isSafeTimestamp(right.createdAt)) return null;
-    const leftKey = canonicalCursorKey(left.key, spec);
-    const rightKey = canonicalCursorKey(right.key, spec);
-    if (leftKey === null || rightKey === null) return null;
+    const leftKeys = cursorKeyParts(left.key, spec);
+    const rightKeys = cursorKeyParts(right.key, spec);
+    if (leftKeys === null || rightKeys === null) return null;
     const created = left.createdAt < right.createdAt ? -1 : left.createdAt > right.createdAt ? 1 : 0;
     if (created !== 0) return created;
     const request = left.requestId < right.requestId ? -1 : left.requestId > right.requestId ? 1 : 0;
     if (request !== 0) return request;
-    if (spec.keyType === 'bigint' || spec.keyType === 'integer' || spec.keyType === 'smallint') {
-        const leftNumeric = BigInt(leftKey);
-        const rightNumeric = BigInt(rightKey);
-        return leftNumeric < rightNumeric ? -1 : leftNumeric > rightNumeric ? 1 : 0;
+    const columns = cursorColumns(spec);
+    for (let index = 0; index < columns.length; index += 1) {
+        const column = columns[index]!;
+        const leftKey = leftKeys[index]!;
+        const rightKey = rightKeys[index]!;
+        if (column.keyType === 'bigint' || column.keyType === 'integer' || column.keyType === 'smallint') {
+            const leftNumeric = BigInt(leftKey);
+            const rightNumeric = BigInt(rightKey);
+            if (leftNumeric !== rightNumeric) {
+                return leftNumeric < rightNumeric ? -1 : 1;
+            }
+        } else if (leftKey !== rightKey) {
+            return leftKey < rightKey ? -1 : 1;
+        }
     }
-    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    return 0;
 }
 
 function rowCursorPosition(row: unknown, spec: BackfillTableSpec): AnalysisBackfillCursorPosition | null {
     if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
     const value = row as Record<string, unknown>;
     const rawCreatedAt = value[spec.timeColumn] ?? value.created_at;
-    const rawKey = Object.prototype.hasOwnProperty.call(value, spec.keyColumn)
-        ? value[spec.keyColumn]
-        : value.id;
     const requestId = spec.requestIdColumn === null
         ? ''
         : value[spec.requestIdColumn ?? 'request_id'] ?? value.request_id;
-    const normalizedKey = canonicalCursorKey(rawKey, spec);
+    const normalizedKey = cursorKeyFromRow(value, spec);
     const normalizedCreatedAt = normalizePgTimestamp(rawCreatedAt);
     if (
         normalizedCreatedAt === null
@@ -2212,10 +2316,15 @@ async function assertMutableCursorBoundaryFreshness(
     if (requestIdColumn === null || !position.requestId) {
         throw new Error('mutable source freshness identity unavailable');
     }
+    const boundaryKeys = cursorKeyParts(position.key, spec);
+    const keyColumns = cursorColumns(spec);
+    if (!boundaryKeys) throw new Error('mutable source cursor boundary changed');
     let query = client.from(spec.table).select(spec.columns);
     query = applyEqFilter(query, requestIdColumn, position.requestId);
     query = applyEqFilter(query, spec.timeColumn, position.createdAt);
-    query = applyEqFilter(query, spec.keyColumn, position.key);
+    for (let index = 0; index < keyColumns.length; index += 1) {
+        query = applyEqFilter(query, keyColumns[index]!.column, boundaryKeys[index]!);
+    }
     const result = await query.limit(2);
     if (result.error || !Array.isArray(result.data) || result.data.length !== 1) {
         throw new Error('mutable source cursor boundary changed');
@@ -2228,6 +2337,32 @@ async function assertMutableCursorBoundaryFreshness(
     ) {
         throw new Error('mutable source cursor boundary changed');
     }
+}
+
+function keysetBoundaryExpression(
+    spec: BackfillTableSpec,
+    requestIdColumn: string,
+    position: AnalysisBackfillCursorPosition,
+): string | null {
+    const keys = cursorKeyParts(position.key, spec);
+    if (!keys) return null;
+    const prefix = [
+        `${spec.timeColumn}.eq.${position.createdAt}`,
+        `${requestIdColumn}.eq.${position.requestId}`,
+    ];
+    const clauses = [
+        `${spec.timeColumn}.gt.${position.createdAt}`,
+        `and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.gt.${position.requestId})`,
+    ];
+    for (let index = 0; index < keys.length; index += 1) {
+        const equalPrefix = [...prefix];
+        for (let prior = 0; prior < index; prior += 1) {
+            equalPrefix.push(`${cursorColumns(spec)[prior]!.column}.eq.${keys[prior]!}`);
+        }
+        const column = cursorColumns(spec)[index]!.column;
+        clauses.push(`and(${[...equalPrefix, `${column}.gt.${keys[index]!}`].join(',')})`);
+    }
+    return clauses.join(',');
 }
 
 function sameMutableSourcePage(
@@ -2335,16 +2470,18 @@ async function readBoundedTable(
     }
     if (position) {
         if (!query.or) throw new Error('keyset boundary filter unavailable');
-        query = query.or(
-            `${spec.timeColumn}.gt.${position.createdAt},and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.gt.${position.requestId}),and(${spec.timeColumn}.eq.${position.createdAt},${requestIdColumn}.eq.${position.requestId},${spec.keyColumn}.gt.${position.key})`,
-        );
+        const boundary = keysetBoundaryExpression(spec, requestIdColumn, position);
+        if (!boundary) throw new Error('keyset boundary cursor unavailable');
+        query = query.or(boundary);
     }
     // Read one sentinel row. A page with exactly `limit` rows is complete
     // because the query asked for `limit + 1`; a page with the sentinel is
     // explicitly incomplete and must never report parity.
     query = query.order(spec.timeColumn, { ascending: true });
     query = query.order(requestIdColumn, { ascending: true });
-    query = query.order(spec.keyColumn, { ascending: true });
+    for (const column of cursorColumns(spec)) {
+        query = query.order(column.column, { ascending: true });
+    }
     const result = await query.limit(limit + 1);
     if (result.error || !Array.isArray(result.data) || result.data.length > limit + 1) {
         throw new Error('bounded analysis canonical backfill query failed');
@@ -2372,7 +2509,7 @@ async function readBoundedTable(
             throw new Error('ambiguous analysis canonical backfill cursor order');
         }
     }
-    // A `(time,request,key)` tie without a unique physical key cannot be safely
+    // A `(time,request,identity)` tie without a schema identity component cannot be safely
     // resumed by a PostgREST boundary. Refuse the page rather than silently
     // skipping or duplicating evidence.  The sentinel is intentionally
     // inspected before it is discarded.
@@ -2389,7 +2526,7 @@ async function readBoundedTable(
         const last = positionsOnPage.at(-1);
         if (!sentinel || !last) throw new Error('invalid analysis canonical backfill sentinel');
         const sentinelOrder = compareCursorPositions(last, sentinel, spec);
-        if (sentinelOrder === null || sentinelOrder <= 0) {
+        if (sentinelOrder === null || sentinelOrder >= 0) {
             throw new Error('ambiguous analysis canonical backfill cursor tie');
         }
     }

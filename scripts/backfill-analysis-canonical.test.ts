@@ -481,6 +481,68 @@ describe('bounded analysis canonical backfill tooling', () => {
         expect(report.nextCursor).toBeTruthy();
     });
 
+    it('progresses across duplicate batch values with the schema primary-key composite', async () => {
+        const requestId = sourceRows[0]!.id;
+        const topologyRows = [
+            {
+                request_id: requestId,
+                topology_kind: 'private_name',
+                batch: 0,
+                created_at: '2026-09-01T00:00:00.000Z',
+            },
+            {
+                request_id: requestId,
+                topology_kind: 'profile',
+                batch: 0,
+                created_at: '2026-09-01T00:00:00.000Z',
+            },
+            {
+                request_id: requestId,
+                topology_kind: 'profile',
+                batch: 1,
+                created_at: '2026-09-01T00:00:00.000Z',
+            },
+        ];
+        let topologyReads = 0;
+        const boundaries: string[] = [];
+        const client = {
+            from: vi.fn((table: string) => {
+                const data = table === 'analysis_requests'
+                    ? sourceRows.slice(0, 1)
+                    : table === 'analysis_v2_dag_batch_topology'
+                        ? topologyReads++ === 0 ? topologyRows : [topologyRows[2]]
+                        : [];
+                const chain = {
+                    select: vi.fn().mockReturnThis(),
+                    in: vi.fn().mockReturnThis(),
+                    or: vi.fn((expression: string) => {
+                        if (table === 'analysis_v2_dag_batch_topology') boundaries.push(expression);
+                        return chain;
+                    }),
+                    order: vi.fn().mockReturnThis(),
+                    limit: vi.fn().mockResolvedValue({ data, error: null }),
+                };
+                return chain;
+            }),
+        };
+
+        const first = await backfillAnalysisCanonical({ client, limit: 2, reportOnly: true });
+        const second = await backfillAnalysisCanonical({
+            client,
+            limit: 2,
+            cursor: first.nextCursor,
+            reportOnly: true,
+        });
+
+        expect(first.families.jobs.source.count).toBe(2);
+        expect(first.nextCursor).toBeTruthy();
+        expect(second.families.jobs.source.count).toBe(1);
+        expect(second.families.jobs.source.complete).toBe(true);
+        expect(boundaries).toHaveLength(1);
+        expect(boundaries[0]).toContain('topology_kind.gt.');
+        expect(boundaries[0]).toContain('batch.gt.');
+    });
+
     it('normalizes live target manifests and interactions into bidirectional logical evidence', () => {
         const request = sourceRows[0]!.id;
         const manifest = {
