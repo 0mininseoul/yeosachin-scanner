@@ -12,7 +12,10 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const TRACK_PATTERN = /^[a-z][a-z0-9_]{0,49}$/;
 const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/;
-const TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|[+-]\d{2}:\d{2})$/;
+const MONEY_PATTERN = /^(0|[1-9]\d{0,5})(?:\.(\d{1,12}))?$/;
+const MICROSECONDS_PER_SECOND = BigInt(1_000_000);
+const MICROSECONDS_PER_MINUTE = BigInt(60) * MICROSECONDS_PER_SECOND;
 
 export type AnalysisCanonicalBackfillFamily =
     | 'jobs'
@@ -330,7 +333,10 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
             },
             {
                 table: 'analysis_provider_cost_ledger',
-                columns: 'request_id, run_id, logical_provider, operation_key, credential_slot, status, max_charge_usd, usage_total_usd, started_at, terminal_at, created_at, updated_at',
+                // PostgREST may decode NUMERIC as a JavaScript number. Cast
+                // money to text in the read itself so no precision is lost
+                // before validation or RPC serialization.
+                columns: 'request_id, run_id, logical_provider, operation_key, credential_slot, status, max_charge_usd::text, usage_total_usd::text, started_at, terminal_at, created_at, updated_at',
                 timeColumn: 'created_at',
                 keyColumn: 'run_id',
             },
@@ -338,7 +344,9 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
         canonicalTable: 'analysis_costs',
         canonical: {
             table: 'analysis_costs',
-            columns: 'id, request_id, provider, operation_key, stage, currency, amount_known, amount_conservative, usage_unknown, source_hash, idempotency_key, payload, retention_class, recorded_at',
+            // Keep canonical NUMERIC values textual on parity re-read too;
+            // comparing a decoded Number would reintroduce rounding.
+            columns: 'id, request_id, provider, operation_key, stage, currency, amount_known::text, amount_conservative::text, usage_unknown, source_hash, idempotency_key, payload, retention_class, recorded_at',
             timeColumn: 'recorded_at',
             keyColumn: 'id',
         },
@@ -452,6 +460,78 @@ interface AnalysisBackfillCursorV1 {
 
 type ParsedBackfillCursor = AnalysisBackfillCursorV1 | AnalysisBackfillCursorV4;
 
+function timestampMicros(value: string): bigint | null {
+    const match = TIMESTAMP_PATTERN.exec(value);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+    const fraction = (match[7] ?? '').padEnd(6, '0');
+    const zone = match[8]!;
+    if (
+        month < 1 || month > 12
+        || day < 1
+        || hour > 23
+        || minute > 59
+        || second > 59
+    ) return null;
+    const daysInMonth = new Date(0);
+    daysInMonth.setUTCFullYear(year, month, 0);
+    const lastDay = daysInMonth.getUTCDate();
+    if (day > lastDay) return null;
+    const local = new Date(0);
+    local.setUTCFullYear(year, month - 1, day);
+    local.setUTCHours(hour, minute, second, 0);
+    if (
+        local.getUTCFullYear() !== year
+        || local.getUTCMonth() !== month - 1
+        || local.getUTCDate() !== day
+        || local.getUTCHours() !== hour
+        || local.getUTCMinutes() !== minute
+        || local.getUTCSeconds() !== second
+    ) return null;
+    let offsetMinutes = 0;
+    if (zone !== 'Z') {
+        const offsetHours = Number(zone.slice(1, 3));
+        const offsetMinutesPart = Number(zone.slice(4, 6));
+        if (offsetHours > 23 || offsetMinutesPart > 59) return null;
+        offsetMinutes = (zone[0] === '+' ? 1 : -1)
+            * (offsetHours * 60 + offsetMinutesPart);
+    }
+    return BigInt(local.getTime()) * BigInt(1_000)
+        + BigInt(fraction)
+        - BigInt(offsetMinutes) * MICROSECONDS_PER_MINUTE;
+}
+
+function normalizePgTimestamp(value: unknown): string | null {
+    if (typeof value !== 'string') return null;
+    const micros = timestampMicros(value);
+    if (micros === null) return null;
+    let epochSeconds = micros / MICROSECONDS_PER_SECOND;
+    let fraction = micros % MICROSECONDS_PER_SECOND;
+    if (fraction < 0) {
+        epochSeconds -= BigInt(1);
+        fraction += MICROSECONDS_PER_SECOND;
+    }
+    const date = new Date(Number(epochSeconds) * 1_000);
+    const year = date.getUTCFullYear();
+    if (year < 0 || year > 9_999) return null;
+    const pad = (part: number, width: number): string => String(part).padStart(width, '0');
+    return `${pad(year, 4)}-${pad(date.getUTCMonth() + 1, 2)}-${pad(date.getUTCDate(), 2)}T`
+        + `${pad(date.getUTCHours(), 2)}:${pad(date.getUTCMinutes(), 2)}:${pad(date.getUTCSeconds(), 2)}.`
+        + `${pad(Number(fraction), 6)}Z`;
+}
+
+function comparePgTimestamps(left: unknown, right: unknown): number | null {
+    const normalizedLeft = normalizePgTimestamp(left);
+    const normalizedRight = normalizePgTimestamp(right);
+    if (normalizedLeft === null || normalizedRight === null) return null;
+    return normalizedLeft < normalizedRight ? -1 : normalizedLeft > normalizedRight ? 1 : 0;
+}
+
 function isSourceRow(value: unknown): value is AnalysisBackfillSourceRow {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const row = value as Record<string, unknown>;
@@ -460,17 +540,14 @@ function isSourceRow(value: unknown): value is AnalysisBackfillSourceRow {
         && typeof row.created_at === 'string'
         && row.created_at.length > 0
         && row.created_at.length <= 128
-        && TIMESTAMP_PATTERN.test(row.created_at)
-        && Number.isFinite(Date.parse(row.created_at))
+        && normalizePgTimestamp(row.created_at) !== null
         && typeof row.status === 'string'
         && row.status.length > 0
         && row.status.length <= 64;
 }
 
 function isSafeTimestamp(value: unknown): value is string {
-    return typeof value === 'string'
-        && TIMESTAMP_PATTERN.test(value)
-        && Number.isFinite(Date.parse(value));
+    return normalizePgTimestamp(value) !== null;
 }
 
 function stableValue(value: unknown): unknown {
@@ -603,6 +680,9 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
         }
         const sourceRow: AnalysisBackfillSourceRow = {
             id: row.id,
+            // v1 hashes the source row exactly as it was encoded.  Keep that
+            // legacy hash input byte-for-byte stable; v4 positions normalize
+            // timestamps for six-digit keyset ordering.
             created_at: row.createdAt,
             status: row.status,
         };
@@ -676,7 +756,7 @@ function parseBackfillCursor(value: string): ParsedBackfillCursor {
             throw new Error('Analysis canonical backfill cursor is unknown.');
         }
         positions[table] = {
-            createdAt: position.createdAt,
+            createdAt: normalizePgTimestamp(position.createdAt)!,
             requestId: position.requestId,
             key: position.key,
             rowHash: position.rowHash,
@@ -704,7 +784,8 @@ function isKnownBackfillPositionKey(value: string): boolean {
 }
 
 function compareRows(left: AnalysisBackfillSourceRow, right: AnalysisBackfillSourceRow): number {
-    const created = left.created_at.localeCompare(right.created_at);
+    const created = (normalizePgTimestamp(left.created_at) ?? left.created_at)
+        .localeCompare(normalizePgTimestamp(right.created_at) ?? right.created_at);
     if (created !== 0) return created;
     return left.id.localeCompare(right.id);
 }
@@ -783,8 +864,8 @@ export interface AnalysisBackfillLogicalRow {
     }> | null;
     retention: string | null;
     cost: Readonly<{
-        amountKnown: number | null;
-        amountConservative: number | null;
+        amountKnown: string | null;
+        amountConservative: string | null;
         usageUnknown: boolean | null;
         sourceHash: string | null;
     }> | null;
@@ -874,6 +955,21 @@ function numericFieldFrom(
     return null;
 }
 
+function canonicalMoneyString(value: unknown): string | null {
+    if (typeof value !== 'string' || !MONEY_PATTERN.test(value)) return null;
+    const [whole, fraction = ''] = value.split('.');
+    const normalizedFraction = fraction.replace(/0+$/, '');
+    return `${whole}${normalizedFraction ? `.${normalizedFraction}` : ''}`;
+}
+
+function moneyFieldFrom(
+    row: Record<string, unknown>,
+    payload: Record<string, unknown>,
+    ...keys: string[]
+): string | null {
+    return canonicalMoneyString(fieldValue(row, payload, ...keys));
+}
+
 function textFieldFrom(
     row: Record<string, unknown>,
     payload: Record<string, unknown>,
@@ -905,12 +1001,13 @@ function targetInteractionRows(value: unknown): readonly Readonly<{
         if (!isRecord(candidate)) return null;
         const key = keyField(candidate, 'key', 'interactionKey', 'interaction_key', 'source_interaction_id', 'id');
         const signal = textField(candidate, 'signal', 'eventCode', 'event_code', 'eventType');
-        const occurredAt = textField(candidate, 'occurredAt', 'occurred_at', 'created_at');
+        const rawOccurredAt = textField(candidate, 'occurredAt', 'occurred_at', 'created_at');
         const evidenceId = textField(candidate, 'evidenceId', 'evidence_id', 'source_interaction_id', 'content_hash');
+        const occurredAt = rawOccurredAt === null ? null : normalizePgTimestamp(rawOccurredAt);
         if (
             !key
             || (signal !== 'target_post_like' && signal !== 'target_post_comment')
-            || (occurredAt !== null && (!TIMESTAMP_PATTERN.test(occurredAt) || !Number.isFinite(Date.parse(occurredAt))))
+            || (rawOccurredAt !== null && occurredAt === null)
             || !evidenceId
         ) return null;
         rows.push(Object.freeze({
@@ -960,11 +1057,13 @@ function normalizeBackfillRow(
     const interactionKey = keyField(row, 'source_interaction_id', 'interaction_key')
         ?? keyField(interactionPayload, 'key', 'interactionKey', 'interaction_key', 'id');
     const sourceHash = textFieldFrom(row, payload, 'source_hash', 'source_identity_hash');
-    const occurredAt = textFieldFrom(
+    const rawOccurredAt = textFieldFrom(
         row,
         interactionPayload,
         'occurred_at', 'occurredAt', 'created_at', 'recorded_at',
     );
+    const occurredAt = rawOccurredAt === null ? null : normalizePgTimestamp(rawOccurredAt);
+    if (rawOccurredAt !== null && occurredAt === null) return null;
     const interactionSignal = textFieldFrom(
         row,
         interactionPayload,
@@ -1113,8 +1212,8 @@ function normalizeBackfillRow(
             ?? (targetManifestValue ? targetRetention : null),
         cost: family === 'costs' || row.amount_known !== undefined || row.usage_unknown !== undefined
             ? {
-                amountKnown: numericFieldFrom(row, payload, 'amount_known', 'cost_known_usd', 'usage_total_usd', 'amountKnown'),
-                amountConservative: numericFieldFrom(row, payload, 'amount_conservative', 'cost_conservative_usd', 'amountConservative'),
+                amountKnown: moneyFieldFrom(row, payload, 'amount_known', 'cost_known_usd', 'usage_total_usd', 'amountKnown'),
+                amountConservative: moneyFieldFrom(row, payload, 'amount_conservative', 'cost_conservative_usd', 'amountConservative'),
                 usageUnknown: typeof row.usage_unknown === 'boolean' ? row.usage_unknown : null,
                 sourceHash,
             }
@@ -1252,20 +1351,13 @@ function applyInteger(
 function applyCanonicalMoney(
     row: Record<string, unknown>,
     key: string,
-): number | null {
+): string | null {
     const value = row[key];
     if (value === null || value === undefined) return null;
-    const raw = typeof value === 'number'
-        ? value.toString()
-        : typeof value === 'string'
-            ? value.trim()
-            : '';
-    // analysis_costs is NUMERIC(18,12): reject values that would round or
-    // overflow when copied instead of silently changing a source amount.
-    const match = /^(\d+)(?:\.(\d{1,12}))?$/.exec(raw);
-    if (!match || match[1]!.replace(/^0+/, '').length > 6) return null;
-    const numeric = Number(raw);
-    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+    // analysis_costs is NUMERIC(18,12).  Only an exact decimal string may cross
+    // the RPC boundary; a JavaScript number has already lost information and
+    // must be rejected instead of being rounded or re-stringified.
+    return canonicalMoneyString(value);
 }
 
 function sourceEnvelope(sourceTable: string, row: Record<string, unknown>): string | null {
@@ -1362,7 +1454,8 @@ function mapJobRow(table: BackfillTableSpec, row: Record<string, unknown>): Back
     }
     const createdAt = row.created_at;
     const updatedAt = row.updated_at;
-    if (!isSafeTimestamp(createdAt) || !isSafeTimestamp(updatedAt) || Date.parse(updatedAt) < Date.parse(createdAt)) {
+    const updateOrder = comparePgTimestamps(updatedAt, createdAt);
+    if (!isSafeTimestamp(createdAt) || !isSafeTimestamp(updatedAt) || updateOrder === null || updateOrder < 0) {
         return { blockedReason: 'jobs_timestamp_invalid' };
     }
     const leaseExpiresAt = row.lease_expires_at === null || row.lease_expires_at === undefined
@@ -1371,7 +1464,7 @@ function mapJobRow(table: BackfillTableSpec, row: Record<string, unknown>): Back
     if (
         (leaseExpiresAt !== null && !isSafeTimestamp(leaseExpiresAt))
         || (status === 'processing' && leaseExpiresAt === null)
-        || (leaseExpiresAt !== null && Date.parse(leaseExpiresAt) <= Date.parse(updatedAt))
+        || (leaseExpiresAt !== null && comparePgTimestamps(leaseExpiresAt, updatedAt) !== 1)
     ) {
         return { blockedReason: 'jobs_lease_not_proven' };
     }
@@ -1505,7 +1598,8 @@ function mapArtifactRow(table: BackfillTableSpec, row: Record<string, unknown>):
     }
     const createdAt = row.created_at;
     const updatedAt = row.updated_at ?? createdAt;
-    if (!isSafeTimestamp(createdAt) || !isSafeTimestamp(updatedAt) || Date.parse(updatedAt) < Date.parse(createdAt)) {
+    const updateOrder = comparePgTimestamps(updatedAt, createdAt);
+    if (!isSafeTimestamp(createdAt) || !isSafeTimestamp(updatedAt) || updateOrder === null || updateOrder < 0) {
         return { blockedReason: 'artifacts_timestamp_invalid' };
     }
     let state: 'retained' | 'expired' = 'retained';
@@ -1595,8 +1689,8 @@ function mapCostRow(table: BackfillTableSpec, row: Record<string, unknown>): Bac
     let provider: string;
     let operationKey: string;
     let stage: string;
-    let amountKnown: number | null;
-    let amountConservative: number | null;
+    let amountKnown: string | null;
+    let amountConservative: string | null;
     let usageUnknown: boolean;
     let sourceHash: string;
     const payload: Record<string, unknown> = { schemaVersion: 1 };
@@ -1933,15 +2027,16 @@ function rowCursorPosition(row: unknown, spec: BackfillTableSpec): AnalysisBackf
     const normalizedKey = typeof rawKey === 'number' && Number.isSafeInteger(rawKey)
         ? String(rawKey)
         : rawKey;
+    const normalizedCreatedAt = normalizePgTimestamp(rawCreatedAt);
     if (
-        !isSafeTimestamp(rawCreatedAt)
+        normalizedCreatedAt === null
         || typeof requestId !== 'string'
         || (requestId !== '' && !UUID_PATTERN.test(requestId))
         || typeof normalizedKey !== 'string'
         || !KEY_PATTERN.test(normalizedKey)
     ) return null;
     return {
-        createdAt: rawCreatedAt,
+        createdAt: normalizedCreatedAt,
         requestId,
         key: normalizedKey,
         rowHash: stableHash(value),
@@ -2200,18 +2295,25 @@ async function readFamily(
     const canonical = aggregateRows(canonicalRows, canonicalComplete && !canonicalHasMore);
     const logicalSource = normalizeBackfillFamilyRows(spec.family, legacyRows, selectedRequestIds);
     const logicalCanonical = normalizeBackfillFamilyRows(spec.family, canonicalRows, selectedRequestIds);
+    const projection = projectLegacyPages(
+        spec.family,
+        legacyPages,
+        new Set(selectedRequestIds),
+    );
+    if (!apply) blocked += projection.blockedReasons.length;
     const parity: AnalysisBackfillParitySummary = apply
         ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
         : !sourceComplete || sourceHasMore
             ? { status: 'blocked', mismatchPaths: ['source.missing'] }
             : !canonicalComplete || canonicalHasMore
                 ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
-                : compareNormalizedBackfillFamilyRows(
-                    spec.family,
-                    legacyRows,
-                    canonicalRows,
-                    selectedRequestIds,
-                );
+                : projection.blockedReasons.length > 0
+                    ? { status: 'blocked', mismatchPaths: ['source.evidence'] }
+                    : compareAppliedCanonicalRows(
+                        spec.family,
+                        projection.expected,
+                        canonicalRowsForExpected(spec.family, projection.expected, canonicalRows),
+                    );
     const targetSource = logicalSource.filter(row => row.evidence.targetManifest);
     const targetCanonical = logicalCanonical.filter(row => row.evidence.targetManifest);
     const targetSourceInteractions = logicalSource.flatMap(row => row.evidence.targetInteractions);
@@ -2301,6 +2403,9 @@ function expectedCanonicalMutation(
         };
     } else if (family === 'events') {
         if (typeof row.contentHash !== 'string') return null;
+        // analysis_events.id is database-generated; apply's deterministic
+        // event identity is the reserved content hash used by its partial
+        // uniqueness fence.
         identity = `${mutation.requestId}\0${row.contentHash}`;
         lookupValue = row.contentHash;
         expected = {
@@ -2354,12 +2459,88 @@ function expectedCanonicalMutation(
     return { family, mutation, identity, lookupValue, expected };
 }
 
+interface BackfillCanonicalProjection {
+    expected: readonly ExpectedCanonicalMutation[];
+    blockedReasons: readonly string[];
+}
+
+/**
+ * Report-only must describe the rows that the guarded apply would send to the
+ * RPC, rather than comparing unrelated physical source and destination rows.
+ * Keep this projection on the same mapper and identity builder as apply so
+ * generated event content identities and derived artifact keys cannot drift.
+ */
+function projectLegacyPages(
+    family: AnalysisCanonicalBackfillFamily,
+    pages: readonly BackfillLegacyPage[],
+    selectedRequestIds: ReadonlySet<string>,
+): BackfillCanonicalProjection {
+    const expectedByIdentity = new Map<string, ExpectedCanonicalMutation>();
+    const blockedReasons = new Set<string>();
+    for (const page of pages) {
+        for (const sourceRow of page.rows) {
+            const requestId = textField(sourceRow, 'request_id', 'requestId');
+            if (!requestId || !selectedRequestIds.has(requestId)) {
+                blockedReasons.add(`${page.table.table}:request_identity_not_in_selected_batch`);
+                continue;
+            }
+            const mapping = mapLegacyRowForApply(family, page.table, sourceRow);
+            if (!mapping.mutation) {
+                blockedReasons.add(`${page.table.table}:${mapping.blockedReason ?? 'mapping_not_proven'}`);
+                continue;
+            }
+            const projected = expectedCanonicalMutation(family, mapping.mutation);
+            if (!projected) {
+                blockedReasons.add(`${page.table.table}:canonical_identity_not_proven`);
+                continue;
+            }
+            const prior = expectedByIdentity.get(projected.identity);
+            if (prior) {
+                if (stableHash(prior.expected) !== stableHash(projected.expected)) {
+                    blockedReasons.add(`${page.table.table}:canonical_identity_conflict`);
+                }
+                continue;
+            }
+            expectedByIdentity.set(projected.identity, projected);
+        }
+    }
+    return {
+        expected: Object.freeze([...expectedByIdentity.values()].sort((left, right) => (
+            left.identity.localeCompare(right.identity)
+        ))),
+        blockedReasons: Object.freeze([...blockedReasons].sort()),
+    };
+}
+
 function canonicalLookupColumn(family: AnalysisCanonicalBackfillFamily): string | null {
     if (family === 'jobs') return 'job_key';
     if (family === 'events') return 'content_hash';
     if (family === 'artifacts') return 'artifact_key';
     if (family === 'costs') return 'idempotency_key';
     return null;
+}
+
+function canonicalRowsForExpected(
+    family: AnalysisCanonicalBackfillFamily,
+    expected: readonly ExpectedCanonicalMutation[],
+    canonicalRows: readonly Record<string, unknown>[],
+): readonly Record<string, unknown>[] {
+    const lookupColumn = canonicalLookupColumn(family);
+    if (!lookupColumn || expected.length === 0) return Object.freeze([]);
+    const lookups = new Set(expected.map(value => `${value.mutation.requestId}\0${value.lookupValue}`));
+    return Object.freeze(canonicalRows.filter(row => {
+        const requestId = textField(row, 'request_id', 'requestId');
+        const lookupValue = textField(row, lookupColumn);
+        // The event RPC fences only its reserved backfill copy code; a normal
+        // event with the same content hash does not conflict and is not the
+        // row report-only is predicting.
+        const isBackfillEvent = family !== 'events'
+            || (isRecord(row.payload) && row.payload.copyCode === APPLY_COPY_CODE);
+        return isBackfillEvent
+            && requestId !== null
+            && lookupValue !== null
+            && lookups.has(`${requestId}\0${lookupValue}`);
+    }));
 }
 
 async function readCanonicalRowsForApply(
@@ -2389,19 +2570,9 @@ async function readCanonicalRowsForApply(
         if (!isRecord(value)) throw new Error('invalid canonical apply re-read row');
         rows.push(value);
     }
-    return Object.freeze(rows);
-}
-
-function canonicalDecimal(value: unknown): string | null {
-    const raw = typeof value === 'number'
-        ? value.toString()
-        : typeof value === 'string'
-            ? value.trim()
-            : null;
-    if (raw === null || !/^(?:\d+)(?:\.\d+)?$/.test(raw)) return null;
-    const [whole, fraction = ''] = raw.split('.');
-    const normalizedFraction = fraction.replace(/0+$/, '');
-    return `${whole.replace(/^0+(?=\d)/, '')}${normalizedFraction ? `.${normalizedFraction}` : ''}`;
+    return Object.freeze(spec.family === 'events'
+        ? rows.filter(row => isRecord(row.payload) && row.payload.copyCode === APPLY_COPY_CODE)
+        : rows);
 }
 
 function canonicalFieldEqual(key: string, expected: unknown, actual: unknown): boolean {
@@ -2411,8 +2582,7 @@ function canonicalFieldEqual(key: string, expected: unknown, actual: unknown): b
     ]);
     if (timestampFields.has(key)) {
         if (expected === null || actual === null) return expected === actual;
-        return isSafeTimestamp(expected) && isSafeTimestamp(actual)
-            && Date.parse(expected) === Date.parse(actual);
+        return comparePgTimestamps(expected, actual) === 0;
     }
     if (['generation', 'attempt_count', 'dependency_count'].includes(key)) {
         const left = typeof expected === 'number' ? expected : Number(expected);
@@ -2420,7 +2590,10 @@ function canonicalFieldEqual(key: string, expected: unknown, actual: unknown): b
         return Number.isSafeInteger(left) && Number.isSafeInteger(right) && left === right;
     }
     if (['amount_known', 'amount_conservative'].includes(key)) {
-        return canonicalDecimal(expected) === canonicalDecimal(actual);
+        if (expected === null || actual === null) return expected === actual;
+        const expectedMoney = canonicalMoneyString(expected);
+        const actualMoney = canonicalMoneyString(actual);
+        return expectedMoney !== null && actualMoney !== null && expectedMoney === actualMoney;
     }
     return JSON.stringify(stableValue(expected)) === JSON.stringify(stableValue(actual));
 }
@@ -2602,7 +2775,7 @@ export async function backfillAnalysisCanonical(input: {
         if (validRows.length > 0 && sourceHasMore) {
             const row = validRows.at(-1)!;
             positions[sourcePositionKey] = {
-                createdAt: row.created_at,
+                createdAt: normalizePgTimestamp(row.created_at)!,
                 requestId: '',
                 key: row.id,
                 rowHash: stableHash(row),
@@ -2751,7 +2924,7 @@ export async function backfillAnalysisCanonical(input: {
         const row = sourceRows.at(-1);
         if (row) {
             positions[sourcePositionKey] = {
-                createdAt: row.created_at,
+                createdAt: normalizePgTimestamp(row.created_at)!,
                 requestId: '',
                 key: row.id,
                 rowHash: stableHash(row),

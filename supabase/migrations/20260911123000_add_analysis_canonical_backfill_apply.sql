@@ -1,6 +1,7 @@
 -- Bounded Wave 1 copy support. Legacy analysis tables remain authoritative;
--- this migration only adds a service-role-only, one-row idempotent copy RPC.
--- No source table is changed and no reader or feature flag is activated.
+-- this migration adds a service-role-only, one-row idempotent copy RPC and
+-- aligns the canonical artifact writer with its shared identity fence. No
+-- source table is changed and no reader or feature flag is activated.
 
 -- Backfill job rows carry their source envelope/hash in the canonical payload so
 -- a natural-key conflict can be compared after a concurrent DO NOTHING insert.
@@ -24,6 +25,64 @@ ALTER TABLE public.analysis_jobs
 CREATE UNIQUE INDEX analysis_events_backfill_copy_key_idx
     ON public.analysis_events(request_id, content_hash)
     WHERE (payload ->> 'copyCode') = 'ANALYSIS_CANONICAL_BACKFILL_V1';
+
+-- The canonical artifact writer and this backfill RPC share one request/key
+-- fence.  The artifact table intentionally permits multiple content hashes in
+-- its physical uniqueness constraint, so the lock plus identity check is what
+-- prevents a normal writer and a backfill from publishing different sources
+-- under one artifact key.
+CREATE OR REPLACE FUNCTION public.append_analysis_canonical_artifact(
+    p_request_id UUID,
+    p_job_id UUID,
+    p_kind TEXT,
+    p_artifact_key TEXT,
+    p_state TEXT,
+    p_content_hash TEXT,
+    p_payload JSONB,
+    p_retention_class TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_row public.analysis_artifacts;
+BEGIN
+    IF p_payload IS NULL OR pg_catalog.jsonb_typeof(p_payload) <> 'object' THEN
+        RAISE EXCEPTION 'ANALYSIS_CANONICAL_INVALID_PAYLOAD' USING ERRCODE = '22023';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_request_id::TEXT || ':' || p_artifact_key, 0)
+    );
+    IF EXISTS (
+        SELECT 1
+          FROM public.analysis_artifacts
+         WHERE request_id = p_request_id
+           AND artifact_key = p_artifact_key
+           AND (
+               content_hash IS DISTINCT FROM p_content_hash
+               OR payload->>'source' IS DISTINCT FROM p_payload->>'source'
+           )
+    ) THEN
+        RAISE EXCEPTION 'ANALYSIS_CANONICAL_IDEMPOTENCY_CONFLICT' USING ERRCODE = '22023';
+    END IF;
+    INSERT INTO public.analysis_artifacts(
+        request_id, job_id, kind, artifact_key, state, content_hash,
+        payload, retention_class
+    ) VALUES (
+        p_request_id, p_job_id, p_kind, p_artifact_key, p_state, p_content_hash,
+        p_payload, p_retention_class
+    )
+    ON CONFLICT (request_id, artifact_key, content_hash) DO UPDATE SET
+        state = EXCLUDED.state,
+        payload = EXCLUDED.payload,
+        retention_class = EXCLUDED.retention_class,
+        updated_at = pg_catalog.clock_timestamp()
+    RETURNING * INTO v_row;
+    RETURN pg_catalog.to_jsonb(v_row);
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION public.apply_analysis_canonical_backfill_row(
     p_acknowledgement TEXT,
@@ -415,8 +474,23 @@ BEGIN
        OR p_row->>'idempotencyKey' IS NULL
        OR pg_catalog.char_length(p_row->>'idempotencyKey') = 0
        OR pg_catalog.char_length(p_row->>'idempotencyKey') > 256
-       OR pg_catalog.jsonb_typeof(p_row->'amountKnown') NOT IN ('null', 'number')
-       OR pg_catalog.jsonb_typeof(p_row->'amountConservative') NOT IN ('null', 'number')
+       -- NUMERIC(18,12) money crosses the RPC as a canonical decimal string;
+       -- JSON numbers are rejected because their JavaScript representation may
+       -- already have rounded away significant fractional digits.
+       OR (
+           p_row->>'amountKnown' IS NOT NULL
+           AND (
+               pg_catalog.jsonb_typeof(p_row->'amountKnown') <> 'string'
+               OR p_row->>'amountKnown' !~ '^(0|[1-9][0-9]{0,5})([.][0-9]{1,12})?$'
+           )
+       )
+       OR (
+           p_row->>'amountConservative' IS NOT NULL
+           AND (
+               pg_catalog.jsonb_typeof(p_row->'amountConservative') <> 'string'
+               OR p_row->>'amountConservative' !~ '^(0|[1-9][0-9]{0,5})([.][0-9]{1,12})?$'
+           )
+       )
        OR pg_catalog.jsonb_typeof(p_row->'usageUnknown') <> 'boolean'
        OR pg_catalog.jsonb_typeof(p_row->'payload') <> 'object'
        OR NOT public.analysis_canonical_payload_has_only_keys(
