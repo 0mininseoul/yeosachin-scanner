@@ -310,12 +310,23 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 columns: 'request_id, job_key, side, provider_run_id, created_at',
                 timeColumn: 'created_at',
                 keyColumn: 'job_key',
+                // Schema PK: (request_id, job_key, side).
+                cursorColumns: Object.freeze([
+                    { column: 'job_key' },
+                    { column: 'side' },
+                ]),
             },
             {
                 table: 'analysis_v2_relationship_rows',
-                columns: 'request_id, job_key, side, created_at',
+                columns: 'request_id, job_key, side, username, created_at',
                 timeColumn: 'created_at',
                 keyColumn: 'job_key',
+                // Schema PK: (request_id, job_key, side, username).
+                cursorColumns: Object.freeze([
+                    { column: 'job_key' },
+                    { column: 'side' },
+                    { column: 'username' },
+                ]),
             },
             {
                 table: 'analysis_v2_relationship_manifests',
@@ -337,6 +348,13 @@ export const ANALYSIS_CANONICAL_BACKFILL_FAMILIES: readonly AnalysisCanonicalBac
                 keyType: 'smallint' as const,
                 keyMinimum: '1',
                 keyMaximum: '690',
+                // Schema PK: (request_id, job_key, signal, source_interaction_id).
+                // Keep ordinal as keyColumn for the pre-PR source identity.
+                cursorColumns: Object.freeze([
+                    { column: 'job_key' },
+                    { column: 'signal' },
+                    { column: 'source_interaction_id' },
+                ]),
             },
             {
                 table: 'analysis_v2_candidate_feature_manifests',
@@ -2283,6 +2301,7 @@ function tableSpecForPositionKey(positionKey: string): BackfillTableSpec | null 
             columns: 'id, created_at, status',
             timeColumn: 'created_at',
             keyColumn: 'id',
+            requestIdColumn: null,
         };
     }
     for (const family of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
@@ -2582,6 +2601,12 @@ async function readBoundedTable(
     if (positionsOnPage.length !== rows.length) {
         throw new Error('invalid analysis canonical backfill cursor row');
     }
+    if (position && positionsOnPage.length > 0) {
+        const firstOrder = compareCursorPositions(position, positionsOnPage[0]!, spec);
+        if (firstOrder === null || firstOrder >= 0) {
+            throw new Error('analysis canonical backfill cursor boundary did not advance');
+        }
+    }
     for (let index = 1; index < positionsOnPage.length; index += 1) {
         const previous = positionsOnPage[index - 1]!;
         const current = positionsOnPage[index]!;
@@ -2589,18 +2614,6 @@ async function readBoundedTable(
         if (order === null || order >= 0) {
             throw new Error('ambiguous analysis canonical backfill cursor order');
         }
-    }
-    // A `(time,request,identity)` tie without a schema identity component cannot be safely
-    // resumed by a PostgREST boundary. Refuse the page rather than silently
-    // skipping or duplicating evidence.  The sentinel is intentionally
-    // inspected before it is discarded.
-    const seenComposite = new Set<string>();
-    for (const positionOnPage of positionsOnPage) {
-        const composite = `${positionOnPage.createdAt}\0${positionOnPage.requestId}\0${positionOnPage.key}`;
-        if (seenComposite.has(composite)) {
-            throw new Error('ambiguous analysis canonical backfill cursor tie');
-        }
-        seenComposite.add(composite);
     }
     if (hasMore) {
         const sentinel = rowCursorPosition(result.data[limit], spec);
@@ -3175,16 +3188,25 @@ export async function backfillAnalysisCanonical(input: {
         if (sourcePosition) positions[sourcePositionKey] = sourcePosition;
     } else {
         let sourceResult: { data: unknown; error: BackfillRpcError | null };
+        let incomingSourcePosition: AnalysisBackfillCursorPosition | null = null;
+        const sourceSpec = tableSpecForPositionKey(sourcePositionKey)!;
         try {
             let sourceQuery = client.from(SOURCE_TABLE).select('id, created_at, status');
             if (cursor?.version === 1) {
                 if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
+                incomingSourcePosition = {
+                    createdAt: normalizePgTimestamp(cursor.createdAt)!,
+                    requestId: '',
+                    key: cursor.id,
+                    rowHash: cursor.sourceHash,
+                };
                 sourceQuery = sourceQuery.or(
                     `${postgrestFilterTerm('created_at', 'gt', cursor.createdAt)},and(${postgrestFilterTerm('created_at', 'eq', cursor.createdAt)},${postgrestFilterTerm('id', 'gt', cursor.id)})`,
                 );
             } else if (cursor?.version === 4 || cursor?.version === COMPOSITE_CURSOR_VERSION) {
                 const position = cursor.positions[sourcePositionKey];
                 if (position) {
+                    incomingSourcePosition = position;
                     if (!sourceQuery.or) throw new Error('cursor boundary filter unavailable');
                     sourceQuery = sourceQuery.or(
                         `${postgrestFilterTerm('created_at', 'gt', position.createdAt)},and(${postgrestFilterTerm('created_at', 'eq', position.createdAt)},${postgrestFilterTerm('id', 'gt', position.key)})`,
@@ -3200,6 +3222,15 @@ export async function backfillAnalysisCanonical(input: {
         }
         if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit + 1) {
             return invalidReport(apply ? 'apply' : 'report_only');
+        }
+        if (incomingSourcePosition && sourceResult.data.length > 0) {
+            const firstPosition = rowCursorPosition(sourceResult.data[0], sourceSpec);
+            const firstOrder = firstPosition
+                ? compareCursorPositions(incomingSourcePosition, firstPosition, sourceSpec)
+                : null;
+            if (firstOrder === null || firstOrder >= 0) {
+                return invalidReport(apply ? 'apply' : 'report_only');
+            }
         }
         sourceHasMore = sourceResult.data.length > limit;
         if (sourceHasMore && !isSourceRow(sourceResult.data[limit])) {
