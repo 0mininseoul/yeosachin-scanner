@@ -63,6 +63,44 @@ const ROUTINES = [
     'public.correct_earlybird_v214_concierge_gemini_copy(uuid,uuid,uuid,text,text,text,jsonb,text,jsonb)',
 ] as const;
 
+const TRIGGERS = [
+    {
+        name: 'prevent_earlybird_concierge_batch_target_lineage_repair_mutation',
+        table: 'earlybird_concierge_batch_target_lineage_repairs',
+    },
+    {
+        name: 'prevent_earlybird_partial_adoption_second_rearm_mutation',
+        table: 'earlybird_partial_adoption_second_rearms',
+    },
+    {
+        name: 'prevent_earlybird_profile_evidence_failure_recovery_mutation',
+        table: 'earlybird_profile_evidence_failure_recoveries',
+    },
+    {
+        name: 'prevent_earlybird_v211_apify_transient_admission_resume_mutation',
+        table: 'earlybird_v211_apify_transient_admission_resumes',
+    },
+    {
+        name: 'prevent_earlybird_v211_concierge_copy_correction_mutation',
+        table: 'earlybird_v211_concierge_copy_corrections',
+    },
+    {
+        name: 'prevent_earlybird_v212_concierge_copy_correction_mutation',
+        table: 'earlybird_v212_concierge_copy_corrections',
+    },
+    {
+        name: 'prevent_earlybird_v213_concierge_copy_correction_mutation',
+        table: 'earlybird_v213_concierge_copy_corrections',
+    },
+    {
+        name: 'prevent_earlybird_v214_concierge_gemini_copy_correction_mutation',
+        table: 'earlybird_v214_concierge_gemini_copy_corrections',
+    },
+] as const;
+
+const SHARED_SCHEMA_RECOVERY_ROUTINE =
+    'public.prevent_earlybird_schema_failure_recovery_mutation()';
+
 type RetirementManifest = {
     schemaVersion: string;
     baselineCommit: string;
@@ -92,6 +130,12 @@ type RetirementManifest = {
     verificationOperation: string;
     rolloutStatus: string;
     evidenceStatus: string;
+    firstApplyAttempt: {
+        migrationVersion: string;
+        status: string;
+        reason: string;
+        correctiveStatus: string;
+    };
     validation: {
         isolatedRestoreDrill: string;
     };
@@ -125,7 +169,7 @@ function normalizeSqlWhitespace(sql: string): string {
 
 function extractDropStatements(sql: string): string[] {
     const activeSql = stripSqlComments(sql);
-    return [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\s+(?:TABLE|FUNCTION)\b[^;]*(?:;|$))/gim)]
+    return [...activeSql.matchAll(/(?:^|[;\r\n])\s*(DROP\s+(?:TRIGGER|TABLE|FUNCTION)\b[^;]*(?:;|$))/gim)]
         .map(match => normalizeSqlWhitespace(match[1]))
         .map(statement => statement.endsWith(';') ? statement : `${statement};`);
 }
@@ -142,6 +186,7 @@ function containsDynamicDestructiveSql(sql: string): boolean {
 
 function expectedDropStatements(): string[] {
     return [
+        ...TRIGGERS.map(({ name, table }) => `DROP TRIGGER ${name} ON public.${table};`),
         ...ROUTINES.map(signature => `DROP FUNCTION ${signature};`),
         ...TARGETS.map(table => `DROP TABLE public.${table};`),
     ];
@@ -216,7 +261,7 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
             noCascade: true,
         });
         expect(manifest.routinePolicy.sharedRoutineSignaturesExcluded)
-            .toContain('public.prevent_earlybird_schema_failure_recovery_mutation()');
+            .toContain(SHARED_SCHEMA_RECOVERY_ROUTINE);
         expect(manifest.excludedFromWave.table).toBe('earlybird_v211_concierge_publications');
         expect(manifest.rollbackSource)
             .toBe('supabase/operations/20260911_restore_legacy_earlybird_recovery_tables.sql');
@@ -233,6 +278,12 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(manifest.validation.isolatedRestoreDrill).toContain('14-test');
         expect(manifest.rolloutStatus).toBe('not_applied');
         expect(manifest.evidenceStatus).toBe('READY_FOR_REVIEW_NOT_APPLIED');
+        expect(manifest.firstApplyAttempt).toEqual({
+            migrationVersion: '20260911001903',
+            status: 'rolled_back',
+            reason: 'SQLSTATE 2BP01: trigger dependency prevented DROP FUNCTION',
+            correctiveStatus: 'pending',
+        });
     });
 
     it('uses one bounded transaction and guards the catalog before any destructive DDL', () => {
@@ -294,16 +345,21 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         expect(containsDynamicDestructiveSql(sql)).toBe(false);
         const drops = extractDropStatements(sql).map(statement => statement.toLowerCase());
         expect(drops).toEqual(expectedDropStatements().map(statement => statement.toLowerCase()));
+        expect(drops.filter(statement => /\bdrop trigger\b/.test(statement))).toHaveLength(TRIGGERS.length);
         expect(drops.filter(statement => /\bdrop table\b/.test(statement))).toHaveLength(TARGETS.length);
         expect(drops.filter(statement => /\bdrop function\b/.test(statement))).toHaveLength(ROUTINES.length);
-        expect(drops.slice(0, ROUTINES.length).every(statement => /\bdrop function\b/.test(statement))).toBe(true);
-        expect(drops.slice(ROUTINES.length).every(statement => /\bdrop table\b/.test(statement))).toBe(true);
+        expect(drops.slice(0, TRIGGERS.length).every(statement => /\bdrop trigger\b/.test(statement))).toBe(true);
+        expect(drops.slice(TRIGGERS.length, TRIGGERS.length + ROUTINES.length)
+            .every(statement => /\bdrop function\b/.test(statement))).toBe(true);
+        expect(drops.slice(TRIGGERS.length + ROUTINES.length)
+            .every(statement => /\bdrop table\b/.test(statement))).toBe(true);
         expect(sql).not.toMatch(/\bCASCADE\b/i);
         expect(stripSqlComments(sql)).not.toMatch(/\bEXECUTE\s+(?:format|v_|sql|drop|create|alter)/i);
         expect(sql).not.toContain('earlybird_v211_concierge_publications');
         expect(sql).not.toContain('earlybird_fulfillments');
         expect(sql).not.toContain('earlybird_payment_discord_outbox');
         expect(sql).not.toContain('earlybird_first15_canary_provider_rearms');
+        expect(sql).not.toContain(`DROP FUNCTION ${SHARED_SCHEMA_RECOVERY_ROUTINE}`);
     });
 
     it('rejects a broadened or dynamically assembled destructive contract', () => {
@@ -401,6 +457,9 @@ describe('Supabase 22 legacy earlybird isolated operations', () => {
     it('records a pre-apply evidence boundary and coordinator-only rollout gate', () => {
         const report = readFileSync(REPORT_PATH, 'utf8');
         expect(report).toContain('READY_FOR_REVIEW_NOT_APPLIED');
+        expect(report).toContain('first production apply attempt rolled back');
+        expect(report).toContain('SQLSTATE 2BP01');
+        expect(report).toContain('Corrective status: pending');
         expect(report).toContain('expected canonical total is 11 rows');
         expect(report).toContain('185');
         expect(report).toContain('177');
@@ -551,6 +610,34 @@ async function createRetirementFixture(): Promise<RetirementFixture> {
         RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END; $fn$;
         CREATE FUNCTION public.correct_earlybird_v214_concierge_gemini_copy(p_order_id uuid, p_owner_id uuid, p_result_request_id uuid, p_source_fingerprint text, p_expected_published_result_hash text, p_prior_correction_result_hash text, p_expected_v213_fact_snapshot jsonb, p_correction_result_hash text, p_copy_payload jsonb)
         RETURNS jsonb LANGUAGE sql AS $fn$ SELECT '{}'::jsonb $fn$;
+
+        CREATE FUNCTION public.prevent_earlybird_schema_failure_recovery_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END; $fn$;
+
+        CREATE TRIGGER prevent_earlybird_concierge_batch_target_lineage_repair_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_concierge_batch_target_lineage_repairs
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_concierge_batch_target_lineage_repair_mutation();
+        CREATE TRIGGER prevent_earlybird_partial_adoption_second_rearm_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_partial_adoption_second_rearms
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_partial_adoption_second_rearm_mutation();
+        CREATE TRIGGER prevent_earlybird_profile_evidence_failure_recovery_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_profile_evidence_failure_recoveries
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_schema_failure_recovery_mutation();
+        CREATE TRIGGER prevent_earlybird_v211_apify_transient_admission_resume_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_v211_apify_transient_admission_resumes
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_schema_failure_recovery_mutation();
+        CREATE TRIGGER prevent_earlybird_v211_concierge_copy_correction_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_v211_concierge_copy_corrections
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_v211_concierge_copy_correction_mutation();
+        CREATE TRIGGER prevent_earlybird_v212_concierge_copy_correction_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_v212_concierge_copy_corrections
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_v212_concierge_copy_correction_mutation();
+        CREATE TRIGGER prevent_earlybird_v213_concierge_copy_correction_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_v213_concierge_copy_corrections
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_v213_concierge_copy_correction_mutation();
+        CREATE TRIGGER prevent_earlybird_v214_concierge_gemini_copy_correction_mutation
+        BEFORE UPDATE OR DELETE ON public.earlybird_v214_concierge_gemini_copy_corrections
+        FOR EACH ROW EXECUTE FUNCTION public.prevent_earlybird_v214_concierge_gemini_copy_correction_mutation();
     `);
 
     const sourceRows: Record<string, readonly string[]> = {};
@@ -692,6 +779,13 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
                 );
                 expect(routine.rows[0]?.routine ?? null).toBeNull();
             }
+
+            const sharedRoutine = await fixture.db.query<{ routine: string | null }>(
+                'SELECT pg_catalog.to_regprocedure($1)::TEXT AS routine',
+                [SHARED_SCHEMA_RECOVERY_ROUTINE],
+            );
+            expect(sharedRoutine.rows[0]?.routine?.replace(/^public\./, '') ?? null)
+                .toBe(SHARED_SCHEMA_RECOVERY_ROUTINE.replace(/^public\./, ''));
         } finally {
             await fixture.db.close();
         }
@@ -775,7 +869,14 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
             },
             {
                 name: 'source-count',
-                mutate: async db => { await db.exec("DELETE FROM public.earlybird_profile_evidence_failure_recoveries WHERE order_id = '00000000-0000-4000-8000-000000000006';"); },
+                mutate: async db => {
+                    await db.exec(`
+                        ALTER TABLE public.earlybird_profile_evidence_failure_recoveries
+                        DISABLE TRIGGER prevent_earlybird_profile_evidence_failure_recovery_mutation;
+                        DELETE FROM public.earlybird_profile_evidence_failure_recoveries
+                        WHERE order_id = '00000000-0000-4000-8000-000000000006';
+                    `);
+                },
                 expectedError: 'RETIREMENT_GUARD_SOURCE_COUNT',
             },
             {
@@ -917,6 +1018,8 @@ describe('Supabase 22 legacy earlybird retirement PGlite apply', () => {
         const preflightFixture = await createRetirementFixture();
         try {
             await preflightFixture.db.exec(`
+                ALTER TABLE public.earlybird_profile_evidence_failure_recoveries
+                DISABLE TRIGGER prevent_earlybird_profile_evidence_failure_recovery_mutation;
                 DELETE FROM public.earlybird_profile_evidence_failure_recoveries
                 WHERE order_id = '00000000-0000-4000-8000-000000000006';
                 SET supabase.retirement_verifier_mode = 'preflight';
