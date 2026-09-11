@@ -5,10 +5,31 @@
     "repositoryRef": "origin/main",
     "repositoryCommit": "956dd485259c7e1dd5b0ecbea09f24fd90aafb2a",
     "productionInspection": "linked Supabase project through authenticated CLI",
-    "cli": "npx supabase@2.102.0",
+    "cli": "npx --yes supabase@2.102.0",
+    "cliVersionAssertion": {
+      "command": "npx --yes supabase@2.102.0 --version",
+      "expected": "2.102.0",
+      "requiredBeforeInspection": true
+    },
     "queryMode": "read-only linked db query",
     "rawRowsPayloadsSecretsAndUserIdentifiersIncluded": false,
-    "productionMutationPerformedByWorker": false
+    "productionMutationPerformedByWorker": false,
+    "runtimeCallerScan": {
+      "applicationRoots": [
+        "app/**",
+        "components/**",
+        "hooks/**",
+        "lib/**",
+        "middleware.*"
+      ],
+      "operationalRoots": [
+        "scripts/**",
+        "supabase/operations/**"
+      ],
+      "migrationRoot": "supabase/migrations/**",
+      "operationalCallersCounted": true,
+      "externalTrafficProof": false
+    }
   },
   "scope": {
     "schema": "public",
@@ -81,11 +102,46 @@
   ],
   "classificationSummary": {
     "retain": 22,
-    "consolidate": 140,
+    "consolidate": 138,
     "retire": 0,
-    "blocked": 15,
+    "blocked": 17,
     "exactLegacyRowsAccountedFor": true
   },
+  "adapterCoverage": {
+    "analysis": {
+      "specFile": "scripts/backfill-analysis-canonical.ts",
+      "declaredLegacySpecCount": 27,
+      "auditSpecCount": 4,
+      "executableSpecCount": 23,
+      "wave1SourceAllowlistCount": 23,
+      "deferredUnmappedConsolidateCount": 78
+    },
+    "commerceOperations": {
+      "specFile": "scripts/backfill-commerce-operations-canonical.ts",
+      "declaredSourceCount": 12,
+      "readBatchWired": false,
+      "readCanonicalBatchWired": false,
+      "executableSourceAllowlistCount": 0,
+      "deferredConsolidateCount": 37,
+      "blockedCohortSourceCount": 1
+    }
+  },
+  "crossWaveDeclaredSources": [
+    {
+      "tableName": "analysis_v2_recovery_provider_run_adoptions",
+      "declaredIn": "scripts/backfill-commerce-operations-canonical.ts",
+      "proposedCanonicalDestination": "maintenance_jobs",
+      "deferredWave": "deferred-analysis-unmapped",
+      "reason": "declared by commerce metadata but absent from the analysis spec and no commerce readBatch is wired"
+    },
+    {
+      "tableName": "analysis_v2_gemini_leases",
+      "declaredIn": "scripts/backfill-commerce-operations-canonical.ts",
+      "proposedCanonicalDestination": "analysis_provider_runs",
+      "deferredWave": "deferred-analysis-unmapped",
+      "reason": "declared by commerce metadata but belongs to an analysis boundary and no commerce readBatch is wired"
+    }
+  ],
   "waves": {
     "wave0FreezeAndInventory": {
       "status": "captured-read-only",
@@ -120,13 +176,43 @@
         "exact-22-canonical-set",
         "dependency-and-RLS-ACL-catalog",
         "migration-history",
-        "no-active-write-lock"
+        "no-active-write-lock",
+        "pinned-cli-version-assertion",
+        "application-and-operational-caller-scan"
       ]
     },
     "wave1AnalysisCanonicalization": {
-      "status": "not-applied",
+      "status": "not-applied-executable-specs-only",
+      "adapterSpecFile": "scripts/backfill-analysis-canonical.ts",
+      "adapterSpecCount": 23,
       "sourceAllowlist": [
         "ai_analysis_cache",
+        "analysis_pipeline_jobs",
+        "analysis_progress_events",
+        "analysis_progress_state",
+        "analysis_provider_cost_ledger",
+        "analysis_step_events",
+        "analysis_target_interactors",
+        "analysis_v2_ai_global_result_cache",
+        "analysis_v2_candidate_feature_manifests",
+        "analysis_v2_candidate_feature_rows",
+        "analysis_v2_candidate_score_manifests",
+        "analysis_v2_candidate_score_rows",
+        "analysis_v2_cost_attributions",
+        "analysis_v2_cost_rollup_snapshots",
+        "analysis_v2_dag_batch_results",
+        "analysis_v2_dag_batch_topology",
+        "analysis_v2_dag_scopes",
+        "analysis_v2_dag_stage_manifests",
+        "analysis_v2_media_artifacts",
+        "analysis_v2_relationship_manifests",
+        "analysis_v2_relationship_rows",
+        "analysis_v2_relationship_sides",
+        "analysis_v2_target_evidence_manifests"
+      ],
+      "sourceAllowlistCount": 23,
+      "deferredReason": "no concrete current source spec, projection, identity/cursor rule, or reader; source remains authoritative",
+      "deferredSourceAllowlist": [
         "analysis_anonymous_preflight_attempts",
         "analysis_anonymous_profile_cache",
         "analysis_anonymous_profile_cache_locks",
@@ -136,13 +222,9 @@
         "analysis_interaction_jobs",
         "analysis_interaction_scores",
         "analysis_lifecycle_events",
-        "analysis_pipeline_jobs",
         "analysis_preflight_acquisition_cost_events",
         "analysis_preflight_failures",
         "analysis_preflight_provider_runs",
-        "analysis_progress_events",
-        "analysis_progress_state",
-        "analysis_provider_cost_ledger",
         "analysis_provider_usage_expectations",
         "analysis_result_share_observations",
         "analysis_revenue_ai_routing_attempt_lineages",
@@ -154,23 +236,10 @@
         "analysis_revenue_resolver_outcome_overlays",
         "analysis_revenue_resolver_passes",
         "analysis_revenue_run_ledgers",
-        "analysis_step_events",
-        "analysis_target_interactors",
         "analysis_v2_active_profile_heartbeats",
         "analysis_v2_ai_attempts",
-        "analysis_v2_ai_global_result_cache",
         "analysis_v2_ai_result_checkpoints",
         "analysis_v2_ai_scoring_stage_checkpoints",
-        "analysis_v2_candidate_feature_manifests",
-        "analysis_v2_candidate_feature_rows",
-        "analysis_v2_candidate_score_manifests",
-        "analysis_v2_candidate_score_rows",
-        "analysis_v2_cost_attributions",
-        "analysis_v2_cost_rollup_snapshots",
-        "analysis_v2_dag_batch_results",
-        "analysis_v2_dag_batch_topology",
-        "analysis_v2_dag_scopes",
-        "analysis_v2_dag_stage_manifests",
         "analysis_v2_failure_receipts",
         "analysis_v2_female_results",
         "analysis_v2_gemini_leases",
@@ -178,7 +247,6 @@
         "analysis_v2_gender_routing_candidates",
         "analysis_v2_gender_routing_manifests",
         "analysis_v2_historical_legacy_dispatch_terminalization_receipts",
-        "analysis_v2_media_artifacts",
         "analysis_v2_mutual_rows",
         "analysis_v2_narrative_manifests",
         "analysis_v2_narrative_rows",
@@ -196,9 +264,6 @@
         "analysis_v2_provider_execution_policies",
         "analysis_v2_provider_runs",
         "analysis_v2_recovery_provider_run_adoptions",
-        "analysis_v2_relationship_manifests",
-        "analysis_v2_relationship_rows",
-        "analysis_v2_relationship_sides",
         "analysis_v2_replay_capture_audit_events",
         "analysis_v2_replay_capture_authorizations",
         "analysis_v2_replay_capture_fragments",
@@ -219,33 +284,31 @@
         "analysis_v2_score_audit_source_rows",
         "analysis_v2_score_audit_sources",
         "analysis_v2_selfhosted_auth_runs",
-        "analysis_v2_target_evidence_manifests",
         "analysis_v2_test_entitlement_consumptions",
         "analysis_v2_unconfirmed_start_resolutions",
         "gemini_token_usage",
         "precheckout_blite_cache",
         "precheckout_blite_dispatches",
         "precheckout_blite_sources",
-        "private_accounts",
         "scraper_provider_usage"
       ],
       "destinationFamilies": [
-        "account_lifecycle",
         "analysis_artifacts",
-        "analysis_audit_bundles",
         "analysis_cache",
         "analysis_costs",
         "analysis_events",
-        "analysis_jobs",
-        "analysis_preflights",
-        "analysis_provider_runs",
-        "analysis_requests",
-        "analysis_results",
-        "maintenance_jobs",
-        "system_configuration"
+        "analysis_jobs"
       ],
+      "retryContract": {
+        "destinationTable": "analysis_events",
+        "kind": "operational",
+        "state": "canonical_retry",
+        "enqueueRpc": "enqueue_analysis_canonical_retry",
+        "maintenanceJobsExcluded": true
+      },
       "destructiveAllowlist": [],
       "gates": [
+        "explicit-source-spec-field-projection-and-cursor",
         "bounded-dual-write",
         "per-row-parity-by-owner-state-order-hash-retention",
         "unknown-cost-preservation",
@@ -254,14 +317,62 @@
         "encrypted-archive-and-isolated-restore"
       ]
     },
-    "wave2CommerceOperationsCanonicalization": {
-      "status": "not-applied",
+    "auditEvidenceWave": {
+      "status": "blocked-evidence-only",
       "sourceAllowlist": [
+        "analysis_order_audit_assembly_queue",
+        "analysis_order_audit_bundles",
+        "analysis_order_audit_candidates",
+        "analysis_order_audit_interactions"
+      ],
+      "sourceAllowlistCount": 4,
+      "canonicalDestination": "analysis_audit_bundles",
+      "ownerApproval": "separate analysis-audit owner approval required",
+      "excludedFromWave1": true,
+      "excludedFromWave1RetryDrain": true,
+      "destructiveAllowlist": [],
+      "gates": [
+        "genuine-production-bundle",
+        "per-row-parity",
+        "encrypted-archive-and-restore",
+        "separate-owner-approval"
+      ]
+    },
+    "wave2CommerceOperationsCanonicalization": {
+      "status": "blocked-no-wired-reader",
+      "adapterSpecFile": "scripts/backfill-commerce-operations-canonical.ts",
+      "declaredSourceCount": 12,
+      "declaredSourceNames": [
+        "earlybird_webhook_events",
+        "earlybird_fulfillments",
+        "earlybird_payment_discord_outbox",
+        "kakao_signup_discord_outbox",
+        "sentry_discord_alert_outbox",
+        "account_classification_audit",
+        "account_paid_evidence",
+        "account_deletion_jobs",
+        "account_ledger_rollout_state",
+        "analysis_v2_recovery_provider_run_adoptions",
+        "analysis_provider_admission_leases",
+        "analysis_v2_gemini_leases"
+      ],
+      "readBatchWired": false,
+      "readCanonicalBatchWired": false,
+      "sourceAllowlist": [],
+      "sourceAllowlistCount": 0,
+      "deferredReason": "commerce report-only CLI has no wired readBatch or readCanonicalBatch; source remains authoritative",
+      "deferredSourceAllowlist": [
         "account_classification_audit",
         "account_deletion_jobs",
-        "account_e2e_test_runners",
         "account_ledger_rollout_state",
         "account_paid_evidence",
+        "analysis_provider_admission_leases",
+        "earlybird_fulfillments",
+        "earlybird_payment_discord_outbox",
+        "earlybird_webhook_events",
+        "kakao_signup_discord_outbox",
+        "sentry_discord_alert_outbox",
+        "account_e2e_test_runners",
         "analysis_beta_access_grants",
         "analysis_beta_access_policy",
         "analysis_beta_pool_allocations",
@@ -270,16 +381,12 @@
         "analysis_beta_pool_reservations",
         "analysis_beta_runtime_gate",
         "analysis_provider_admission_budgets",
-        "analysis_provider_admission_leases",
         "analysis_revenue_dispatch_guards",
         "earlybird_adoption_policy_failure_rearms",
         "earlybird_checkout_reconciliations",
-        "earlybird_concierge_batch_cohort_members",
         "earlybird_concierge_snapshot_conflict_recoveries",
-        "earlybird_fulfillments",
-        "earlybird_payment_discord_outbox",
-        "earlybird_pfe_target_evidence_start_rejection_rearms",
         "earlybird_pfe3_media_artifact_rearms",
+        "earlybird_pfe_target_evidence_start_rejection_rearms",
         "earlybird_plan_inventory",
         "earlybird_profile_fetch_exhaustion_recoveries",
         "earlybird_schema_failure_recoveries",
@@ -290,11 +397,12 @@
         "earlybird_v211_policy_identity_replays",
         "earlybird_v211_profile_ai_diagnostic_replays",
         "earlybird_v211_relationship_lineage_failure_rearms",
-        "earlybird_webhook_events",
-        "kakao_signup_discord_outbox",
         "selfhosted_profile_request_start_gate",
-        "sentry_discord_alert_outbox",
         "vertex_ai_budget_reservations"
+      ],
+      "deferredSourceAllowlistCount": 37,
+      "blockedSourceAllowlist": [
+        "earlybird_concierge_batch_cohort_members"
       ],
       "destinationFamilies": [
         "account_lifecycle",
@@ -319,10 +427,6 @@
       "status": "blocked-no-current-allowlist",
       "approvedDestructiveAllowlist": [],
       "candidatesRequiringNewEvidence": [
-        "analysis_order_audit_assembly_queue",
-        "analysis_order_audit_bundles",
-        "analysis_order_audit_candidates",
-        "analysis_order_audit_interactions",
         "analysis_v2_apify_secret_ref_prune_guard",
         "analysis_v2_profile_provider_canary_experiments",
         "analysis_v2_profile_provider_canary_runs",
@@ -333,7 +437,12 @@
         "earlybird_v211_concierge_publications",
         "payment_orders",
         "payments",
-        "pending_analysis"
+        "pending_analysis",
+        "private_accounts",
+        "earlybird_concierge_batch_cohort_members"
+      ],
+      "blockedEvidenceWaves": [
+        "auditEvidenceWave"
       ],
       "gates": [
         "source-empty-and-write-quiescent-window",
@@ -392,7 +501,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "account_lifecycle",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "account-lifecycle-and-deletion-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -440,7 +549,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -487,7 +596,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "account_lifecycle",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "account-lifecycle-and-deletion-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -536,7 +645,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "account_lifecycle",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "account-lifecycle-and-deletion-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -623,7 +732,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "account_lifecycle",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "account-lifecycle-and-deletion-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -719,7 +828,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_preflights",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_preflights-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -766,7 +875,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_cache",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_cache-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -813,7 +922,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_cache",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_cache-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -859,7 +968,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -986,7 +1095,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1033,7 +1142,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1079,7 +1188,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1128,7 +1237,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [],
@@ -1171,7 +1280,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1217,7 +1326,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1265,7 +1374,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1431,7 +1540,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1478,7 +1587,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1525,7 +1634,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_jobs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1572,7 +1681,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1659,7 +1768,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_events",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1718,7 +1827,8 @@
         "per-row-parity",
         "encrypted-archive-and-restore",
         "separate-owner-approval"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_order_audit_bundles",
@@ -1767,7 +1877,8 @@
         "per-row-parity",
         "encrypted-archive-and-restore",
         "separate-owner-approval"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_order_audit_candidates",
@@ -1814,7 +1925,8 @@
         "per-row-parity",
         "encrypted-archive-and-restore",
         "separate-owner-approval"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_order_audit_interactions",
@@ -1861,7 +1973,8 @@
         "per-row-parity",
         "encrypted-archive-and-restore",
         "separate-owner-approval"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_pipeline_jobs",
@@ -1946,7 +2059,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -1992,7 +2105,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_events",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2040,7 +2153,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2180,9 +2293,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_requests",
+      "canonicalDestination": "analysis_events",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-request-progress-projection",
+      "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "source-not-empty",
@@ -2193,8 +2306,8 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "request-status-and-current-progress-parity",
-        "owner-state-order-hash-retention-parity",
+        "append-only-event-order-and-hash-parity",
+        "unknown-state-preserved",
         "shadow-read-rollback"
       ]
     },
@@ -2231,7 +2344,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2279,7 +2392,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2416,7 +2529,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2503,7 +2616,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2589,7 +2702,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2634,7 +2747,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2681,7 +2794,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2729,7 +2842,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2774,7 +2887,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2820,7 +2933,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2865,7 +2978,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2910,7 +3023,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -2955,7 +3068,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3000,7 +3113,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3142,7 +3255,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_jobs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3189,7 +3302,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_jobs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3286,7 +3399,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3335,7 +3448,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3392,7 +3505,8 @@
       ],
       "requiredGates": [
         "secret-reference-lifecycle-owner-proof"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_v2_candidate_feature_manifests",
@@ -3523,9 +3637,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_audit_bundles",
+      "canonicalDestination": "analysis_artifacts",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
+      "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "write-counters-nonzero",
@@ -3534,9 +3648,9 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "complete-per-row-audit-parity",
-        "immutable-content-hash-and-retention",
-        "encrypted-archive-and-restore"
+        "artifact-manifest-media-ref-and-retention-parity",
+        "no-raw-provider-payload-or-secret",
+        "isolated-restore"
       ]
     },
     {
@@ -3571,9 +3685,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_audit_bundles",
+      "canonicalDestination": "analysis_artifacts",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
+      "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "write-counters-nonzero",
@@ -3581,9 +3695,9 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "complete-per-row-audit-parity",
-        "immutable-content-hash-and-retention",
-        "encrypted-archive-and-restore"
+        "artifact-manifest-media-ref-and-retention-parity",
+        "no-raw-provider-payload-or-secret",
+        "isolated-restore"
       ]
     },
     {
@@ -3909,7 +4023,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_events",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -3956,7 +4070,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4004,7 +4118,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4051,7 +4165,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_events",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4099,7 +4213,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4145,7 +4259,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4192,7 +4306,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4288,7 +4402,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4336,7 +4450,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4384,7 +4498,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4431,7 +4545,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4479,7 +4593,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4526,7 +4640,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4574,7 +4688,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4622,7 +4736,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4670,7 +4784,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4717,7 +4831,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4765,7 +4879,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4814,7 +4928,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4863,7 +4977,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -4922,7 +5036,8 @@
       "requiredGates": [
         "separate-owner-scope",
         "no-activation-and-no-real-canary"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_v2_profile_provider_canary_runs",
@@ -4968,7 +5083,8 @@
       "requiredGates": [
         "separate-owner-scope",
         "no-activation-and-no-real-canary"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_v2_profile_repair_canary_runs",
@@ -5014,7 +5130,8 @@
       "requiredGates": [
         "separate-owner-scope",
         "no-activation-and-no-real-canary"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "analysis_v2_provider_cleanup_intents",
@@ -5049,7 +5166,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5096,7 +5213,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5144,7 +5261,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5195,7 +5312,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5242,9 +5359,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_audit_bundles",
+      "canonicalDestination": "analysis_artifacts",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-relationship-audit-evidence",
+      "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "write-counters-nonzero",
@@ -5253,9 +5370,9 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "complete-per-row-audit-parity",
-        "immutable-content-hash-and-retention",
-        "encrypted-archive-and-restore"
+        "artifact-manifest-media-ref-and-retention-parity",
+        "no-raw-provider-payload-or-secret",
+        "isolated-restore"
       ]
     },
     {
@@ -5290,9 +5407,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_audit_bundles",
+      "canonicalDestination": "analysis_artifacts",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-relationship-audit-evidence",
+      "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "write-counters-nonzero",
@@ -5300,9 +5417,9 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "complete-per-row-audit-parity",
-        "immutable-content-hash-and-retention",
-        "encrypted-archive-and-restore"
+        "artifact-manifest-media-ref-and-retention-parity",
+        "no-raw-provider-payload-or-secret",
+        "isolated-restore"
       ]
     },
     {
@@ -5337,9 +5454,9 @@
       },
       "tableClass": "legacy",
       "classification": "consolidate",
-      "canonicalDestination": "analysis_audit_bundles",
+      "canonicalDestination": "analysis_artifacts",
       "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-relationship-audit-evidence",
+      "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
         "write-counters-nonzero",
@@ -5348,9 +5465,9 @@
         "static-runtime-reference"
       ],
       "requiredGates": [
-        "complete-per-row-audit-parity",
-        "immutable-content-hash-and-retention",
-        "encrypted-archive-and-restore"
+        "artifact-manifest-media-ref-and-retention-parity",
+        "no-raw-provider-payload-or-secret",
+        "isolated-restore"
       ]
     },
     {
@@ -5386,7 +5503,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5431,7 +5548,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5477,7 +5594,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5522,7 +5639,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_events",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_events-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5569,7 +5686,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5616,7 +5733,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5662,7 +5779,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5707,7 +5824,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5754,7 +5871,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5802,7 +5919,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5852,7 +5969,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5900,7 +6017,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_results-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5947,7 +6064,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_jobs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -5995,7 +6112,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6043,7 +6160,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6090,7 +6207,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6139,7 +6256,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6186,7 +6303,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6233,7 +6350,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_audit_bundles",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_audit_bundles-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6281,7 +6398,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6379,7 +6496,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "account_lifecycle",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "account-lifecycle-and-deletion-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6427,7 +6544,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_provider_runs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_provider_runs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6484,7 +6601,8 @@
       ],
       "requiredGates": [
         "separate-demo-retention-decision"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "demo_analysis_runs",
@@ -6530,7 +6648,8 @@
       ],
       "requiredGates": [
         "separate-demo-retention-decision"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "earlybird_adoption_policy_failure_rearms",
@@ -6565,7 +6684,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6613,7 +6732,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "payment_events",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "payment-event-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6655,24 +6774,67 @@
         "partitionEdges": 0
       },
       "runtimeEvidence": {
-        "sourceFiles": 0,
-        "sourceReferences": 0
+        "sourceFiles": 2,
+        "sourceReferences": 2,
+        "applicationSourceFiles": 0,
+        "applicationSourceReferences": 0,
+        "operationalSourceFiles": [
+          "scripts/warm-reimage-g1.ts",
+          "scripts/warm-reimage-g2.ts"
+        ],
+        "operationalSourceReferences": 2
       },
       "tableClass": "legacy",
-      "classification": "consolidate",
-      "canonicalDestination": "fulfillment_jobs",
-      "wave": "commerce-operations",
-      "preservationRequirement": "fulfillment-order-and-lease-evidence",
-      "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
+      "classification": "blocked",
+      "canonicalDestination": null,
+      "proposedCanonicalDestination": "fulfillment_jobs",
+      "identityEvidence": {
+        "sourcePrimaryKey": [
+          "cohort_key",
+          "order_id"
+        ],
+        "proposedDestinationUniqueKey": [
+          "order_id"
+        ],
+        "orderWideUniquenessProven": false,
+        "frozenManifestProjectionProven": false,
+        "frozenManifestFields": [
+          "owner_id",
+          "target_username",
+          "plan_id",
+          "cohort",
+          "preflight_id",
+          "original_result_request_id",
+          "snapshot_order_status",
+          "snapshot_fulfillment_status",
+          "snapshot_request_status",
+          "snapshot_error_code",
+          "payment_id_fingerprint",
+          "expected_amount_krw",
+          "expected_product_id",
+          "actual_amount_krw",
+          "actual_product_id",
+          "paid_at",
+          "evidence_hash",
+          "manifest_hash",
+          "frozen_at"
+        ]
+      },
+      "wave": null,
+      "preservationRequirement": "concierge-cohort-manifest-preserve-until-cardinality-proof",
+      "basis": "blocked until order-wide order_id uniqueness or a deterministic cohort/member identity and lossless frozen-manifest projection are proven; operational callers must be migrated before any canonical or retirement decision",
       "blockers": [
         "source-not-empty",
         "write-counters-nonzero",
         "outgoing-foreign-key",
-        "user-trigger"
+        "user-trigger",
+        "cohort-cardinality-unproven",
+        "operational-caller-scan"
       ],
       "requiredGates": [
-        "order-linkage-lease-generation-and-retry-parity",
-        "bounded-claim-and-fence",
+        "order-wide-uniqueness-or-cohort-member-identity",
+        "lossless-frozen-manifest-payload",
+        "warm-reimage-g1-g2-caller-migration",
         "shadow-read-rollback"
       ]
     },
@@ -6709,7 +6871,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6769,7 +6931,8 @@
       "requiredGates": [
         "separate-owner-scope",
         "no-activation-and-no-real-canary"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "earlybird_fulfillments",
@@ -6804,7 +6967,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "fulfillment_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "fulfillment-order-and-lease-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6891,7 +7054,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "notification_outbox",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "notification-dedupe-and-delivery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6938,7 +7101,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -6986,7 +7149,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7034,7 +7197,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7081,7 +7244,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7129,7 +7292,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7177,7 +7340,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7225,7 +7388,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7284,7 +7447,8 @@
       "requiredGates": [
         "stored-routine-dependency-zero",
         "result-summary-trigger-proof"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "earlybird_v211_concierge_replays",
@@ -7319,7 +7483,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7367,7 +7531,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7415,7 +7579,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7463,7 +7627,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7511,7 +7675,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "maintenance_jobs",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "maintenance-retry-and-recovery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7599,7 +7763,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "payment_events",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "payment-event-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7688,7 +7852,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7737,7 +7901,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "notification_outbox",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "notification-dedupe-and-delivery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -7953,7 +8117,8 @@
         "owner-catalog-proof",
         "independent-provider-disposition",
         "payment_pending-no-mutation"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "payments",
@@ -7998,7 +8163,8 @@
         "owner-catalog-proof",
         "independent-provider-disposition",
         "payment_pending-no-mutation"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "pending_analysis",
@@ -8044,7 +8210,8 @@
         "owner-catalog-proof",
         "independent-provider-disposition",
         "payment_pending-no-mutation"
-      ]
+      ],
+      "wave": null
     },
     {
       "tableName": "precheckout_blite_cache",
@@ -8079,7 +8246,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_cache",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_cache-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8127,7 +8294,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_jobs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_jobs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8174,7 +8341,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_artifacts",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_artifacts-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8218,21 +8385,40 @@
         "sourceReferences": 5
       },
       "tableClass": "legacy",
-      "classification": "consolidate",
-      "canonicalDestination": "analysis_results",
-      "wave": "analysis-canonicalization",
-      "preservationRequirement": "analysis-analysis_results-evidence",
-      "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
+      "classification": "blocked",
+      "canonicalDestination": null,
+      "proposedCanonicalDestination": "analysis_results",
+      "contractEvidence": {
+        "sourceFields": [
+          "id",
+          "request_id",
+          "instagram_id",
+          "profile_image",
+          "full_name",
+          "name_female_score",
+          "name_is_name",
+          "name_confidence",
+          "created_at"
+        ],
+        "destinationFieldMappingProven": false,
+        "ownerPublicationAndShareReaderParityProven": false
+      },
+      "wave": null,
+      "preservationRequirement": "private-account-profile-preserve-until-contract",
+      "basis": "blocked until a lossless private-profile/result-artifact contract proves field, row identity, owner, publication, share-reader, dual-write, shadow-read, rollback, and archive behavior",
       "blockers": [
         "source-not-empty",
         "write-counters-nonzero",
         "outgoing-foreign-key",
         "policy-review",
-        "static-runtime-reference"
+        "static-runtime-reference",
+        "private-account-contract-unproven"
       ],
       "requiredGates": [
-        "owner-result-rank-score-publication-share-parity",
-        "per-row-hash-and-retention-parity",
+        "private-profile-field-and-row-identity-parity",
+        "owner-publication-and-share-reader-parity",
+        "lossless-dual-write-and-rollback",
+        "encrypted-archive-and-isolated-restore",
         "shadow-read-rollback"
       ]
     },
@@ -8309,7 +8495,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "analysis_costs",
-      "wave": "analysis-canonicalization",
+      "wave": "deferred-analysis-unmapped",
       "preservationRequirement": "analysis-analysis_costs-evidence",
       "basis": "approved analysis-canonicalization source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8358,7 +8544,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_leases",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "lease-and-fence-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8404,7 +8590,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "notification_outbox",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "notification-dedupe-and-delivery-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [
@@ -8570,7 +8756,7 @@
       "tableClass": "legacy",
       "classification": "consolidate",
       "canonicalDestination": "system_configuration",
-      "wave": "commerce-operations",
+      "wave": "deferred-commerce-unmapped",
       "preservationRequirement": "versioned-configuration-and-budget-evidence",
       "basis": "approved commerce-operations source-family mapping; source remains authoritative until parity and rollback gates close",
       "blockers": [

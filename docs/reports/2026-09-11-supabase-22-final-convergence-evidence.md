@@ -4,13 +4,41 @@
 
 This is the read-only production snapshot taken on 2026-09-11 after the
 `20260911001903` earlybird retirement migration. The linked production project
-was inspected through the authenticated, pinned `npx supabase@2.102.0` CLI from
+was inspected through the authenticated, pinned `npx --yes supabase@2.102.0` CLI from
 an isolated work directory; no SQL mutation, migration push, table drop,
 activation, canary, payment-state change, or raw-row export was performed.
 
 The source repository boundary is `origin/main` at commit
-`956dd485259c7e1dd5b0ecbea09f24fd90aafb2a`. Secrets, access tokens, cookies,
-UUIDs, provider payloads, and user/device identifiers are intentionally absent.
+`956dd485259c7e1dd5b0ecbea09f24fd90aafb2a`. The CLI version assertion was
+`npx --yes supabase@2.102.0 --version` = `2.102.0` before inspection; an
+unversioned CLI is not an acceptable substitute. Secrets, access tokens,
+cookies, UUIDs, provider payloads, and user/device identifiers are
+intentionally absent.
+
+The runtime/dependency audit baseline is the sanitized audit at commit
+`00c11ad2`; its operational scan is incorporated here for the caller boundary.
+The scan covers `app/**`, `components/**`, `hooks/**`, `lib/**`,
+`middleware.*`, operational `scripts/**`, and `supabase/operations/**`;
+`supabase/migrations/**` remains migration-history evidence. Operational
+references are counted as callers but are not promoted to proof of live traffic.
+The follow-up correction at `faa7b876` is also applied: `blocked` means
+retirement is not authorized, and the dependency aggregate is recorded as 243
+outgoing and 240 incoming foreign-key endpoint rows.
+
+## Review finding closure map
+
+The review report at `d8cd4525` is closed by these document-only corrections:
+
+| Finding | Correction recorded in this baseline |
+|---|---|
+| P1-1 source coverage | The inventory narrows Wave 1 to 23 explicit analysis specs and keeps Wave 2 executable allowlist empty because the commerce report-only CLI has no wired `readBatch`/`readCanonicalBatch`. It names 78 deferred analysis and 37 deferred commerce consolidate rows; the two cross-wave declarations are explicit. |
+| P1-2 retry destination | Analysis retries use `analysis_events` operational `canonical_retry` markers through `enqueue_analysis_canonical_retry`; `maintenance_jobs` is not an analysis retry destination. |
+| P1-3 private accounts | `private_accounts` is now blocked with no canonical destination or destructive proposal until its profile/result-artifact field, identity, owner/publication, reader, dual-write, rollback, and archive contract is proven. |
+| P1-4 cohort cardinality/callers | `earlybird_concierge_batch_cohort_members` is now blocked pending order-wide uniqueness or deterministic cohort/member identity plus lossless frozen-manifest mapping. `scripts/warm-reimage-g1.ts` and `scripts/warm-reimage-g2.ts` are counted as operational callers. |
+| P1-5 audit boundary | The four `analysis_order_audit_*` tables are assigned to a separate blocked audit-evidence wave with independent production bundle parity, archive, restore, and owner gates, excluded from Wave 1. |
+| P2-1 CLI pin | The inventory requires and records an exact `2.102.0` assertion before every future catalog or dry-run command. |
+
+No application, migration, or test code was changed for these corrections.
 
 ## Exact live catalog
 
@@ -65,13 +93,14 @@ Every one of the 155 noncanonical tables has exactly one classification in the
 inventory:
 
 - `retain`: 22 canonical tables.
-- `consolidate`: 140 legacy tables, assigned to an explicit canonical
-  destination and preservation requirement.
+- `consolidate`: 138 legacy tables, assigned to an explicit canonical
+  destination and preservation requirement; only sources with a concrete
+  current spec/reader enter an executable wave.
 - `retire`: 0. No current destructive allowlist is defensible.
-- `blocked`: 15 tables requiring new production evidence or an owner-scoped
+- `blocked`: 17 tables requiring new production evidence or an owner-scoped
   contract before any retirement decision.
 
-The 15 blocked tables are:
+The 17 blocked tables are:
 
 `analysis_order_audit_assembly_queue`, `analysis_order_audit_bundles`,
 `analysis_order_audit_candidates`, `analysis_order_audit_interactions`,
@@ -81,15 +110,48 @@ The 15 blocked tables are:
 `analysis_v2_profile_repair_canary_runs`, `demo_analysis_fixtures`,
 `demo_analysis_runs`, `earlybird_first15_canary_provider_rearms`,
 `earlybird_v211_concierge_publications`, `payment_orders`, `payments`,
-`pending_analysis`.
+`pending_analysis`, `private_accounts`,
+`earlybird_concierge_batch_cohort_members`.
 
-Wave 1 has an exact 102-table analysis source allowlist in the inventory and
-targets the analysis canonical families. Wave 2 has an exact 38-table
-commerce/operations source allowlist and targets the account, fulfillment,
-notification, payment, configuration, lease, and maintenance families. Both
-waves are additive, source-authoritative, and have an exact empty destructive
-allowlist. Wave 3 is blocked with an exact empty approved destructive
-allowlist; terminal convergence is therefore not ready.
+Wave 1 has an exact 23-table analysis source allowlist, matching the explicit
+legacy specs in `scripts/backfill-analysis-canonical.ts`. It covers five
+executable families (jobs, events, artifacts, costs, and cache). The inventory
+names the other 78 analysis consolidate rows as deferred, including the two
+cross-wave names declared by
+the commerce file. Wave 2 has an empty executable allowlist: its current
+report-only function declares 12 names but has no wired `readBatch` or
+`readCanonicalBatch`; the 37 non-blocked commerce consolidate rows are named
+as deferred and the cohort source is blocked. Both canonicalization waves are
+source-authoritative with exact empty destructive allowlists.
+
+The four `analysis_order_audit_*` sources are in the separate
+`auditEvidenceWave`, which is blocked evidence-only and independent of Wave 1
+parity/retry accounting. Its canonical destination proposal is
+`analysis_audit_bundles`, but genuine production bundle parity, encrypted
+archive, isolated restore, and separate owner approval are still required.
+Wave 3 is blocked with an exact empty approved destructive allowlist; terminal
+convergence is therefore not ready.
+
+Analysis dual-write failures use the existing
+`enqueue_analysis_canonical_retry` marker contract in
+`analysis_events(kind = operational, state = canonical_retry)`. The
+`maintenance_jobs` destination is not used for analysis retry markers because
+its current contract does not admit `canonical_retry`.
+
+`private_accounts` is blocked outside every executable allowlist. Its current
+4,861 rows are a request-scoped private-profile collection with no proven
+lossless projection into `analysis_results`; the inventory records no canonical
+destination or retirement permission. It requires field/identity, owner and
+publication, share-reader, dual-write, shadow-read, rollback, and archive
+proof.
+
+`earlybird_concierge_batch_cohort_members` is blocked outside Wave 2. Its
+source identity is `(cohort_key, order_id)` while the proposed
+`fulfillment_jobs` identity is order-wide, so cardinality is not assumed. The
+inventory records two operational callers, `scripts/warm-reimage-g1.ts` and
+`scripts/warm-reimage-g2.ts`, and requires an order-wide uniqueness invariant
+or deterministic cohort/member identity plus a lossless frozen-manifest
+projection before parity or retirement consideration.
 
 The classification decisions preserve data by requiring bounded dual-write,
 aggregate parity, normalized row checksums, source-authoritative rollback,
@@ -102,10 +164,12 @@ unknown/blocked; it is never fabricated or converted into a payment state.
 Catalog queries captured names, relation classes, aggregate counts, dependency
 counts, policy/trigger/publication counts, RLS state, statistics counters, and
 sanitized source-reference counts only. Static source-reference counts do not
-prove absence of external callers. Several replay, audit, canary, and secret
-lifecycle tables have stored-routine or foreign-key dependencies even when
-their current row/write counters are zero, which is why they are consolidated
-or blocked rather than retired.
+prove absence of external callers. The caller scan includes operational
+`scripts/**` and `supabase/operations/**`; those references are not live-traffic
+proof. Several replay, audit, canary, and secret lifecycle tables have
+stored-routine or foreign-key dependencies even when their current row/write
+counters are zero, which is why they are consolidated or blocked rather than
+retired.
 
 The current `stats_reset` boundary is unavailable, and no live activation or
 canary scope was authorized. Any future retirement must first obtain a bounded
@@ -115,11 +179,15 @@ trigger, publication, foreign-key, scheduler, and external-writer absence.
 ## Reproduction boundary
 
 The safe inspection shape is a read-only linked query with the pinned CLI in an
-isolated work directory containing only Supabase CLI metadata. Use `db query
---linked --output json`; do not source an application `.env.local`, print CLI
-credentials, export raw rows, or use `db push`. The plan in
+isolated work directory containing only Supabase CLI metadata. First assert
+`test "$(npx --yes supabase@2.102.0 --version)" = "2.102.0"`, then use
+`npx --yes supabase@2.102.0 db query --linked --output json`; do not source an
+application `.env.local`, print CLI credentials, export raw rows, or use
+`npx --yes supabase@2.102.0 db push`. The plan in
 [`2026-09-11-supabase-22-final-convergence.md`](../superpowers/plans/2026-09-11-supabase-22-final-convergence.md)
-defines the exact future dry-run, post-apply, rollback, and test gates.
+defines the exact future dry-run, post-apply, rollback, and lean static/typecheck
+gates. No new tests, broad test suite, or CI run is required for this report-only
+document correction.
 
 Official references used for the CLI contract:
 
