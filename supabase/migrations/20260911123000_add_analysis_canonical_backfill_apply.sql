@@ -2,6 +2,22 @@
 -- this migration only adds a service-role-only, one-row idempotent copy RPC.
 -- No source table is changed and no reader or feature flag is activated.
 
+-- Backfill job rows carry their source envelope/hash in the canonical payload so
+-- a natural-key conflict can be compared after a concurrent DO NOTHING insert.
+-- Existing canonical job rows remain valid because the new provenance fields are
+-- optional for non-backfill writers.
+ALTER TABLE public.analysis_jobs
+    DROP CONSTRAINT IF EXISTS analysis_jobs_payload_check,
+    DROP CONSTRAINT IF EXISTS analysis_jobs_check;
+ALTER TABLE public.analysis_jobs
+    ADD CONSTRAINT analysis_jobs_payload_check CHECK (
+        public.analysis_canonical_payload_has_only_keys(payload, ARRAY[
+            'schemaVersion', 'successorCount', 'track', 'batch', 'jobKey',
+            'generation', 'attemptCount', 'dependencyCount', 'completionHash',
+            'requestStatus', 'state', 'counts', 'source', 'sourceHash'
+        ]::TEXT[])
+    );
+
 -- Events are append-only and do not have a general natural-key constraint.
 -- Reserve one payload copy code for the backfill rows so a repeated invocation
 -- can discover the already committed row without changing event semantics.
@@ -90,7 +106,7 @@ BEGIN
                ARRAY[
                    'schemaVersion', 'successorCount', 'track', 'batch', 'jobKey',
                    'generation', 'attemptCount', 'dependencyCount', 'completionHash',
-                   'requestStatus', 'state', 'counts'
+                   'requestStatus', 'state', 'counts', 'source', 'sourceHash'
                ]::TEXT[]
            )
            OR p_row->'payload'->>'jobKey' IS DISTINCT FROM p_row->>'jobKey'
@@ -98,6 +114,9 @@ BEGIN
            OR p_row->'payload'->>'attemptCount' IS DISTINCT FROM p_row->>'attemptCount'
            OR p_row->'payload'->>'dependencyCount' IS DISTINCT FROM p_row->>'dependencyCount'
            OR p_row->'payload'->>'state' IS DISTINCT FROM p_row->>'state'
+           OR p_row->'payload'->>'source' IS NULL
+           OR p_row->'payload'->>'sourceHash' IS DISTINCT FROM p_source_hash
+           OR p_row->'payload'->>'sourceHash' !~ '^[a-f0-9]{64}$'
            OR p_row->>'retentionClass' IS NULL
            OR pg_catalog.char_length(p_row->>'retentionClass') > 64
            OR (
@@ -112,35 +131,6 @@ BEGIN
                 USING ERRCODE = '22023';
         END IF;
 
-        SELECT *
-          INTO v_job
-          FROM public.analysis_jobs
-         WHERE request_id = p_request_id
-           AND job_key = p_row->>'jobKey'
-           AND generation = (p_row->>'generation')::BIGINT
-         FOR UPDATE;
-        IF FOUND AND (
-            v_job.kind IS DISTINCT FROM p_row->>'kind'
-            OR v_job.state IS DISTINCT FROM p_row->>'state'
-            OR v_job.attempt_count IS DISTINCT FROM (p_row->>'attemptCount')::INTEGER
-            OR v_job.dependency_count IS DISTINCT FROM (p_row->>'dependencyCount')::INTEGER
-            OR v_job.next_attempt_at IS DISTINCT FROM (p_row->>'nextAttemptAt')::TIMESTAMPTZ
-            OR v_job.lease_expires_at IS DISTINCT FROM CASE
-                WHEN p_row->>'leaseExpiresAt' IS NULL THEN NULL
-                ELSE (p_row->>'leaseExpiresAt')::TIMESTAMPTZ
-            END
-            OR v_job.completion_hash IS DISTINCT FROM CASE
-                WHEN p_row->>'completionHash' IS NULL THEN NULL
-                ELSE p_row->>'completionHash'
-            END
-            OR v_job.payload IS DISTINCT FROM p_row->'payload'
-            OR v_job.retention_class IS DISTINCT FROM p_row->>'retentionClass'
-            OR v_job.created_at IS DISTINCT FROM (p_row->>'createdAt')::TIMESTAMPTZ
-            OR v_job.updated_at IS DISTINCT FROM (p_row->>'updatedAt')::TIMESTAMPTZ
-        ) THEN
-            RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
-                USING ERRCODE = '22023';
-        END IF;
         INSERT INTO public.analysis_jobs(
             request_id, job_key, kind, state, generation, attempt_count,
             dependency_count, next_attempt_at, lease_expires_at, completion_hash,
@@ -163,17 +153,41 @@ BEGIN
             (p_row->>'createdAt')::TIMESTAMPTZ,
             (p_row->>'updatedAt')::TIMESTAMPTZ
         )
-        ON CONFLICT (request_id, job_key, generation) DO UPDATE SET
-            kind = EXCLUDED.kind,
-            state = EXCLUDED.state,
-            attempt_count = EXCLUDED.attempt_count,
-            dependency_count = EXCLUDED.dependency_count,
-            next_attempt_at = EXCLUDED.next_attempt_at,
-            lease_expires_at = EXCLUDED.lease_expires_at,
-            completion_hash = EXCLUDED.completion_hash,
-            payload = EXCLUDED.payload,
-            retention_class = EXCLUDED.retention_class,
-            updated_at = EXCLUDED.updated_at;
+        ON CONFLICT (request_id, job_key, generation) DO NOTHING
+        RETURNING * INTO v_job;
+        IF NOT FOUND THEN
+            SELECT *
+              INTO v_job
+              FROM public.analysis_jobs
+             WHERE request_id = p_request_id
+               AND job_key = p_row->>'jobKey'
+               AND generation = (p_row->>'generation')::BIGINT
+             FOR UPDATE;
+            IF NOT FOUND OR (
+                v_job.kind IS DISTINCT FROM p_row->>'kind'
+                OR v_job.state IS DISTINCT FROM p_row->>'state'
+                OR v_job.attempt_count IS DISTINCT FROM (p_row->>'attemptCount')::INTEGER
+                OR v_job.dependency_count IS DISTINCT FROM (p_row->>'dependencyCount')::INTEGER
+                OR v_job.next_attempt_at IS DISTINCT FROM (p_row->>'nextAttemptAt')::TIMESTAMPTZ
+                OR v_job.lease_expires_at IS DISTINCT FROM CASE
+                    WHEN p_row->>'leaseExpiresAt' IS NULL THEN NULL
+                    ELSE (p_row->>'leaseExpiresAt')::TIMESTAMPTZ
+                END
+                OR v_job.completion_hash IS DISTINCT FROM CASE
+                    WHEN p_row->>'completionHash' IS NULL THEN NULL
+                    ELSE p_row->>'completionHash'
+                END
+                OR v_job.payload->>'source' IS DISTINCT FROM p_row->'payload'->>'source'
+                OR v_job.payload->>'sourceHash' IS DISTINCT FROM p_source_hash
+                OR v_job.payload IS DISTINCT FROM p_row->'payload'
+                OR v_job.retention_class IS DISTINCT FROM p_row->>'retentionClass'
+                OR v_job.created_at IS DISTINCT FROM (p_row->>'createdAt')::TIMESTAMPTZ
+                OR v_job.updated_at IS DISTINCT FROM (p_row->>'updatedAt')::TIMESTAMPTZ
+            ) THEN
+                RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
+                    USING ERRCODE = '22023';
+            END IF;
+        END IF;
         RETURN pg_catalog.jsonb_build_object('status', 'applied', 'family', p_family);
     END IF;
 
@@ -209,7 +223,8 @@ BEGIN
                    'candidate', 'interaction', 'order', 'retention', 'counts', 'evidence'
                ]::TEXT[]
            )
-           OR (p_row->'payload'->>'copyCode') <> 'ANALYSIS_CANONICAL_BACKFILL_V1'
+           OR (p_row->'payload'->>'copyCode') IS DISTINCT FROM 'ANALYSIS_CANONICAL_BACKFILL_V1'
+           OR p_row->'payload'->>'source' IS NULL
            OR p_row->'payload'->>'state' IS DISTINCT FROM p_row->>'state' THEN
             RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_EVENT_MAPPING_BLOCKED'
                 USING ERRCODE = '22023';
@@ -303,7 +318,8 @@ BEGIN
                    'likerCount', 'commentCount', 'frozenAt'
                ]::TEXT[]
            )
-           OR (p_row->'payload'->>'copyCode') <> 'ANALYSIS_CANONICAL_BACKFILL_V1'
+           OR (p_row->'payload'->>'copyCode') IS DISTINCT FROM 'ANALYSIS_CANONICAL_BACKFILL_V1'
+           OR p_row->'payload'->>'source' IS NULL
            OR p_row->'payload'->>'artifactKey' IS DISTINCT FROM p_row->>'artifactKey'
            OR p_row->'payload'->>'kind' IS DISTINCT FROM p_row->>'kind'
            OR p_row->'payload'->>'state' IS DISTINCT FROM p_row->>'state' THEN
@@ -311,24 +327,13 @@ BEGIN
                 USING ERRCODE = '22023';
         END IF;
         v_artifact_key := p_row->>'artifactKey';
-        SELECT *
-          INTO v_artifact
-          FROM public.analysis_artifacts
-         WHERE request_id = p_request_id
-           AND artifact_key = v_artifact_key
-           AND content_hash = p_source_hash
-         FOR UPDATE;
-        IF FOUND AND (
-            v_artifact.kind IS DISTINCT FROM p_row->>'kind'
-            OR v_artifact.state IS DISTINCT FROM p_row->>'state'
-            OR v_artifact.payload IS DISTINCT FROM p_row->'payload'
-            OR v_artifact.retention_class IS DISTINCT FROM p_row->>'retentionClass'
-            OR v_artifact.created_at IS DISTINCT FROM (p_row->>'createdAt')::TIMESTAMPTZ
-            OR v_artifact.updated_at IS DISTINCT FROM (p_row->>'updatedAt')::TIMESTAMPTZ
-        ) THEN
-            RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
-                USING ERRCODE = '22023';
-        END IF;
+        -- The canonical schema permits more than one content hash for an
+        -- artifact key. Serialize that natural-key check so two concurrent
+        -- source identities cannot both create the same key with different
+        -- hashes, then use the insert's DO NOTHING result as the race fence.
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(p_request_id::TEXT || ':' || v_artifact_key, 0)
+        );
         INSERT INTO public.analysis_artifacts(
             request_id, job_id, kind, artifact_key, state, content_hash,
             payload, retention_class, created_at, updated_at
@@ -344,11 +349,38 @@ BEGIN
             (p_row->>'createdAt')::TIMESTAMPTZ,
             (p_row->>'updatedAt')::TIMESTAMPTZ
         )
-        ON CONFLICT (request_id, artifact_key, content_hash) DO UPDATE SET
-            state = EXCLUDED.state,
-            payload = EXCLUDED.payload,
-            retention_class = EXCLUDED.retention_class,
-            updated_at = EXCLUDED.updated_at;
+        ON CONFLICT (request_id, artifact_key, content_hash) DO NOTHING
+        RETURNING * INTO v_artifact;
+        IF EXISTS (
+            SELECT 1
+              FROM public.analysis_artifacts
+             WHERE request_id = p_request_id
+               AND artifact_key = v_artifact_key
+               AND (
+                   content_hash IS DISTINCT FROM p_source_hash
+                   OR payload->>'source' IS DISTINCT FROM p_row->'payload'->>'source'
+               )
+        ) THEN
+            RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
+                USING ERRCODE = '22023';
+        END IF;
+        SELECT *
+          INTO v_artifact
+          FROM public.analysis_artifacts
+         WHERE request_id = p_request_id
+           AND artifact_key = v_artifact_key
+           AND content_hash = p_source_hash
+         FOR UPDATE;
+        IF NOT FOUND
+           OR v_artifact.payload IS DISTINCT FROM p_row->'payload'
+           OR v_artifact.kind IS DISTINCT FROM p_row->>'kind'
+           OR v_artifact.state IS DISTINCT FROM p_row->>'state'
+           OR v_artifact.retention_class IS DISTINCT FROM p_row->>'retentionClass'
+           OR v_artifact.created_at IS DISTINCT FROM (p_row->>'createdAt')::TIMESTAMPTZ
+           OR v_artifact.updated_at IS DISTINCT FROM (p_row->>'updatedAt')::TIMESTAMPTZ THEN
+            RAISE EXCEPTION 'ANALYSIS_CANONICAL_BACKFILL_IDEMPOTENCY_CONFLICT'
+                USING ERRCODE = '22023';
+        END IF;
         RETURN pg_catalog.jsonb_build_object('status', 'applied', 'family', p_family);
     END IF;
 

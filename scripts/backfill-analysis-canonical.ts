@@ -409,6 +409,30 @@ interface BackfillMappingResult {
     blockedReason?: string;
 }
 
+interface AppliedBackfillMutation {
+    family: AnalysisCanonicalBackfillFamily;
+    mutation: BackfillApplyMutation;
+}
+
+interface BackfillApplyBudget {
+    attempted: number;
+    readonly limit: number;
+}
+
+interface BackfillApplyRun {
+    budget: BackfillApplyBudget;
+    appliedMutations: AppliedBackfillMutation[];
+    stopped: boolean;
+    stopTableKey: string | null;
+    stopPosition: AnalysisBackfillCursorPosition | null;
+}
+
+interface BackfillApplyFamilyResult {
+    report: BackfillApplyReport;
+    lastProcessedPosition: AnalysisBackfillCursorPosition | null;
+    stopped: boolean;
+}
+
 interface AnalysisBackfillCursorV4 {
     version: 4;
     positions: Record<string, AnalysisBackfillCursorPosition>;
@@ -1361,6 +1385,8 @@ function mapJobRow(table: BackfillTableSpec, row: Record<string, unknown>): Back
     ) {
         return { blockedReason: 'jobs_completion_not_proven' };
     }
+    const identity = applySourceIdentity(table, row);
+    if (!identity) return { blockedReason: 'required_identity_or_bounded_payload' };
     const canonicalState = APPLY_JOB_STATES[status];
     const payload: Record<string, unknown> = {
         schemaVersion: 1,
@@ -1372,6 +1398,8 @@ function mapJobRow(table: BackfillTableSpec, row: Record<string, unknown>): Back
         requestStatus: status,
         state: canonicalState,
         completionHash,
+        source: identity.envelope,
+        sourceHash: identity.sourceHash,
     };
     if (batch !== null) payload.batch = batch;
     return mutation(table, row, {
@@ -1670,37 +1698,64 @@ async function applyLegacyPages(
     pages: readonly BackfillLegacyPage[],
     selectedRequestIds: ReadonlySet<string>,
     acknowledgement: string,
-): Promise<BackfillApplyReport & { failed: number }> {
+    run: BackfillApplyRun,
+): Promise<BackfillApplyFamilyResult> {
     let attempted = 0;
     let applied = 0;
     let blocked = 0;
     let failed = 0;
     const blockedReasons = new Set<string>();
+    let lastProcessedPosition: AnalysisBackfillCursorPosition | null = null;
+    const stoppedResult = (): BackfillApplyFamilyResult => ({
+        report: { attempted, applied, blocked, failed, blockedReasons: [...blockedReasons].sort() },
+        lastProcessedPosition,
+        stopped: run.stopped,
+    });
     if (pages.length === 0) {
-        return { attempted, applied, blocked, failed, blockedReasons: [] };
+        return stoppedResult();
     }
     for (const page of pages) {
+        if (run.stopped) {
+            blocked += 1;
+            blockedReasons.add('apply_stopped');
+            return stoppedResult();
+        }
         // Each page is read with `limit + 1`, then reduced to at most limit.
         // Apply one row per RPC so a failed row can be retried from the same
         // input cursor without ever skipping a source row.
         for (const sourceRow of page.rows) {
+            const sourcePosition = rowCursorPosition(sourceRow, page.table);
             const requestId = textField(sourceRow, 'request_id', 'requestId');
             if (!requestId || !selectedRequestIds.has(requestId)) {
                 blocked += 1;
                 blockedReasons.add('request_identity_not_in_selected_batch');
+                if (sourcePosition) lastProcessedPosition = sourcePosition;
                 continue;
             }
             const mapping = mapLegacyRowForApply(family, page.table, sourceRow);
             if (!mapping.mutation) {
                 blocked += 1;
                 blockedReasons.add(`${page.table.table}:${mapping.blockedReason ?? 'mapping_not_proven'}`);
+                if (sourcePosition) lastProcessedPosition = sourcePosition;
                 continue;
             }
+            if (run.budget.attempted >= run.budget.limit) {
+                blocked += 1;
+                blockedReasons.add('apply_budget_exhausted');
+                run.stopped = true;
+                run.stopTableKey = tablePositionKey(page.table);
+                run.stopPosition = lastProcessedPosition;
+                return stoppedResult();
+            }
+            run.budget.attempted += 1;
             attempted += 1;
             if (!client.rpc) {
                 failed += 1;
                 blockedReasons.add('apply_rpc_unavailable');
-                return { attempted, applied, blocked, failed, blockedReasons: [...blockedReasons].sort() };
+                run.stopped = true;
+                run.stopTableKey = tablePositionKey(page.table);
+                run.stopPosition = lastProcessedPosition;
+                return stoppedResult();
             }
             let result: { data: unknown; error: BackfillRpcError | null };
             try {
@@ -1716,17 +1771,25 @@ async function applyLegacyPages(
             } catch {
                 failed += 1;
                 blockedReasons.add('apply_rpc_failed');
-                return { attempted, applied, blocked, failed, blockedReasons: [...blockedReasons].sort() };
+                run.stopped = true;
+                run.stopTableKey = tablePositionKey(page.table);
+                run.stopPosition = lastProcessedPosition;
+                return stoppedResult();
             }
             if (result.error || !isRecord(result.data) || result.data.status !== 'applied') {
                 failed += 1;
                 blockedReasons.add('apply_rpc_rejected');
-                return { attempted, applied, blocked, failed, blockedReasons: [...blockedReasons].sort() };
+                run.stopped = true;
+                run.stopTableKey = tablePositionKey(page.table);
+                run.stopPosition = lastProcessedPosition;
+                return stoppedResult();
             }
             applied += 1;
+            run.appliedMutations.push({ family, mutation: mapping.mutation });
+            if (sourcePosition) lastProcessedPosition = sourcePosition;
         }
     }
-    return { attempted, applied, blocked, failed, blockedReasons: [...blockedReasons].sort() };
+    return stoppedResult();
 }
 
 export function parseBackfillCliArgs(argv: readonly string[]): BackfillCliArgs {
@@ -2045,6 +2108,7 @@ async function readFamily(
     limit: number,
     cursor: ParsedBackfillCursor | null,
     selectedRequestIds: readonly string[],
+    apply: boolean,
 ): Promise<{
     report: BackfillFamilyReport;
     positions: Record<string, AnalysisBackfillCursorPosition>;
@@ -2052,6 +2116,7 @@ async function readFamily(
     legacyPages: readonly BackfillLegacyPage[];
     blocked: number;
     hasMore: boolean;
+    readBlocked: boolean;
 }> {
     if (spec.deferred || spec.legacy.length === 0) {
         // Keep the five-family report shape while making deferred families a
@@ -2064,6 +2129,7 @@ async function readFamily(
             legacyPages: [],
             blocked: 1,
             hasMore: false,
+            readBlocked: false,
         };
     }
     const positions: Record<string, AnalysisBackfillCursorPosition> = {};
@@ -2134,16 +2200,18 @@ async function readFamily(
     const canonical = aggregateRows(canonicalRows, canonicalComplete && !canonicalHasMore);
     const logicalSource = normalizeBackfillFamilyRows(spec.family, legacyRows, selectedRequestIds);
     const logicalCanonical = normalizeBackfillFamilyRows(spec.family, canonicalRows, selectedRequestIds);
-    const parity: AnalysisBackfillParitySummary = !sourceComplete || sourceHasMore
-        ? { status: 'blocked', mismatchPaths: ['source.missing'] }
-        : !canonicalComplete || canonicalHasMore
-            ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
-            : compareNormalizedBackfillFamilyRows(
-                spec.family,
-                legacyRows,
-                canonicalRows,
-                selectedRequestIds,
-            );
+    const parity: AnalysisBackfillParitySummary = apply
+        ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
+        : !sourceComplete || sourceHasMore
+            ? { status: 'blocked', mismatchPaths: ['source.missing'] }
+            : !canonicalComplete || canonicalHasMore
+                ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
+                : compareNormalizedBackfillFamilyRows(
+                    spec.family,
+                    legacyRows,
+                    canonicalRows,
+                    selectedRequestIds,
+                );
     const targetSource = logicalSource.filter(row => row.evidence.targetManifest);
     const targetCanonical = logicalCanonical.filter(row => row.evidence.targetManifest);
     const targetSourceInteractions = logicalSource.flatMap(row => row.evidence.targetInteractions);
@@ -2191,13 +2259,252 @@ async function readFamily(
         legacyPages,
         blocked,
         hasMore: sourceHasMore || canonicalHasMore,
+        readBlocked: blocked > 0,
     };
 }
 
-function invalidReport(): BackfillReport {
+interface ExpectedCanonicalMutation {
+    family: AnalysisCanonicalBackfillFamily;
+    mutation: BackfillApplyMutation;
+    identity: string;
+    lookupValue: string;
+    expected: Record<string, unknown>;
+}
+
+function expectedCanonicalMutation(
+    family: AnalysisCanonicalBackfillFamily,
+    mutation: BackfillApplyMutation,
+): ExpectedCanonicalMutation | null {
+    const row = mutation.row;
+    let identity: string;
+    let lookupValue: string;
+    let expected: Record<string, unknown>;
+    if (family === 'jobs') {
+        if (typeof row.jobKey !== 'string' || typeof row.generation !== 'number') return null;
+        identity = `${mutation.requestId}\0${row.jobKey}\0${row.generation}`;
+        lookupValue = row.jobKey;
+        expected = {
+            request_id: mutation.requestId,
+            job_key: row.jobKey,
+            kind: row.kind,
+            state: row.state,
+            generation: row.generation,
+            attempt_count: row.attemptCount,
+            dependency_count: row.dependencyCount,
+            next_attempt_at: row.nextAttemptAt,
+            lease_expires_at: row.leaseExpiresAt,
+            completion_hash: row.completionHash,
+            payload: row.payload,
+            retention_class: row.retentionClass,
+            created_at: row.createdAt,
+            updated_at: row.updatedAt,
+        };
+    } else if (family === 'events') {
+        if (typeof row.contentHash !== 'string') return null;
+        identity = `${mutation.requestId}\0${row.contentHash}`;
+        lookupValue = row.contentHash;
+        expected = {
+            request_id: mutation.requestId,
+            job_id: null,
+            kind: row.kind,
+            state: row.state,
+            payload: row.payload,
+            content_hash: row.contentHash,
+            retention_class: row.retentionClass,
+            created_at: row.createdAt,
+        };
+    } else if (family === 'artifacts') {
+        if (typeof row.artifactKey !== 'string' || typeof row.contentHash !== 'string') return null;
+        identity = `${mutation.requestId}\0${row.artifactKey}\0${row.contentHash}`;
+        lookupValue = row.artifactKey;
+        expected = {
+            request_id: mutation.requestId,
+            job_id: null,
+            kind: row.kind,
+            artifact_key: row.artifactKey,
+            state: row.state,
+            content_hash: row.contentHash,
+            payload: row.payload,
+            retention_class: row.retentionClass,
+            created_at: row.createdAt,
+            updated_at: row.updatedAt,
+        };
+    } else if (family === 'costs') {
+        if (typeof row.idempotencyKey !== 'string' || typeof row.sourceHash !== 'string') return null;
+        identity = `${mutation.requestId}\0${row.idempotencyKey}`;
+        lookupValue = row.idempotencyKey;
+        expected = {
+            request_id: mutation.requestId,
+            provider: row.provider,
+            operation_key: row.operationKey,
+            stage: row.stage,
+            currency: row.currency,
+            amount_known: row.amountKnown,
+            amount_conservative: row.amountConservative,
+            usage_unknown: row.usageUnknown,
+            source_hash: row.sourceHash,
+            idempotency_key: row.idempotencyKey,
+            payload: row.payload,
+            retention_class: row.retentionClass,
+            recorded_at: row.recordedAt,
+        };
+    } else {
+        return null;
+    }
+    return { family, mutation, identity, lookupValue, expected };
+}
+
+function canonicalLookupColumn(family: AnalysisCanonicalBackfillFamily): string | null {
+    if (family === 'jobs') return 'job_key';
+    if (family === 'events') return 'content_hash';
+    if (family === 'artifacts') return 'artifact_key';
+    if (family === 'costs') return 'idempotency_key';
+    return null;
+}
+
+async function readCanonicalRowsForApply(
+    client: AnalysisBackfillClient,
+    spec: AnalysisCanonicalBackfillFamilySpec,
+    expected: readonly ExpectedCanonicalMutation[],
+): Promise<readonly Record<string, unknown>[]> {
+    if (expected.length === 0) return Object.freeze([]);
+    const lookupColumn = canonicalLookupColumn(spec.family);
+    if (!lookupColumn) throw new Error('canonical apply re-read is unavailable for deferred family');
+    const requestIds = [...new Set(expected.map(value => value.mutation.requestId))];
+    const lookupValues = [...new Set(expected.map(value => value.lookupValue))];
+    if (requestIds.length > BACKFILL_MAX_LIMIT || lookupValues.length > BACKFILL_MAX_LIMIT) {
+        throw new Error('canonical apply re-read exceeds bounded identity set');
+    }
+    let query = client.from(spec.canonical.table).select(spec.canonical.columns);
+    const inFilter = query.in;
+    if (!inFilter) throw new Error('canonical apply re-read request filter unavailable');
+    query = inFilter.call(query, 'request_id', requestIds);
+    query = inFilter.call(query, lookupColumn, lookupValues);
+    const result = await query.limit(BACKFILL_MAX_LIMIT + 1);
+    if (result.error || !Array.isArray(result.data) || result.data.length > BACKFILL_MAX_LIMIT) {
+        throw new Error('bounded canonical apply re-read failed');
+    }
+    const rows: Record<string, unknown>[] = [];
+    for (const value of result.data) {
+        if (!isRecord(value)) throw new Error('invalid canonical apply re-read row');
+        rows.push(value);
+    }
+    return Object.freeze(rows);
+}
+
+function canonicalDecimal(value: unknown): string | null {
+    const raw = typeof value === 'number'
+        ? value.toString()
+        : typeof value === 'string'
+            ? value.trim()
+            : null;
+    if (raw === null || !/^(?:\d+)(?:\.\d+)?$/.test(raw)) return null;
+    const [whole, fraction = ''] = raw.split('.');
+    const normalizedFraction = fraction.replace(/0+$/, '');
+    return `${whole.replace(/^0+(?=\d)/, '')}${normalizedFraction ? `.${normalizedFraction}` : ''}`;
+}
+
+function canonicalFieldEqual(key: string, expected: unknown, actual: unknown): boolean {
+    if (expected === undefined || actual === undefined) return expected === actual;
+    const timestampFields = new Set([
+        'next_attempt_at', 'lease_expires_at', 'created_at', 'updated_at', 'recorded_at',
+    ]);
+    if (timestampFields.has(key)) {
+        if (expected === null || actual === null) return expected === actual;
+        return isSafeTimestamp(expected) && isSafeTimestamp(actual)
+            && Date.parse(expected) === Date.parse(actual);
+    }
+    if (['generation', 'attempt_count', 'dependency_count'].includes(key)) {
+        const left = typeof expected === 'number' ? expected : Number(expected);
+        const right = typeof actual === 'number' ? actual : Number(actual);
+        return Number.isSafeInteger(left) && Number.isSafeInteger(right) && left === right;
+    }
+    if (['amount_known', 'amount_conservative'].includes(key)) {
+        return canonicalDecimal(expected) === canonicalDecimal(actual);
+    }
+    return JSON.stringify(stableValue(expected)) === JSON.stringify(stableValue(actual));
+}
+
+function canonicalMutationIdentity(family: AnalysisCanonicalBackfillFamily, row: Record<string, unknown>): string | null {
+    const requestId = textField(row, 'request_id', 'requestId');
+    if (!requestId || !UUID_PATTERN.test(requestId)) return null;
+    if (family === 'jobs') {
+        const jobKey = textField(row, 'job_key', 'jobKey');
+        const generation = row.generation;
+        const normalizedGeneration = typeof generation === 'number' ? generation : Number(generation);
+        return jobKey && Number.isSafeInteger(normalizedGeneration)
+            ? `${requestId}\0${jobKey}\0${normalizedGeneration}` : null;
+    }
+    if (family === 'events') {
+        const contentHash = textField(row, 'content_hash', 'contentHash');
+        return contentHash ? `${requestId}\0${contentHash}` : null;
+    }
+    if (family === 'artifacts') {
+        const artifactKey = textField(row, 'artifact_key', 'artifactKey');
+        const contentHash = textField(row, 'content_hash', 'contentHash');
+        return artifactKey && contentHash ? `${requestId}\0${artifactKey}\0${contentHash}` : null;
+    }
+    if (family === 'costs') {
+        const idempotencyKey = textField(row, 'idempotency_key', 'idempotencyKey');
+        return idempotencyKey ? `${requestId}\0${idempotencyKey}` : null;
+    }
+    return null;
+}
+
+function compareAppliedCanonicalRows(
+    family: AnalysisCanonicalBackfillFamily,
+    expected: readonly ExpectedCanonicalMutation[],
+    canonicalRows: readonly Record<string, unknown>[],
+): AnalysisBackfillParitySummary {
+    const expectedIdentities = new Set(expected.map(value => value.identity));
+    const actualByIdentity = new Map<string, Record<string, unknown>>();
+    for (const row of canonicalRows) {
+        const identity = canonicalMutationIdentity(family, row);
+        // Job lookups are bounded by job_key, while the natural key also
+        // includes generation. Ignore an unrelated generation; exact identity
+        // rows and artifact-key hash conflicts remain part of the comparison.
+        if (family === 'jobs' && identity && !expectedIdentities.has(identity)) continue;
+        if (!identity || actualByIdentity.has(identity)) {
+            return { status: 'blocked', mismatchPaths: ['canonical.evidence'] };
+        }
+        actualByIdentity.set(identity, row);
+    }
+    let fieldMismatch = false;
+    for (const value of expected) {
+        const actual = actualByIdentity.get(value.identity);
+        if (!actual) continue;
+        for (const [key, expectedValue] of Object.entries(value.expected)) {
+            if (!canonicalFieldEqual(key, expectedValue, actual[key])) {
+                fieldMismatch = true;
+                break;
+            }
+        }
+        if (fieldMismatch) break;
+    }
+    if (fieldMismatch) return { status: 'mismatch', mismatchPaths: ['logical.row.fields'] };
+    if (
+        expectedIdentities.size !== actualByIdentity.size
+        || [...expectedIdentities].some(identity => !actualByIdentity.has(identity))
+    ) {
+        return { status: 'mismatch', mismatchPaths: ['logical.row.identity'] };
+    }
+    return { status: 'match', mismatchPaths: [] };
+}
+
+function applyReadBlockedReport(reason: string): BackfillApplyReport {
+    return {
+        attempted: 0,
+        applied: 0,
+        blocked: 1,
+        failed: 0,
+        blockedReasons: [reason],
+    };
+}
+
+function invalidReport(mode: 'report_only' | 'apply' = 'report_only'): BackfillReport {
     return {
         status: 'blocked',
-        mode: 'report_only',
+        mode,
         scanned: 0,
         complete: 0,
         blocked: 1,
@@ -2235,12 +2542,15 @@ export async function backfillAnalysisCanonical(input: {
         try {
             cursor = parseBackfillCursor(input.cursor);
         } catch {
-            return invalidReport();
+            return invalidReport(apply ? 'apply' : 'report_only');
         }
     }
     const sourcePositionKey = `${SOURCE_TABLE}:created_at:id`;
     const continuingFamilyPage = cursor?.version === 4
-        && Object.keys(cursor.positions).some(key => key !== sourcePositionKey);
+        && (
+            Object.keys(cursor.positions).some(key => key !== sourcePositionKey)
+            || cursor.requestIds.length > 0
+        );
     const familyCursor = continuingFamilyPage && cursor?.version === 4 ? cursor : null;
     let sourceHasMore = false;
     let sourcePage: unknown[] = [];
@@ -2275,17 +2585,20 @@ export async function backfillAnalysisCanonical(input: {
                 .order('id', { ascending: true })
                 .limit(limit + 1);
         } catch {
-            return invalidReport();
+            return invalidReport(apply ? 'apply' : 'report_only');
         }
         if (sourceResult.error || !Array.isArray(sourceResult.data) || sourceResult.data.length > limit + 1) {
-            return invalidReport();
+            return invalidReport(apply ? 'apply' : 'report_only');
         }
         sourceHasMore = sourceResult.data.length > limit;
+        if (sourceHasMore && !isSourceRow(sourceResult.data[limit])) {
+            return invalidReport(apply ? 'apply' : 'report_only');
+        }
         sourcePage = sourceHasMore ? sourceResult.data.slice(0, limit) : sourceResult.data;
         const validRows = sourcePage.filter(isSourceRow);
         sourceBlocked = sourcePage.length - validRows.length;
         selectedRequestIds = validRows.map(row => row.id);
-        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) return invalidReport();
+        if (selectedRequestIds.length > BACKFILL_MAX_LIMIT) return invalidReport(apply ? 'apply' : 'report_only');
         if (validRows.length > 0 && sourceHasMore) {
             const row = validRows.at(-1)!;
             positions[sourcePositionKey] = {
@@ -2297,10 +2610,16 @@ export async function backfillAnalysisCanonical(input: {
         }
     }
     const familyReports = {} as Record<AnalysisCanonicalBackfillFamily, BackfillFamilyReport>;
+    const familyResults: Array<{
+        spec: AnalysisCanonicalBackfillFamilySpec;
+        family: Awaited<ReturnType<typeof readFamily>>;
+        parity: AnalysisBackfillParitySummary;
+    }> = [];
     let familyBlocked = 0;
     let familyHasMore = false;
     let applyFailed = false;
     let applyBlocked = 0;
+    let readBarrierBlocked = sourceBlocked > 0;
     const completedTables = new Set<string>(
         familyCursor ? familyCursor.completed : [],
     );
@@ -2316,43 +2635,116 @@ export async function backfillAnalysisCanonical(input: {
             limit,
             familyCursor,
             selectedRequestIds,
+            apply,
         );
-        const parity = mergeParityEvidence(
-            family.report.parity,
-            priorFamilyEvidence[spec.family],
-        );
+        const parity = apply
+            ? { status: 'blocked', mismatchPaths: ['canonical.missing'] } as const
+            : mergeParityEvidence(
+                family.report.parity,
+                priorFamilyEvidence[spec.family],
+            );
         const report = parity === family.report.parity
             ? family.report
             : { ...family.report, parity };
-        const familyApply = apply
-            ? spec.deferred
-                ? {
-                    attempted: 0,
-                    applied: 0,
-                    blocked: 1,
-                    failed: 0,
-                    blockedReasons: ['deferred_family'],
-                }
-                : await applyLegacyPages(
+        familyResults.push({ spec, family, parity });
+        familyReports[spec.family] = report;
+        if (!apply && parity.status !== 'match') familyEvidence[spec.family] = parity;
+        readBarrierBlocked ||= family.readBlocked;
+        familyBlocked += family.blocked;
+        familyHasMore ||= family.hasMore;
+        family.completed.forEach(table => completedTables.add(table));
+        Object.assign(positions, family.positions);
+    }
+    const applyRun: BackfillApplyRun = {
+        budget: { attempted: 0, limit: BACKFILL_MAX_LIMIT },
+        appliedMutations: [],
+        stopped: false,
+        stopTableKey: null,
+        stopPosition: null,
+    };
+    const applyResults = new Map<AnalysisCanonicalBackfillFamily, BackfillApplyFamilyResult>();
+    if (apply) {
+        for (const { spec, family } of familyResults) {
+            let result: BackfillApplyFamilyResult;
+            if (spec.deferred) {
+                result = {
+                    report: applyReadBlockedReport('deferred_family'),
+                    lastProcessedPosition: null,
+                    stopped: false,
+                };
+            } else if (readBarrierBlocked) {
+                result = {
+                    report: applyReadBlockedReport('read_blocked'),
+                    lastProcessedPosition: null,
+                    stopped: false,
+                };
+            } else {
+                result = await applyLegacyPages(
                     client,
                     spec.family,
                     family.legacyPages,
                     new Set(selectedRequestIds),
                     input.acknowledgement!,
-                )
-            : undefined;
-        if (familyApply) {
-            familyReports[spec.family] = { ...report, apply: familyApply };
-            applyFailed ||= familyApply.failed > 0;
-            applyBlocked += familyApply.blocked;
-        } else {
-            familyReports[spec.family] = report;
+                    applyRun,
+                );
+            }
+            applyResults.set(spec.family, result);
+            familyReports[spec.family] = { ...familyReports[spec.family]!, apply: result.report };
+            applyFailed ||= result.report.failed > 0;
+            applyBlocked += result.report.blocked;
+            familyBlocked += result.report.blocked + result.report.failed;
         }
-        if (parity.status !== 'match') familyEvidence[spec.family] = parity;
-        familyBlocked += family.blocked + (familyApply?.blocked ?? 0) + (familyApply?.failed ?? 0);
-        familyHasMore ||= family.hasMore;
-        family.completed.forEach(table => completedTables.add(table));
-        Object.assign(positions, family.positions);
+    }
+
+    let postParityBlocked = false;
+    if (apply && !readBarrierBlocked) {
+        for (const { spec } of familyResults) {
+            if (spec.deferred) continue;
+            const expected = applyRun.appliedMutations
+                .filter(value => value.family === spec.family)
+                .map(value => expectedCanonicalMutation(spec.family, value.mutation));
+            const familyApply = applyResults.get(spec.family)!;
+            let parity: AnalysisBackfillParitySummary;
+            if (expected.some(value => value === null)) {
+                parity = { status: 'blocked', mismatchPaths: ['source.evidence'] };
+            } else if (expected.length === 0) {
+                parity = familyApply.report.failed > 0 || familyApply.report.blocked > 0
+                    ? { status: 'blocked', mismatchPaths: ['canonical.missing'] }
+                    : { status: 'match', mismatchPaths: [] };
+            } else {
+                try {
+                    const canonicalRows = await readCanonicalRowsForApply(
+                        client,
+                        spec,
+                        expected as ExpectedCanonicalMutation[],
+                    );
+                    parity = compareAppliedCanonicalRows(
+                        spec.family,
+                        expected as ExpectedCanonicalMutation[],
+                        canonicalRows,
+                    );
+                } catch {
+                    parity = { status: 'blocked', mismatchPaths: ['canonical.evidence'] };
+                }
+            }
+            familyReports[spec.family] = { ...familyReports[spec.family]!, parity };
+            if (parity.status !== 'match') {
+                familyEvidence[spec.family] = parity;
+                familyBlocked += 1;
+                if (expected.length > 0) postParityBlocked = true;
+            }
+        }
+    } else if (apply) {
+        for (const { spec } of familyResults) {
+            if (!spec.deferred) {
+                const parity: AnalysisBackfillParitySummary = {
+                    status: 'blocked',
+                    mismatchPaths: ['source.missing'],
+                };
+                familyReports[spec.family] = { ...familyReports[spec.family]!, parity };
+                familyEvidence[spec.family] = parity;
+            }
+        }
     }
     const sourceRows = sourcePage.filter(isSourceRow);
     if (familyHasMore && selectedRequestIds.length > 0 && !positions[sourcePositionKey]) {
@@ -2366,14 +2758,40 @@ export async function backfillAnalysisCanonical(input: {
             };
         }
     }
-    const hasContinuation = familyHasMore || sourceHasMore;
-    const nextCursor = applyFailed
+    if (apply && applyRun.stopped && !readBarrierBlocked && applyRun.stopTableKey) {
+        let stopReached = false;
+        for (const spec of ANALYSIS_CANONICAL_BACKFILL_FAMILIES) {
+            for (const table of spec.legacy) {
+                const tableKey = tablePositionKey(table);
+                if (tableKey === applyRun.stopTableKey) {
+                    stopReached = true;
+                    completedTables.delete(tableKey);
+                    const resumePosition = applyRun.stopPosition ?? cursorPosition(familyCursor, table);
+                    if (resumePosition) positions[tableKey] = resumePosition;
+                    else delete positions[tableKey];
+                    continue;
+                }
+                if (!stopReached || cursorTableCompleted(familyCursor, table)) continue;
+                completedTables.delete(tableKey);
+                const priorPosition = cursorPosition(familyCursor, table);
+                if (priorPosition) positions[tableKey] = priorPosition;
+                else delete positions[tableKey];
+            }
+        }
+    }
+    const applyParityBlocked = apply && postParityBlocked;
+    const hasContinuation = familyHasMore || sourceHasMore || (apply && applyRun.stopped);
+    const hasCursorContinuation = hasContinuation && (
+        Object.keys(positions).length > 0
+        || (apply && applyRun.stopped && selectedRequestIds.length > 0)
+    );
+    const nextCursor = apply && (readBarrierBlocked || applyParityBlocked)
         ? input.cursor ?? null
-        : hasContinuation && Object.keys(positions).length > 0
+        : hasCursorContinuation
         ? Buffer.from(JSON.stringify({
             version: 4,
             positions,
-            requestIds: familyHasMore ? selectedRequestIds : [],
+            requestIds: (familyHasMore || (apply && applyRun.stopped)) ? selectedRequestIds : [],
             sourceHasMore,
             completed: [...completedTables],
             familyEvidence,
@@ -2393,7 +2811,7 @@ export async function backfillAnalysisCanonical(input: {
     );
     return {
         status: apply
-            ? (applyFailed || applyBlocked > 0 ? 'blocked' : 'applied')
+            ? (readBarrierBlocked || applyFailed || applyBlocked > 0 || applyParityBlocked ? 'blocked' : 'applied')
             : (blockedResult ? 'blocked' : 'report_only'),
         mode: apply ? 'apply' : 'report_only',
         scanned: continuingFamilyPage ? selectedRequestIds.length : sourcePage.length,
