@@ -51,11 +51,15 @@ traversal: `84e69185f7384f7f2e676e58d66721e24691f8ec7fe61aed006e91e2f637e0c7`,
 | cache | blocked/deferred | no executable request-safe source was read; counts/checksums `0`/`null` | `source.missing` |
 | audit | blocked/deferred | held for the independent audit-evidence wave; counts/checksums `0`/`null` | `source.missing` |
 
-`canonical_count=0` with `canonical_complete=false` is an incomplete-read
-signal, not proof that a canonical table is empty. The runner observed no
-`mismatch` path and no `match` status: **verified parity families: none**;
-**mismatch families: none observed**; **blocked/deferred families: jobs,
-events, artifacts, costs, cache, audit**.
+For executable families, `canonical_count=0` with `canonical_complete=false` is
+an incomplete-read signal, not proof that a canonical table is empty. For the
+deferred cache and audit families, the same empty shape is synthetic blocked
+evidence because no canonical read was attempted. `source.missing` is likewise
+a blocked path for an unavailable or incomplete source page, not proof that the
+source contains zero rows. The runner observed no parity status `mismatch` and
+no `match` status: **verified parity families: none**; **mismatch families:
+none observed**; **blocked/deferred families: jobs, events, artifacts, costs,
+cache, audit**.
 
 The production table count remains recorded as **177** from the prior baseline;
 it was not separately re-queried in this run.
