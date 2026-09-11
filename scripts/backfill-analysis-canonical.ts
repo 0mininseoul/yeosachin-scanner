@@ -1846,6 +1846,7 @@ async function applyLegacyPages(
             blockedReasons.add('apply_stopped');
             return stoppedResult();
         }
+        lastProcessedPosition = page.priorPosition;
         try {
             await assertMutableSourcePageFreshness(client, page, [...selectedRequestIds]);
         } catch {
