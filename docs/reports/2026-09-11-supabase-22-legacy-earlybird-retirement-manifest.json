@@ -216,7 +216,7 @@
     "reason": "SQLSTATE 2BP01: trigger dependency prevented DROP FUNCTION",
     "correctiveStatus": "resolved_by_pr_566"
   },
-  "productionMutation": "refused",
+  "productionMutation": "selective_migration_applied",
   "activationBoundary": {
     "paymentPending": "unchanged",
     "analysisAdmission": "unchanged",

@@ -395,7 +395,7 @@ describe('Supabase 22 legacy earlybird retirement contract', () => {
         });
         expect(manifest.rolloutStatus).toBe('VERIFIED');
         expect(manifest.evidenceStatus).toBe('VERIFIED');
-        expect(manifest.productionMutation).toBe('refused');
+        expect(manifest.productionMutation).toBe('selective_migration_applied');
         expect(manifest.firstApplyAttempt).toEqual({
             migrationVersion: '20260911001903',
             status: 'rolled_back',
