@@ -227,12 +227,28 @@ function rowCountClass(value: number | null): RowCountClass {
  * | legacy table | canonical destination | evidence |
  * | earlybird_webhook_events | payment_events | payment event lineage |
  * | account_deletion_jobs | maintenance_jobs | account cleanup job lineage |
+ * | earlybird_concierge_batch_target_lineage_repairs | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_partial_adoption_second_rearms | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_profile_evidence_failure_recoveries | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_v211_apify_transient_admission_resumes | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_v211_concierge_copy_corrections | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_v212_concierge_copy_corrections | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_v213_concierge_copy_corrections | maintenance_jobs | isolated historical recovery ledger |
+ * | earlybird_v214_concierge_gemini_copy_corrections | maintenance_jobs | isolated historical recovery ledger |
  *
  * Do not infer destinations from prefixes, table names, or family semantics.
  * A table not listed here has no proven destination and remains unknown/no-action.
  */
 export const SUPABASE_22_EXPLICIT_LEGACY_DESTINATIONS: Readonly<Record<string, string>> = {
     account_deletion_jobs: 'maintenance_jobs',
+    earlybird_concierge_batch_target_lineage_repairs: 'maintenance_jobs',
+    earlybird_partial_adoption_second_rearms: 'maintenance_jobs',
+    earlybird_profile_evidence_failure_recoveries: 'maintenance_jobs',
+    earlybird_v211_apify_transient_admission_resumes: 'maintenance_jobs',
+    earlybird_v211_concierge_copy_corrections: 'maintenance_jobs',
+    earlybird_v212_concierge_copy_corrections: 'maintenance_jobs',
+    earlybird_v213_concierge_copy_corrections: 'maintenance_jobs',
+    earlybird_v214_concierge_gemini_copy_corrections: 'maintenance_jobs',
     earlybird_webhook_events: 'payment_events',
 };
 

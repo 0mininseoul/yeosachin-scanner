@@ -49,8 +49,21 @@ describe('Supabase 22 retirement inventory generator', () => {
     it('uses only explicit legacy destinations and leaves unproven tables unknown', () => {
         expect(destinationFor('earlybird_webhook_events')).toBe('payment_events');
         expect(destinationFor('account_deletion_jobs')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_concierge_batch_target_lineage_repairs')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_partial_adoption_second_rearms')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_profile_evidence_failure_recoveries')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_v211_apify_transient_admission_resumes')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_v211_concierge_copy_corrections')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_v212_concierge_copy_corrections')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_v213_concierge_copy_corrections')).toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_v214_concierge_gemini_copy_corrections')).toBe('maintenance_jobs');
         expect(destinationFor('payment_orders')).not.toBe('analysis_events');
         expect(destinationFor('payments')).not.toBe('analysis_events');
+        expect(destinationFor('earlybird_webhook_events')).not.toBe('maintenance_jobs');
+        expect(destinationFor('earlybird_fulfillments')).toBeNull();
+        expect(destinationFor('earlybird_payment_discord_outbox')).toBeNull();
+        expect(destinationFor('earlybird_first15_canary_provider_rearms')).toBeNull();
+        expect(destinationFor('earlybird_v211_concierge_publications')).toBeNull();
         expect(destinationFor('payment_event_log')).toBeNull();
         expect(destinationFor('unrelated_legacy_table')).toBeNull();
         expect(dispositionFor('unrelated_legacy_table')).toBe('unknown');
