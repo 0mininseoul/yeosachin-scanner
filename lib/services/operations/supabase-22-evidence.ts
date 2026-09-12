@@ -17,6 +17,20 @@ export const SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA =
     '053d46326e7ecf45c02ebab9ae210ffe66624d00' as const;
 
 /**
+ * The post-deploy package is pinned to the revision whose deployment and
+ * zero-row evidence were supplied by the coordinator.  This is provenance,
+ * not a live deployment probe; the migration independently rechecks the
+ * live catalog and zero-row preconditions before every destructive statement.
+ */
+export const SUPABASE_OPERATIONAL_DEPLOYED_REVISION_SHA =
+    '90a6e6a20ba242afd4526063b0100a49f65caa88' as const;
+export const SUPABASE_OPERATIONAL_DEPLOYMENT_COMPLETED_AT =
+    '2026-09-12T21:33:16Z' as const;
+export const SUPABASE_OPERATIONAL_W1A_ZERO_COUNT_OBSERVED_AT =
+    '2026-09-12T21:42:43.922341Z' as const;
+export const SUPABASE_OPERATIONAL_PUBLIC_BASE_TABLE_COUNT_BEFORE_CONTRACTION = 160 as const;
+
+/**
  * The predeploy package has no reviewed exact contraction manifest.  This gate
  * is intentionally unconditional until the later post-deploy package supplies
  * one from fresh independent production evidence.
@@ -35,11 +49,19 @@ export const SUPABASE_OPERATIONAL_POSTDEPLOY_DEFERRED_EVIDENCE = [
 export const SUPABASE_OPERATIONAL_RETAINED_TABLES = [
     'analysis_jobs', 'analysis_events',
     'analysis_provider_runs', 'analysis_v2_provider_runs',
-    'payment_events', 'payment_pending', 'payments', 'payment_orders',
-    'earlybird_orders', 'pending_analysis', 'maintenance_jobs',
+    'payment_events', 'earlybird_orders', 'maintenance_jobs',
     'analysis_order_audit_assembly_queue', 'analysis_order_audit_bundles',
     'analysis_order_audit_candidates', 'analysis_order_audit_interactions',
     'account_lifecycle',
+] as const;
+
+/**
+ * These historical payment relation names were absent from the supplied
+ * production catalog.  They are intentionally not retained-table
+ * requirements and this package never creates, reads, or mutates them.
+ */
+export const SUPABASE_OPERATIONAL_OUT_OF_SCOPE_PAYMENT_TABLES = [
+    'payment_pending', 'payments', 'payment_orders', 'pending_analysis',
 ] as const;
 
 export const SUPABASE_OPERATIONAL_W1A_UPPER_BOUND = [
@@ -47,6 +69,306 @@ export const SUPABASE_OPERATIONAL_W1A_UPPER_BOUND = [
     'analysis_costs', 'fulfillment_jobs', 'notification_outbox',
     'system_configuration', 'system_leases',
 ] as const;
+
+export const SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA =
+    'supabase-operational-contraction-v1' as const;
+
+/** Corrections supplied after comparing the local fixture with live catalog evidence. */
+export const SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS = Object.freeze({
+    analysisCacheStateConstraint: 'present:analysis_cache_state_check',
+    fulfillmentJobsCheck5: 'absent:fulfillment_jobs_check5',
+    charRoutineIdentity: 'character',
+});
+
+/**
+ * Exact target object inventory derived from the immutable canonical-table
+ * migrations.  Empty policy/view/publication classes are represented by a
+ * sentinel so an unexpected object cannot be silently ignored.  The forward
+ * migration repeats this list as SQL literals because a migration must not
+ * derive destructive targets from caller input or a broad catalog scan.
+ */
+export const SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST = [
+    'table:public.analysis_artifacts',
+    'table:public.analysis_audit_bundles',
+    'table:public.analysis_cache',
+    'table:public.analysis_costs',
+    'table:public.fulfillment_jobs',
+    'table:public.notification_outbox',
+    'table:public.system_configuration',
+    'table:public.system_leases',
+
+    'constraint:public.analysis_artifacts.analysis_artifacts_pkey',
+    'constraint:public.analysis_artifacts.analysis_artifacts_request_id_artifact_key_content_hash_key',
+    'constraint:public.analysis_artifacts.analysis_artifacts_request_id_fkey',
+    'constraint:public.analysis_artifacts.analysis_artifacts_job_id_fkey',
+    'constraint:public.analysis_artifacts.analysis_artifacts_kind_check',
+    'constraint:public.analysis_artifacts.analysis_artifacts_state_check',
+    'constraint:public.analysis_artifacts.analysis_artifacts_content_hash_check',
+    'constraint:public.analysis_artifacts.analysis_artifacts_payload_check',
+    'constraint:public.analysis_costs.analysis_costs_pkey',
+    'constraint:public.analysis_costs.analysis_costs_request_id_fkey',
+    'constraint:public.analysis_costs.analysis_costs_amount_known_check',
+    'constraint:public.analysis_costs.analysis_costs_amount_conservative_check',
+    'constraint:public.analysis_costs.analysis_costs_check',
+    'constraint:public.analysis_costs.analysis_costs_check1',
+    'constraint:public.analysis_costs.analysis_costs_source_hash_check',
+    'constraint:public.analysis_costs.analysis_costs_payload_check',
+    'constraint:public.analysis_cache.analysis_cache_pkey',
+    'constraint:public.analysis_cache.analysis_cache_request_id_fkey',
+    'constraint:public.analysis_cache.analysis_cache_request_id_scope_cache_key_hash_key',
+    'constraint:public.analysis_cache.analysis_cache_scope_check',
+    'constraint:public.analysis_cache.analysis_cache_cache_key_hash_check',
+    'constraint:public.analysis_cache.analysis_cache_state_check',
+    'constraint:public.analysis_cache.analysis_cache_single_flight_token_hash_check',
+    'constraint:public.analysis_cache.analysis_cache_payload_check',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_pkey',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_request_id_fkey',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_request_id_version_kind_content_hash_key',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_version_check',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_kind_check',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_state_check',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_content_hash_check',
+    'constraint:public.analysis_audit_bundles.analysis_audit_bundles_payload_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_pkey',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_order_id_key',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_request_id_key',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_order_id_fkey',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_request_id_fkey',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_state_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_attempt_count_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_lease_generation_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_payload_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_check',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_check1',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_check2',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_check3',
+    'constraint:public.fulfillment_jobs.fulfillment_jobs_check4',
+    'constraint:public.notification_outbox.notification_outbox_pkey',
+    'constraint:public.notification_outbox.notification_outbox_dedupe_key_key',
+    'constraint:public.notification_outbox.notification_outbox_channel_check',
+    'constraint:public.notification_outbox.notification_outbox_state_check',
+    'constraint:public.notification_outbox.notification_outbox_attempt_count_check',
+    'constraint:public.notification_outbox.notification_outbox_lease_generation_check',
+    'constraint:public.notification_outbox.notification_outbox_lease_holder_hash_check',
+    'constraint:public.notification_outbox.notification_outbox_content_hash_check',
+    'constraint:public.notification_outbox.notification_outbox_payload_check',
+    'constraint:public.system_configuration.system_configuration_pkey',
+    'constraint:public.system_configuration.system_configuration_version_check',
+    'constraint:public.system_configuration.system_configuration_state_check',
+    'constraint:public.system_configuration.system_configuration_content_hash_check',
+    'constraint:public.system_configuration.system_configuration_config_check',
+    'constraint:public.system_leases.system_leases_pkey',
+    'constraint:public.system_leases.system_leases_kind_check',
+    'constraint:public.system_leases.system_leases_generation_check',
+    'constraint:public.system_leases.system_leases_state_check',
+    'constraint:public.system_leases.system_leases_holder_hash_check',
+    'constraint:public.system_leases.system_leases_fence_token_check',
+    'constraint:public.system_leases.system_leases_payload_check',
+
+    'index:public.analysis_artifacts.analysis_artifacts_pkey',
+    'index:public.analysis_artifacts.analysis_artifacts_request_id_artifact_key_content_hash_key',
+    'index:public.analysis_artifacts.analysis_artifacts_request_kind_idx',
+    'index:public.analysis_costs.analysis_costs_pkey',
+    'index:public.analysis_costs.analysis_costs_request_recorded_idx',
+    'index:public.analysis_costs.analysis_costs_request_idempotency_idx',
+    'index:public.analysis_cache.analysis_cache_pkey',
+    'index:public.analysis_cache.analysis_cache_request_id_scope_cache_key_hash_key',
+    'index:public.analysis_cache.analysis_cache_expiry_idx',
+    'index:public.analysis_cache.analysis_cache_request_updated_idx',
+    'index:public.analysis_audit_bundles.analysis_audit_bundles_pkey',
+    'index:public.analysis_audit_bundles.analysis_audit_bundles_request_id_version_kind_content_hash_key',
+    'index:public.analysis_audit_bundles.analysis_audit_request_version_idx',
+    'index:public.analysis_audit_bundles.analysis_audit_request_idempotency_idx',
+    'index:public.fulfillment_jobs.fulfillment_jobs_pkey',
+    'index:public.fulfillment_jobs.fulfillment_jobs_order_id_key',
+    'index:public.fulfillment_jobs.fulfillment_jobs_request_id_key',
+    'index:public.fulfillment_jobs.fulfillment_jobs_recovery_idx',
+    'index:public.notification_outbox.notification_outbox_pkey',
+    'index:public.notification_outbox.notification_outbox_dedupe_key_key',
+    'index:public.notification_outbox.notification_outbox_delivery_idx',
+    'index:public.system_configuration.system_configuration_pkey',
+    'index:public.system_configuration.system_configuration_effective_idx',
+    'index:public.system_leases.system_leases_pkey',
+    'index:public.system_leases.system_leases_expiry_idx',
+
+    'routine:public.append_analysis_canonical_artifact(uuid,uuid,text,text,text,text,jsonb,text)',
+    'routine:public.apply_analysis_canonical_backfill_row(text,text,text,text,text,uuid,jsonb)',
+    'routine:public.append_analysis_canonical_audit(uuid,integer,text,text,integer,text,text,text,jsonb,text)',
+    'routine:public.append_analysis_canonical_late_cost_audit(uuid,text,text,text,character,numeric,numeric,boolean,text,text,jsonb,text,text,jsonb,text)',
+    'routine:public.upsert_analysis_canonical_cache(uuid,text,text,text,timestamptz,text,jsonb)',
+    'routine:public.append_analysis_canonical_cost(uuid,text,text,text,character,numeric,numeric,boolean,text,jsonb,text,text)',
+    'routine:public.enqueue_analysis_canonical_retry(uuid,text)',
+    'routine:public.load_analysis_canonical_family(uuid,text)',
+    'routine:public.upsert_fulfillment_job_v1(uuid,uuid,text,smallint,bigint,uuid,timestamptz,timestamptz,text,jsonb,timestamptz,timestamptz,timestamptz,timestamptz)',
+    'routine:public.enqueue_notification_v1(text,text,text,jsonb,text,boolean)',
+    'routine:public.claim_notification_outbox_v1(integer,text,integer)',
+    'routine:public.finish_notification_outbox_v1(uuid,uuid,bigint,text,text,integer)',
+    'routine:public.reconcile_stale_notification_outbox_v1(integer)',
+    'routine:public.list_notification_outbox_v1(integer)',
+    'routine:public.list_notification_legacy_outbox_v1(integer)',
+    'routine:public.canonical_system_configuration_json(jsonb)',
+    'routine:public.record_system_configuration_v1(text,integer,text,jsonb,text,timestamptz)',
+    'routine:public.acquire_system_lease_v1(text,text,text,integer)',
+
+    'trigger:public.analysis_costs.analysis_costs_append_only',
+    'trigger:public.analysis_audit_bundles.analysis_audit_bundles_append_only',
+    'trigger:public.system_configuration.system_configuration_immutable',
+    'sequence:public.analysis_costs_id_seq',
+
+    'acl:table:public.analysis_artifacts:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.analysis_audit_bundles:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.analysis_cache:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.analysis_costs:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.fulfillment_jobs:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.notification_outbox:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.system_configuration:PUBLIC,anon,authenticated,service_role',
+    'acl:table:public.system_leases:PUBLIC,anon,authenticated,service_role',
+    'acl:column:public.analysis_artifacts.id:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.request_id:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.job_id:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.kind:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.artifact_key:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.state:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.content_hash:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.payload:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.retention_class:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.created_at:service_role:SELECT',
+    'acl:column:public.analysis_artifacts.updated_at:service_role:SELECT',
+    'acl:column:public.analysis_costs.id:service_role:SELECT',
+    'acl:column:public.analysis_costs.request_id:service_role:SELECT',
+    'acl:column:public.analysis_costs.provider:service_role:SELECT',
+    'acl:column:public.analysis_costs.operation_key:service_role:SELECT',
+    'acl:column:public.analysis_costs.stage:service_role:SELECT',
+    'acl:column:public.analysis_costs.currency:service_role:SELECT',
+    'acl:column:public.analysis_costs.amount_known:service_role:SELECT',
+    'acl:column:public.analysis_costs.amount_conservative:service_role:SELECT',
+    'acl:column:public.analysis_costs.usage_unknown:service_role:SELECT',
+    'acl:column:public.analysis_costs.source_hash:service_role:SELECT',
+    'acl:column:public.analysis_costs.idempotency_key:service_role:SELECT',
+    'acl:column:public.analysis_costs.payload:service_role:SELECT',
+    'acl:column:public.analysis_costs.retention_class:service_role:SELECT',
+    'acl:column:public.analysis_costs.recorded_at:service_role:SELECT',
+    'acl:routine:public.append_analysis_canonical_artifact:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.apply_analysis_canonical_backfill_row:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.append_analysis_canonical_audit:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.append_analysis_canonical_late_cost_audit:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.upsert_analysis_canonical_cache:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.append_analysis_canonical_cost:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.enqueue_analysis_canonical_retry:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.load_analysis_canonical_family:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.upsert_fulfillment_job_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.enqueue_notification_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.claim_notification_outbox_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.finish_notification_outbox_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.reconcile_stale_notification_outbox_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.list_notification_outbox_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.list_notification_legacy_outbox_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.canonical_system_configuration_json:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.record_system_configuration_v1:PUBLIC,anon,authenticated,service_role',
+    'acl:routine:public.acquire_system_lease_v1:PUBLIC,anon,authenticated,service_role',
+
+    'policy:none:public.analysis_artifacts',
+    'policy:none:public.analysis_audit_bundles',
+    'policy:none:public.analysis_cache',
+    'policy:none:public.analysis_costs',
+    'policy:none:public.fulfillment_jobs',
+    'policy:none:public.notification_outbox',
+    'policy:none:public.system_configuration',
+    'policy:none:public.system_leases',
+    'view:none:public.analysis_artifacts',
+    'view:none:public.analysis_audit_bundles',
+    'view:none:public.analysis_cache',
+    'view:none:public.analysis_costs',
+    'view:none:public.fulfillment_jobs',
+    'view:none:public.notification_outbox',
+    'view:none:public.system_configuration',
+    'view:none:public.system_leases',
+    'publication:none:public.analysis_artifacts',
+    'publication:none:public.analysis_audit_bundles',
+    'publication:none:public.analysis_cache',
+    'publication:none:public.analysis_costs',
+    'publication:none:public.fulfillment_jobs',
+    'publication:none:public.notification_outbox',
+    'publication:none:public.system_configuration',
+    'publication:none:public.system_leases',
+] as const;
+
+export function hashSupabaseOperationalContractionAllowlist(
+    values: readonly string[] = SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST,
+): string {
+    return createHash('sha256')
+        // Use code-unit ordering so the digest is independent of host locale
+        // and matches SQL's explicit C-collation ordering in the migration.
+        .update([...values].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)).join('\n'), 'utf8')
+        .digest('hex');
+}
+
+export const SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST_SHA256 =
+    hashSupabaseOperationalContractionAllowlist();
+
+/**
+ * Static caller scan scope used by the post-deploy manifest. Tests, docs,
+ * immutable migrations, and reports are not runtime callers; their historical
+ * references remain available for audit and restore purposes.
+ */
+export const SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE = Object.freeze({
+    roots: ['app', 'components', 'hooks', 'lib', 'middleware.ts'] as const,
+    excludedSuffixes: ['.test.ts', '.test.tsx', '.spec.ts', '.spec.tsx'] as const,
+    excludedRoots: ['docs', 'reports', 'supabase/migrations'] as const,
+});
+
+export const SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_COUNTS: Readonly<
+    Record<(typeof SUPABASE_OPERATIONAL_W1A_UPPER_BOUND)[number], 0>
+> = Object.freeze(
+    Object.fromEntries(SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.map(name => [name, 0])) as Record<
+        (typeof SUPABASE_OPERATIONAL_W1A_UPPER_BOUND)[number],
+        0
+    >,
+);
+export const SUPABASE_OPERATIONAL_ROLLBACK_ARTIFACT =
+    'supabase/operations/20260913_restore_supabase_operational_w1a.sql' as const;
+export const SUPABASE_OPERATIONAL_REMAINING_PRODUCTION_GATES = [
+    'operator independently rechecks the pinned revision and observation timestamps',
+    'operator confirms the committed manifest and immutable migration source match the pinned review',
+    'operator runs the forward migration through the exact allowlisted migration path',
+    'operator verifies the post-migration catalog and retained-object contract',
+] as const;
+
+export type SupabaseOperationalContractionManifest = Readonly<{
+    schemaVersion: typeof SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA;
+    policySchemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
+    evidenceSource: 'coordinator-supplied-read-only';
+    policySourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
+    deployedRevisionSha: typeof SUPABASE_OPERATIONAL_DEPLOYED_REVISION_SHA;
+    deploymentCompletedAt: typeof SUPABASE_OPERATIONAL_DEPLOYMENT_COMPLETED_AT;
+    evidenceObservedAt: typeof SUPABASE_OPERATIONAL_W1A_ZERO_COUNT_OBSERVED_AT;
+    publicBaseTableCountBeforeContraction: typeof SUPABASE_OPERATIONAL_PUBLIC_BASE_TABLE_COUNT_BEFORE_CONTRACTION;
+    liveCatalogCorrections: typeof SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS;
+    approvedSubset: readonly (typeof SUPABASE_OPERATIONAL_W1A_UPPER_BOUND[number])[];
+    deferredReasons: Readonly<Record<string, string>>;
+    exactZeroCounts: Readonly<Record<(typeof SUPABASE_OPERATIONAL_W1A_UPPER_BOUND)[number], 0>>;
+    runtimeCallerCounts: Readonly<Record<(typeof SUPABASE_OPERATIONAL_W1A_UPPER_BOUND)[number], 0>>;
+    retainedTables: readonly string[];
+    outOfScopePaymentTables: readonly string[];
+    noCascadeAllowlist: readonly string[];
+    noCascadeAllowlistHash: typeof SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST_SHA256;
+    staticCallerScope: typeof SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE;
+    rollbackArtifact: string;
+    remainingProductionGates: readonly string[];
+    productionMutation: 'none';
+}>;
+
+export type SupabaseOperationalContractionEvaluation = Readonly<{
+    schemaVersion: typeof SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA;
+    status: 'ready' | 'blocked';
+    policyReadiness: 'ready-for-review' | 'blocked';
+    missingGates: readonly string[];
+    approvedSubset: readonly string[];
+    deferredReasons: Readonly<Record<string, string>>;
+    noCascadeAllowlistHash: string | null;
+    migrationApplied: false;
+    productionMutation: 'none';
+}>;
 
 /** Objects whose retention/non-mutation must be proven before contraction. */
 export const SUPABASE_OPERATIONAL_FORBIDDEN_W1A = [
@@ -2822,4 +3144,225 @@ export function isPaymentPendingDispositionRecorded(
         && evidence.dispositionRecordedCount >= 0
         && evidence.independentlyEvidencedCount === evidence.pendingOrderCount
         && evidence.dispositionRecordedCount === evidence.pendingOrderCount;
+}
+
+const SUPABASE_OPERATIONAL_CONTRACTION_MANIFEST_KEYS = [
+    'schemaVersion', 'policySchemaVersion', 'evidenceSource', 'policySourceSha',
+    'deployedRevisionSha', 'deploymentCompletedAt', 'evidenceObservedAt',
+    'publicBaseTableCountBeforeContraction', 'liveCatalogCorrections', 'approvedSubset', 'deferredReasons',
+    'exactZeroCounts', 'runtimeCallerCounts', 'retainedTables',
+    'outOfScopePaymentTables', 'noCascadeAllowlist', 'noCascadeAllowlistHash',
+    'staticCallerScope', 'rollbackArtifact', 'remainingProductionGates', 'productionMutation',
+] as const;
+
+function hasExactObjectKeys(
+    value: Record<string, unknown>,
+    keys: readonly string[],
+): boolean {
+    return Object.keys(value).length === keys.length
+        && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function parseZeroCountMap(
+    value: unknown,
+    errorCode: string,
+): Record<string, 0> {
+    if (!isRecord(value)
+        || Object.keys(value).length !== SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.length) {
+        throw new Error(errorCode);
+    }
+    const result: Record<string, 0> = {};
+    for (const name of SUPABASE_OPERATIONAL_W1A_UPPER_BOUND) {
+        if (!Object.prototype.hasOwnProperty.call(value, name)
+            || value[name] !== 0) {
+            throw new Error(errorCode);
+        }
+        result[name] = 0;
+    }
+    if (Object.keys(value).some(name => !SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(name as never))) {
+        throw new Error(errorCode);
+    }
+    return result;
+}
+
+/**
+ * Parse the fixed post-deploy evidence envelope without accepting caller
+ * supplied hashes, extra object names, or partial zero-count maps. The
+ * coordinator-supplied deployment/row observations are provenance only; the
+ * SQL migration repeats the live catalog and count checks before any drop.
+ */
+export function parseSupabaseOperationalContractionManifest(
+    value: unknown,
+): SupabaseOperationalContractionManifest {
+    if (!isRecord(value)
+        || !hasExactObjectKeys(value, SUPABASE_OPERATIONAL_CONTRACTION_MANIFEST_KEYS)
+        || value.schemaVersion !== SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA
+        || value.policySchemaVersion !== SUPABASE_OPERATIONAL_POLICY_SCHEMA
+        || value.evidenceSource !== 'coordinator-supplied-read-only'
+        || value.policySourceSha !== SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA
+        || value.deployedRevisionSha !== SUPABASE_OPERATIONAL_DEPLOYED_REVISION_SHA
+        || value.deploymentCompletedAt !== SUPABASE_OPERATIONAL_DEPLOYMENT_COMPLETED_AT
+        || value.evidenceObservedAt !== SUPABASE_OPERATIONAL_W1A_ZERO_COUNT_OBSERVED_AT
+        || value.publicBaseTableCountBeforeContraction !== SUPABASE_OPERATIONAL_PUBLIC_BASE_TABLE_COUNT_BEFORE_CONTRACTION
+        || value.productionMutation !== 'none') {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_MANIFEST_INVALID');
+    }
+    if (!isRecord(value.liveCatalogCorrections)
+        || !hasExactObjectKeys(value.liveCatalogCorrections, [
+            'analysisCacheStateConstraint', 'fulfillmentJobsCheck5', 'charRoutineIdentity',
+        ])
+        || value.liveCatalogCorrections.analysisCacheStateConstraint
+            !== SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.analysisCacheStateConstraint
+        || value.liveCatalogCorrections.fulfillmentJobsCheck5
+            !== SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.fulfillmentJobsCheck5
+        || value.liveCatalogCorrections.charRoutineIdentity
+            !== SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.charRoutineIdentity) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_CATALOG_CORRECTIONS_INVALID');
+    }
+    const approvedSubset = Array.isArray(value.approvedSubset)
+        ? value.approvedSubset.filter((name): name is string => typeof name === 'string')
+        : [];
+    if (!Array.isArray(value.approvedSubset)
+        || approvedSubset.length === 0
+        || approvedSubset.length !== value.approvedSubset.length
+        || new Set(approvedSubset).size !== approvedSubset.length
+        || approvedSubset.some(name => !SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(name as never))) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_SUBSET_INVALID');
+    }
+    const deferredReasons = value.deferredReasons;
+    if (!isRecord(deferredReasons)
+        || Object.keys(deferredReasons).some(name => !SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(name as never))
+        || Object.keys(deferredReasons).some(name => approvedSubset.includes(name)
+            || typeof deferredReasons[name] !== 'string'
+            || (deferredReasons[name] as string).trim().length === 0)
+        || SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.some(name => !approvedSubset.includes(name)
+            && !Object.prototype.hasOwnProperty.call(deferredReasons, name))) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_DEFERRED_INVALID');
+    }
+    const exactZeroCounts = parseZeroCountMap(
+        value.exactZeroCounts,
+        'SUPABASE_OPERATIONAL_CONTRACTION_ZERO_COUNTS_INVALID',
+    );
+    const runtimeCallerCounts = parseZeroCountMap(
+        value.runtimeCallerCounts,
+        'SUPABASE_OPERATIONAL_CONTRACTION_CALLERS_INVALID',
+    );
+    if (!Array.isArray(value.retainedTables)
+        || !sameStringSet(value.retainedTables.filter((entry): entry is string => typeof entry === 'string'), SUPABASE_OPERATIONAL_RETAINED_TABLES)
+        || value.retainedTables.some(entry => typeof entry !== 'string')) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_RETAINED_INVALID');
+    }
+    if (!Array.isArray(value.outOfScopePaymentTables)
+        || !sameStringSet(value.outOfScopePaymentTables.filter((entry): entry is string => typeof entry === 'string'), SUPABASE_OPERATIONAL_OUT_OF_SCOPE_PAYMENT_TABLES)
+        || value.outOfScopePaymentTables.some(entry => typeof entry !== 'string')) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_PAYMENT_SCOPE_INVALID');
+    }
+    if (!Array.isArray(value.noCascadeAllowlist)
+        || new Set(value.noCascadeAllowlist).size !== value.noCascadeAllowlist.length
+        || value.noCascadeAllowlist.some(entry => typeof entry !== 'string')
+        || !sameStringSet(value.noCascadeAllowlist.filter((entry): entry is string => typeof entry === 'string'), SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST)
+        || typeof value.noCascadeAllowlistHash !== 'string'
+        || value.noCascadeAllowlistHash !== SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST_SHA256
+        || value.noCascadeAllowlistHash !== hashSupabaseOperationalContractionAllowlist(value.noCascadeAllowlist)) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST_INVALID');
+    }
+    if (!isRecord(value.staticCallerScope)
+        || !hasExactObjectKeys(value.staticCallerScope, ['roots', 'excludedSuffixes', 'excludedRoots'])
+        || !sameStringSet(value.staticCallerScope.roots as string[], SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.roots)
+        || !sameStringSet(value.staticCallerScope.excludedSuffixes as string[], SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.excludedSuffixes)
+        || !sameStringSet(value.staticCallerScope.excludedRoots as string[], SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.excludedRoots)) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_CALLER_SCOPE_INVALID');
+    }
+    if (value.rollbackArtifact !== SUPABASE_OPERATIONAL_ROLLBACK_ARTIFACT) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_ROLLBACK_INVALID');
+    }
+    if (!Array.isArray(value.remainingProductionGates)
+        || !sameStringSet(value.remainingProductionGates.filter((entry): entry is string => typeof entry === 'string'), SUPABASE_OPERATIONAL_REMAINING_PRODUCTION_GATES)
+        || value.remainingProductionGates.some(entry => typeof entry !== 'string')) {
+        throw new Error('SUPABASE_OPERATIONAL_CONTRACTION_GATES_INVALID');
+    }
+    return {
+        schemaVersion: SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA,
+        policySchemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        evidenceSource: 'coordinator-supplied-read-only',
+        policySourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+        deployedRevisionSha: SUPABASE_OPERATIONAL_DEPLOYED_REVISION_SHA,
+        deploymentCompletedAt: SUPABASE_OPERATIONAL_DEPLOYMENT_COMPLETED_AT,
+        evidenceObservedAt: SUPABASE_OPERATIONAL_W1A_ZERO_COUNT_OBSERVED_AT,
+        publicBaseTableCountBeforeContraction: SUPABASE_OPERATIONAL_PUBLIC_BASE_TABLE_COUNT_BEFORE_CONTRACTION,
+        liveCatalogCorrections: {
+            analysisCacheStateConstraint:
+                SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.analysisCacheStateConstraint,
+            fulfillmentJobsCheck5:
+                SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.fulfillmentJobsCheck5,
+            charRoutineIdentity:
+                SUPABASE_OPERATIONAL_LIVE_CATALOG_CORRECTIONS.charRoutineIdentity,
+        },
+        approvedSubset: [...approvedSubset] as SupabaseOperationalContractionManifest['approvedSubset'],
+        deferredReasons: Object.entries(deferredReasons).sort(([left], [right]) => left.localeCompare(right))
+            .reduce<Record<string, string>>((result, [name, reason]) => {
+                result[name] = reason as string;
+                return result;
+            }, {}),
+        exactZeroCounts: exactZeroCounts as SupabaseOperationalContractionManifest['exactZeroCounts'],
+        runtimeCallerCounts: runtimeCallerCounts as SupabaseOperationalContractionManifest['runtimeCallerCounts'],
+        retainedTables: [...value.retainedTables] as string[],
+        outOfScopePaymentTables: [...value.outOfScopePaymentTables] as string[],
+        noCascadeAllowlist: [...value.noCascadeAllowlist] as string[],
+        noCascadeAllowlistHash: SUPABASE_OPERATIONAL_CONTRACTION_ALLOWLIST_SHA256,
+        staticCallerScope: {
+            roots: [...SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.roots],
+            excludedSuffixes: [...SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.excludedSuffixes],
+            excludedRoots: [...SUPABASE_OPERATIONAL_W1A_RUNTIME_CALLER_SCOPE.excludedRoots],
+        },
+        rollbackArtifact: SUPABASE_OPERATIONAL_ROLLBACK_ARTIFACT,
+        remainingProductionGates: [...SUPABASE_OPERATIONAL_REMAINING_PRODUCTION_GATES],
+        productionMutation: 'none',
+    };
+}
+
+/**
+ * Evaluate only the fixed post-deploy envelope. A ready result means the
+ * evidence package is internally complete and reviewable; it does not apply
+ * a migration and never reports that production was changed.
+ */
+export function evaluateSupabaseOperationalContractionManifest(
+    value: unknown,
+): SupabaseOperationalContractionEvaluation {
+    try {
+        const manifest = parseSupabaseOperationalContractionManifest(value);
+        const missingGates: string[] = [];
+        if (manifest.approvedSubset.length !== SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.length) {
+            missingGates.push('approved-subset-incomplete');
+        }
+        if (manifest.deferredReasons && Object.keys(manifest.deferredReasons).length > 0) {
+            missingGates.push('deferred-family');
+        }
+        return {
+            schemaVersion: SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA,
+            status: missingGates.length === 0 ? 'ready' : 'blocked',
+            policyReadiness: missingGates.length === 0 ? 'ready-for-review' : 'blocked',
+            missingGates,
+            approvedSubset: [...manifest.approvedSubset],
+            deferredReasons: manifest.deferredReasons,
+            noCascadeAllowlistHash: manifest.noCascadeAllowlistHash,
+            migrationApplied: false,
+            productionMutation: 'none',
+        };
+    } catch (error) {
+        const missingGate = error instanceof Error && error.message.length > 0
+            ? error.message.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+            : 'manifest-invalid';
+        return {
+            schemaVersion: SUPABASE_OPERATIONAL_CONTRACTION_SCHEMA,
+            status: 'blocked',
+            policyReadiness: 'blocked',
+            missingGates: [missingGate],
+            approvedSubset: [],
+            deferredReasons: {},
+            noCascadeAllowlistHash: null,
+            migrationApplied: false,
+            productionMutation: 'none',
+        };
+    }
 }
