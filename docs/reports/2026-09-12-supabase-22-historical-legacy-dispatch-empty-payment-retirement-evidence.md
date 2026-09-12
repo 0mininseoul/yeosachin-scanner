@@ -4,6 +4,13 @@ Status: `READY_FOR_REVIEW_NOT_APPLIED`
 
 Reviewed base SHA: `e9c7abe3df0d0569b8eda178b42382e1e8789de2`
 
+Reviewed final implementation SHA: `fbec3733b6899243e9934345bf5cd7b5873fde86`
+
+Independent final review: no Critical SQL finding; the coordinator closes the
+required handoff clarification below with an explicit pre-apply baseline and
+post-apply comparison. The migration and restore SQL are unchanged by this
+documentation clarification.
+
 Predecessor schema SHA: `60423b338d6f8f617c2c1457405bda719c3cf02b`
 
 This report records the production read-only decision and the local
@@ -190,6 +197,10 @@ cp "$MIGRATION" "$ROLLOUT_CLI_WORKDIR/supabase/migrations/"
 test "$(find "$ROLLOUT_CLI_WORKDIR/supabase/migrations" -maxdepth 1 -type f -name '*.sql' ! -size 0c -exec basename {} \; | sort)" = "$(basename "$MIGRATION")"
 test "$(find "$ROLLOUT_CLI_WORKDIR/supabase/migrations" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "387"
 
+# PRE-APPLY baseline: retain this sanitized JSON for the comparison below.
+# Run all linked CLI commands serially, including queries from other workers.
+npx --yes supabase@2.102.0 db query --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json --file "$VERIFY"
+
 # Read-only dry run, before any approval to apply:
 npx --yes supabase@2.102.0 db push --workdir "$ROLLOUT_CLI_WORKDIR" --linked --dry-run
 
@@ -203,8 +214,15 @@ query and rerun the evidence operation:
 ```sh
 npx --yes supabase@2.102.0 db query --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json \
   "SELECT count(*) AS migration_history_occurrences FROM supabase_migrations.schema_migrations WHERE version = '20260912070144';"
+# POST-APPLY evidence: compare pending_analysis and all six payment_wrappers
+# byte-for-byte with PRE-APPLY; require the documented count/presence changes.
 npx --yes supabase@2.102.0 db query --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json --file "$VERIFY"
 ```
+
+Capture this intermediate post-apply evidence before separately applying the
+pending-analysis retirement: this operation intentionally requires the original
+pending table to exist. When composing a larger rollout, preserve this ordering
+and refresh the exact migration allowlist/history count for each application.
 
 For disposable restore only, provide the connection to that disposable
 database outside this report, set the isolation flag in the same SQL session,

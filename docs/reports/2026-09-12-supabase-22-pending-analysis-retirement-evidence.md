@@ -58,9 +58,9 @@ unrelated maintenance rows remain NULL.
 
 - Zero dependent views, zero dependent routines, zero routine-body mentions,
   zero view-body mentions, zero user triggers, and zero publication
-  memberships. The local app, lib, scripts, and supabase/operations caller
-  scan found no callers; only the existing inventory denylist names this
-  legacy table.
+  memberships. The local app, lib, and scripts scan found no active runtime
+  callers. Inventory/retirement tooling and the explicitly isolated restore
+  operation still name the legacy table; these are not live service callers.
 - The source has RLS enabled and not forced, two existing owner policies
   (INSERT and SELECT, both auth.uid() = user_id for PUBLIC), and the legacy
   broad table ACL observed in production.
@@ -69,6 +69,19 @@ unrelated maintenance rows remain NULL.
   archive rows.
 
 ## Preservation and retirement contract
+
+Independent review of implementation `cc751644e0875b957ca6f91a9b5633e9ad3aa0d7`
+and evidence `95719b31186b2effc63d1a14ccb6aaaedb9feddf` is conditional on this
+coordinator-owned hard gate immediately before merge/apply: require exactly one
+validated source FK whose local key is the actual `pending_analysis.user_id`
+attribute, referenced key is the actual `auth.users.id` attribute, and delete
+action is CASCADE. Require exactly the three validated source CHECK definitions
+for plan (basic/standard), status (awaiting_payment/paid/refunded/expired), and
+gender (male/female), matching this restore operation. Stop on mismatch or
+unavailable evidence; an earlier snapshot is not sufficient. Root's serialized
+catalog query at 2026-09-12 08:26 UTC passed all these checks. This explicit
+operational gate is the reviewer's accepted minimal alternative to adding a new
+validation framework. No production mutation was performed by that check.
 
 Each source row becomes one immutable canonical row with:
 
