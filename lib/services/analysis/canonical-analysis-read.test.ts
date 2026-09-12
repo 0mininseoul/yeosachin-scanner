@@ -1,514 +1,58 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
+import { describe, expect, it, vi } from 'vitest';
 import {
-    CANONICAL_READ_MAX_ROWS,
+    ANALYSIS_CANONICAL_READ_FLAGS,
     analysisCanonicalReadEnabled,
     buildAnalysisParity,
-    compareAnalysisCanonicalProjection,
     createAnalysisCanonicalReadStore,
-    nextAnalysisCanonicalAuditVersion,
 } from './canonical-analysis-read';
 
-const requestId = '123e4567-e89b-42d3-a456-426614174000';
+const REQUEST_ID = '423e4567-e89b-42d3-a456-426614174001';
 
-afterEach(() => {
-    vi.unstubAllEnvs();
-});
-
-describe('analysis canonical shadow reads', () => {
-    it('bounds a canonical family load that never settles', async () => {
-        vi.useFakeTimers();
-        try {
-            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-            const store = createAnalysisCanonicalReadStore({
-                rpc: vi.fn(() => new Promise<never>(() => undefined)),
-            });
-            const load = store.loadRequest(requestId, 'jobs');
-            const rejected = expect(load).rejects.toMatchObject({ code: 'CANONICAL_MIRROR_TIMEOUT' });
-
-            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
-            await rejected;
-        } finally {
-            vi.useRealTimers();
-        }
-    });
-
-    it('fails open to legacy when the shadow projection never settles', async () => {
-        vi.useFakeTimers();
-        try {
-            vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-            const onMismatch = vi.fn();
-            const store = createAnalysisCanonicalReadStore({
-                rpc: vi.fn(async () => ({ data: {}, error: null })),
-            }, { onMismatch });
-            const legacy = { requestStatus: 'completed' };
-            const read = store.shadowRead({
-                family: 'jobs',
-                legacy: async () => legacy,
-                canonical: async () => new Promise<never>(() => undefined),
-                compare: () => ({ status: 'match', mismatchPaths: [] }),
-            });
-
-            await vi.advanceTimersByTimeAsync(CANONICAL_MIRROR_TIMEOUT_MS);
-            await expect(read).resolves.toEqual(legacy);
-            expect(onMismatch).toHaveBeenCalledWith({
-                family: 'jobs',
-                summary: { status: 'blocked', mismatchPaths: ['canonical.error'] },
-            });
-        } finally {
-            vi.useRealTimers();
-        }
-    });
-
-    it('does not allow a partial projection to report a parity match', () => {
-        expect(compareAnalysisCanonicalProjection(
-            { requestStatus: 'completed' },
-            { requestStatus: 'completed' },
-        )).toEqual({
-            status: 'blocked',
-            mismatchPaths: ['comparison.required'],
+describe('retained analysis jobs/events canonical reader', () => {
+    it('uses separate retained jobs/events read flags', () => {
+        expect(ANALYSIS_CANONICAL_READ_FLAGS).toEqual({
+            jobs: 'ANALYSIS_CANONICAL_JOBS_READ',
+            events: 'ANALYSIS_CANONICAL_EVENTS_READ',
         });
-    });
-
-    it('compares candidate, interaction, order, cost, retention, unknown-source, and every family row', () => {
-        const projection = {
-            schemaVersion: 1,
-            requestId,
-            requestStatus: 'completed',
-            ownership: 'owned',
-            state: 'completed',
-            counts: {
-                detectedMutuals: 1,
-                publicMutuals: 1,
-                privateMutuals: 0,
-                screenedMutuals: 1,
-                candidates: 1,
-                interactions: 1,
-            },
-            candidate: [{ key: 'candidate:1', ordinal: 1, rank: 1, score: 8.2, state: 'included', contentHash: 'd'.repeat(64) }],
-            interaction: [{ key: 'interaction:1', candidateKey: 'candidate:1', signal: 'comment', occurredAt: null, evidenceId: 'evidence:1', contentHash: 'e'.repeat(64) }],
-            order: [{ key: 'candidate:1', list: 'female', ordinal: 1, rank: 1 }],
-            orderHash: 'b'.repeat(64),
-            contentHash: 'c'.repeat(64),
-            progress: null,
-            result: { rank: 1, score: 8.2 },
-            providerOperation: 'provider:1',
-            cost: {
-                amountKnown: 0.12,
-                amountConservative: 0.12,
-                usageUnknown: false,
-                sourceHash: 'a'.repeat(64),
-            },
-            retention: 'permanent',
-            auditRetention: 'permanent',
-            unknownSource: false,
-            evidence: {
-                targetManifests: [{
-                    key: 'manifest:1',
-                    inputHash: 'a'.repeat(64),
-                    likerSourceHash: 'b'.repeat(64),
-                    commentSourceHash: 'c'.repeat(64),
-                    resultHash: 'f'.repeat(64),
-                    interactorCount: 1,
-                    likerCount: 1,
-                    commentCount: 0,
-                    retention: 'permanent',
-                }],
-                targetInteractions: [],
-            },
-            familyRows: {
-                jobs: [],
-                events: [],
-                artifacts: [],
-                costs: [],
-                caches: [],
-                audits: [],
-            },
-        };
-        expect(compareAnalysisCanonicalProjection(projection, projection)).toEqual({
-            status: 'match',
-            mismatchPaths: [],
-        });
-        expect(compareAnalysisCanonicalProjection(
-            { ...projection, candidate: [] },
-            { ...projection, candidate: [] },
-        )).toEqual({
-            status: 'blocked',
-            mismatchPaths: ['comparison.required'],
-        });
-        expect(compareAnalysisCanonicalProjection(
-            { ...projection, unknownSource: true },
-            { ...projection, unknownSource: true },
-        )).toEqual({
-            status: 'blocked',
-            mismatchPaths: ['unknownSource'],
-        });
-        expect(compareAnalysisCanonicalProjection(
-            projection,
-            {
-                ...projection,
-                candidate: [{ key: 'candidate:2', rank: 1, score: 8.2 }],
-                interaction: [{ key: 'interaction:2', count: 2 }],
-                order: [{ key: 'candidate:2', ordinal: 2 }],
-                cost: { ...projection.cost, amountKnown: 0.13 },
-                retention: 'fenced',
-                unknownSource: true,
-                familyRows: {
-                    ...projection.familyRows,
-                    audits: [{
-                        id: '123e4567-e89b-42d3-a456-426614174010',
-                        request_id: requestId,
-                        version: 1,
-                        kind: 'bundle',
-                        candidate_key: null,
-                        ordinal: null,
-                        state: 'complete',
-                        content_hash: 'a'.repeat(64),
-                        idempotency_key: null,
-                        retention_class: 'permanent',
-                        payload: { schemaVersion: 1 },
-                        created_at: '2026-09-09T20:00:00.000Z',
-                    }],
-                },
-            },
-        )).toEqual({
-            status: 'blocked',
-            mismatchPaths: ['unknownSource'],
-        });
-    });
-
-    it('reports checksum drift even when aggregate counts match', () => {
-        expect(buildAnalysisParity({
-            source: { count: 2, checksum: 'a'.repeat(64), complete: true },
-            canonical: { count: 2, checksum: 'b'.repeat(64), complete: true },
-        })).toEqual({ status: 'mismatch', mismatchPaths: ['checksum'] });
-    });
-
-    it('compares ownership, state, counts, ordering, hashes, cost, retention, and unknown-source dimensions', () => {
-        const source = {
-            count: 2,
-            checksum: 'a'.repeat(64),
-            complete: true,
-            ownership: 'owned',
-            state: 'succeeded',
-            counts: { completed: 2, blocked: 0 },
-            orderHash: 'b'.repeat(64),
-            contentHash: 'c'.repeat(64),
-            cost: { amountKnown: 0.12, amountConservative: 0.12, usageUnknown: false },
-            retention: 'permanent',
-            unknownSource: false,
-        };
-        const canonical = { ...source };
-        expect(buildAnalysisParity({ source, canonical })).toEqual({
-            status: 'match',
-            mismatchPaths: [],
-        });
-
-        expect(buildAnalysisParity({
-            source,
-            canonical: {
-                ...canonical,
-                ownership: 'unowned',
-                state: 'blocked',
-                counts: { completed: 1, blocked: 1 },
-                orderHash: 'd'.repeat(64),
-                contentHash: 'e'.repeat(64),
-                cost: { amountKnown: null, amountConservative: 0.12, usageUnknown: true },
-                retention: 'fenced',
-                unknownSource: true,
-            },
-        })).toEqual({
-            status: 'mismatch',
-            mismatchPaths: [
-                'ownership',
-                'state',
-                'counts',
-                'orderHash',
-                'contentHash',
-                'cost',
-                'retention',
-                'unknownSource',
-            ],
-        });
-    });
-
-    it('blocks a missing legacy source rather than treating an empty canonical set as equal', () => {
-        expect(buildAnalysisParity({
-            source: null,
-            canonical: { count: 0, checksum: null, complete: false },
-        })).toEqual({ status: 'blocked', mismatchPaths: ['source.missing'] });
-    });
-
-    it('keeps canonical read flags family-specific and disabled by default', () => {
-        expect(analysisCanonicalReadEnabled('jobs', {})).toBe(false);
-        expect(analysisCanonicalReadEnabled('jobs', {
-            ANALYSIS_CANONICAL_JOBS_READ: 'true',
+        expect(analysisCanonicalReadEnabled('events', {
+            ANALYSIS_CANONICAL_EVENTS_READ: '1',
         })).toBe(true);
-        expect(analysisCanonicalReadEnabled('cost', {
-            ANALYSIS_CANONICAL_JOBS_READ: 'true',
+        expect(analysisCanonicalReadEnabled('events', {
+            UNRELATED_FLAG: '1',
         })).toBe(false);
     });
 
-    it('allocates a new immutable audit version for a late cost observation', () => {
-        expect(nextAnalysisCanonicalAuditVersion([1], true)).toBe(2);
-        expect(nextAnalysisCanonicalAuditVersion([1, 2, 4], true)).toBe(5);
-    });
-
-    it('exposes the cache family as a bounded typed collection', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_CACHE_READ', 'true');
-        const client = {
-            rpc: vi.fn(async () => ({
-                data: {
-                    jobs: [],
-                    events: [],
-                    artifacts: [],
-                    costs: [],
-                    caches: [{
-                        id: '123e4567-e89b-42d3-a456-426614174003',
-                        request_id: requestId,
-                        scope: 'ai',
-                        cache_key_hash: 'a'.repeat(64),
-                        state: 'ready',
-                        expires_at: '2026-09-10T00:00:00.000Z',
-                        single_flight_token_hash: null,
-                        payload: { schemaVersion: 1 },
-                        created_at: '2026-09-09T20:00:00.000Z',
-                        updated_at: '2026-09-09T20:00:00.000Z',
-                    }],
-                    audits: [],
-                },
-                error: null,
-            })),
-        };
-        const store = createAnalysisCanonicalReadStore(client);
-
-        await expect(store.loadRequest(requestId, 'cache')).resolves.toMatchObject({
-            caches: [{ scope: 'ai', state: 'ready' }],
+    it('loads a two-array execution bundle through the new RPC', async () => {
+        const rpc = vi.fn(async () => ({ data: { jobs: [], events: [] }, error: null }));
+        const store = createAnalysisCanonicalReadStore({ rpc }, {
+            env: { ANALYSIS_CANONICAL_JOBS_READ: 'true' },
         });
-        expect(client.rpc).toHaveBeenCalledWith('load_analysis_canonical_family', {
-            p_request_id: requestId,
-            p_family: 'cache',
+        await expect(store.loadRequest(REQUEST_ID, 'jobs')).resolves.toEqual({ jobs: [], events: [] });
+        expect(rpc).toHaveBeenCalledWith('load_analysis_execution_family_v1', {
+            p_request_id: REQUEST_ID,
+            p_family: 'jobs',
         });
     });
 
-    it('rejects unknown or oversized family arrays before they reach callers', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const oversized = {
-            jobs: Array.from({ length: CANONICAL_READ_MAX_ROWS + 1 }, () => ({ state: 'succeeded' })),
-            events: [],
-            artifacts: [],
-            costs: [],
-            caches: [],
-            audits: [],
-        };
-        const oversizedStore = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({ data: oversized, error: null })),
+    it('fails open for disabled families and rejects retired response collections', async () => {
+        const rpc = vi.fn(async () => ({
+            data: { jobs: [], events: [], audits: [] }, error: null,
+        }));
+        const store = createAnalysisCanonicalReadStore({ rpc }, {
+            env: { ANALYSIS_CANONICAL_EVENTS_READ: 'true' },
         });
-        await expect(oversizedStore.loadRequest(requestId, 'jobs'))
-            .rejects.toThrow('oversized canonical jobs collection');
-
-        const unknownStore = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({
-                data: {
-                    jobs: [],
-                    events: [],
-                    artifacts: [],
-                    costs: [],
-                    caches: 'not-an-array',
-                    audits: [],
-                },
-                error: null,
-            })),
-        });
-        await expect(unknownStore.loadRequest(requestId, 'jobs'))
-            .rejects.toThrow('invalid canonical caches collection');
+        await expect(store.loadRequest(REQUEST_ID, 'jobs')).resolves.toBeNull();
+        await expect(store.loadRequest(REQUEST_ID, 'events')).rejects.toThrow('unknown canonical collection');
     });
 
-    it('rejects a canonical row that omits required schema fields', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({
-                data: {
-                    jobs: [{ state: 'succeeded' }],
-                    events: [],
-                    artifacts: [],
-                    costs: [],
-                    caches: [],
-                    audits: [],
-                },
-                error: null,
-            })),
-        });
-        await expect(store.loadRequest(requestId, 'jobs'))
-            .rejects.toThrow('missing required canonical jobs field');
-    });
-
-    it('rejects null request ids in required canonical family rows', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_READ', 'true');
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({
-                data: {
-                    jobs: [],
-                    events: [{
-                        id: 1,
-                        request_id: null,
-                        job_id: null,
-                        kind: 'progress',
-                        state: 'completed',
-                        payload: {},
-                        content_hash: 'a'.repeat(64),
-                        retention_class: 'standard',
-                        created_at: '2026-09-09T20:00:00.000Z',
-                    }],
-                    artifacts: [],
-                    costs: [],
-                    caches: [],
-                    audits: [],
-                },
-                error: null,
-            })),
-        });
-        await expect(store.loadRequest(requestId, 'evidence'))
-            .rejects.toThrow('invalid or missing required canonical events field');
-    });
-
-    it('rejects an unversioned empty canonical JSON payload', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_EVIDENCE_READ', 'true');
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({
-                data: {
-                    jobs: [],
-                    events: [{
-                        id: 1,
-                        request_id: requestId,
-                        job_id: null,
-                        kind: 'progress',
-                        state: 'completed',
-                        payload: {},
-                        content_hash: 'a'.repeat(64),
-                        retention_class: 'standard',
-                        created_at: '2026-09-09T20:00:00.000Z',
-                    }],
-                    artifacts: [],
-                    costs: [],
-                    caches: [],
-                    audits: [],
-                },
-                error: null,
-            })),
-        });
-        await expect(store.loadRequest(requestId, 'evidence'))
-            .rejects.toThrow('invalid or missing required canonical events field');
-    });
-
-    it('falls back to the legacy projection on a normalized shadow mismatch', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const client = {
-            rpc: vi.fn(async () => ({ data: {}, error: null })),
-        };
-        const onMismatch = vi.fn();
-        const store = createAnalysisCanonicalReadStore(client, { onMismatch });
-        const legacy = {
-            schemaVersion: 1,
-            requestId,
-            requestStatus: 'completed',
-            ownership: 'owned',
-            state: 'completed',
-            counts: { detectedMutuals: 1, publicMutuals: 1, privateMutuals: 0, screenedMutuals: 1, candidates: 1, interactions: 1 },
-            candidate: [{ key: 'candidate:1', ordinal: 1, rank: 1, score: 8.2, state: 'included', contentHash: 'd'.repeat(64) }],
-            interaction: [{ key: 'interaction:1', candidateKey: 'candidate:1', signal: 'comment', occurredAt: null, evidenceId: 'evidence:1', contentHash: 'e'.repeat(64) }],
-            order: [{ key: 'candidate:1', list: 'female', ordinal: 1, rank: 1 }],
-            orderHash: 'b'.repeat(64),
-            contentHash: 'c'.repeat(64),
-            progress: null,
-            result: { rank: 1, score: 8.2 },
-            providerOperation: 'provider:1',
-            cost: {
-                amountKnown: 0.12,
-                amountConservative: 0.12,
-                usageUnknown: false,
-                sourceHash: 'a'.repeat(64),
-            },
-            retention: 'permanent',
-            auditRetention: 'permanent',
-            unknownSource: false,
-            evidence: { targetManifests: [], targetInteractions: [] },
-            familyRows: { jobs: [], events: [], artifacts: [], costs: [], caches: [], audits: [] },
-        };
-        const canonical = { ...legacy, result: { rank: 1, score: 8.1 } };
-
-        await expect(store.shadowRead({
-            family: 'jobs',
-            legacy: async () => legacy,
-            canonical: async () => canonical,
-            compare: (left, right) => compareAnalysisCanonicalProjection(left, right),
-        })).resolves.toEqual(legacy);
-        expect(onMismatch).toHaveBeenCalledWith({
-            family: 'jobs',
-            summary: { status: 'mismatch', mismatchPaths: ['result'] },
-        });
-        expect(JSON.stringify(onMismatch.mock.calls)).not.toContain(requestId);
-    });
-
-    it('fails open to legacy when canonical is enabled without a comparator', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const onMismatch = vi.fn();
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({ data: {}, error: null })),
-        }, { onMismatch });
-        const legacy = { requestStatus: 'completed' };
-
-        await expect(store.shadowRead({
-            family: 'jobs',
-            legacy: async () => legacy,
-            canonical: async () => ({ requestStatus: 'wrong' }),
-        } as never)).resolves.toEqual(legacy);
-        expect(onMismatch).toHaveBeenCalledWith({
-            family: 'jobs',
-            summary: { status: 'blocked', mismatchPaths: ['comparison.missing'] },
-        });
-    });
-
-    it('fails open to legacy when the canonical comparator throws', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const onMismatch = vi.fn();
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({ data: {}, error: null })),
-        }, { onMismatch });
-        const legacy = { requestStatus: 'completed' };
-
-        await expect(store.shadowRead({
-            family: 'jobs',
-            legacy: async () => legacy,
-            canonical: async () => ({ requestStatus: 'completed' }),
-            compare: () => { throw new Error('bad comparator'); },
-        })).resolves.toEqual(legacy);
-        expect(onMismatch).toHaveBeenCalledWith({
-            family: 'jobs',
-            summary: { status: 'blocked', mismatchPaths: ['comparison.error'] },
-        });
-    });
-
-    it('sanitizes comparator paths before reporting a mismatch', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_JOBS_READ', 'true');
-        const onMismatch = vi.fn();
-        const store = createAnalysisCanonicalReadStore({
-            rpc: vi.fn(async () => ({ data: {}, error: null })),
-        }, { onMismatch });
-
-        await expect(store.shadowRead({
-            family: 'jobs',
-            legacy: async () => ({ requestStatus: 'completed' }),
-            canonical: async () => ({ requestStatus: 'completed' }),
-            compare: () => ({
-                status: 'mismatch',
-                mismatchPaths: [requestId],
-            }),
-        })).resolves.toEqual({ requestStatus: 'completed' });
-        expect(onMismatch).toHaveBeenCalledWith({
-            family: 'jobs',
-            summary: { status: 'blocked', mismatchPaths: ['comparison.error'] },
-        });
-        expect(JSON.stringify(onMismatch.mock.calls)).not.toContain(requestId);
+    it('compares retained aggregate dimensions only', () => {
+        expect(buildAnalysisParity({
+            source: { count: 1, checksum: 'a'.repeat(64), complete: true, state: 'done' },
+            canonical: { count: 1, checksum: 'a'.repeat(64), complete: true, state: 'done' },
+        })).toEqual({ status: 'match', mismatchPaths: [] });
+        expect(buildAnalysisParity({
+            source: { count: 1, checksum: 'a'.repeat(64), complete: true },
+            canonical: null,
+        })).toEqual({ status: 'blocked', mismatchPaths: ['canonical.missing'] });
     });
 });

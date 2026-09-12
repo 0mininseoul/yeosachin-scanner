@@ -13,14 +13,6 @@ import {
     dispatchAnalysisV2Job,
     enqueueAnalysisV2FreshAdmissionTask,
 } from '@/lib/services/analysis/v2-tasks';
-import {
-    canonicalOperationsStore,
-    isCanonicalFamilyWriteEnabled,
-    maintenanceMarker,
-    queueCanonicalMaintenanceJob,
-    withCanonicalMirrorTimeout,
-    type CanonicalOperationsStore,
-} from '@/lib/services/operations/canonical-operations-store';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
 
@@ -404,77 +396,11 @@ export function createEarlybirdFulfillmentStore(
     dependencies: {
         rpc: EarlybirdFulfillmentRpcClient['rpc'];
         randomUuid: () => string;
-        dualWrite?: boolean;
-        canonicalStore?: Pick<CanonicalOperationsStore, 'upsertFulfillmentJob' | 'enqueueMaintenanceJob'>;
     } = {
         rpc: (name, params) => supabaseAdmin.rpc(name, params),
         randomUuid: randomUUID,
     }
 ): EarlybirdFulfillmentStore {
-    const dualWrite = dependencies.dualWrite ?? isCanonicalFamilyWriteEnabled('fulfillment');
-    const canonicalStore = dependencies.canonicalStore ?? canonicalOperationsStore;
-    const enqueueMaintenance = dependencies.canonicalStore
-        ? canonicalStore.enqueueMaintenanceJob.bind(canonicalStore)
-        : queueCanonicalMaintenanceJob;
-    const mirror = async (input: {
-        orderId: string;
-        requestId: string | null;
-        status: EarlybirdFulfillmentStatus;
-        attemptCount?: number;
-        leaseGeneration?: number;
-        leaseToken?: string | null;
-        leaseExpiresAt?: string | null;
-        lastErrorCode?: string | null;
-        operatorAdmittedAt?: string | null;
-        lastErrorAt?: string | null;
-        completedAt?: string | null;
-        manualReviewAt?: string | null;
-    }): Promise<void> => {
-        if (!dualWrite) return;
-        const now = new Date().toISOString();
-        const leaseToken = input.leaseToken ?? null;
-        const snapshot = {
-            orderId: input.orderId,
-            requestId: input.requestId,
-            state: input.status,
-            attemptCount: input.attemptCount ?? 0,
-            leaseGeneration: input.leaseGeneration ?? 0,
-            leaseToken,
-            // The legacy claim RPC historically returned the token and fence
-            // but not the expiry. Preserve that active lease in the mirror
-            // with the same five-minute lease used by claim() rather than
-            // dropping the token or writing an invalid half-lease shape.
-            leaseExpiresAt: leaseToken
-                ? input.leaseExpiresAt ?? new Date(Date.now() + 300_000).toISOString()
-                : null,
-            nextAttemptAt: now,
-            lastErrorCode: input.lastErrorCode ?? null,
-            operatorAdmittedAt: input.operatorAdmittedAt
-                ?? (input.status === 'awaiting_operator' ? null : now),
-            lastErrorAt: input.lastErrorAt
-                ?? (input.lastErrorCode ? now : null),
-            completedAt: input.completedAt
-                ?? (input.status === 'completed' ? now : null),
-            manualReviewAt: input.manualReviewAt
-                ?? (input.status === 'manual_review' ? now : null),
-        } as const;
-        try {
-            await withCanonicalMirrorTimeout(() => canonicalStore.upsertFulfillmentJob(snapshot));
-        } catch {
-            try {
-                await withCanonicalMirrorTimeout(() => enqueueMaintenance(
-                    maintenanceMarker(
-                        'recovery',
-                        input.orderId,
-                        `fulfillment:${input.status}`,
-                    ),
-                ));
-            } catch {
-                // Legacy fulfillment remains authoritative when both mirrors fail.
-            }
-        }
-    };
-
     const validatedOrderId = (value: string) => {
         const parsed = uuidSchema.safeParse(value);
         if (!parsed.success) {
@@ -493,12 +419,6 @@ export function createEarlybirdFulfillmentStore(
             );
             if (error) persistenceError(error);
             const identity = identityFromRow(oneRow(data, identityRowSchema));
-            await mirror({
-                orderId: identity.orderId,
-                requestId: identity.requestId,
-                status: identity.status,
-                operatorAdmittedAt: new Date().toISOString(),
-            });
             return identity;
         },
 
@@ -520,14 +440,6 @@ export function createEarlybirdFulfillmentStore(
                 persistenceError();
             }
             const identities = parsed.data.map(identityFromRow);
-            await Promise.all(identities.map(identity => mirror({
-                orderId: identity.orderId,
-                requestId: identity.requestId,
-                status: identity.status,
-                operatorAdmittedAt: new Date().toISOString(),
-                completedAt: identity.status === 'completed' ? new Date().toISOString() : null,
-                manualReviewAt: identity.status === 'manual_review' ? new Date().toISOString() : null,
-            })));
             return Object.freeze(identities);
         },
 
@@ -545,14 +457,6 @@ export function createEarlybirdFulfillmentStore(
             const parsed = identityRowsSchema.safeParse(data);
             if (!parsed.success) persistenceError();
             const identities = parsed.data.map(identityFromRow);
-            await Promise.all(identities.map(identity => mirror({
-                orderId: identity.orderId,
-                requestId: identity.requestId,
-                status: identity.status,
-                operatorAdmittedAt: new Date().toISOString(),
-                completedAt: identity.status === 'completed' ? new Date().toISOString() : null,
-                manualReviewAt: identity.status === 'manual_review' ? new Date().toISOString() : null,
-            })));
             return Object.freeze(identities);
         },
 
@@ -591,16 +495,6 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
-            await mirror({
-                orderId: orderId.toLowerCase(),
-                requestId: null,
-                status: row.fulfillment_status,
-                attemptCount: row.attempt_count,
-                leaseGeneration: row.lease_fence,
-                leaseToken: row.lease_token,
-                leaseExpiresAt: row.lease_expires_at ?? null,
-                operatorAdmittedAt: new Date().toISOString(),
-            });
             return Object.freeze({
                 claimed: row.claimed,
                 status: row.fulfillment_status,
@@ -643,16 +537,6 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
-            await mirror({
-                orderId: row.order_id,
-                requestId: row.request_id,
-                status: row.fulfillment_status,
-                leaseGeneration: claim.fence,
-                leaseToken: claim.claimToken,
-                operatorAdmittedAt: new Date().toISOString(),
-                completedAt: row.fulfillment_status === 'completed' ? new Date().toISOString() : null,
-                manualReviewAt: row.fulfillment_status === 'manual_review' ? new Date().toISOString() : null,
-            });
             return Object.freeze({
                 orderId: row.order_id,
                 status: row.fulfillment_status,
@@ -677,15 +561,6 @@ export function createEarlybirdFulfillmentStore(
                 }
             );
             if (error || data !== 'manual_review') persistenceError(error);
-            await mirror({
-                orderId: orderId.toLowerCase(),
-                requestId: null,
-                status: 'manual_review',
-                lastErrorCode: parsedCode.data,
-                operatorAdmittedAt: new Date().toISOString(),
-                lastErrorAt: new Date().toISOString(),
-                manualReviewAt: new Date().toISOString(),
-            });
             return 'manual_review';
         },
 
@@ -698,12 +573,6 @@ export function createEarlybirdFulfillmentStore(
             if (error) persistenceError(error);
             const row = oneRow(data, schemaFailureRecoveryRowSchema);
             if (row.order_id !== parsedOrderId) persistenceError();
-            await mirror({
-                orderId: row.order_id,
-                requestId: null,
-                status: row.fulfillment_status,
-                operatorAdmittedAt: new Date().toISOString(),
-            });
             return Object.freeze({
                 orderId: row.order_id,
                 status: row.fulfillment_status,
@@ -731,13 +600,6 @@ export function createEarlybirdFulfillmentStore(
             ) {
                 persistenceError();
             }
-            await mirror({
-                orderId: row.order_id,
-                requestId: row.request_id,
-                status: row.fulfillment_status,
-                operatorAdmittedAt: new Date().toISOString(),
-                completedAt: row.fulfillment_status === 'completed' ? new Date().toISOString() : null,
-            });
             return identityFromRow(row);
         },
 

@@ -2,17 +2,24 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { SUPABASE_22_CANONICAL_TABLES } from '../lib/services/operations/supabase-22-evidence';
+import {
+    SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+    SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+    SUPABASE_OPERATIONAL_FORBIDDEN_W1A,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
+    SUPABASE_OPERATIONAL_W1A_UPPER_BOUND,
+    type SupabaseOperationalPolicyClosure,
+} from '../lib/services/operations/supabase-22-evidence';
 
 export const SUPABASE_22_RETIREMENT_REPORT_PATH =
     'docs/reports/2026-09-10-supabase-22-retirement-inventory.json';
-export const SUPABASE_22_RETIREMENT_SCHEMA = 'supabase-22-retirement-inventory-v1' as const;
-export const SUPABASE_22_EXPECTED_TABLE_COUNT = 187;
-export const SUPABASE_22_EXPECTED_LEGACY_COUNT = 165;
+export const SUPABASE_22_RETIREMENT_SCHEMA = SUPABASE_OPERATIONAL_POLICY_SCHEMA;
+export const SUPABASE_22_HISTORICAL_DISPOSITION =
+    'retired-non-runnable-exact-22-backfill-references' as const;
 export const UNKNOWN_SENSITIVE_TABLES = ['payments', 'payment_orders', 'pending_analysis'] as const;
 const MUTATING_SQL_PATTERN = /\b(?:ALTER|CREATE|DELETE|DROP|GRANT|INSERT|RENAME|REVOKE|TRUNCATE|UPDATE)\b/i;
 
-export type TableClass = 'canonical' | 'legacy';
+export type TableClass = 'retained' | 'w1a-candidate' | 'legacy';
 export type RelationClass = 'base' | 'partitioned';
 export type RowCountClass = 'empty' | 'small' | 'medium' | 'large' | 'unknown';
 export type Disposition = 'retain' | 'consolidate-after-proof' | 'unknown';
@@ -57,15 +64,28 @@ export type Supabase22RetirementInventoryRow = Readonly<{
 
 export type Supabase22RetirementInventoryReport = Readonly<{
     schemaVersion: typeof SUPABASE_22_RETIREMENT_SCHEMA;
+    /** Aggregate inventory is diagnostic only; it cannot authorize contraction. */
+    policyReadiness: 'blocked';
+    historicalDisposition: typeof SUPABASE_22_HISTORICAL_DISPOSITION;
+    sourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
+    retained: readonly string[];
+    forbiddenW1A: readonly string[];
+    closure: SupabaseOperationalPolicyClosure;
     generatedFrom: Readonly<{ projectRefSupplied: true; readOnly: true }>;
     publicBasePartitionedTableCount: number;
     canonicalTableCount: number;
+    w1aCandidateTableCount: number;
     legacyTableCount: number;
     canonicalTables: readonly Supabase22RetirementInventoryRow[];
+    retainedTables: readonly Supabase22RetirementInventoryRow[];
+    w1aCandidates: readonly Supabase22RetirementInventoryRow[];
     legacyTables: readonly Supabase22RetirementInventoryRow[];
     runtimeCallerCounts: Readonly<Record<string, Supabase22RuntimeCallerEvidence>>;
     contractionCandidateAllowlist: readonly string[];
     contractionCandidateAllowlistSha256: string;
+    approvedSubset: readonly string[];
+    deferredReasons: Readonly<Record<string, string>>;
+    noCascadeAllowlistHash: string | null;
     destructiveOperations: 'refused';
 }>;
 
@@ -305,10 +325,12 @@ function buildRow(
             policyCount: aggregate.policyCount,
         },
         callerEvidence: callers,
-        intendedCanonicalDestination: tableClass === 'canonical' ? aggregate.tableName : destinationFor(aggregate.tableName),
-        disposition: tableClass === 'canonical' ? 'retain' : dispositionFor(aggregate.tableName),
-        reason: tableClass === 'canonical'
-            ? 'canonical survivor in the approved 22-table contract'
+        intendedCanonicalDestination: tableClass === 'retained' ? aggregate.tableName : destinationFor(aggregate.tableName),
+        disposition: tableClass === 'retained' ? 'retain' : dispositionFor(aggregate.tableName),
+        reason: tableClass === 'retained'
+            ? 'retained operational-policy-v1 survivor; non-mutation must be proven'
+            : tableClass === 'w1a-candidate'
+                ? 'W1A upper-bound candidate; fresh evidence must approve or defer this family'
             : reasonFor(aggregate.tableName, aggregate, callers),
         contractionCandidate: false,
     };
@@ -346,29 +368,61 @@ export async function buildSupabase22RetirementInventoryReport(
     callers: Readonly<Record<string, Supabase22RuntimeCallerEvidence>> = {},
 ): Promise<Supabase22RetirementInventoryReport> {
     const names = aggregates.map(row => row.tableName);
-    const canonical = aggregates.filter(row => SUPABASE_22_CANONICAL_TABLES.includes(row.tableName as never));
-    const legacy = aggregates.filter(row => !SUPABASE_22_CANONICAL_TABLES.includes(row.tableName as never));
-    if (new Set(names).size !== names.length
-        || canonical.length !== SUPABASE_22_CANONICAL_TABLES.length
-        || legacy.length !== SUPABASE_22_EXPECTED_LEGACY_COUNT
-        || aggregates.length !== SUPABASE_22_EXPECTED_TABLE_COUNT
-        || SUPABASE_22_CANONICAL_TABLES.some(name => !names.includes(name))) {
-        throw new Error('SUPABASE_22_RETIREMENT_TABLE_COUNT_MISMATCH');
+    if (new Set(names).size !== names.length) {
+        throw new Error('SUPABASE_OPERATIONAL_INVENTORY_DUPLICATE_TABLE');
     }
-    const canonicalRows = canonical
+    const retained = aggregates.filter(row => SUPABASE_OPERATIONAL_RETAINED_TABLES.includes(row.tableName as never));
+    const w1aCandidates = aggregates.filter(row => SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(row.tableName as never));
+    const legacy = aggregates.filter(row => !SUPABASE_OPERATIONAL_RETAINED_TABLES.includes(row.tableName as never)
+        && !SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(row.tableName as never));
+    const retainedRows = retained
         .sort((left, right) => left.tableName.localeCompare(right.tableName))
-        .map(row => buildRow(row, 'canonical', callers[row.tableName] ?? { callerCount: 0, referenceCount: 0 }));
+        .map(row => buildRow(row, 'retained', callers[row.tableName] ?? { callerCount: 0, referenceCount: 0 }));
+    const w1aRows = w1aCandidates
+        .sort((left, right) => left.tableName.localeCompare(right.tableName))
+        .map(row => buildRow(row, 'w1a-candidate', callers[row.tableName] ?? { callerCount: 0, referenceCount: 0 }));
     const legacyRows = legacy
         .sort((left, right) => left.tableName.localeCompare(right.tableName))
         .map(row => buildRow(row, 'legacy', callers[row.tableName] ?? { callerCount: 0, referenceCount: 0 }));
     const allowlist: readonly string[] = [];
+    const deferredReasons = Object.fromEntries(SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.map(name => [
+        name,
+        w1aCandidates.some(row => row.tableName === name)
+            ? 'fresh evidence not supplied in this read-only run; family remains deferred'
+        : 'family absent from the observation; independent evidence is still required',
+    ]));
+    const closure: SupabaseOperationalPolicyClosure = {
+        // This aggregate-only reader intentionally cannot prove object-level
+        // closure. Empty arrays are therefore blocked by the policy verifier.
+        tables: [],
+        routines: [],
+        flags: [],
+        indexes: [],
+        triggers: [],
+        policies: [],
+        acls: [],
+        views: [],
+        foreignKeys: [],
+        sequences: [],
+        publications: [],
+        dependencies: [],
+    };
     return {
         schemaVersion: SUPABASE_22_RETIREMENT_SCHEMA,
+        policyReadiness: 'blocked',
+        historicalDisposition: SUPABASE_22_HISTORICAL_DISPOSITION,
+        sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+        retained: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],
+        forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A],
+        closure,
         generatedFrom: { projectRefSupplied: true, readOnly: true },
         publicBasePartitionedTableCount: aggregates.length,
-        canonicalTableCount: canonicalRows.length,
+        canonicalTableCount: retainedRows.length,
+        w1aCandidateTableCount: w1aRows.length,
         legacyTableCount: legacyRows.length,
-        canonicalTables: canonicalRows,
+        canonicalTables: retainedRows,
+        retainedTables: retainedRows,
+        w1aCandidates: w1aRows,
         legacyTables: legacyRows,
         runtimeCallerCounts: Object.fromEntries(names.sort().map(name => [
             name,
@@ -376,6 +430,9 @@ export async function buildSupabase22RetirementInventoryReport(
         ])),
         contractionCandidateAllowlist: allowlist,
         contractionCandidateAllowlistSha256: stableAllowlistHash(allowlist),
+        approvedSubset: [],
+        deferredReasons,
+        noCascadeAllowlistHash: null,
         destructiveOperations: 'refused',
     };
 }

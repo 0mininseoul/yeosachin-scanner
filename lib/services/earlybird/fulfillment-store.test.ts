@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AnalysisV2FreshAdmissionError } from '@/lib/services/analysis/fresh-plan-admission';
 import { AnalysisV2TaskEnqueueError } from '@/lib/services/analysis/v2-tasks';
-import { CANONICAL_MIRROR_TIMEOUT_MS } from '@/lib/services/operations/canonical-operations-store';
 import {
     admitAndAdvanceEarlybirdFulfillment,
     advanceAdmittedEarlybirdFulfillment,
@@ -140,67 +139,6 @@ describe('earlybird fulfillment store', () => {
             status: 'retryable_failure',
             preflightId: REBOUND_PREFLIGHT,
         }));
-    });
-
-    it('dual-writes a bounded fulfillment snapshot without changing the legacy result', async () => {
-        const upsertFulfillmentJob = vi.fn(async () => ({
-            status: 'recorded',
-        }));
-        const enqueueMaintenanceJob = vi.fn(async () => ({
-            status: 'queued',
-        }));
-        const rpc = vi.fn(() => rpcResult([{
-            order_id: ORDER,
-            fulfillment_status: 'admission_pending',
-            preflight_id: PREFLIGHT,
-            user_id: USER,
-            plan_id: 'basic',
-            request_id: null,
-        }]));
-        const fulfillmentStore = createEarlybirdFulfillmentStore({
-            rpc,
-            randomUuid: () => CLAIM,
-            dualWrite: true,
-            canonicalStore: { upsertFulfillmentJob, enqueueMaintenanceJob },
-        });
-
-        await expect(fulfillmentStore.admit(ORDER)).resolves.toEqual(identity());
-        expect(upsertFulfillmentJob).toHaveBeenCalledWith(expect.objectContaining({
-            orderId: ORDER,
-            state: 'admission_pending',
-        }));
-        expect(enqueueMaintenanceJob).not.toHaveBeenCalled();
-    });
-
-    it('bounds a stuck fulfillment mirror and preserves the legacy admission result', async () => {
-        vi.useFakeTimers();
-        try {
-            const upsertFulfillmentJob = vi.fn(() => new Promise<never>(() => undefined));
-            const enqueueMaintenanceJob = vi.fn(async () => ({ status: 'queued' }));
-            const rpc = vi.fn(() => rpcResult([{
-                order_id: ORDER,
-                fulfillment_status: 'admission_pending',
-                preflight_id: PREFLIGHT,
-                user_id: USER,
-                plan_id: 'basic',
-                request_id: null,
-            }]));
-            const fulfillmentStore = createEarlybirdFulfillmentStore({
-                rpc,
-                randomUuid: () => CLAIM,
-                dualWrite: true,
-                canonicalStore: { upsertFulfillmentJob, enqueueMaintenanceJob },
-            });
-
-            const admission = fulfillmentStore.admit(ORDER);
-            // Flush the legacy RPC/mirror promise chain, then fire the
-            // bounded timeout without waiting on the stuck provider call.
-            await vi.runAllTimersAsync();
-            await expect(admission).resolves.toEqual(identity());
-            expect(enqueueMaintenanceJob).toHaveBeenCalledTimes(1);
-        } finally {
-            vi.useRealTimers();
-        }
     });
 
     it.each([

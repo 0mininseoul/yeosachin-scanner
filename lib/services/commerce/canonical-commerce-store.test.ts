@@ -87,28 +87,6 @@ describe('commerce canonical migration contract', () => {
         );
     });
 
-    it('pins the fulfillment function ACL to the exact CREATE FUNCTION signature', () => {
-        const sql = migrationSql();
-        const create = sql.match(
-            /CREATE FUNCTION public\.upsert_fulfillment_job_v1\(([\s\S]*?)\)\nRETURNS JSONB/,
-        );
-        expect(create).not.toBeNull();
-        const createTypes = create![1]
-            .split(',')
-            .map(parameter => parameter.trim().split(/\s+/)[1])
-            .filter(Boolean);
-        const expectedTypes = [
-            'UUID', 'UUID', 'TEXT', 'SMALLINT', 'BIGINT', 'UUID',
-            'TIMESTAMPTZ', 'TIMESTAMPTZ', 'TEXT', 'JSONB',
-            'TIMESTAMPTZ', 'TIMESTAMPTZ', 'TIMESTAMPTZ', 'TIMESTAMPTZ',
-        ];
-        expect(createTypes).toEqual(expectedTypes);
-        const expectedSignature = expectedTypes.join(', ');
-        const aclSignatures = [...sql.matchAll(
-            /(?:REVOKE|GRANT) EXECUTE ON FUNCTION public\.upsert_fulfillment_job_v1\(([^)]*)\)/g,
-        )].map(match => match[1]);
-        expect(aclSignatures).toEqual([expectedSignature, expectedSignature]);
-    });
 });
 
 describe('canonical commerce store', () => {

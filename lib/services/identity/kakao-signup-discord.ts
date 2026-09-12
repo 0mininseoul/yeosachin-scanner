@@ -2,17 +2,6 @@ import 'server-only';
 
 import * as Sentry from '@sentry/nextjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import {
-    CANONICAL_HASH_NAMESPACES,
-    canonicalJsonHash,
-} from '@/lib/services/commerce/canonical-commerce-store';
-import {
-    isCanonicalFamilyWriteEnabled,
-    maintenanceMarker,
-    queueCanonicalMaintenanceJob,
-    canonicalOperationsStore,
-    withCanonicalMirrorTimeout,
-} from '@/lib/services/operations/canonical-operations-store';
 
 const MAX_DELIVERY_ATTEMPTS = 3;
 const DISCORD_TIMEOUT_MS = 10_000;
@@ -281,38 +270,6 @@ export function kakaoSignupProfileForOutbox(profile: KakaoSignupProfile) {
     };
 }
 
-async function mirrorKakaoSignupNotification(
-    userId: string,
-    payload: ReturnType<typeof kakaoSignupProfileForOutbox>,
-): Promise<void> {
-    if (!isCanonicalFamilyWriteEnabled('notification')) return;
-    const canonicalPayload = {
-        user_id: userId,
-        masked_name: payload.masked_name,
-        birthyear: payload.birthyear,
-        gender: payload.gender,
-        signed_up_at: payload.signed_up_at,
-        attribution_origin: safeAttributionOrigin(payload.attribution_origin),
-    };
-    try {
-        await withCanonicalMirrorTimeout(() => canonicalOperationsStore.enqueueNotification({
-                channel: 'kakao',
-                eventKind: 'kakao.signup',
-                dedupeKey: `kakao-signup:${canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationKey, userId)}`,
-                payload: canonicalPayload,
-                contentHash: canonicalJsonHash(CANONICAL_HASH_NAMESPACES.kakaoNotificationContent, canonicalPayload),
-            }));
-    } catch {
-        try {
-            await withCanonicalMirrorTimeout(() => queueCanonicalMaintenanceJob(
-                    maintenanceMarker('recovery', userId, 'kakao-signup-notification'),
-                ));
-        } catch {
-            operationalFailure('CANONICAL_NOTIFICATION_UNAVAILABLE');
-        }
-    }
-}
-
 /** Updates only a trigger-created first-signup row; it can never enqueue a relogin. */
 export async function stageKakaoSignupDiscordProfile(
     userId: string,
@@ -333,7 +290,6 @@ export async function stageKakaoSignupDiscordProfile(
             operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
             return;
         }
-        await mirrorKakaoSignupNotification(userId, payload);
     } catch {
         operationalFailure('OUTBOX_PROFILE_STAGE_FAILED');
     }

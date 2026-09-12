@@ -1,5 +1,7 @@
 # Supabase commerce and operations canonicalization evidence
 
+> Historical disposition (2026-09-13): the referenced exact-22 commerce backfill entry point has been retired and is no longer runnable. Use the `supabase-operational-policy-v1` inventory/verifier for current evidence.
+
 Date: 2026-09-09 (Asia/Seoul)
 
 ## Decision
@@ -26,9 +28,11 @@ Date: 2026-09-09 (Asia/Seoul)
 
 ## Backfill, parity, and rollback evidence
 
-The guarded command:
+The guarded command below is historical provenance only and is not runnable after
+the exact-22 backfill entry point was retired:
 
 ```text
+# RETIRED_NON_RUNNABLE: historical command retained for provenance only
 npx tsx --conditions=react-server scripts/backfill-commerce-operations-canonical.ts --limit=100 --report-only
 ```
 

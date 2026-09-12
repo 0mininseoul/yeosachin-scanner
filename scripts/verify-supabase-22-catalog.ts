@@ -7,7 +7,6 @@ import {
     adaptSupabase22CatalogRows,
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
-    SUPABASE_22_CANONICAL_TABLES,
     type Supabase22CatalogEvidence,
 } from '../lib/services/operations/supabase-22-evidence';
 
@@ -38,36 +37,6 @@ export function resolveSupabaseCliPath(
         return '/opt/homebrew/bin/supabase';
     }
     return 'supabase';
-}
-
-const CATALOG_METADATA_KEYS = [
-    'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
-    'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
-] as const;
-const CATALOG_EVIDENCE_KEYS = [
-    'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
-    'missingTables', 'dependencyClean', 'migrationHistoryClean', 'rlsClean',
-    'routinesClean', 'canonicalRelationsAclClean', 'privateRoutinesAclClean',
-    'serviceRpcsAclClean', 'clientRpcsAclClean', 'aclClean', 'triggersClean',
-    'foreignKeysClean', 'viewsClean',
-    'publicationsClean', 'sequencesClean', 'partitionsClean', 'legacyWritersClean',
-    'metadataAvailability', 'clean', 'destructiveOperations',
-] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, requiredKeys: readonly string[]): boolean {
-    return Object.keys(value).length === requiredKeys.length
-        && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key));
-}
-
-function safeCatalogName(value: unknown): value is string {
-    return typeof value === 'string'
-        && value.length > 0
-        && value.length <= 256
-        && /^[a-z][a-z0-9_.-]*$/i.test(value);
 }
 
 export function parseSupabase22CatalogCliArgs(
@@ -109,13 +78,6 @@ export function parseSupabase22CatalogCliArgs(
     return { reportOnly, manifestPath, projectRef };
 }
 
-export interface Supabase22CatalogCliDependencies {
-    readCatalog(): Promise<unknown>;
-    queryCatalog?(sql: string): PromiseLike<unknown>;
-    readManifest?(path: string): Promise<unknown>;
-    writeStdout(value: string): void;
-}
-
 export function parseSupabase22CliResponse(stdout: string): { rows: readonly unknown[] } {
     const jsonStart = stdout.indexOf('{');
     if (jsonStart < 0) throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
@@ -125,11 +87,11 @@ export function parseSupabase22CliResponse(stdout: string): { rows: readonly unk
     } catch {
         throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
     }
-    if (!isRecord(parsed) || !Array.isArray(parsed.rows)) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+        || !Array.isArray((parsed as { rows?: unknown }).rows)) {
         throw new Error('SUPABASE_22_CATALOG_READ_FAILED');
     }
-    // Drop CLI boundary/warning metadata before the strict catalog adapter.
-    return { rows: parsed.rows };
+    return { rows: (parsed as { rows: readonly unknown[] }).rows };
 }
 
 export function readSupabase22CliRows(read: () => string): { rows: readonly unknown[] } {
@@ -140,130 +102,30 @@ export function readSupabase22CliRows(read: () => string): { rows: readonly unkn
     }
 }
 
+export interface Supabase22CatalogCliDependencies {
+    readCatalog(): Promise<unknown>;
+    queryCatalog?(sql: string): PromiseLike<unknown>;
+    /** Read only to establish that a historical file is descriptive; never a readiness source. */
+    readManifest?(path: string): Promise<unknown>;
+    writeStdout(value: string): void;
+}
+
 function defaultDependencies(projectRef: string | null): Supabase22CatalogCliDependencies {
-    const queryCatalog = projectRef === null ? undefined : async (sql: string): Promise<unknown> => {
-        return readSupabase22CliRows(() => execFileSync(resolveSupabaseCliPath(), [
-                'db', 'query', '--linked', `--project-ref=${projectRef}`,
-                '--output-format', 'json', sql,
-            ], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
-    };
+    const queryCatalog = projectRef === null ? undefined : async (sql: string): Promise<unknown> => (
+        readSupabase22CliRows(() => execFileSync(resolveSupabaseCliPath(), [
+            'db', 'query', '--linked', `--project-ref=${projectRef}`,
+            '--output-format', 'json', sql,
+        ], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }))
+    );
     return {
-        // Supabase JS does not expose pg_catalog. A direct read-only catalog
-        // connection may be injected by the operator; without one, fail closed
-        // instead of guessing or calling an unprovisioned repository RPC.
+        // Supabase JS does not expose pg_catalog. Without an injected
+        // read-only catalog connection, fail closed instead of guessing.
         readCatalog: async () => {
             throw new Error('SUPABASE_22_CATALOG_READ_UNAVAILABLE');
         },
         ...(queryCatalog === undefined ? {} : { queryCatalog }),
         readManifest: async path => JSON.parse(await readFile(path, 'utf8')) as unknown,
         writeStdout: value => process.stdout.write(value),
-    };
-}
-
-function parseManifest(value: unknown): Supabase22CatalogEvidence {
-    if (!isRecord(value) || !hasOnlyKeys(value, CATALOG_EVIDENCE_KEYS)) {
-        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
-    }
-    const manifest = value as Partial<Supabase22CatalogEvidence>;
-    if (manifest.schemaVersion !== 'supabase-22-catalog-v1'
-        || !Number.isSafeInteger(manifest.publicTableCount)
-        || (manifest.publicTableCount ?? -1) < 0
-        || (manifest.status !== 'ready' && manifest.status !== 'blocked')
-        || !Array.isArray(manifest.canonicalTables)
-        || !Array.isArray(manifest.unexpectedTables)
-        || !Array.isArray(manifest.missingTables)
-        || typeof manifest.dependencyClean !== 'boolean'
-        || typeof manifest.migrationHistoryClean !== 'boolean'
-        || typeof manifest.rlsClean !== 'boolean'
-        || typeof manifest.routinesClean !== 'boolean'
-        || typeof manifest.canonicalRelationsAclClean !== 'boolean'
-        || typeof manifest.privateRoutinesAclClean !== 'boolean'
-        || typeof manifest.serviceRpcsAclClean !== 'boolean'
-        || typeof manifest.clientRpcsAclClean !== 'boolean'
-        || typeof manifest.aclClean !== 'boolean'
-        || typeof manifest.triggersClean !== 'boolean'
-        || typeof manifest.foreignKeysClean !== 'boolean'
-        || typeof manifest.viewsClean !== 'boolean'
-        || typeof manifest.publicationsClean !== 'boolean'
-        || typeof manifest.sequencesClean !== 'boolean'
-        || typeof manifest.partitionsClean !== 'boolean'
-        || typeof manifest.legacyWritersClean !== 'boolean'
-        || !manifest.metadataAvailability
-        || typeof manifest.clean !== 'boolean'
-        || manifest.destructiveOperations !== 'refused') {
-        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
-    }
-    if (manifest.canonicalTables.some(table => !safeCatalogName(table))
-        || manifest.unexpectedTables.some(table => !safeCatalogName(table))
-        || manifest.missingTables.some(table => !safeCatalogName(table))) {
-        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
-    }
-    const metadataAvailability = manifest.metadataAvailability;
-    const metadataKeys = [
-        'catalog', 'acl', 'routine', 'trigger', 'dependency', 'migration', 'rls',
-        'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
-    ] as const;
-    if (!isRecord(metadataAvailability)
-        || !hasOnlyKeys(metadataAvailability, CATALOG_METADATA_KEYS)
-        || metadataKeys.some(key => typeof metadataAvailability[key] !== 'boolean')) {
-        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
-    }
-    const allChecksClean = manifest.dependencyClean
-        && manifest.migrationHistoryClean
-        && manifest.rlsClean
-        && manifest.routinesClean
-        && manifest.canonicalRelationsAclClean
-        && manifest.privateRoutinesAclClean
-        && manifest.serviceRpcsAclClean
-        && manifest.clientRpcsAclClean
-        && manifest.aclClean
-        && manifest.triggersClean
-        && manifest.foreignKeysClean
-        && manifest.viewsClean
-        && manifest.publicationsClean
-        && manifest.sequencesClean
-        && manifest.partitionsClean
-        && manifest.legacyWritersClean;
-    const exactCanonicalSet = manifest.publicTableCount === SUPABASE_22_CANONICAL_TABLES.length
-        && [...manifest.canonicalTables].sort().join('\u0000')
-        === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
-        && manifest.unexpectedTables.length === 0
-        && manifest.missingTables.length === 0;
-    const allMetadataAvailable = metadataKeys.every(key => metadataAvailability[key] === true);
-    if (manifest.clean !== allChecksClean
-        || manifest.clean !== allMetadataAvailable
-        || (manifest.clean && !exactCanonicalSet)
-        || manifest.clean !== (manifest.status === 'ready')) {
-        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
-    }
-    return {
-        schemaVersion: 'supabase-22-catalog-v1',
-        status: manifest.clean ? 'ready' : 'blocked',
-        publicTableCount: manifest.publicTableCount!,
-        canonicalTables: [...manifest.canonicalTables],
-        unexpectedTables: [...manifest.unexpectedTables],
-        missingTables: [...manifest.missingTables],
-        dependencyClean: manifest.dependencyClean,
-        migrationHistoryClean: manifest.migrationHistoryClean,
-        rlsClean: manifest.rlsClean,
-        routinesClean: manifest.routinesClean,
-        canonicalRelationsAclClean: manifest.canonicalRelationsAclClean,
-        privateRoutinesAclClean: manifest.privateRoutinesAclClean,
-        serviceRpcsAclClean: manifest.serviceRpcsAclClean,
-        clientRpcsAclClean: manifest.clientRpcsAclClean,
-        aclClean: manifest.aclClean,
-        triggersClean: manifest.triggersClean,
-        foreignKeysClean: manifest.foreignKeysClean,
-        viewsClean: manifest.viewsClean,
-        publicationsClean: manifest.publicationsClean,
-        sequencesClean: manifest.sequencesClean,
-        partitionsClean: manifest.partitionsClean,
-        legacyWritersClean: manifest.legacyWritersClean,
-        metadataAvailability: Object.fromEntries(
-            metadataKeys.map(key => [key, metadataAvailability[key] === true]),
-        ) as Supabase22CatalogEvidence['metadataAvailability'],
-        clean: manifest.clean,
-        destructiveOperations: 'refused',
     };
 }
 
@@ -309,18 +171,22 @@ export async function runSupabase22CatalogCli(
     let evidence: Supabase22CatalogEvidence;
     try {
         if (options.manifestPath) {
-            if (!activeDependencies.readManifest) throw new Error('SUPABASE_22_CATALOG_MANIFEST_READ_UNAVAILABLE');
-            // A caller-supplied manifest is descriptive only; catalog readiness must
-            // be derived from the bounded row reader below, never from booleans in JSON.
-            parseManifest(await activeDependencies.readManifest(options.manifestPath));
-            evidence = unavailableCatalogEvidence();
+            // Historical manifests are descriptive provenance only. Reading a
+            // JSON file cannot establish current signatures, ACLs, dependencies,
+            // or drain state, so a live independent reader is still required.
+            if (!activeDependencies.readManifest) {
+                throw new Error('SUPABASE_22_CATALOG_MANIFEST_READ_UNAVAILABLE');
+            }
+            await activeDependencies.readManifest(options.manifestPath);
+            if (activeDependencies.queryCatalog) {
+                evidence = await collectSupabase22CatalogEvidence({ query: activeDependencies.queryCatalog });
+            } else {
+                evidence = unavailableCatalogEvidence();
+            }
         } else if (activeDependencies.queryCatalog) {
             evidence = await collectSupabase22CatalogEvidence({ query: activeDependencies.queryCatalog });
         } else {
-            if (!activeDependencies.readCatalog) throw new Error('SUPABASE_22_CATALOG_READ_UNAVAILABLE');
             const rawCatalog = await activeDependencies.readCatalog();
-            // A prebuilt snapshot is not a row-to-snapshot proof and must not
-            // silently become catalog readiness.
             evidence = evaluateSupabase22Catalog(adaptSupabase22CatalogRows(
                 rawCatalog as Parameters<typeof adaptSupabase22CatalogRows>[0],
             ));
@@ -330,7 +196,10 @@ export async function runSupabase22CatalogCli(
     }
     assertPiiSafeConsolidationOutput(evidence);
     activeDependencies.writeStdout(`${JSON.stringify(evidence, null, 2)}\n`);
-    return { exitCode: evidence.clean ? 0 : 1, evidence };
+    // This package only emits a diagnostic catalog snapshot. A complete
+    // snapshot still cannot authorize contraction before the post-deploy
+    // exact-manifest package exists, so the CLI never exits as policy-ready.
+    return { exitCode: 1, evidence };
 }
 
 function isDirectExecution(): boolean {
@@ -340,9 +209,7 @@ function isDirectExecution(): boolean {
 
 if (isDirectExecution()) {
     runSupabase22CatalogCli(process.argv.slice(2))
-        .then(result => {
-            process.exitCode = result.exitCode;
-        })
+        .then(result => { process.exitCode = result.exitCode; })
         .catch(() => {
             process.stderr.write(`${JSON.stringify({
                 status: 'failed',

@@ -1,5 +1,7 @@
 # Analysis Canonicalization Implementation Plan
 
+> Historical plan disposition (2026-09-13): this exact-22 multi-family backfill plan is retained for provenance only; its backfill entry point was retired. Every backfill path and command below is `RETIRED_NON_RUNNABLE`; do not execute or copy it into a shell.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
 **Goal:** 기존 V2 execution family를 \`analysis_requests\`, \`analysis_preflights\`, \`analysis_results\`, \`analysis_provider_runs\`와 여섯 개의 최소 canonical table로 수렴시키고 parity가 증명된 family만 reader를 전환한다.
@@ -20,8 +22,8 @@
 | Create | \`lib/services/analysis/canonical-analysis-pglite.test.ts\` |
 | Create | \`lib/services/analysis/canonical-analysis-read.ts\` |
 | Create | \`lib/services/analysis/canonical-analysis-read.test.ts\` |
-| Create | \`scripts/backfill-analysis-canonical.ts\` |
-| Create | \`scripts/backfill-analysis-canonical.test.ts\` |
+| RETIRED_NON_RUNNABLE Create | \`scripts/backfill-analysis-canonical.ts\` |
+| RETIRED_NON_RUNNABLE Create | \`scripts/backfill-analysis-canonical.test.ts\` |
 | Modify | \`lib/services/analysis/v2-worker.ts\`, \`lib/services/analysis/provider-cost-reconciliation.ts\` |
 | Modify | \`lib/services/analysis/v2-progress-reporter.ts\`, \`lib/services/analysis/v2-result-store.ts\` |
 
@@ -239,8 +241,8 @@ git commit -m "feat: dual-write analysis canonical evidence"
 
 **Files:**
 
-- Create: \`scripts/backfill-analysis-canonical.ts\`
-- Create: \`scripts/backfill-analysis-canonical.test.ts\`
+- RETIRED_NON_RUNNABLE Create: \`scripts/backfill-analysis-canonical.ts\`
+- RETIRED_NON_RUNNABLE Create: \`scripts/backfill-analysis-canonical.test.ts\`
 - Modify: \`lib/services/analysis/canonical-analysis-read.ts\`
 - Create: \`lib/services/analysis/canonical-analysis-read.test.ts\`
 
@@ -262,8 +264,8 @@ expect(buildAnalysisParity({
 - [ ] **Step 3: Run GREEN with exact command.**
 
 ~~~bash
-npx vitest run scripts/backfill-analysis-canonical.test.ts lib/services/analysis/canonical-analysis-read.test.ts lib/services/analysis/order-audit-bundle.test.ts lib/services/analysis/order-audit-consolidation.test.ts
-npx tsx --conditions=react-server scripts/backfill-analysis-canonical.ts --limit=100 --report-only
+# RETIRED_NON_RUNNABLE: npx vitest run scripts/backfill-analysis-canonical.test.ts lib/services/analysis/canonical-analysis-read.test.ts lib/services/analysis/order-audit-bundle.test.ts lib/services/analysis/order-audit-consolidation.test.ts
+# RETIRED_NON_RUNNABLE: npx tsx --conditions=react-server scripts/backfill-analysis-canonical.ts --limit=100 --report-only
 ~~~
 
 Expected: tests PASS; command prints \`status\` and aggregate checksums without request IDs, user IDs, usernames, payloads, or cost secrets.
@@ -271,8 +273,8 @@ Expected: tests PASS; command prints \`status\` and aggregate checksums without 
 - [ ] **Step 4: Commit the parity tooling.**
 
 ~~~bash
-git add scripts/backfill-analysis-canonical.ts scripts/backfill-analysis-canonical.test.ts lib/services/analysis/canonical-analysis-read.ts lib/services/analysis/canonical-analysis-read.test.ts
-git commit -m "feat: add bounded analysis canonical parity"
+# RETIRED_NON_RUNNABLE: git add scripts/backfill-analysis-canonical.ts scripts/backfill-analysis-canonical.test.ts lib/services/analysis/canonical-analysis-read.ts lib/services/analysis/canonical-analysis-read.test.ts
+# RETIRED_NON_RUNNABLE: git commit -m "feat: add bounded analysis canonical parity"
 ~~~
 
 ## Task 4: Family cutover readiness and regression handoff
@@ -282,7 +284,7 @@ git commit -m "feat: add bounded analysis canonical parity"
 - [ ] **Step 2: Run owned plus repository gates.**
 
 ~~~bash
-npx vitest run lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts lib/services/analysis/canonical-analysis-read.test.ts scripts/backfill-analysis-canonical.test.ts lib/services/analysis/v2-worker.test.ts lib/services/analysis/provider-cost-reconciliation.test.ts
+# RETIRED_NON_RUNNABLE: npx vitest run lib/services/analysis/canonical-analysis-store.test.ts lib/services/analysis/canonical-analysis-pglite.test.ts lib/services/analysis/canonical-analysis-read.test.ts scripts/backfill-analysis-canonical.test.ts lib/services/analysis/v2-worker.test.ts lib/services/analysis/provider-cost-reconciliation.test.ts
 npx tsc --noEmit --pretty false
 npm run lint
 npm run build

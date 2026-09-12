@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-import { resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { supabaseAdmin } from '../lib/supabase/admin';
 import {
@@ -11,20 +10,26 @@ import {
     type OrderAuditParitySnapshot,
 } from '../lib/services/analysis/order-audit-consolidation';
 import {
-    evaluateSupabase22Gate,
+    evaluateSupabaseOperationalPolicy,
     isGenuineArchiveManifest,
     isGenuineRestoreManifest,
+    SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+    SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
+    SUPABASE_OPERATIONAL_FORBIDDEN_W1A,
+    type SupabaseOperationalPolicyInput,
+    type SupabaseOperationalPolicyEvidence,
     type Supabase22ArchiveEvidence,
     type Supabase22ArchiveManifest,
-    type Supabase22Evidence,
     type Supabase22RestoreManifest,
 } from '../lib/services/operations/supabase-22-evidence';
 
-const UUID_PATTERN =
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH_PATTERN = /^[0-9a-f]{64}$/i;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const MAX_REQUESTS = 20;
 const MAX_ARCHIVE_PROOF_RECORDS = MAX_REQUESTS;
+const ARCHIVE_ENCRYPTION_ALGORITHM = 'AES-256-GCM' as const;
 const READ_ONLY_OPTIONS = new Set([
     '--execute', '--apply', '--drop', '--truncate', '--rename', '--delete', '--mutate',
 ]);
@@ -41,86 +46,64 @@ function optionName(value: string): string {
     return value.split('=', 1)[0];
 }
 
-const EVIDENCE_KEYS = [
-    'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
-    'missingTables', 'dependencyClean', 'migrationHistoryClean', 'genuineCompletedBundleCount',
-    'parityStatus', 'archiveManifest', 'rollbackEvidenceVerified', 'observationWindowClosed',
-    'ownerApprovalRecorded', 'canonicalSetMatch', 'catalogDependencyClean',
-    'paymentPendingDispositionRecorded', 'noActivationOrCanary', 'archiveRestoreChecksumMatch',
-    'destructiveOperations', 'missingGates',
-] as const;
-const ARCHIVE_MANIFEST_KEYS = [
-    'schemaVersion', 'selectedCount', 'aggregateChecksum', 'encrypted', 'encryption',
-    'retentionClass',
-] as const;
-const ENCRYPTION_KEYS = ['algorithm', 'verified'] as const;
-const ARCHIVE_ENCRYPTION_ALGORITHM = 'AES-256-GCM';
-const INDEPENDENT_ARCHIVE_PROOF_KEYS = [
-    'source', 'selectedCount', 'archiveChecksum', 'restoreCount', 'restoreChecksum',
-    'encryptionAlgorithm', 'retentionClass', 'isolatedRestoreVerified',
-] as const;
-const INDEPENDENT_RESTORE_PROOF_KEYS = [
-    'source', 'selectedCount', 'restoreChecksum', 'encryptionAlgorithm', 'retentionClass',
-] as const;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function hasOnlyKeys(
     value: Record<string, unknown>,
-    requiredKeys: readonly string[],
-    optionalKeys: readonly string[] = [],
+    keys: readonly string[],
 ): boolean {
-    const allowed = new Set([...requiredKeys, ...optionalKeys]);
-    return Object.keys(value).every(key => allowed.has(key))
-        && requiredKeys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+    return keys.every(key => Object.prototype.hasOwnProperty.call(value, key))
+        && Object.keys(value).every(key => keys.includes(key));
 }
 
-function safeManifestName(value: unknown): value is string {
-    return typeof value === 'string'
-        && value.length > 0
-        && value.length <= 256
-        && /^[a-z][a-z0-9_.-]*$/i.test(value);
+function safeName(value: unknown): value is string {
+    return typeof value === 'string' && /^[a-z][a-z0-9_.-]{0,255}$/i.test(value);
 }
 
-function parseEncryption(value: unknown): { algorithm: string; verified: true } {
+function parseEncryption(value: unknown): { algorithm: typeof ARCHIVE_ENCRYPTION_ALGORITHM } {
     if (!isRecord(value)
-        || !hasOnlyKeys(value, ENCRYPTION_KEYS)
-        || value.algorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
-        || value.verified !== true) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+        || !hasOnlyKeys(value, ['algorithm'])
+        || value.algorithm !== ARCHIVE_ENCRYPTION_ALGORITHM) {
+        throw new Error('OPERATIONAL_POLICY_ARCHIVE_MANIFEST_INVALID');
     }
-    return { algorithm: value.algorithm, verified: true };
+    return { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM };
 }
 
 function parseArchiveManifest(value: unknown): Supabase22ArchiveManifest {
     if (!isRecord(value)
-        || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
+        || !hasOnlyKeys(value, [
+            'schemaVersion', 'selectedCount', 'aggregateChecksum', 'encrypted',
+            'encryption', 'retentionClass',
+        ])
         || !isGenuineArchiveManifest(value)
-        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
+        || value.selectedCount > MAX_ARCHIVE_PROOF_RECORDS) {
+        throw new Error('OPERATIONAL_POLICY_ARCHIVE_MANIFEST_INVALID');
     }
     return {
         schemaVersion: 'supabase-22-archive-manifest-v1',
-        selectedCount: value.selectedCount as number,
+        selectedCount: value.selectedCount,
         aggregateChecksum: value.aggregateChecksum,
         encrypted: true,
         encryption: parseEncryption(value.encryption),
-        retentionClass: value.retentionClass as string,
+        retentionClass: value.retentionClass,
     };
 }
 
 function parseRestoreManifest(value: unknown): Supabase22RestoreManifest {
     if (!isRecord(value)
-        || !hasOnlyKeys(value, ARCHIVE_MANIFEST_KEYS)
+        || !hasOnlyKeys(value, [
+            'schemaVersion', 'selectedCount', 'aggregateChecksum', 'encrypted',
+            'encryption', 'retentionClass',
+        ])
         || !isGenuineRestoreManifest(value)
-        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS) {
-        throw new Error('SUPABASE_22_RESTORE_MANIFEST_INVALID');
+        || value.selectedCount > MAX_ARCHIVE_PROOF_RECORDS) {
+        throw new Error('OPERATIONAL_POLICY_RESTORE_MANIFEST_INVALID');
     }
     return {
         schemaVersion: 'supabase-22-restore-manifest-v1',
-        selectedCount: value.selectedCount as number,
+        selectedCount: value.selectedCount,
         aggregateChecksum: value.aggregateChecksum,
         encrypted: true,
         encryption: parseEncryption(value.encryption),
@@ -164,17 +147,19 @@ export function parseSupabase22ArchiveRestoreCliArgs(
         }
         if (option === '--restore-path' || option.startsWith('--restore-path=')) {
             if (restorePath !== null) throw new Error('--restore-path must appear exactly once');
-            const value = option === '--restore-path' ? args[index + 1] : option.slice('--restore-path='.length);
-            if (!value || value.startsWith('--')) throw new Error('--restore-path requires a path');
-            restorePath = value;
+            restorePath = option === '--restore-path'
+                ? args[index + 1] ?? null
+                : option.slice('--restore-path='.length);
+            if (!restorePath || restorePath.startsWith('--')) throw new Error('--restore-path requires a path');
             if (option === '--restore-path') index += 1;
             continue;
         }
         if (option === '--manifest' || option.startsWith('--manifest=')) {
             if (manifestPath !== null) throw new Error('--manifest must appear exactly once');
-            const value = option === '--manifest' ? args[index + 1] : option.slice('--manifest='.length);
-            if (!value || value.startsWith('--')) throw new Error('--manifest requires a path');
-            manifestPath = value;
+            manifestPath = option === '--manifest'
+                ? args[index + 1] ?? null
+                : option.slice('--manifest='.length);
+            if (!manifestPath || manifestPath.startsWith('--')) throw new Error('--manifest requires a path');
             if (option === '--manifest') index += 1;
             continue;
         }
@@ -189,7 +174,6 @@ export interface Supabase22ArchiveRestoreCliDependencies {
     readSnapshot(requestId: string): Promise<OrderAuditParitySnapshot>;
     readManifest(path: string): Promise<unknown>;
     readRestoreManifest(path: string): Promise<unknown>;
-    /** Independent read-only archive/object-store observation; never a supplied manifest. */
     readArchiveEvidence?(
         requestIds: readonly string[],
         expectedChecksum: string | null,
@@ -207,141 +191,118 @@ function defaultDependencies(): Supabase22ArchiveRestoreCliDependencies {
     };
 }
 
-function parseEvidenceManifest(value: unknown): Supabase22Evidence {
-    if (!isRecord(value) || !hasOnlyKeys(value, EVIDENCE_KEYS)) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    const evidence = value as Partial<Supabase22Evidence>;
-    if (evidence.schemaVersion !== 'supabase-22-evidence-v1'
-        || (evidence.status !== 'ready'
-            && evidence.status !== 'mismatch'
-            && evidence.status !== 'blocked')
-        || !Number.isSafeInteger(evidence.publicTableCount)
-        || (evidence.publicTableCount ?? -1) < 0
-        || !Array.isArray(evidence.canonicalTables)
-        || !Array.isArray(evidence.unexpectedTables)
-        || !Array.isArray(evidence.missingTables)
-        || typeof evidence.dependencyClean !== 'boolean'
-        || typeof evidence.migrationHistoryClean !== 'boolean'
-        || !Number.isSafeInteger(evidence.genuineCompletedBundleCount)
-        || (evidence.genuineCompletedBundleCount ?? -1) < 0
-        || (evidence.parityStatus !== 'ready'
-            && evidence.parityStatus !== 'mismatch'
-            && evidence.parityStatus !== 'blocked')
-        || !evidence.archiveManifest
-        || typeof evidence.rollbackEvidenceVerified !== 'boolean'
-        || typeof evidence.observationWindowClosed !== 'boolean'
-        || typeof evidence.ownerApprovalRecorded !== 'boolean'
-        || typeof evidence.canonicalSetMatch !== 'boolean'
-        || typeof evidence.catalogDependencyClean !== 'boolean'
-        || typeof evidence.paymentPendingDispositionRecorded !== 'boolean'
-        || typeof evidence.noActivationOrCanary !== 'boolean'
-        || typeof evidence.archiveRestoreChecksumMatch !== 'boolean'
-        || evidence.destructiveOperations !== 'refused'
-        || !Array.isArray(evidence.missingGates)
-        || evidence.missingGates.some(gate => typeof gate !== 'string')) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    if (evidence.canonicalTables.some(table => !safeManifestName(table))
-        || evidence.unexpectedTables.some(table => !safeManifestName(table))
-        || evidence.missingTables.some(table => !safeManifestName(table))) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    const archive = evidence.archiveManifest;
-    if (!isRecord(archive)
-        || !hasOnlyKeys(archive, ['verified', 'aggregateChecksum', 'restoreStatus'], [
-            'manifest', 'restoreManifest',
-        ])
-        || typeof archive.verified !== 'boolean'
-        || (archive.aggregateChecksum !== null
-            && (typeof archive.aggregateChecksum !== 'string' || !HASH_PATTERN.test(archive.aggregateChecksum)))
-        || (archive.restoreStatus !== 'verified'
-            && archive.restoreStatus !== 'mismatch'
-            && archive.restoreStatus !== 'blocked'
-            && archive.restoreStatus !== 'not_run')) {
-        throw new Error('SUPABASE_22_EVIDENCE_MANIFEST_INVALID');
-    }
-    const archiveManifest = archive.manifest === undefined || archive.manifest === null
-        ? null
-        : parseArchiveManifest(archive.manifest);
-    const restoreManifest = archive.restoreManifest === undefined || archive.restoreManifest === null
-        ? null
-        : parseRestoreManifest(archive.restoreManifest);
-    const sanitizedEvidence: Supabase22Evidence = {
-        schemaVersion: 'supabase-22-evidence-v1',
-        status: evidence.status,
-        publicTableCount: evidence.publicTableCount!,
-        canonicalTables: [...evidence.canonicalTables],
-        unexpectedTables: [...evidence.unexpectedTables],
-        missingTables: [...evidence.missingTables],
-        dependencyClean: evidence.dependencyClean,
-        migrationHistoryClean: evidence.migrationHistoryClean,
-        genuineCompletedBundleCount: evidence.genuineCompletedBundleCount!,
-        parityStatus: evidence.parityStatus,
-        archiveManifest: {
-            verified: archive.verified,
-            aggregateChecksum: archive.aggregateChecksum,
-            restoreStatus: archive.restoreStatus,
-            ...(archiveManifest === null ? {} : { manifest: archiveManifest }),
-            ...(restoreManifest === null ? {} : { restoreManifest }),
-        },
-        rollbackEvidenceVerified: evidence.rollbackEvidenceVerified,
-        observationWindowClosed: evidence.observationWindowClosed,
-        ownerApprovalRecorded: evidence.ownerApprovalRecorded,
-        canonicalSetMatch: evidence.canonicalSetMatch!,
-        catalogDependencyClean: evidence.catalogDependencyClean!,
-        paymentPendingDispositionRecorded: evidence.paymentPendingDispositionRecorded!,
-        noActivationOrCanary: evidence.noActivationOrCanary!,
-        archiveRestoreChecksumMatch: evidence.archiveRestoreChecksumMatch!,
-        destructiveOperations: 'refused',
-        missingGates: [...evidence.missingGates],
+const EMPTY_POLICY_REASONS = Object.fromEntries([
+    'analysis_artifacts', 'analysis_audit_bundles', 'analysis_cache', 'analysis_costs',
+    'fulfillment_jobs', 'notification_outbox', 'system_configuration', 'system_leases',
+].map(name => [name, 'fresh independent evidence and old-revision drain are required'])) as Record<string, string>;
+
+function emptyArchiveEvidence(): Supabase22ArchiveEvidence {
+    return {
+        source: 'unavailable',
+        observedAt: null,
+        aggregateChecksum: null,
+        restoreStatus: 'blocked',
     };
-    assertPiiSafeConsolidationOutput(sanitizedEvidence);
-    // A JSON evidence/manifest file is caller-supplied metadata, not independent
-    // archive, payment, traffic, or activation evidence. Keep it useful for a
-    // blocked report, but never let its booleans upgrade readiness.
-    return evaluateSupabase22Gate({
-        ...sanitizedEvidence,
-        archiveManifest: { verified: false, aggregateChecksum: null, restoreStatus: 'blocked' },
-        rollbackEvidenceVerified: false,
-        observationWindowClosed: false,
-        ownerApprovalRecorded: false,
-        canonicalSetMatch: false,
-        catalogDependencyClean: false,
-        paymentPendingDispositionRecorded: false,
-        noActivationOrCanary: false,
-        archiveRestoreChecksumMatch: false,
-    });
 }
 
-function parseRestoredManifest(value: unknown): Supabase22RestoredManifest {
-    if (!isRecord(value)
-        || !hasOnlyKeys(value, INDEPENDENT_RESTORE_PROOF_KEYS)
-        || value.source !== 'independent-read-only'
-        || !Number.isSafeInteger(value.selectedCount)
-        || (value.selectedCount as number) <= 0
-        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS
-        || typeof value.restoreChecksum !== 'string'
-        || !HASH_PATTERN.test(value.restoreChecksum)
-        || value.encryptionAlgorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
-        || !safeManifestName(value.retentionClass)) {
-        throw new Error('SUPABASE_22_INDEPENDENT_RESTORE_PROOF_INVALID');
-    }
-    const manifest: Supabase22RestoreManifest = {
-        schemaVersion: 'supabase-22-restore-manifest-v1',
-        selectedCount: value.selectedCount as number,
-        aggregateChecksum: value.restoreChecksum,
-        encrypted: true,
-        encryption: { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM, verified: true },
-        retentionClass: value.retentionClass as string,
+function policyInputFromEvidence(archiveManifest: Supabase22ArchiveEvidence): SupabaseOperationalPolicyInput {
+    return {
+        schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+        retained: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],
+        forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A],
+        approvedSubset: [],
+        deferredReasons: EMPTY_POLICY_REASONS,
+        closureEvidence: null,
+        catalogEvidence: null,
+        completedBundleEvidence: null,
+        archiveManifest,
+        rollbackEvidence: null,
+        approvalEvidence: null,
+        paymentPendingEvidence: null,
+        noActivationEvidence: null,
     };
-    assertPiiSafeConsolidationOutput(manifest);
-    return manifest;
+}
+
+/** A historical policy JSON file is never promoted to independent evidence. */
+function policyEvidenceFromHistoricalManifest(_value: unknown): SupabaseOperationalPolicyEvidence {
+    return evaluateSupabaseOperationalPolicy(policyInputFromEvidence(emptyArchiveEvidence()));
+}
+
+export type Supabase22IndependentArchiveProof = Readonly<{
+    source: 'independent-read-only';
+    observedAt: string;
+    selectedCount: number;
+    archiveChecksum: string;
+    restoreCount: number;
+    restoreChecksum: string;
+    encryptionAlgorithm: string;
+    retentionClass: string;
+}>;
+
+export function parseSupabase22IndependentArchiveProof(value: unknown): Supabase22IndependentArchiveProof {
+    if (!isRecord(value)
+        || !hasOnlyKeys(value, [
+            'source', 'observedAt', 'selectedCount', 'archiveChecksum', 'restoreCount', 'restoreChecksum',
+            'encryptionAlgorithm', 'retentionClass',
+        ])
+        || value.source !== 'independent-read-only'
+        || typeof value.observedAt !== 'string' || !ISO_DATE_PATTERN.test(value.observedAt)
+        || !Number.isSafeInteger(value.selectedCount) || (value.selectedCount as number) <= 0
+        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS
+        || !Number.isSafeInteger(value.restoreCount) || (value.restoreCount as number) <= 0
+        || (value.restoreCount as number) > MAX_ARCHIVE_PROOF_RECORDS
+        || typeof value.archiveChecksum !== 'string' || !HASH_PATTERN.test(value.archiveChecksum)
+        || typeof value.restoreChecksum !== 'string' || !HASH_PATTERN.test(value.restoreChecksum)
+        || value.encryptionAlgorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
+        || !safeName(value.retentionClass)) {
+        throw new Error('OPERATIONAL_POLICY_INDEPENDENT_ARCHIVE_PROOF_INVALID');
+    }
+    return value as Supabase22IndependentArchiveProof;
+}
+
+function archiveEvidenceFromProof(
+    aggregate: ReturnType<typeof buildOrderAuditParityAggregate>,
+    proof: Supabase22IndependentArchiveProof | null,
+): Supabase22ArchiveEvidence {
+    if (!proof) return emptyArchiveEvidence();
+    const archiveMatch = proof.selectedCount === aggregate.realCompletedCount
+        && proof.archiveChecksum === aggregate.aggregateChecksum;
+    const restoreMatch = proof.restoreCount === proof.selectedCount
+        && proof.restoreChecksum === proof.archiveChecksum;
+    const manifest: Supabase22ArchiveManifest = {
+        schemaVersion: 'supabase-22-archive-manifest-v1',
+        selectedCount: proof.selectedCount,
+        aggregateChecksum: proof.archiveChecksum,
+        encrypted: true,
+        encryption: { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM },
+        retentionClass: proof.retentionClass,
+    };
+    const restoreManifest: Supabase22RestoreManifest = {
+        schemaVersion: 'supabase-22-restore-manifest-v1',
+        selectedCount: proof.restoreCount,
+        aggregateChecksum: proof.restoreChecksum,
+        encrypted: true,
+        encryption: { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM },
+        retentionClass: proof.retentionClass,
+    };
+    return {
+        source: archiveMatch ? 'independent-read-only' : 'unavailable',
+        observedAt: archiveMatch ? proof.observedAt : null,
+        aggregateChecksum: proof.archiveChecksum,
+        restoreStatus: restoreMatch ? 'verified' : 'mismatch',
+        manifest,
+        restoreManifest,
+    };
 }
 
 export type Supabase22ArchiveRestoreReport = Readonly<{
-    schemaVersion: 'supabase-22-archive-restore-v1';
-    status: 'ready' | 'mismatch' | 'blocked';
+    schemaVersion: 'supabase-operational-policy-v1-archive-restore';
+    policySchemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
+    /** Archive/restore diagnostic status; never contraction readiness. */
+    status: 'mismatch' | 'blocked';
+    policyReadiness: 'blocked';
+    missingGates: readonly string[];
     selectedCount: number;
     aggregateChecksum: string | null;
     archiveManifest: Supabase22ArchiveEvidence & Readonly<{
@@ -353,169 +314,35 @@ export type Supabase22ArchiveRestoreReport = Readonly<{
     destructiveOperations: 'refused';
 }>;
 
-export type Supabase22IndependentArchiveProof = Readonly<{
-    source: 'independent-read-only';
-    selectedCount: number;
-    archiveChecksum: string;
-    restoreCount: number;
-    restoreChecksum: string;
-    encryptionAlgorithm: typeof ARCHIVE_ENCRYPTION_ALGORITHM;
-    retentionClass: string;
-    isolatedRestoreVerified: true;
-}>;
-
-export function parseSupabase22IndependentArchiveProof(
-    value: unknown,
-): Supabase22IndependentArchiveProof {
-    if (!isRecord(value)
-        || !hasOnlyKeys(value, INDEPENDENT_ARCHIVE_PROOF_KEYS)
-        || value.source !== 'independent-read-only'
-        || !Number.isSafeInteger(value.selectedCount)
-        || (value.selectedCount as number) <= 0
-        || (value.selectedCount as number) > MAX_ARCHIVE_PROOF_RECORDS
-        || !Number.isSafeInteger(value.restoreCount)
-        || (value.restoreCount as number) <= 0
-        || (value.restoreCount as number) > MAX_ARCHIVE_PROOF_RECORDS
-        || typeof value.archiveChecksum !== 'string'
-        || !HASH_PATTERN.test(value.archiveChecksum)
-        || typeof value.restoreChecksum !== 'string'
-        || !HASH_PATTERN.test(value.restoreChecksum)
-        || value.encryptionAlgorithm !== ARCHIVE_ENCRYPTION_ALGORITHM
-        || !safeManifestName(value.retentionClass)
-        || value.isolatedRestoreVerified !== true) {
-        throw new Error('SUPABASE_22_INDEPENDENT_ARCHIVE_PROOF_INVALID');
-    }
-    return {
-        source: 'independent-read-only',
-        selectedCount: value.selectedCount as number,
-        archiveChecksum: value.archiveChecksum,
-        restoreCount: value.restoreCount as number,
-        restoreChecksum: value.restoreChecksum,
-        encryptionAlgorithm: ARCHIVE_ENCRYPTION_ALGORITHM,
-        retentionClass: value.retentionClass as string,
-        isolatedRestoreVerified: true,
-    };
-}
-
-function archiveEvidenceFromIndependentProof(
-    aggregate: ReturnType<typeof buildOrderAuditParityAggregate>,
-    proof: Supabase22IndependentArchiveProof | null,
-): Supabase22ArchiveEvidence {
-    if (proof === null) {
-        return { verified: false, aggregateChecksum: null, restoreStatus: 'blocked' };
-    }
-    const archiveMatch = proof.selectedCount === aggregate.selectedCount
-        && proof.archiveChecksum === aggregate.aggregateChecksum;
-    const restoreMatch = archiveMatch
-        && proof.restoreCount === aggregate.selectedCount
-        && proof.restoreChecksum === proof.archiveChecksum;
-    const archiveManifest: Supabase22ArchiveManifest = {
-        schemaVersion: 'supabase-22-archive-manifest-v1',
-        selectedCount: proof.selectedCount,
-        aggregateChecksum: proof.archiveChecksum,
-        encrypted: true,
-        encryption: { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM, verified: true },
-        retentionClass: proof.retentionClass,
-    };
-    const restoreManifest: Supabase22RestoreManifest = {
-        schemaVersion: 'supabase-22-restore-manifest-v1',
-        selectedCount: proof.restoreCount,
-        aggregateChecksum: proof.restoreChecksum,
-        encrypted: true,
-        encryption: { algorithm: ARCHIVE_ENCRYPTION_ALGORITHM, verified: true },
-        retentionClass: proof.retentionClass,
-    };
-    return {
-        verified: archiveMatch,
-        aggregateChecksum: proof.archiveChecksum,
-        restoreStatus: restoreMatch ? 'verified' : 'mismatch',
-        manifest: archiveManifest,
-        restoreManifest,
-    };
-}
-
-function reportFromEvidence(
-    evidence: Supabase22Evidence,
+function reportFromPolicy(
+    evidence: SupabaseOperationalPolicyEvidence,
     restored: Supabase22RestoredManifest | null,
 ): Supabase22ArchiveRestoreReport {
-    const selectedCount = evidence.genuineCompletedBundleCount;
-    const checksum = evidence.archiveManifest.aggregateChecksum;
     const sourceManifest = evidence.archiveManifest.manifest;
-    const encrypted = isGenuineArchiveManifest(sourceManifest)
-        && sourceManifest.encrypted === true;
-    const retentionClass = isGenuineArchiveManifest(sourceManifest)
-        ? sourceManifest.retentionClass
-        : null;
-    const restoreEvidenceValid = isGenuineRestoreManifest(evidence.archiveManifest.restoreManifest)
-        && isGenuineArchiveManifest(sourceManifest)
-        && evidence.archiveManifest.restoreManifest.selectedCount === selectedCount
-        && evidence.archiveManifest.restoreManifest.aggregateChecksum === checksum
-        && evidence.archiveManifest.restoreManifest.retentionClass === sourceManifest.retentionClass
-        && evidence.archiveManifest.restoreStatus === 'verified';
-    const checksumMatch = restoreEvidenceValid || (restored !== null
-        && restored.encrypted === true
-        && restored.encryption.verified === true
-        && restored.selectedCount === selectedCount
+    const checksum = evidence.archiveManifest.aggregateChecksum;
+    const selectedCount = isGenuineArchiveManifest(sourceManifest) ? sourceManifest.selectedCount : 0;
+    const checksumMatch = restored !== null
         && restored.aggregateChecksum === checksum
+        && restored.selectedCount === selectedCount
         && isGenuineArchiveManifest(sourceManifest)
-        && restored.retentionClass === sourceManifest.retentionClass);
-    const restoreStatus = restored === null
-        ? restoreEvidenceValid
-            ? evidence.archiveManifest.restoreStatus
-            : evidence.archiveManifest.restoreStatus === 'mismatch'
-                ? 'mismatch'
-                : evidence.archiveManifest.restoreStatus === 'not_run'
-                    ? 'not_run'
-                    : 'blocked'
+        && restored.retentionClass === sourceManifest.retentionClass;
+    const restoreStatus = restored === null ? evidence.archiveManifest.restoreStatus
         : checksumMatch ? 'verified' : 'mismatch';
-    const sanitizedArchiveManifest: Supabase22ArchiveEvidence = {
-        verified: evidence.archiveManifest.verified === true,
-        aggregateChecksum: typeof checksum === 'string' && HASH_PATTERN.test(checksum)
-            ? checksum
-            : null,
-        restoreStatus,
-        ...(isGenuineArchiveManifest(sourceManifest)
-            ? {
-                manifest: {
-                    schemaVersion: 'supabase-22-archive-manifest-v1' as const,
-                    selectedCount: sourceManifest.selectedCount,
-                    aggregateChecksum: sourceManifest.aggregateChecksum,
-                    encrypted: true as const,
-                    encryption: {
-                        algorithm: sourceManifest.encryption.algorithm,
-                        verified: true as const,
-                    },
-                    retentionClass: sourceManifest.retentionClass,
-                },
-            }
-            : {}),
-        ...(isGenuineRestoreManifest(evidence.archiveManifest.restoreManifest)
-            ? {
-                restoreManifest: {
-                    schemaVersion: 'supabase-22-restore-manifest-v1' as const,
-                    selectedCount: evidence.archiveManifest.restoreManifest.selectedCount,
-                    aggregateChecksum: evidence.archiveManifest.restoreManifest.aggregateChecksum,
-                    encrypted: true as const,
-                    encryption: {
-                        algorithm: evidence.archiveManifest.restoreManifest.encryption.algorithm,
-                        verified: true as const,
-                    },
-                    retentionClass: evidence.archiveManifest.restoreManifest.retentionClass,
-                },
-            }
-            : {}),
-    };
     const report: Supabase22ArchiveRestoreReport = {
-        schemaVersion: 'supabase-22-archive-restore-v1',
-        status: evidence.status === 'ready' && restoreStatus === 'verified' && checksumMatch
-            ? 'ready'
-            : evidence.status === 'mismatch' || restoreStatus === 'mismatch' ? 'mismatch' : 'blocked',
+        schemaVersion: 'supabase-operational-policy-v1-archive-restore',
+        policySchemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        // The archive verifier is intentionally diagnostic-only. The current
+        // package has no exact contraction manifest, so policy readiness is
+        // always blocked even when archive/restore checksums match.
+        status: restoreStatus === 'mismatch' ? 'mismatch' : 'blocked',
+        policyReadiness: 'blocked',
+        missingGates: evidence.missingGates,
         selectedCount,
-        aggregateChecksum: sanitizedArchiveManifest.aggregateChecksum,
+        aggregateChecksum: typeof checksum === 'string' && HASH_PATTERN.test(checksum) ? checksum : null,
         archiveManifest: {
-            ...sanitizedArchiveManifest,
-            encrypted,
-            retentionClass,
+            ...evidence.archiveManifest,
+            encrypted: isGenuineArchiveManifest(sourceManifest) && sourceManifest.encrypted === true,
+            retentionClass: isGenuineArchiveManifest(sourceManifest) ? sourceManifest.retentionClass : null,
         },
         restoreStatus,
         checksumMatch,
@@ -525,149 +352,65 @@ function reportFromEvidence(
     return report;
 }
 
-function evidenceFromAggregate(
-    aggregate: ReturnType<typeof buildOrderAuditParityAggregate>,
-    archiveProof: Supabase22IndependentArchiveProof | null = null,
-): Supabase22Evidence {
-    const archiveManifest = archiveEvidenceFromIndependentProof(aggregate, archiveProof);
-    const archiveReady = archiveManifest.verified === true
-        && archiveManifest.restoreStatus === 'verified';
-    return evaluateSupabase22Gate({
-        publicTableCount: 0,
-        canonicalTables: [],
-        unexpectedTables: [],
-        missingTables: [],
-        dependencyClean: false,
-        migrationHistoryClean: false,
-        genuineCompletedBundleCount: aggregate.realCompletedCount,
-        parityStatus: aggregate.archive.parityStatus,
-        archiveManifest,
-        rollbackEvidenceVerified: false,
-        observationWindowClosed: false,
-        ownerApprovalRecorded: false,
-        canonicalSetMatch: false,
-        catalogDependencyClean: false,
-        paymentPendingDispositionRecorded: false,
-        noActivationOrCanary: false,
-        archiveRestoreChecksumMatch: archiveReady,
-    });
-}
-
 export async function runSupabase22ArchiveRestoreCli(
     args: readonly string[],
     dependencies: Supabase22ArchiveRestoreCliDependencies = defaultDependencies(),
 ): Promise<{ exitCode: 0 | 1; report: Supabase22ArchiveRestoreReport }> {
     const options = parseSupabase22ArchiveRestoreCliArgs(args);
-    let evidence: Supabase22Evidence;
+    let evidence: SupabaseOperationalPolicyEvidence;
     if (options.manifestPath) {
-        evidence = parseEvidenceManifest(await dependencies.readManifest(options.manifestPath));
+        // A checked-in/historical manifest is descriptive provenance only. It
+        // cannot establish the current catalog, traffic window, or drain state.
+        await dependencies.readManifest(options.manifestPath);
+        evidence = policyEvidenceFromHistoricalManifest(null);
     } else if (options.requestIds.length > 0) {
         const snapshots = await Promise.all(options.requestIds.map(id => dependencies.readSnapshot(id)));
         const aggregate = buildOrderAuditParityAggregate(
             snapshots.map(snapshot => buildOrderAuditParityReport(snapshot)),
         );
-        let archiveProof: Supabase22IndependentArchiveProof | null = null;
+        let proof: Supabase22IndependentArchiveProof | null = null;
         if (dependencies.readArchiveEvidence) {
             try {
-                archiveProof = parseSupabase22IndependentArchiveProof(await dependencies.readArchiveEvidence(
+                proof = parseSupabase22IndependentArchiveProof(await dependencies.readArchiveEvidence(
                     options.requestIds,
                     aggregate.aggregateChecksum,
                 ));
             } catch {
-                archiveProof = null;
+                proof = null;
             }
         }
-        evidence = evidenceFromAggregate(aggregate, archiveProof);
+        evidence = evaluateSupabaseOperationalPolicy(
+            policyInputFromEvidence(archiveEvidenceFromProof(aggregate, proof)),
+        );
     } else {
-        evidence = evaluateSupabase22Gate({
-            publicTableCount: 0,
-            canonicalTables: [],
-            unexpectedTables: [],
-            missingTables: [],
-            dependencyClean: false,
-            migrationHistoryClean: false,
-            genuineCompletedBundleCount: 0,
-            parityStatus: 'blocked',
-            archiveManifest: { verified: false, aggregateChecksum: null, restoreStatus: 'blocked' },
-            rollbackEvidenceVerified: false,
-            observationWindowClosed: false,
-            ownerApprovalRecorded: false,
-            canonicalSetMatch: false,
-            catalogDependencyClean: false,
-            paymentPendingDispositionRecorded: false,
-            noActivationOrCanary: false,
-            archiveRestoreChecksumMatch: false,
-        });
+        evidence = evaluateSupabaseOperationalPolicy(policyInputFromEvidence(emptyArchiveEvidence()));
     }
+
     const isolatedRestorePath = options.restorePath !== null
-        && (options.manifestPath === null
-            || resolvePath(options.restorePath) !== resolvePath(options.manifestPath));
+        && (options.manifestPath === null || options.restorePath !== options.manifestPath);
     let restored: Supabase22RestoredManifest | null = null;
-    let restoreReadFailed = false;
-    if (options.restorePath && !isolatedRestorePath) {
-        restoreReadFailed = true;
-    }
-    if (isolatedRestorePath
-        && evidence.archiveManifest.verified
+    if (isolatedRestorePath && evidence.archiveManifest.source === 'independent-read-only'
         && isGenuineArchiveManifest(evidence.archiveManifest.manifest)) {
         try {
-            restored = parseRestoredManifest(
-                await dependencies.readRestoreManifest(options.restorePath),
-            );
+            restored = parseRestoreManifest(await dependencies.readRestoreManifest(options.restorePath!));
         } catch {
-            // A missing or malformed isolated restore manifest is evidence of a
-            // blocked drill, never a reason to infer restore success.
-            restoreReadFailed = true;
+            restored = null;
         }
+        evidence = evaluateSupabaseOperationalPolicy(policyInputFromEvidence({
+            ...evidence.archiveManifest,
+            restoreStatus: restored !== null
+                && restored.aggregateChecksum === evidence.archiveManifest.aggregateChecksum
+                && restored.selectedCount === evidence.archiveManifest.manifest.selectedCount
+                ? 'verified' : 'mismatch',
+            ...(restored === null ? {} : { restoreManifest: restored }),
+        }));
     }
-    const restoredChecksumMatch = restored !== null
-        && restored.encrypted === true
-        && restored.encryption.verified === true
-        && restored.selectedCount === evidence.genuineCompletedBundleCount
-        && restored.aggregateChecksum === evidence.archiveManifest.aggregateChecksum
-        && isGenuineArchiveManifest(evidence.archiveManifest.manifest)
-        && restored.retentionClass === evidence.archiveManifest.manifest.retentionClass;
-    const independentRestoreAlreadyVerified = evidence.archiveManifest.restoreStatus === 'verified'
-        && isGenuineRestoreManifest(evidence.archiveManifest.restoreManifest);
-    const evaluatedEvidence = !isolatedRestorePath
-        ? independentRestoreAlreadyVerified
-            ? evidence
-            : evaluateSupabase22Gate({
-                ...evidence,
-                archiveManifest: {
-                    ...evidence.archiveManifest,
-                    restoreStatus: 'blocked',
-                    restoreManifest: null,
-                },
-                archiveRestoreChecksumMatch: false,
-            })
-        : restoreReadFailed
-            ? evaluateSupabase22Gate({
-                ...evidence,
-                archiveManifest: {
-                    ...evidence.archiveManifest,
-                    restoreStatus: 'blocked',
-                    restoreManifest: null,
-                },
-                archiveRestoreChecksumMatch: false,
-            })
-            : restored === null
-                ? evidence
-                : evaluateSupabase22Gate({
-                    ...evidence,
-                    archiveManifest: {
-                        ...evidence.archiveManifest,
-                        restoreStatus: restoredChecksumMatch ? 'verified' : 'mismatch',
-                        restoreManifest: restored,
-                    },
-                    archiveRestoreChecksumMatch: restoredChecksumMatch,
-                });
-    const report = reportFromEvidence(evaluatedEvidence, restored);
+    const report = reportFromPolicy(evidence, restored);
     const output = options.includeArchiveManifest
         ? report
         : Object.fromEntries(Object.entries(report).filter(([key]) => key !== 'archiveManifest'));
     dependencies.writeStdout(`${JSON.stringify(output, null, 2)}\n`);
-    return { exitCode: report.status === 'ready' ? 0 : 1, report };
+    return { exitCode: 1, report };
 }
 
 function isDirectExecution(): boolean {
@@ -677,15 +420,9 @@ function isDirectExecution(): boolean {
 
 if (isDirectExecution()) {
     runSupabase22ArchiveRestoreCli(process.argv.slice(2))
-        .then(result => {
-            process.exitCode = result.exitCode;
-        })
+        .then(result => { process.exitCode = result.exitCode; })
         .catch(() => {
-            process.stderr.write(`${JSON.stringify({
-                status: 'failed',
-                errorCode: 'SUPABASE_22_ARCHIVE_RESTORE_VERIFY_FAILED',
-                destructiveOperations: 'refused',
-            })}\n`);
+            process.stderr.write('OPERATIONAL_POLICY_ARCHIVE_RESTORE_REFUSED\n');
             process.exitCode = 1;
         });
 }

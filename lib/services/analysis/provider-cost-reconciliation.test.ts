@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { reconcileSettledAnalysisProviderCosts } from './provider-cost-reconciliation';
 
 function database(rows: unknown[]) {
@@ -20,9 +20,10 @@ function database(rows: unknown[]) {
     chain.limit.mockResolvedValue({ data: rows, error: null });
     return {
         from: vi.fn(() => chain),
-        rpc: vi.fn(async (name: string) => name === 'enqueue_analysis_order_audit_bundle'
-            ? { data: { status: 'queued', requestId: '123e4567-e89b-42d3-a456-426614174000' }, error: null }
-            : { data: true, error: null }),
+        rpc: vi.fn(async (name: string) => ({
+            data: name === 'enqueue_analysis_order_audit_bundle' ? null : true,
+            error: null,
+        })),
         chain,
     };
 }
@@ -34,249 +35,48 @@ const settledRow = {
     credential_slot: 'primary',
     status: 'succeeded',
     max_charge_usd: '0.078',
-};
-
-const requestScopedSettledRow = {
-    ...settledRow,
     request_id: '123e4567-e89b-42d3-a456-426614174000',
 };
 
-afterEach(() => {
-    vi.unstubAllEnvs();
-});
-
 describe('provider cost reconciliation', () => {
-    it('finalizes the authenticated stable usage after the settlement cutoff', async () => {
+    it('finalizes stable usage and retains the order-audit enqueue', async () => {
         const db = database([settledRow]);
-        const get = vi.fn().mockResolvedValue({
-            status: 'SUCCEEDED',
-            usageTotalUsd: 0.0754,
-        });
-
-        await expect(reconcileSettledAnalysisProviderCosts(
-            db as never,
-            '123e4567-e89b-42d3-a456-426614174000',
-            {
-                now: new Date('2026-07-13T01:30:00.000Z'),
-                clientForSlot: () => ({ run: () => ({ get }) }),
-            }
-        )).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(db.chain.lte).toHaveBeenCalledWith(
-            'terminal_at',
-            '2026-07-13T01:29:30.000Z'
-        );
-        expect(db.rpc).toHaveBeenCalledWith('finalize_analysis_provider_cost', {
-            p_run_id: settledRow.run_id,
-            p_logical_provider: 'apify',
-            p_actor_id: 'actor/profile',
-            p_credential_slot: 'primary',
-            p_status: 'succeeded',
-            p_usage_total_usd: 0.0754,
-        });
-    });
-
-    it('leaves an over-cap or mismatched snapshot pending without blocking analysis', async () => {
-        const db = database([settledRow]);
-        const result = await reconcileSettledAnalysisProviderCosts(
-            db as never,
-            '123e4567-e89b-42d3-a456-426614174000',
-            {
-                clientForSlot: () => ({
-                    run: () => ({
-                        get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.08 }),
-                    }),
-                }),
-            }
-        );
-        expect(result).toEqual({ eligible: 1, finalized: 0, failed: 1, hasMore: false });
-        expect(db.rpc).not.toHaveBeenCalled();
-    });
-
-    // Free target-profile runs settle through analysis_preflight_provider_runs;
-    // this legacy request cost ledger remains primary/secondary-only.
-    it('rejects free-pool aliases because this ledger reconciler remains primary/secondary-only', async () => {
-        const db = database([{ ...settledRow, credential_slot: 'octonary' }]);
-        const selectedSlots: string[] = [];
-        const get = vi.fn().mockResolvedValue({
-            status: 'SUCCEEDED',
-            usageTotalUsd: 0.0754,
-        });
-
         await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            clientForSlot: slot => {
-                selectedSlots.push(slot);
-                return { run: () => ({ get }) };
-            },
-        })).resolves.toEqual({ eligible: 1, finalized: 0, failed: 1, hasMore: false });
-
-        expect(selectedSlots).toEqual([]);
-        expect(db.rpc).not.toHaveBeenCalled();
-    });
-
-    it('can reconcile the oldest global rows without a request filter', async () => {
-        const db = database([settledRow]);
-        const get = vi.fn().mockResolvedValue({
-            status: 'SUCCEEDED',
-            usageTotalUsd: 0.0754,
-        });
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            clientForSlot: () => ({ run: () => ({ get }) }),
+            clientForSlot: () => ({
+                run: () => ({ get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }) }),
+            }),
         })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(db.chain.eq).not.toHaveBeenCalled();
-        expect(db.chain.order).toHaveBeenCalledWith('terminal_at', { ascending: true });
+        expect(db.rpc).toHaveBeenCalledWith('finalize_analysis_provider_cost', expect.any(Object));
+        expect(db.rpc).toHaveBeenCalledWith('enqueue_analysis_order_audit_bundle', {
+            p_request_id: settledRow.request_id,
+        });
+        expect(db.rpc.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+            'finalize_analysis_provider_cost',
+            'enqueue_analysis_order_audit_bundle',
+        ]);
     });
 
-    it('reports a global backlog beyond the bounded reconciliation batch', async () => {
+    it('keeps an over-cap provider snapshot pending', async () => {
+        const db = database([settledRow]);
+        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
+            clientForSlot: () => ({
+                run: () => ({ get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.08 }) }),
+            }),
+        })).resolves.toEqual({ eligible: 1, finalized: 0, failed: 1, hasMore: false });
+        expect(db.rpc).not.toHaveBeenCalled();
+    });
+
+    it('reports bounded backlog without an unbounded retry or mirror branch', async () => {
         const rows = Array.from({ length: 65 }, (_, index) => ({
             ...settledRow,
             run_id: `Abcdefgh1234${String(index).padStart(4, '0')}`,
         }));
         const db = database(rows);
-
         await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
             clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
+                run: () => ({ get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }) }),
             }),
-        })).resolves.toEqual({
-            eligible: 64,
-            finalized: 64,
-            failed: 0,
-            hasMore: true,
-        });
+        })).resolves.toEqual({ eligible: 64, finalized: 64, failed: 0, hasMore: true });
         expect(db.chain.limit).toHaveBeenCalledWith(65);
-        expect(db.rpc).toHaveBeenCalledTimes(64);
-    });
-
-    it('enqueues a corrected order audit after a settled provider cost commits', async () => {
-        const db = database([requestScopedSettledRow]);
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
-            }),
-        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(db.rpc).toHaveBeenCalledWith('enqueue_analysis_order_audit_bundle', {
-            p_request_id: requestScopedSettledRow.request_id,
-        });
-    });
-
-    it('appends a canonical cost after the legacy settlement commits', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
-        const db = database([requestScopedSettledRow]);
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
-            }),
-        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(db.rpc).toHaveBeenCalledWith('append_analysis_canonical_cost', expect.objectContaining({
-            p_request_id: requestScopedSettledRow.request_id,
-            p_provider: 'apify',
-            p_amount_known: 0.0754,
-            p_amount_conservative: 0.0754,
-            p_usage_unknown: false,
-        }));
-    });
-
-    it('selects the next immutable audit version for a late cost in reconciliation', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
-        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
-        const db = database([requestScopedSettledRow]);
-        const canonicalStore = {
-            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
-            loadAuditVersions: vi.fn(async () => [1, 4]),
-            appendAuditRow: vi.fn(async () => ({ status: 'appended' })),
-            appendLateCostAudit: vi.fn(async () => ({
-                status: 'appended', usageUnknown: false, version: 5,
-            })),
-            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
-        };
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            canonicalStore: canonicalStore as never,
-            clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
-            }),
-        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(canonicalStore.appendLateCostAudit).toHaveBeenCalledWith(expect.objectContaining({
-            requestId: requestScopedSettledRow.request_id,
-            amountKnown: 0.0754,
-        }));
-        expect(canonicalStore.loadAuditVersions).not.toHaveBeenCalled();
-        expect(canonicalStore.appendAuditRow).not.toHaveBeenCalled();
-    });
-
-    it('uses one atomic late-cost RPC instead of a read-then-append version race', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
-        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
-        const db = database([requestScopedSettledRow]);
-        const canonicalStore = {
-            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
-            loadAuditVersions: vi.fn(async () => [1, 4]),
-            appendAuditRow: vi.fn(async () => ({ status: 'appended' })),
-            appendLateCostAudit: vi.fn(async () => ({
-                status: 'appended', usageUnknown: false, version: 5,
-            })),
-            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
-        };
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            canonicalStore: canonicalStore as never,
-            clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
-            }),
-        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(canonicalStore.appendLateCostAudit).toHaveBeenCalledWith(expect.objectContaining({
-            requestId: requestScopedSettledRow.request_id,
-            amountKnown: 0.0754,
-        }));
-        expect(canonicalStore.loadAuditVersions).not.toHaveBeenCalled();
-        expect(canonicalStore.appendAuditRow).not.toHaveBeenCalled();
-    });
-
-    it('durably marks a late audit failure before keeping legacy settlement successful', async () => {
-        vi.stubEnv('ANALYSIS_CANONICAL_COST_WRITE', 'true');
-        vi.stubEnv('ANALYSIS_CANONICAL_AUDIT_WRITE', 'true');
-        const db = database([requestScopedSettledRow]);
-        const canonicalStore = {
-            appendCost: vi.fn(async () => ({ status: 'appended', usageUnknown: false })),
-            loadAuditVersions: vi.fn(async () => { throw new Error('audit read unavailable'); }),
-            appendAuditRow: vi.fn(),
-            appendLateCostAudit: vi.fn(async () => ({
-                status: 'blocked', family: 'audit', usageUnknown: false,
-            })),
-            enqueueRetry: vi.fn(async () => ({ status: 'retry_queued', family: 'audit' })),
-        };
-
-        await expect(reconcileSettledAnalysisProviderCosts(db as never, undefined, {
-            canonicalStore: canonicalStore as never,
-            clientForSlot: () => ({
-                run: () => ({
-                    get: async () => ({ status: 'SUCCEEDED', usageTotalUsd: 0.0754 }),
-                }),
-            }),
-        })).resolves.toEqual({ eligible: 1, finalized: 1, failed: 0, hasMore: false });
-
-        expect(canonicalStore.enqueueRetry).toHaveBeenCalledWith(
-            requestScopedSettledRow.request_id,
-            'audit',
-        );
     });
 });

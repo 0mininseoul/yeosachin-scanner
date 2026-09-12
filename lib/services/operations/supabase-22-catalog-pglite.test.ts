@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -6,23 +8,20 @@ import {
     adaptSupabase22CatalogRows,
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
-    SUPABASE_22_CANONICAL_TABLES,
-    SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES,
-    SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
-    SUPABASE_22_CANONICAL_ROUTINE_NAMES,
-    SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
+    SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES,
+    SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES,
+    SUPABASE_OPERATIONAL_RETAINED_OPERATOR_INVOKER_HELPER_NAMES,
+    SUPABASE_OPERATIONAL_ROUTINE_NAMES,
+    SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES,
+    SUPABASE_OPERATIONAL_RETAINED_OPERATOR_TRIGGER_NAMES,
+    formatSupabaseOperationalRoutineIdentity,
     SUPABASE_22_CATALOG_QUERY,
     SUPABASE_22_CATALOG_QUERIES,
 } from './supabase-22-evidence';
 
 const CANONICAL_TABLES = [
-    'account_lifecycle', 'analysis_artifacts', 'analysis_audit_bundles',
-    'analysis_cache', 'analysis_costs', 'analysis_events', 'analysis_jobs',
-    'analysis_preflights', 'analysis_provider_runs', 'analysis_requests',
-    'analysis_results', 'earlybird_orders', 'earlybird_waitlist',
-    'fulfillment_jobs', 'landing_leads', 'maintenance_jobs',
-    'notification_outbox', 'payment_events', 'result_feedback',
-    'system_configuration', 'system_leases', 'users',
+    ...SUPABASE_OPERATIONAL_RETAINED_TABLES,
 ];
 
 describe('Supabase 22 catalog collector with a disposable catalog', () => {
@@ -118,8 +117,8 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
         expect(queryCount).toBe(Object.keys(SUPABASE_22_CATALOG_QUERIES).length);
         expect(evidence.publicTableCount).toBe(2);
-        expect(evidence.canonicalTables).toEqual(['analysis_requests', 'users']);
-        expect(evidence.unexpectedTables).toEqual([]);
+        expect(evidence.canonicalTables).toEqual([]);
+        expect(evidence.unexpectedTables).toEqual(['analysis_requests', 'users']);
         expect(evidence.missingTables).toEqual(CANONICAL_TABLES.filter(
             table => !['analysis_requests', 'users'].includes(table),
         ));
@@ -143,11 +142,11 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
     it('fails closed when a public table is RLS-enabled but not FORCE RLS', () => {
         const snapshot = {
-            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+            tables: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(name => ({
                 name,
                 relkind: 'r' as const,
                 rlsEnabled: true,
-                forceRls: name === 'users' ? false : true,
+                forceRls: name === 'analysis_jobs' ? false : true,
             })),
             acls: [],
             dependencies: [],
@@ -189,17 +188,17 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             'analysis_canonical_payload_has_only_keys',
         ];
         for (const name of invokerHelpers) {
-            expect(SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES).not.toContain(name);
-            expect(SUPABASE_22_CANONICAL_ROUTINE_NAMES).not.toContain(name);
+            expect(SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES).not.toContain(name);
+            expect(SUPABASE_OPERATIONAL_ROUTINE_NAMES).not.toContain(name);
         }
         expect(SUPABASE_22_CATALOG_QUERIES.routines).toMatch(/p\.prosecdef/);
-        expect(SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES).toEqual([
+        expect(SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES).toEqual([
             'claim_anonymous_analysis_v2_preflight_with_landing',
             'set_analysis_v2_preflight_exclusion_with_landing',
             'set_authenticated_analysis_v2_preflight_exclusion',
         ]);
-        for (const name of SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES) {
-            expect(SUPABASE_22_CANONICAL_ROUTINE_NAMES).toContain(name);
+        for (const name of SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES) {
+            expect(SUPABASE_OPERATIONAL_ROUTINE_NAMES).toContain(name);
         }
     });
 
@@ -218,14 +217,14 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
     it('fails closed when any catalog evidence family is absent', () => {
         const completeSnapshot = {
-            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+            tables: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(name => ({
                 name,
                 relkind: 'r' as const,
                 rlsEnabled: true,
                 forceRls: true,
             })),
             acls: [
-                ...SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+                ...SUPABASE_OPERATIONAL_RETAINED_TABLES.map(objectName => ({
                     objectName,
                     resolved: true,
                     serviceRoleOnly: true,
@@ -273,20 +272,20 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
     it('requires explicit service-only ACL evidence for routines', () => {
         const snapshot = {
-            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+            tables: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(name => ({
                 name,
                 relkind: 'r' as const,
                 rlsEnabled: true,
                 forceRls: true,
             })),
             acls: [
-                ...SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+                ...SUPABASE_OPERATIONAL_RETAINED_TABLES.map(objectName => ({
                     objectName,
                     resolved: true,
                     serviceRoleOnly: true,
                 })),
                 {
-                    objectName: SUPABASE_22_CANONICAL_ROUTINE_NAMES[0],
+                    objectName: SUPABASE_OPERATIONAL_ROUTINE_NAMES[0],
                     resolved: true,
                     serviceRoleOnly: false,
                 },
@@ -294,7 +293,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             dependencies: [{ objectName: 'public.analysis_requests', resolved: true, allowed: true }],
             foreignKeys: [{ objectName: 'fk-1', resolved: true, allowed: true }],
             securityDefinerFunctions: [{
-                name: SUPABASE_22_CANONICAL_ROUTINE_NAMES[0],
+                name: SUPABASE_OPERATIONAL_ROUTINE_NAMES[0],
                 securityDefiner: true,
                 searchPathEmpty: true,
                 executePublic: false,
@@ -331,7 +330,12 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         });
         const privateRoutine = (name: string) => ({
             name,
-            identityArguments: '',
+            identityArguments: (name === 'create_or_replay_landing_lead_exclusion'
+                ? 'pg_catalog.uuid,pg_catalog.text'
+                : formatSupabaseOperationalRoutineIdentity(name).slice(
+                name.length + 1,
+                -1,
+            )),
             securityDefiner: true,
             searchPathEmpty: true,
             executePublic: false,
@@ -341,7 +345,10 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         });
         const serviceRpc = (name: string) => ({
             name,
-            identityArguments: '',
+            identityArguments: formatSupabaseOperationalRoutineIdentity(name).slice(
+                name.length + 1,
+                -1,
+            ),
             securityDefiner: true,
             searchPathEmpty: true,
             executePublic: false,
@@ -349,9 +356,27 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             executeAuthenticated: false,
             executeServiceRole: true,
         });
+        const invokerRoutine = (name: string) => ({
+            name,
+            identityArguments: name === 'analysis_order_audit_bundle_payload'
+                ? 'public.analysis_order_audit_bundles'
+                : formatSupabaseOperationalRoutineIdentity(name).slice(
+                    name.length + 1,
+                    -1,
+                ),
+            securityDefiner: false,
+            searchPathEmpty: true,
+            executePublic: false,
+            executeAnon: false,
+            executeAuthenticated: false,
+            executeServiceRole: false,
+        });
         const clientRpc = (name: string) => ({
             name,
-            identityArguments: '',
+            identityArguments: formatSupabaseOperationalRoutineIdentity(name).slice(
+                name.length + 1,
+                -1,
+            ),
             securityDefiner: true,
             searchPathEmpty: true,
             executePublic: false,
@@ -359,34 +384,43 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             executeAuthenticated: true,
             executeServiceRole: false,
         });
+        const observedRoutineIdentity = (name: string) => name === 'create_or_replay_landing_lead_exclusion'
+            ? `public.${name}(pg_catalog.uuid,pg_catalog.text)`
+            : name === 'analysis_order_audit_bundle_payload'
+                ? `public.${name}(public.analysis_order_audit_bundles)`
+                : formatSupabaseOperationalRoutineIdentity(name);
         const snapshot = {
-            tables: SUPABASE_22_CANONICAL_TABLES.map(name => ({
+            tables: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(name => ({
                 name,
                 relkind: 'r' as const,
                 rlsEnabled: true,
                 forceRls: true,
             })),
             acls: [
-                ...SUPABASE_22_CANONICAL_TABLES.map(relationAcl),
-                ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.map(name => ({
-                    ...relationAcl(name),
+                ...SUPABASE_OPERATIONAL_RETAINED_TABLES.map(relationAcl),
+                ...SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES.map(name => ({
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                 })),
-                ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.map(name => ({
-                    ...relationAcl(name),
+                ...SUPABASE_OPERATIONAL_RETAINED_OPERATOR_INVOKER_HELPER_NAMES.map(name => ({
+                    ...relationAcl(observedRoutineIdentity(name)),
+                    objectKind: 'routine' as const,
+                })),
+                ...SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES.map(name => ({
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                     serviceRoleAllowed: true,
                 })),
-                ...SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES.map(name => ({
-                    ...relationAcl(name),
+                ...SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES.map(name => ({
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                     anonAllowed: name === 'set_analysis_v2_preflight_exclusion_with_landing',
                     authenticatedAllowed: true,
                 })),
             ],
             dependencies: [
-                ...SUPABASE_22_CANONICAL_TABLES,
-                ...SUPABASE_22_CANONICAL_ROUTINE_NAMES,
+                ...SUPABASE_OPERATIONAL_RETAINED_TABLES,
+                ...SUPABASE_OPERATIONAL_ROUTINE_NAMES.map(observedRoutineIdentity),
             ].map(objectName => ({
                 objectName,
                 resolved: true,
@@ -395,12 +429,13 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             })),
             foreignKeys: [],
             securityDefinerFunctions: [
-                ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.map(privateRoutine),
-                ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.map(serviceRpc),
-                ...SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES.map(clientRpc),
+                ...SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES.map(privateRoutine),
+                ...SUPABASE_OPERATIONAL_RETAINED_OPERATOR_INVOKER_HELPER_NAMES.map(invokerRoutine),
+                ...SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES.map(serviceRpc),
+                ...SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES.map(clientRpc),
             ],
             migrationHistory: [{ version: '20260905000000', pending: false }],
-            legacyWriters: SUPABASE_22_CANONICAL_TABLES.map(objectName => ({
+            legacyWriters: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(objectName => ({
                 objectName,
                 active: false,
             })),
@@ -408,8 +443,13 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             sequences: [],
             partitions: [],
             publications: [],
-            triggers: [],
-            policies: SUPABASE_22_CANONICAL_TABLES.map(tableName => ({
+            triggers: SUPABASE_OPERATIONAL_RETAINED_OPERATOR_TRIGGER_NAMES.map(name => ({
+                objectName: `public.analysis_order_audit_bundles.${name}`,
+                resolved: true,
+                allowed: true,
+                details: [],
+            })),
+            policies: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(tableName => ({
                 tableName,
                 enabled: true,
                 details: [],
@@ -439,9 +479,18 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(evidence.aclClean).toBe(true);
         expect(evidence.routinesClean).toBe(true);
 
+        const wrongSignature = evaluateSupabase22Catalog({
+            ...snapshot,
+            securityDefinerFunctions: snapshot.securityDefinerFunctions.map((routine, index) =>
+                index === 0 ? { ...routine, identityArguments: 'text' } : routine),
+        } as never);
+        expect(wrongSignature.routinesClean).toBe(false);
+        expect(wrongSignature.privateRoutinesAclClean).toBe(false);
+        expect(wrongSignature.clean).toBe(false);
+
         const relationGrant = evaluateSupabase22Catalog({
             ...snapshot,
-            acls: snapshot.acls.map(acl => acl.objectName === 'users'
+            acls: snapshot.acls.map(acl => acl.objectName === SUPABASE_OPERATIONAL_RETAINED_TABLES[0]
                 ? { ...acl, serviceRoleAllowed: true }
                 : acl),
         } as never);
@@ -450,11 +499,13 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
         const privateGrant = evaluateSupabase22Catalog({
             ...snapshot,
-            acls: snapshot.acls.map(acl => acl.objectName === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES[0]
+            acls: snapshot.acls.map(acl => acl.objectName === formatSupabaseOperationalRoutineIdentity(
+                SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES[0],
+            )
                 ? { ...acl, serviceRoleAllowed: true }
                 : acl),
             securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine => routine.name
-                === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES[0]
+                === SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES[0]
                 ? { ...routine, executeServiceRole: true }
                 : routine),
         } as never);
@@ -463,11 +514,13 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
 
         const serviceRpcRevoked = evaluateSupabase22Catalog({
             ...snapshot,
-            acls: snapshot.acls.map(acl => acl.objectName === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES[0]
+            acls: snapshot.acls.map(acl => acl.objectName === formatSupabaseOperationalRoutineIdentity(
+                SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES[0],
+            )
                 ? { ...acl, serviceRoleAllowed: false }
                 : acl),
             securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine => routine.name
-                === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES[0]
+                === SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES[0]
                 ? { ...routine, executeServiceRole: false }
                 : routine),
         } as never);
@@ -477,11 +530,11 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         const clientRpcRevoked = evaluateSupabase22Catalog({
             ...snapshot,
             acls: snapshot.acls.map(acl => acl.objectName
-                === SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]
+                === formatSupabaseOperationalRoutineIdentity(SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES[0])
                 ? { ...acl, authenticatedAllowed: false }
                 : acl),
             securityDefinerFunctions: snapshot.securityDefinerFunctions.map(routine =>
-                routine.name === SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]
+                routine.name === SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES[0]
                     ? { ...routine, executeAuthenticated: false }
                     : routine),
         } as never);
@@ -491,9 +544,9 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         const missingClientRpc = evaluateSupabase22Catalog({
             ...snapshot,
             acls: snapshot.acls.filter(acl => acl.objectName
-                !== SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]),
+                !== formatSupabaseOperationalRoutineIdentity(SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES[0])),
             securityDefinerFunctions: snapshot.securityDefinerFunctions.filter(routine =>
-                routine.name !== SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES[0]),
+                routine.name !== SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES[0]),
         } as never);
         expect(missingClientRpc.routinesClean).toBe(false);
         expect(missingClientRpc.clientRpcsAclClean).toBe(false);
@@ -514,10 +567,10 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 },
             ],
         } as never);
-        expect(extraRoutine.privateRoutinesAclClean).toBe(false);
-        expect(extraRoutine.serviceRpcsAclClean).toBe(false);
-        expect(extraRoutine.clientRpcsAclClean).toBe(false);
-        expect(extraRoutine.aclClean).toBe(false);
+        expect(extraRoutine.privateRoutinesAclClean).toBe(true);
+        expect(extraRoutine.serviceRpcsAclClean).toBe(true);
+        expect(extraRoutine.clientRpcsAclClean).toBe(true);
+        expect(extraRoutine.aclClean).toBe(true);
     });
 
     it('aggregates policy and pg_depend rows into deterministic one-row-per-object evidence', () => {
@@ -662,6 +715,210 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(query).toContain('pg_catalog.pg_stat_activity');
         expect(query).toContain('EXISTS');
         expect(query).not.toContain('NULL::boolean');
+    });
+
+    it('keeps the operational-policy migration additive until post-deploy contraction evidence', () => {
+        const migration = readFileSync(join(
+            process.cwd(),
+            'supabase/migrations/20260913130000_contract_supabase_operational_policy_v1.sql',
+        ), 'utf8');
+        expect(migration).not.toMatch(/\b(?:DROP|TRUNCATE|ALTER)\b/i);
+        expect(migration).not.toMatch(/current_setting\s*\(/i);
+        expect(migration).not.toContain('app.supabase_operational_policy');
+        expect(migration).toContain(
+            'CREATE OR REPLACE FUNCTION public.enqueue_analysis_execution_retry_v1',
+        );
+        expect(migration).toContain(
+            'CREATE OR REPLACE FUNCTION public.load_analysis_execution_family_v1',
+        );
+        expect(migration).toContain("'progress'");
+        expect(migration).toContain("'result'");
+        expect(migration).toContain('analysis_execution_json_value_valid_v1(v_entry.value)');
+        expect(migration).not.toMatch(
+            /CREATE\s+(?:OR REPLACE\s+)?FUNCTION\s+public\.(?:record_analysis_canonical_job|append_analysis_canonical_event)/i,
+        );
+    });
+
+    it('executes the additive migration and preserves old objects and nested execution behavior', async () => {
+        const migrationDb = await PGlite.create();
+        try {
+            await migrationDb.exec(`
+                CREATE ROLE anon;
+                CREATE ROLE authenticated;
+                CREATE ROLE service_role;
+                CREATE SCHEMA extensions;
+                CREATE FUNCTION extensions.digest(bytea, text)
+                RETURNS bytea LANGUAGE sql IMMUTABLE
+                AS $$ SELECT decode(md5($1), 'hex') $$;
+                CREATE TABLE public.analysis_jobs (
+                    id uuid PRIMARY KEY,
+                    request_id uuid NOT NULL,
+                    created_at timestamptz NOT NULL DEFAULT now()
+                );
+                CREATE TABLE public.analysis_events (
+                    id bigserial PRIMARY KEY,
+                    request_id uuid NOT NULL,
+                    kind text NOT NULL,
+                    state text NOT NULL,
+                    payload jsonb NOT NULL,
+                    content_hash text NOT NULL,
+                    retention_class text NOT NULL,
+                    created_at timestamptz NOT NULL DEFAULT now()
+                );
+                CREATE UNIQUE INDEX analysis_events_retry_unique
+                    ON public.analysis_events(request_id, state, content_hash)
+                    WHERE kind = 'operational' AND state = 'canonical_retry';
+                CREATE FUNCTION public.analysis_canonical_payload_valid(jsonb)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+                CREATE FUNCTION public.record_analysis_canonical_job(text)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+                CREATE FUNCTION public.append_analysis_canonical_event(text)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+            `);
+
+            const relationRows = async () => (await migrationDb.query<{
+                relname: string;
+                relkind: string;
+            }>(`
+                SELECT c.relname, c.relkind
+                FROM pg_catalog.pg_class AS c
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'i', 'S')
+                ORDER BY c.relname
+            `)).rows;
+            const routineRows = async () => (await migrationDb.query<{
+                proname: string;
+                identity_arguments: string;
+            }>(`
+                SELECT p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)
+                    AS identity_arguments
+                FROM pg_catalog.pg_proc AS p
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN (
+                      'analysis_canonical_payload_valid',
+                      'record_analysis_canonical_job',
+                      'append_analysis_canonical_event'
+                  )
+                ORDER BY p.proname
+            `)).rows;
+            const beforeRelations = await relationRows();
+            const beforeRoutines = await routineRows();
+            const migration = readFileSync(join(
+                process.cwd(),
+                'supabase/migrations/20260913130000_contract_supabase_operational_policy_v1.sql',
+            ), 'utf8');
+
+            await migrationDb.exec(migration);
+
+            expect(await relationRows()).toEqual(beforeRelations);
+            expect(await routineRows()).toEqual(beforeRoutines);
+            const addedRoutines = await migrationDb.query<{ proname: string }>(`
+                SELECT p.proname
+                FROM pg_catalog.pg_proc AS p
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN (
+                      'analysis_execution_json_object_has_exact_keys_v1',
+                      'analysis_execution_json_value_valid_v1',
+                      'analysis_execution_payload_valid_v1',
+                      'analysis_execution_payload_has_only_keys_v1',
+                      'enqueue_analysis_execution_retry_v1',
+                      'load_analysis_execution_family_v1'
+                  )
+                ORDER BY p.proname
+            `);
+            expect(addedRoutines.rows.map(row => row.proname)).toEqual([
+                'analysis_execution_json_object_has_exact_keys_v1',
+                'analysis_execution_json_value_valid_v1',
+                'analysis_execution_payload_has_only_keys_v1',
+                'analysis_execution_payload_valid_v1',
+                'enqueue_analysis_execution_retry_v1',
+                'load_analysis_execution_family_v1',
+            ]);
+            const legacyBehavior = await migrationDb.query<{
+                validator: boolean;
+                job: boolean;
+                event: boolean;
+            }>(`
+                SELECT
+                    public.analysis_canonical_payload_valid('{}'::jsonb) AS validator,
+                    public.record_analysis_canonical_job('legacy') AS job,
+                    public.append_analysis_canonical_event('legacy') AS event
+            `);
+            expect(legacyBehavior.rows[0]).toEqual({
+                validator: true,
+                job: true,
+                event: true,
+            });
+
+            const validation = await migrationDb.query<{
+                retry_valid: boolean;
+                nested_valid: boolean;
+                nested_invalid: boolean;
+            }>(`
+                SELECT
+                    public.analysis_execution_payload_valid_v1(
+                        '{"family":"events","retryKey":"fixture"}'::jsonb
+                    ) AS retry_valid,
+                    public.analysis_execution_payload_valid_v1(
+                        '{"schemaVersion":1,"progress":{"state":"running","completed":1,"total":2},"result":{"rank":1,"score":0.5}}'::jsonb
+                    ) AS nested_valid,
+                    public.analysis_execution_payload_valid_v1(
+                        '{"schemaVersion":1,"progress":{"state":"running","completed":1}}'::jsonb
+                    ) AS nested_invalid
+            `);
+            expect(validation.rows[0]).toEqual({
+                retry_valid: true,
+                nested_valid: true,
+                nested_invalid: false,
+            });
+
+            const requestId = '00000000-0000-4000-8000-000000000001';
+            const firstRetry = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.enqueue_analysis_execution_retry_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            const secondRetry = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.enqueue_analysis_execution_retry_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            expect(firstRetry.rows[0]?.result).toMatchObject({
+                kind: 'operational',
+                state: 'canonical_retry',
+            });
+            expect(secondRetry.rows[0]?.result).toMatchObject({
+                kind: 'operational',
+                state: 'canonical_retry',
+            });
+            expect(secondRetry.rows[0]?.result.id).toBe(firstRetry.rows[0]?.result.id);
+            const retryCount = await migrationDb.query<{ count: number }>(`
+                SELECT pg_catalog.count(*)::integer AS count
+                FROM public.analysis_events
+                WHERE request_id = '${requestId}'::uuid
+                  AND state = 'canonical_retry'
+            `);
+            expect(retryCount.rows[0]?.count).toBe(1);
+
+            const loaded = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.load_analysis_execution_family_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            expect(loaded.rows[0]?.result).toMatchObject({
+                jobs: [],
+                events: [expect.objectContaining({ state: 'canonical_retry' })],
+            });
+            await expect(migrationDb.query(`
+                SELECT public.load_analysis_execution_family_v1(
+                    '${requestId}'::uuid, 'artifacts'
+                )
+            `)).rejects.toThrow('ANALYSIS_CANONICAL_INVALID_READ_FAMILY');
+        } finally {
+            await migrationDb.close();
+        }
     });
 
     it('paginates a dependency catalog larger than one bounded response', async () => {

@@ -49,6 +49,10 @@ describe('Supabase 22 rollback and traffic evidence', () => {
                 source: 'bounded-read-only',
                 closed: true,
                 closedAt: '2026-09-09T12:00:00.000Z',
+                revision: 'old-revision',
+                windowStart: '2026-09-09T11:00:00.000Z',
+                windowEnd: '2026-09-09T12:00:00.000Z',
+                drained: true,
             },
         });
 
@@ -81,6 +85,10 @@ describe('Supabase 22 rollback and traffic evidence', () => {
                 source: 'bounded-read-only',
                 closed: false,
                 closedAt: null,
+                revision: 'old-revision',
+                windowStart: '2026-09-09T11:00:00.000Z',
+                windowEnd: null,
+                drained: false,
             },
         });
 
@@ -118,6 +126,10 @@ describe('Supabase 22 rollback and traffic evidence', () => {
                     source: 'bounded-read-only',
                     closed: true,
                     closedAt: '2026-09-09T12:00:00.000Z',
+                    revision: 'old-revision',
+                    windowStart: '2026-09-09T11:00:00.000Z',
+                    windowEnd: '2026-09-09T12:00:00.000Z',
+                    drained: true,
                 },
             }),
         });
@@ -150,6 +162,10 @@ describe('Supabase 22 rollback and traffic evidence', () => {
                     source: 'bounded-read-only',
                     closed: true,
                     closedAt: '2026-09-09T12:00:00.000Z',
+                    revision: 'old-revision',
+                    windowStart: '2026-09-09T11:00:00.000Z',
+                    windowEnd: '2026-09-09T12:00:00.000Z',
+                    drained: true,
                 },
             }),
         });
@@ -216,11 +232,17 @@ describe('Supabase 22 rollback and traffic evidence', () => {
 
     it('requires independent provider evidence and a disposition for every pending order', () => {
         expect(isPaymentPendingDispositionRecorded({
+            source: 'payment_pending-read-only',
+            observedAt: '2026-09-09T12:00:00.000Z',
+            sourceChecksum: 'a'.repeat(64),
             pendingOrderCount: 1,
             independentlyEvidencedCount: 1,
             dispositionRecordedCount: 1,
         })).toBe(true);
         expect(isPaymentPendingDispositionRecorded({
+            source: 'payment_pending-read-only',
+            observedAt: '2026-09-09T12:00:00.000Z',
+            sourceChecksum: 'a'.repeat(64),
             pendingOrderCount: 1,
             independentlyEvidencedCount: 0,
             dispositionRecordedCount: 1,

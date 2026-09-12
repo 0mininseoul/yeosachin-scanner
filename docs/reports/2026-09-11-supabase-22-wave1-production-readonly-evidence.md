@@ -1,5 +1,7 @@
 # Supabase 22 Wave 1 production read-only evidence
 
+> Historical disposition (2026-09-13): the referenced exact-22 analysis backfill entry point has been retired and is no longer runnable. Use the `supabase-operational-policy-v1` inventory/verifier for current evidence.
+
 ## Status and boundary
 
 Production read-only collection is **VERIFIED**. Wave 1 parity and cutover are
@@ -9,8 +11,9 @@ eligible for flag activation or destructive retirement.
 - Source revision: fresh `origin/main` at `ac3ad2ed8361621ab2c0cbf2b380ce20a6ffbcc8`.
 - Supabase CLI check: `npx --yes supabase@2.102.0 --version` returned exactly
   `2.102.0`.
-- The checked-in `scripts/backfill-analysis-canonical.ts` report-only function
-  ran against production with `LIMIT=100`. The canonical main worktree
+- The historical `scripts/backfill-analysis-canonical.ts` report-only reference
+  is **RETIRED_NON_RUNNABLE** and is preserved only as provenance; it is not an
+  executable production path. The canonical main worktree
   `.env.local` was supplied only through Node's `--env-file` mechanism; it was
   not sourced, copied, printed, or persisted.
 - Cursors, selected request scope, and rows stayed in process memory. The
