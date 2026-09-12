@@ -1155,7 +1155,7 @@ BEGIN
            OR routine_row.prosecdef IS DISTINCT FROM TRUE
            OR routine_row.proconfig IS NULL
            OR pg_catalog.cardinality(routine_row.proconfig) <> 1
-           OR NOT ('search_path=' = ANY(routine_row.proconfig))
+           OR NOT ('search_path=""' = ANY(routine_row.proconfig))
     ) THEN
         RAISE EXCEPTION 'W1A_GUARD_ROUTINE_SECURITY';
     END IF;

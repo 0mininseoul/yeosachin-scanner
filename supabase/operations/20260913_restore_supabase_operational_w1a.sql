@@ -2067,6 +2067,14 @@ SET LOCAL TIME ZONE 'UTC';
 
  GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_artifact(UUID, UUID, TEXT, TEXT, TEXT, TEXT, JSONB, TEXT) TO service_role;
 
+ REVOKE ALL ON FUNCTION public.apply_analysis_canonical_backfill_row(
+     TEXT, TEXT, TEXT, TEXT, TEXT, UUID, JSONB
+ ) FROM PUBLIC, anon, authenticated, service_role;
+
+ GRANT EXECUTE ON FUNCTION public.apply_analysis_canonical_backfill_row(
+     TEXT, TEXT, TEXT, TEXT, TEXT, UUID, JSONB
+ ) TO service_role;
+
  REVOKE ALL ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB, TEXT) FROM PUBLIC, anon, authenticated, service_role;
 
  GRANT EXECUTE ON FUNCTION public.append_analysis_canonical_audit(UUID, INTEGER, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, JSONB, TEXT) TO service_role;
