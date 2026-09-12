@@ -279,7 +279,7 @@ DECLARE
     v_hash TEXT;
 BEGIN
     SELECT pg_catalog.count(*), pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-        pg_catalog.string_agg(item, E'\\n' ORDER BY item COLLATE "C"), 'UTF8'
+        pg_catalog.string_agg(item, E'\n' ORDER BY item COLLATE "C"), 'UTF8'
     )), 'hex')
       INTO v_count, v_hash
     FROM pg_temp.w1a_expected_allowlist;
