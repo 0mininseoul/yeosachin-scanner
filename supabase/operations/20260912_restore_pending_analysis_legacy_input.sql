@@ -5,6 +5,8 @@
 --
 -- This operation never deletes or rewrites public.maintenance_jobs rows.  The
 -- disposable database must already contain auth.users for the archived FK.
+-- Deleting an auth user intentionally cascades that user's pending archive
+-- rows, so this exact 11-row restore fails closed after such an erasure.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -40,6 +42,28 @@ BEGIN
     END IF;
 END;
 $restore_relation_guard$;
+
+DO $restore_typed_fk_guard$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_constraint AS constraint_row
+        JOIN pg_catalog.pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conname = 'maintenance_jobs_legacy_pending_user_id_fkey'
+          AND constraint_row.contype = 'f'
+          AND constraint_row.conrelid = 'public.maintenance_jobs'::REGCLASS
+          AND constraint_row.confrelid = 'auth.users'::REGCLASS
+          AND constraint_row.confdeltype = 'c'
+          AND attribute_row.attname = 'legacy_pending_user_id'
+          AND attribute_row.atttypid = 'pg_catalog.uuid'::REGTYPE
+          AND NOT attribute_row.attnotnull
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_TYPED_FK_MISSING';
+    END IF;
+END;
+$restore_typed_fk_guard$;
 
 -- SHARE blocks concurrent canonical inserts while allowing this read-only
 -- restore proof to copy the immutable archive.
@@ -99,6 +123,9 @@ BEGIN
           AND (
               job_row.kind IS DISTINCT FROM 'audit_assembly'
               OR job_row.state IS DISTINCT FROM 'succeeded'
+              OR job_row.legacy_pending_user_id IS NULL
+              OR job_row.payload->'legacy_row'->>'user_id'
+                    IS DISTINCT FROM job_row.legacy_pending_user_id::TEXT
               OR job_row.payload->>'archive_operation'
                     IS DISTINCT FROM 'pending_analysis_retirement'
               OR job_row.payload->>'archive_state_semantics'

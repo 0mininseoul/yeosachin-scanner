@@ -403,6 +403,43 @@ BEGIN
 END;
 $retirement_catalog_guard$;
 
+-- Extend the canonical ledger only after validating its reviewed 16-column
+-- predecessor shape.  The typed reference is populated solely for this
+-- pending archive cohort; every unrelated maintenance row remains NULL.
+ALTER TABLE public.maintenance_jobs
+    ADD COLUMN legacy_pending_user_id UUID,
+    ADD CONSTRAINT maintenance_jobs_pending_archive_user_fk_check
+    CHECK (
+        (
+            legacy_pending_user_id IS NULL
+            AND (
+                kind = 'audit_assembly'
+                AND state = 'succeeded'
+                AND payload->>'archive_operation' = 'pending_analysis_retirement'
+                AND payload->>'legacy_source_table' = 'pending_analysis'
+            ) IS NOT TRUE
+        )
+        OR (
+            legacy_pending_user_id IS NOT NULL
+            AND (
+                kind = 'audit_assembly'
+                AND state = 'succeeded'
+                AND payload->>'archive_operation' = 'pending_analysis_retirement'
+                AND payload->>'legacy_source_table' = 'pending_analysis'
+            ) IS TRUE
+            AND payload->'legacy_row'->>'user_id'
+                IS NOT DISTINCT FROM legacy_pending_user_id::TEXT
+        )
+    ),
+    ADD CONSTRAINT maintenance_jobs_legacy_pending_user_id_fkey
+        FOREIGN KEY (legacy_pending_user_id)
+        REFERENCES auth.users(id)
+        ON DELETE CASCADE;
+
+CREATE INDEX maintenance_jobs_legacy_pending_user_id_idx
+    ON public.maintenance_jobs(legacy_pending_user_id)
+    WHERE legacy_pending_user_id IS NOT NULL;
+
 DO $retirement_source_guard$
 DECLARE
     v_count BIGINT;
@@ -479,6 +516,7 @@ CREATE TEMP TABLE pg_temp.pending_analysis_archive_expected (
     target_key_hash TEXT NOT NULL,
     payload JSONB NOT NULL,
     content_hash TEXT NOT NULL,
+    legacy_pending_user_id UUID NOT NULL,
     PRIMARY KEY (kind, target_key_hash)
 ) ON COMMIT DROP;
 
@@ -486,11 +524,12 @@ CREATE TEMP TABLE pg_temp.pending_analysis_archive_expected (
 -- archived awaiting_payment status and nullable checkout/timestamp fields are
 -- copied without interpretation or normalization.
 INSERT INTO pg_temp.pending_analysis_archive_expected (
-    kind, target_key_hash, payload, content_hash
+    kind, target_key_hash, payload, content_hash, legacy_pending_user_id
 )
 WITH incoming AS (
     SELECT
         'audit_assembly'::TEXT AS kind,
+        source_row.user_id AS legacy_pending_user_id,
         pg_catalog.jsonb_build_object(
             'archive_operation', 'pending_analysis_retirement',
             'archive_state_semantics', 'completed_archive_operation_only',
@@ -505,6 +544,7 @@ WITH incoming AS (
 ), prepared AS (
     SELECT
         kind,
+        legacy_pending_user_id,
         pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
             'supabase-22-public-retirement-v1:' || kind || ':pending_analysis:'
                 || (payload->'legacy_primary_key')::TEXT,
@@ -515,7 +555,7 @@ WITH incoming AS (
             AS content_hash
     FROM incoming
 )
-SELECT kind, target_key_hash, payload, content_hash
+SELECT kind, target_key_hash, payload, content_hash, legacy_pending_user_id
 FROM prepared;
 
 -- Idempotent re-entry is allowed only for an exact archive row.  Any other
@@ -534,6 +574,8 @@ BEGIN
                 AND actual.state = 'succeeded'
                 AND actual.payload IS NOT DISTINCT FROM expected.payload
                 AND actual.content_hash IS NOT DISTINCT FROM expected.content_hash
+                AND actual.legacy_pending_user_id
+                    IS NOT DISTINCT FROM expected.legacy_pending_user_id
           )
     ) OR EXISTS (
         SELECT 1
@@ -544,6 +586,8 @@ BEGIN
         WHERE actual.state IS DISTINCT FROM 'succeeded'
            OR actual.payload IS DISTINCT FROM expected.payload
            OR actual.content_hash IS DISTINCT FROM expected.content_hash
+           OR actual.legacy_pending_user_id
+                IS DISTINCT FROM expected.legacy_pending_user_id
     ) THEN
         RAISE EXCEPTION 'MAINTENANCE_CONTENT_CONFLICT';
     END IF;
@@ -553,9 +597,10 @@ $retirement_canonical_conflict_guard$;
 -- Succeeded is a terminal archive fact; claim_maintenance_jobs_v1 only takes
 -- queued/retryable rows, so this insert cannot enqueue work.
 INSERT INTO public.maintenance_jobs AS maintenance_job (
-    kind, target_key_hash, state, payload, content_hash
+    kind, target_key_hash, state, payload, content_hash, legacy_pending_user_id
 )
-SELECT kind, target_key_hash, 'succeeded', payload, content_hash
+SELECT kind, target_key_hash, 'succeeded', payload, content_hash,
+       legacy_pending_user_id
 FROM pg_temp.pending_analysis_archive_expected
 ON CONFLICT (kind, target_key_hash) DO NOTHING;
 
@@ -628,6 +673,7 @@ BEGIN
                 pg_catalog.sha256(pg_catalog.convert_to(job_row.payload::TEXT, 'UTF8')),
                 'hex'
            )
+           OR job_row.legacy_pending_user_id IS DISTINCT FROM source_row.user_id
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_FULL_ROW_PARITY';
     END IF;
@@ -693,16 +739,20 @@ DO $retirement_terminal_guard$
 DECLARE
     v_public_table_count BIGINT;
     v_canonical_count BIGINT;
+    v_typed_pending_user_count BIGINT;
 BEGIN
     IF pg_catalog.to_regclass('public.pending_analysis') IS NOT NULL THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_TARGET_REMAINS';
     END IF;
-    SELECT pg_catalog.count(*) INTO v_canonical_count
+    SELECT
+        pg_catalog.count(*),
+        pg_catalog.count(*) FILTER (WHERE job_row.legacy_pending_user_id IS NOT NULL)
+      INTO v_canonical_count, v_typed_pending_user_count
     FROM public.maintenance_jobs AS job_row
     WHERE job_row.kind = 'audit_assembly'
       AND job_row.state = 'succeeded'
       AND job_row.payload->>'legacy_source_table' = 'pending_analysis';
-    IF v_canonical_count <> 11 THEN
+    IF v_canonical_count <> 11 OR v_typed_pending_user_count <> 11 THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_CANONICAL_TOTAL';
     END IF;
     SELECT pg_catalog.count(*) INTO v_public_table_count
