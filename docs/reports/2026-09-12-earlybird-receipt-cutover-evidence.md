@@ -4,7 +4,7 @@ Date: 2026-09-12
 Ancestor: `245ef9d5517b791ceb65491ed187e744c56f6ad8`
 Implementation commit: `046ae4faf9bb70a6e7abbeb3e2c41fa1a3a2f8ce`
 Residual-fix base: `9ec4c586fc78348f74c868d4ace0375020b8398b`
-Residual-fix commit: `2476d16d`
+Residual-fix commit: `09bd12d8e44e371b4511fa38a41c5d0d73eda6b9`
 Scope: the approved thirteen-table earlybird receipt cohort only.
 
 This report records bounded local evidence for the repaired SQL. It is not a
