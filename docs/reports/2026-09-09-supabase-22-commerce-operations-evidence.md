@@ -28,9 +28,11 @@ Date: 2026-09-09 (Asia/Seoul)
 
 ## Backfill, parity, and rollback evidence
 
-The guarded command:
+The guarded command below is historical provenance only and is not runnable after
+the exact-22 backfill entry point was retired:
 
 ```text
+# RETIRED_NON_RUNNABLE: historical command retained for provenance only
 npx tsx --conditions=react-server scripts/backfill-commerce-operations-canonical.ts --limit=100 --report-only
 ```
 

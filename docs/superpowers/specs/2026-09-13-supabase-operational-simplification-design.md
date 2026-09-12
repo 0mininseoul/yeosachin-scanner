@@ -5,7 +5,7 @@
 - 기준 SHA: 053d46326e7ecf45c02ebab9ae210ffe66624d00
 - 기준일: 2026-09-13
 - 성격: exact-22 table/set 계약을 대체하는 bounded operational contraction 설계
-- 현재 작업 범위: 이 문서와 대응 plan 문서의 검토 반영만 수행한다. 코드·SQL 수정, 원격 Supabase 또는 Vercel 접근, migration apply, canary, payment 상태 mutation, 테스트 실행은 하지 않는다.
+- 이전 planning dispatch의 작업 범위: 이 문서와 대응 plan 문서의 검토 반영만 수행했다. 코드·SQL 수정, 원격 Supabase 또는 Vercel 접근, migration apply, canary, payment 상태 mutation, 테스트 실행은 하지 않았다.
 
 exact-22는 terminal table 수가 아니라 historical baseline으로만 남긴다. 새 목표는 active runtime과 operator contract를 보존하면서, inactive canonical shadow의 table, flag, mirror/shadow-read, 전용 RPC, backfill entry point, ACL/trigger/index 의존성을 family 단위로 닫는 것이다.
 
@@ -23,6 +23,10 @@ system_leases
 ~~~
 
 이는 8개를 반드시 제거하라는 숫자가 아니다. 적용 직전 fresh catalog와 caller/dependency evidence가 한 family라도 불충분하면 해당 family를 deferred set으로 옮긴다. 구현자는 8개를 맞추기 위해 row count, parity, dependency, operator evidence를 생략하거나 만들어내지 않는다.
+
+### 현재 implementation package의 predeploy 경계
+
+이 설계와 이전 planning dispatch를 실행하는 별도 implementation package는 exact contraction을 아직 작성하지 않는다. predeploy 단계의 `20260913130000_contract_supabase_operational_policy_v1.sql`은 retained `analysis_jobs`/`analysis_events`와 호환되는 validator, retry enqueue RPC, family load RPC만 additive하게 추가하며, 기존 RPC·table·function·index·trigger·ACL과 caller-controlled GUC evidence를 건드리지 않는다. 이후 code deploy, old-revision drain, fresh independent evidence, fixed exact embedded manifest/hash를 순서대로 완료한 뒤에만 W1A-only exact no-CASCADE contraction migration을 새로 작성·적용한다.
 
 `account_lifecycle`은 W1A에서 완전히 제외한 retained/deferred family다. `account-deletion.ts`의 flag-gated lifecycle evidence와 irreversible-action guard를 대체 설계하지 않으며, account_lifecycle table/RPC/flags/callers는 이번 code/schema change에서 손대지 않는다.
 
@@ -122,7 +126,7 @@ closure 배열은 실행 시 catalog evidence로 채우며, 빈 배열을 승인
 
 ### 현재 공용 family와 W1A/retained split
 
-20260909095740_add_analysis_canonical_tables.sql은 jobs, events, artifacts, costs, cache, audit를 하나의 validator, family flag, load bundle, retry marker 표면으로 묶었다. W1A는 artifacts/audit/cache/cost를 제거하지만 jobs/events는 retained하므로 공용 evidence 경계를 그대로 삭제하면 안 된다. 다음 split을 하나의 application+SQL change set으로 처리한다.
+20260909095740_add_analysis_canonical_tables.sql은 jobs, events, artifacts, costs, cache, audit를 하나의 validator, family flag, load bundle, retry marker 표면으로 묶었다. W1A는 artifacts/audit/cache/cost를 제거하지만 jobs/events는 retained하므로 공용 evidence 경계를 그대로 삭제하면 안 된다. 현재 package에서는 retained jobs/events 호환 표면을 additive predeploy migration과 code deploy로 분리하고, W1A object contraction은 old-revision drain·fresh evidence·fixed manifest/hash 이후의 별도 package로 남긴다.
 
 | 영역 | retained analysis_jobs/events | W1A analysis_artifacts/audit/cache/cost |
 | --- | --- | --- |
@@ -134,11 +138,11 @@ closure 배열은 실행 시 catalog evidence로 채우며, 빈 배열을 승인
 | SQL RPC | record_analysis_canonical_job, append_analysis_canonical_event는 retained contract | append_analysis_canonical_artifact, append_analysis_canonical_cost, upsert_analysis_canonical_cache, append_analysis_canonical_audit, append_analysis_canonical_late_cost_audit는 W1A drop allowlist |
 | load RPC | 새 load_analysis_execution_family_v1(UUID,TEXT)는 jobs/events만 query | load_analysis_canonical_family(UUID,TEXT)는 W1A 6-family bundle 의존성이므로 caller를 새 RPC로 바꾼 뒤 drop |
 
-이 split은 flag 이름만 바꾸는 작업이 아니다. source import, env read, RPC parameter, response parser, retry marker parser, payload validator, migration ACL, pg_depend edge를 함께 바꿔서 retained execution path가 W1A 객체를 전혀 참조하지 않게 해야 한다.
+이 split은 flag 이름만 바꾸는 작업이 아니다. source import, env read, RPC parameter, response parser, retry marker parser, payload validator, migration ACL, pg_depend edge를 함께 검증해야 한다. predeploy 단계에서는 새 retained-only validator/RPC를 추가하되 old RPC와 old-compatible writer를 drain 전까지 유지하고, exact contraction 단계에서만 fresh evidence와 fixed manifest/hash에 근거해 W1A 참조를 제거한다.
 
 ### validator와 payload closure
 
-현재 SQL의 analysis_canonical_json_object_has_exact_keys, analysis_canonical_json_value_valid, analysis_canonical_payload_valid, analysis_canonical_payload_has_only_keys와 TypeScript의 CANONICAL_PAYLOAD_KEYS/CANONICAL_EXACT_NESTED_KEYS는 여섯 family key와 familyRows를 함께 허용한다. 다음 규칙으로 rewrite한다.
+현재 SQL의 analysis_canonical_json_object_has_exact_keys, analysis_canonical_json_value_valid, analysis_canonical_payload_valid, analysis_canonical_payload_has_only_keys와 TypeScript의 CANONICAL_PAYLOAD_KEYS/CANONICAL_EXACT_NESTED_KEYS는 여섯 family key와 familyRows를 함께 허용한다. predeploy에서는 old validator를 변경하지 않고 retained-only 호환 validator/RPC를 additive하게 제공하며, 다음 규칙을 exact contraction 이후의 retained contract에 적용한다.
 
 - retained execution validator는 jobs payload와 events payload, operational retry payload만 허용한다. jobs의 job state/generation/attempt/dependency/completionHash와 events의 kind/state/contentHash/timestamp 검증은 유지한다.
 - W1A 전용 artifacts, costs, caches, audits row shape와 late-cost idempotency/audit version 검증은 제거한다. familyRows의 artifacts/costs/caches/audits key와 그 nested exact-key branch도 제거한다.
@@ -161,7 +165,7 @@ closure 배열은 실행 시 catalog evidence로 채우며, 빈 배열을 승인
 
 1. analysis_jobs payload constraint 확장, analysis_events backfill copy index, jobs/events source mapping은 retained execution preservation wave의 deferred evidence다. W1A에서 full-row archive나 backfill을 실행하지 않고 object non-change만 확인한다.
 2. append_analysis_canonical_artifact 재정의는 W1A artifact fence이므로 W1A contraction에서 더 이상 호출·grant·dependency를 남기지 않는다.
-3. apply_analysis_canonical_backfill_row(TEXT,TEXT,TEXT,TEXT,TEXT,UUID,JSONB)의 jobs/events/artifacts/costs 단일 branch RPC는 W1A에서 실행하지 않는다. source와 DB caller count가 0이고 old revision drain이 끝난 뒤에만 W1A contraction migration이 old multi-family function을 exact signature로 no-CASCADE drop한다. artifact/cost branch를 제거한 retained-only preservation RPC는 별도 wave에서 새로 설계하며, 기존 multi-family RPC를 compatibility wrapper로 남기지 않는다.
+3. apply_analysis_canonical_backfill_row(TEXT,TEXT,TEXT,TEXT,TEXT,UUID,JSONB)의 jobs/events/artifacts/costs 단일 branch RPC는 W1A에서 실행하지 않는다. source와 DB caller count가 0이고 old revision drain·fresh evidence·fixed exact manifest/hash가 모두 끝난 뒤에만 W1A contraction migration이 old multi-family function을 exact signature로 no-CASCADE drop한다. artifact/cost branch를 제거한 retained-only preservation RPC는 별도 wave에서 새로 설계하며, 기존 multi-family RPC를 compatibility wrapper로 남기지 않는다.
 4. 20260911100000_grant_wave1_backfill_projection_select.sql의 analysis_artifacts와 analysis_costs column-level grant 및 관련 backfill caller는 W1A closure에서 제거한다. analysis_jobs와 analysis_events grant/index/constraint는 retained object로 유지한다.
 
 따라서 analysis_jobs/events full-row archive는 W1A의 선행 조건이 아니다. 후속 preservation wave에서 consistent snapshot, full-row archive, row-level checksum, PK/reference manifest를 독립적으로 수행하고, 그 결과가 없다는 이유로 W1A에서 jobs/events를 drop하지 않는다.
@@ -201,7 +205,7 @@ account_lifecycle은 W1A에서 완전히 제외한다. account-deletion.ts의 fl
 
 - tables: analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions
 - operator RPC: load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, list_analysis_order_audit_bundle_recovery, claim_analysis_order_audit_bundle, release_analysis_order_audit_bundle, enqueue_analysis_order_audit_bundle, assemble_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot
-- shared audit functions/triggers: analysis_order_audit_bundle_payload, analysis_order_audit_digest, analysis_order_audit_redact_json, analysis_order_audit_candidate_key_coverage, analysis_order_audit_cost_source_hash, analysis_order_audit_source_table_hash, analysis_order_audit_purge_fence, prevent_analysis_order_audit_bundle_mutation, analysis_order_audit_parity_attestation_after_completion
+- shared audit functions/triggers: analysis_order_audit_digest, analysis_order_audit_redact_json, analysis_order_audit_bundle_payload, analysis_order_audit_parity_attestation_is_safe, analysis_order_audit_candidate_key_coverage, analysis_order_audit_cost_source_hash, analysis_order_audit_source_table_hash, analysis_order_audit_purge_fence, analysis_order_audit_summary_counts, analysis_order_audit_retention_payload, analysis_order_audit_enqueue_from_request, analysis_order_audit_enqueue_from_request_id, prevent_analysis_order_audit_bundle_mutation, prevent_analysis_order_audit_candidate_mutation, prevent_analysis_order_audit_interaction_mutation, enqueue_analysis_order_audit_after_request_finalization, enqueue_analysis_order_audit_after_result_summary, enqueue_analysis_order_audit_after_cost_snapshot, enqueue_analysis_order_audit_after_cost_attribution, capture_analysis_order_audit_parity_attestation_after_completion
 - routes: admin order-audit, admin analysis-audit, analysis observability projection과 관련 legacy RPC/view
 
 이 operator 계층은 실제 completed bundle/parity evidence가 없으면 retire할 수 없다. 실제 0_min._.00 canary나 synthetic bundle은 genuine production evidence로 인정하지 않는다.
@@ -226,11 +230,12 @@ payment_events, payment_pending, payments, payment_orders, earlybird_orders, pen
 
 적용 순서는 고정한다.
 
-1. W1A code deploy: legacy source path가 authoritative이고 W1A mirror/shadow caller가 제거된 revision을 배포한다.
-2. old revision drain: Vercel/worker의 이전 revision을 drain하고, in-flight request/job/queue가 끝나며 old revision이 W1A RPC/flag를 더 이상 호출하지 않는 증거를 수집한다.
-3. verified evidence: drain 이후 fresh catalog, source caller, migration history, flag/config, row/checksum, ACL/RLS, view/FK/sequence/publication/trigger/pg_depend manifest를 같은 observation window에서 검증한다.
-4. W1A flags hard-off and removal: analysis W1A flags와 commerce W1A flags를 먼저 false/hard-off로 고정하고, code/config/RPC manifest에서 제거한다. account lifecycle flags/callers는 no-touch retained/deferred이며, retained jobs/events, maintenance, payment hold flags는 별도 retained policy로 남긴다.
-5. schema contraction: exact no-CASCADE allowlist migration만 적용한다. old migration file을 수정하지 않으며, DROP ... CASCADE를 사용하지 않는다.
+1. predeploy additive compatibility migration: retained jobs/events validator와 compatibility RPC를 추가하고 기존 RPC·table·function·index·trigger·ACL을 보존한다. caller-controlled GUC evidence는 허용하지 않는다.
+2. code deploy: legacy source path가 authoritative이고 W1A mirror/shadow caller가 제거된 revision을 배포한다. old-compatible event writer는 old revision drain 전까지 수용한다.
+3. old revision drain: Vercel/worker의 이전 revision을 drain하고, in-flight request/job/queue가 끝나며 old revision이 W1A RPC/flag를 더 이상 호출하지 않는 증거를 수집한다.
+4. verified evidence and fixed manifest/hash: drain 이후 fresh independent catalog/traffic evidence, source caller, migration history, flag/config, row/checksum, exact routine signature/SECURITY DEFINER/`search_path`/ACL, full operator-audit contract, typed `payment_pending` read-only counts/checksum, revision/window/drain, view/FK/sequence/publication/trigger/pg_depend manifest를 같은 observation window에서 검증하고 exact embedded no-CASCADE manifest/hash를 고정한다.
+5. W1A flags hard-off and removal: 위 evidence와 fixed manifest/hash가 ready일 때만 analysis W1A flags와 commerce W1A flags를 false/hard-off로 고정하고 code/config/RPC manifest에서 제거한다. account lifecycle flags/callers는 no-touch retained/deferred이며, retained jobs/events, maintenance, payment hold flags는 별도 retained policy로 남긴다.
+6. schema contraction: 위 조건을 모두 통과한 뒤에만 exact no-CASCADE allowlist migration을 새로 작성·적용한다. old migration file을 수정하지 않으며, DROP ... CASCADE를 사용하지 않는다.
 
 W1A flag 목록은 다음과 같다.
 

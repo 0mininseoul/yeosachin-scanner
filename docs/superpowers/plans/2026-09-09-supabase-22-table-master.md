@@ -156,8 +156,8 @@ The three detailed plans require Steps 3–4 to run in one shell session, verify
 | Failure handling과 rollback | 네 상세 계획 Task 4 및 공통 verification matrix |
 
 - Landing plan은 generated \`$LANDING_MIGRATION_PATH\`, \`lib/services/leads/store.ts\`, \`lib/services/analysis/anonymous-preflight.ts\`, \`app/api/leads/route.ts\`, \`app/api/admin/landing-leads/route.ts\`, \`app/admin/analysis-audit/workbench.tsx\`와 해당 테스트만 소유한다.
-- Analysis plan은 generated \`$ANALYSIS_MIGRATION_PATH\`, \`lib/services/analysis/canonical-analysis-store.ts\`, \`lib/services/analysis/canonical-analysis-read.ts\`, \`scripts/backfill-analysis-canonical.ts\`와 해당 테스트를 소유한다. 기존 execution table은 parity window 동안 read-only source로 남긴다.
-- Commerce plan은 generated \`$COMMERCE_MIGRATION_PATH\`, \`lib/services/commerce/canonical-commerce-store.ts\`, \`lib/services/operations/canonical-operations-store.ts\`, \`scripts/backfill-commerce-operations-canonical.ts\`와 webhook/fulfillment/outbox/account lifecycle adapter 테스트를 소유한다.
+- Analysis plan은 generated \`$ANALYSIS_MIGRATION_PATH\`, \`lib/services/analysis/canonical-analysis-store.ts\`, \`lib/services/analysis/canonical-analysis-read.ts\`와 해당 테스트를 소유한다. Historical \`RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts\`와 그 테스트는 provenance only이며 실행 가능한 owner가 아니다. 기존 execution table은 parity window 동안 read-only source로 남긴다.
+- Commerce plan은 generated \`$COMMERCE_MIGRATION_PATH\`, \`lib/services/commerce/canonical-commerce-store.ts\`, \`lib/services/operations/canonical-operations-store.ts\`와 webhook/fulfillment/outbox/account lifecycle adapter 테스트를 소유한다. Historical \`RETIRED_NON_RUNNABLE:scripts/backfill-commerce-operations-canonical.ts\`와 그 테스트는 provenance only이며 실행 가능한 owner가 아니다.
 - Gate plan은 \`lib/services/operations/supabase-22-evidence.ts\`, \`scripts/verify-supabase-22-catalog.ts\`, \`scripts/verify-supabase-22-archive-restore.ts\`, gate contract tests와 evidence report만 소유한다. 적용된 migration, protected migration, \`.playwright-mcp/\`는 수정하지 않는다.
 
 어댑터는 실제 old caller가 존재하는 동안만 유지한다. 새 generic ORM, stage마다 RPC 하나, table count만 맞추는 rename/view chain은 만들지 않는다.

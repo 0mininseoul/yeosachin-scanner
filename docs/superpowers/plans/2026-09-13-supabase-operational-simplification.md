@@ -4,20 +4,30 @@
 
 **Goal:** 기준 SHA 053d46326e7ecf45c02ebab9ae210ffe66624d00에서 exact-22 terminal count 계약을 폐기하고, active runtime·payment·provider·operator audit·maintenance contract를 보존하면서 fresh evidence가 허용한 inactive canonical shadow subset만 수축한다.
 
-**Architecture:** legacy V2, payment/order, notification, identity deletion, provider admission/charge, operator audit source를 authoritative 또는 retained contract로 둔다. W1A는 application caller와 flag를 먼저 닫고, old revision drain과 verified evidence 뒤에 explicit no-CASCADE allowlist migration으로 W1A-only table/RPC/flag/index/trigger/ACL/FK/view/sequence dependency만 제거한다. analysis_jobs/events는 W1A에서 object 보존·비변경만 확인하고 full-row archive는 별도 preservation wave로 이동한다.
+**Architecture:** legacy V2, payment/order, notification, identity deletion, provider admission/charge, operator audit source를 authoritative 또는 retained contract로 둔다. predeploy additive compatibility migration으로 retained jobs/events의 호환 validator와 RPC 표면을 먼저 제공하고, code deploy → old revision drain → fresh independent evidence와 fixed exact manifest/hash를 거친 뒤에만 별도 exact no-CASCADE contraction migration을 작성·적용한다. analysis_jobs/events는 W1A에서 object 보존·비변경만 확인하고 full-row archive는 별도 preservation wave로 이동한다.
 
 **Tech Stack:** Next.js 16 App Router, React 19, TypeScript, Supabase PostgreSQL, Supabase CLI 2.102.0, existing TypeScript/SQL contract and PGlite tests.
 
 ---
 
-## 현재 dispatch의 경계
+## 이전 planning dispatch의 경계 (보존)
 
-현재 dispatch에서 실제로 수정하는 파일은 아래 두 문서뿐이다.
+이전 planning dispatch에서 실제로 수정하는 파일은 아래 두 문서뿐이다.
 
 - docs/superpowers/specs/2026-09-13-supabase-operational-simplification-design.md
 - docs/superpowers/plans/2026-09-13-supabase-operational-simplification.md
 
-현재 dispatch에서는 코드/SQL 구현, production/remote Supabase/Vercel 접근, migration apply, supabase db push, flag activation, test 실행, canary, payment_pending mutation을 하지 않는다. 후속 implementation work package는 정확한 파일과 검증 순서를 기록하기 위한 것이며, 이 dispatch의 변경 권한을 넓히지 않는다.
+이전 planning dispatch에서는 코드/SQL 구현, production/remote Supabase/Vercel 접근, migration apply, supabase db push, flag activation, test 실행, canary, payment_pending mutation을 하지 않았다. 후속 implementation work package는 이 경계와 분리된 작업이며, 아래의 predeploy compatibility 구현만 포함하고 exact contraction이나 원격 적용 권한을 부여하지 않는다.
+
+## 현재 implementation package의 고정 순서
+
+이 문서의 planning dispatch와 별도인 현재 implementation package는 다음 순서를 고정한다.
+
+1. **Predeploy additive compatibility migration:** `20260913130000_contract_supabase_operational_policy_v1.sql`은 retained `analysis_jobs`/`analysis_events`와 호환되는 validator, retry enqueue RPC, family load RPC만 추가한다. 기존 RPC·table·function·index·trigger·ACL은 drop/변경하지 않고, caller-controlled GUC evidence도 허용하지 않는다.
+2. **Code deploy:** producer/consumer가 새 retained execution contract를 사용할 수 있게 배포하되 old revision과 old-compatible event writer를 즉시 제거하지 않는다.
+3. **Old-revision drain and fresh evidence:** old revision의 in-flight request/job/queue 및 old RPC caller가 0임을 drain evidence로 확인한 뒤, 독립 read-only catalog/traffic evidence에서 exact routine signature, SECURITY DEFINER, `search_path`, ACL, full operator-audit contract, typed `payment_pending` read-only counts/checksum, revision/window/drain을 검증한다.
+4. **Fixed exact manifest/hash:** 위 fresh evidence를 바탕으로 exact object/dependency manifest와 no-CASCADE allowlist hash를 고정하고 embedded source/hash를 남긴다. shape-only closure, caller-supplied hash/boolean, 빈 배열은 승인 근거가 아니다.
+5. **Post-deploy contraction authoring/application:** 위 조건이 모두 충족된 뒤에만 W1A-only exact contraction migration을 새로 작성하고 별도 승인·적용한다. 이 implementation package에는 contraction migration이 없으며 production/remote apply는 수행하지 않는다.
 
 ## 결정된 operational policy
 
@@ -281,9 +291,9 @@ drop 후보는 fulfillment_jobs, notification_outbox, system_configuration, syst
 
 모든 DROP TABLE/FUNCTION/INDEX/TRIGGER는 exact schema/name/signature를 직접 적는다. DROP ... CASCADE, broad wildcard, implicit dependent deletion은 금지한다. dependency precondition 또는 allowlist가 하나라도 실패하면 migration을 apply하지 않고 family를 deferred set으로 되돌린다.
 
-- [ ] **Step 5: code deploy → old revision drain → verified evidence → flags hard-off/removed → schema contraction 순서를 적용한다.**
+- [ ] **Step 5: predeploy additive compatibility → code deploy → old revision drain → fresh evidence + fixed manifest/hash → flags hard-off/removed → exact contraction 순서를 적용한다.**
 
-old Vercel/worker revision이 drain되어 in-flight request/job/queue와 old RPC caller가 0임을 증명하기 전에는 schema를 줄이지 않는다. drain 후 fresh evidence를 검증하고, W1A flags를 모두 hard-off한 뒤 source/config에서 제거한다. W1A flags는 ANALYSIS_CANONICAL_EVIDENCE_READ, ANALYSIS_CANONICAL_EVIDENCE_WRITE, ANALYSIS_CANONICAL_COST_READ, ANALYSIS_CANONICAL_COST_WRITE, ANALYSIS_CANONICAL_CACHE_READ, ANALYSIS_CANONICAL_CACHE_WRITE, ANALYSIS_CANONICAL_AUDIT_READ, ANALYSIS_CANONICAL_AUDIT_WRITE와 COMMERCE_CANONICAL_FULFILLMENT_READ, COMMERCE_CANONICAL_FULFILLMENT_WRITE, COMMERCE_CANONICAL_NOTIFICATION_READ, COMMERCE_CANONICAL_NOTIFICATION_WRITE, COMMERCE_CANONICAL_CONFIG_READ, COMMERCE_CANONICAL_CONFIG_WRITE, COMMERCE_CANONICAL_LEASE_READ, COMMERCE_CANONICAL_LEASE_WRITE다. account lifecycle flags/callers는 no-touch retained/deferred이고, retained jobs/events flags, maintenance, payment hold flag는 별도 policy로 남긴다.
+`20260913130000_contract_supabase_operational_policy_v1.sql` 같은 additive compatibility migration을 먼저 적용할 수 있지만, old Vercel/worker revision이 drain되어 in-flight request/job/queue와 old RPC caller가 0임을 증명하기 전에는 schema를 줄이지 않는다. drain 후 fresh independent evidence와 exact embedded manifest/hash를 검증하고, W1A flags를 모두 hard-off한 뒤 source/config에서 제거한다. exact contraction migration은 이 모든 조건이 충족된 뒤에만 새로 작성·적용한다. W1A flags는 ANALYSIS_CANONICAL_EVIDENCE_READ, ANALYSIS_CANONICAL_EVIDENCE_WRITE, ANALYSIS_CANONICAL_COST_READ, ANALYSIS_CANONICAL_COST_WRITE, ANALYSIS_CANONICAL_CACHE_READ, ANALYSIS_CANONICAL_CACHE_WRITE, ANALYSIS_CANONICAL_AUDIT_READ, ANALYSIS_CANONICAL_AUDIT_WRITE와 COMMERCE_CANONICAL_FULFILLMENT_READ, COMMERCE_CANONICAL_FULFILLMENT_WRITE, COMMERCE_CANONICAL_NOTIFICATION_READ, COMMERCE_CANONICAL_NOTIFICATION_WRITE, COMMERCE_CANONICAL_CONFIG_READ, COMMERCE_CANONICAL_CONFIG_WRITE, COMMERCE_CANONICAL_LEASE_READ, COMMERCE_CANONICAL_LEASE_WRITE다. account lifecycle flags/callers는 no-touch retained/deferred이고, retained jobs/events flags, maintenance, payment hold flag는 별도 policy로 남긴다.
 
 - [ ] **Step 6: post evidence를 수집한다.**
 

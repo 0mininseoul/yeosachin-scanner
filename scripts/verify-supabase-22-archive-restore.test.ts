@@ -58,13 +58,13 @@ describe('operational-policy-v1 archive/restore verifier CLI', () => {
         );
         expect(parseSupabase22IndependentArchiveProof({
             source: 'independent-read-only',
+            observedAt: '2026-09-09T12:00:00.000Z',
             selectedCount: 1,
             archiveChecksum: HASH,
             restoreCount: 1,
             restoreChecksum: HASH,
             encryptionAlgorithm: 'AES-256-GCM',
             retentionClass: 'standard',
-            isolatedRestoreVerified: true,
         })).toMatchObject({ selectedCount: 1, restoreCount: 1 });
     });
 
@@ -82,13 +82,13 @@ describe('operational-policy-v1 archive/restore verifier CLI', () => {
         const deps = dependencies({
             readArchiveEvidence: vi.fn(async () => ({
                 source: 'independent-read-only',
+                observedAt: '2026-09-09T12:00:00.000Z',
                 selectedCount: 0,
                 archiveChecksum: HASH,
                 restoreCount: 0,
                 restoreChecksum: HASH,
                 encryptionAlgorithm: 'AES-256-GCM',
                 retentionClass: 'standard',
-                isolatedRestoreVerified: true,
             })),
         });
         const result = await runSupabase22ArchiveRestoreCli([

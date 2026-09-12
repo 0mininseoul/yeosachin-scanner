@@ -110,7 +110,7 @@
   },
   "adapterCoverage": {
     "analysis": {
-      "specFile": "scripts/backfill-analysis-canonical.ts",
+      "specFile": "RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts",
       "declaredLegacySpecCount": 27,
       "auditSpecCount": 4,
       "executableSpecCount": 21,
@@ -184,7 +184,7 @@
     },
     "wave1AnalysisCanonicalization": {
       "status": "not-applied-executable-specs-only",
-      "adapterSpecFile": "scripts/backfill-analysis-canonical.ts",
+      "adapterSpecFile": "RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts",
       "adapterSpecCount": 21,
       "sourceAllowlist": [
         "analysis_pipeline_jobs",

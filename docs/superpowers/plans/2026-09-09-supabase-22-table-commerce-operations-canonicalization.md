@@ -1,6 +1,6 @@
 # Commerce and Operations Canonicalization Implementation Plan
 
-> Historical plan disposition (2026-09-13): this exact-22 multi-family backfill plan is retained for provenance only; its backfill entry point was retired. Do not run commands referencing `scripts/backfill-commerce-operations-canonical.ts`.
+> Historical plan disposition (2026-09-13): this exact-22 multi-family backfill plan is retained for provenance only; its backfill entry point was retired. Every backfill path and command below is `RETIRED_NON_RUNNABLE`; do not execute or copy it into a shell.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
@@ -22,8 +22,8 @@
 | Create | \`lib/services/commerce/canonical-commerce-pglite.test.ts\` |
 | Create | \`lib/services/operations/canonical-operations-store.ts\` |
 | Create | \`lib/services/operations/canonical-operations-store.test.ts\` |
-| Create | \`scripts/backfill-commerce-operations-canonical.ts\` |
-| Create | \`scripts/backfill-commerce-operations-canonical.test.ts\` |
+| RETIRED_NON_RUNNABLE Create | \`scripts/backfill-commerce-operations-canonical.ts\` |
+| RETIRED_NON_RUNNABLE Create | \`scripts/backfill-commerce-operations-canonical.test.ts\` |
 | Modify | \`app/api/webhooks/groble/route.ts\`, \`lib/services/groble/webhook.ts\` |
 | Modify | \`lib/services/earlybird/fulfillment-store.ts\`, \`lib/services/earlybird/payment-discord.ts\` |
 | Modify | \`lib/services/identity/account-deletion.ts\`, \`lib/services/identity/account-principal-store.ts\` |
@@ -261,8 +261,8 @@ git commit -m "feat: dual-write commerce operation evidence"
 
 **Files:**
 
-- Create: \`scripts/backfill-commerce-operations-canonical.ts\`
-- Create: \`scripts/backfill-commerce-operations-canonical.test.ts\`
+- RETIRED_NON_RUNNABLE Create: \`scripts/backfill-commerce-operations-canonical.ts\`
+- RETIRED_NON_RUNNABLE Create: \`scripts/backfill-commerce-operations-canonical.test.ts\`
 - Modify: \`lib/services/commerce/canonical-commerce-store.ts\`, \`lib/services/operations/canonical-operations-store.ts\`
 
 - [ ] **Step 1: Write RED parity tests.** Backfill old \`earlybird_webhook_events\`, \`earlybird_fulfillments\`, \`earlybird_*_outbox\`, \`account_classification_audit\`, \`account_paid_evidence\`, \`account_deletion_jobs\`, \`account_ledger_rollout_state\`, recovery tables, and lease tables in batches of at most 100. Assert event/payment/order relationships, fulfillment states/fences, notification dedupe, lifecycle order, config version, lease generation, and maintenance retry parity. Missing provider/payment evidence is blocked, never converted to \`payment_failed\`.
@@ -283,8 +283,8 @@ expect(derivePaymentDisposition({
 - [ ] **Step 3: Run GREEN.**
 
 ~~~bash
-npx vitest run scripts/backfill-commerce-operations-canonical.test.ts lib/services/commerce/canonical-commerce-store.test.ts lib/services/operations/canonical-operations-store.test.ts
-npx tsx --conditions=react-server scripts/backfill-commerce-operations-canonical.ts --limit=100 --report-only
+# RETIRED_NON_RUNNABLE: npx vitest run scripts/backfill-commerce-operations-canonical.test.ts lib/services/commerce/canonical-commerce-store.test.ts lib/services/operations/canonical-operations-store.test.ts
+# RETIRED_NON_RUNNABLE: npx tsx --conditions=react-server scripts/backfill-commerce-operations-canonical.ts --limit=100 --report-only
 ~~~
 
 Expected: tests PASS; report-only output has \`status: blocked\` for missing evidence and never changes an order.
@@ -292,8 +292,8 @@ Expected: tests PASS; report-only output has \`status: blocked\` for missing evi
 - [ ] **Step 4: Commit backfill and rollback reader.**
 
 ~~~bash
-git add scripts/backfill-commerce-operations-canonical.ts scripts/backfill-commerce-operations-canonical.test.ts lib/services/commerce/canonical-commerce-store.ts lib/services/operations/canonical-operations-store.ts
-git commit -m "feat: add commerce operation parity backfill"
+# RETIRED_NON_RUNNABLE: git add scripts/backfill-commerce-operations-canonical.ts scripts/backfill-commerce-operations-canonical.test.ts lib/services/commerce/canonical-commerce-store.ts lib/services/operations/canonical-operations-store.ts
+# RETIRED_NON_RUNNABLE: git commit -m "feat: add commerce operation parity backfill"
 ~~~
 
 ## Task 4: Full verification and handoff
@@ -301,7 +301,7 @@ git commit -m "feat: add commerce operation parity backfill"
 - [ ] **Step 1: Run owned and repository gates.**
 
 ~~~bash
-npx vitest run lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts scripts/backfill-commerce-operations-canonical.test.ts lib/services/earlybird/groble-webhook-route.test.ts lib/services/earlybird/fulfillment-store.test.ts lib/services/earlybird/payment-discord.test.ts lib/services/identity/account-deletion.test.ts
+# RETIRED_NON_RUNNABLE: npx vitest run lib/services/commerce/canonical-commerce-store.test.ts lib/services/commerce/canonical-commerce-pglite.test.ts lib/services/operations/canonical-operations-store.test.ts scripts/backfill-commerce-operations-canonical.test.ts lib/services/earlybird/groble-webhook-route.test.ts lib/services/earlybird/fulfillment-store.test.ts lib/services/earlybird/payment-discord.test.ts lib/services/identity/account-deletion.test.ts
 npx tsc --noEmit --pretty false
 npm run lint
 npm run build

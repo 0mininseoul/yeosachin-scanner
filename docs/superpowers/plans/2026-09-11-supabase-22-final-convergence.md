@@ -1,6 +1,6 @@
 # Supabase 22 Final Convergence Implementation Plan
 
-> Historical plan disposition (2026-09-13): exact-22 backfill entry points referenced by this plan are retired and non-runnable. Current implementation evidence is governed by `supabase-operational-policy-v1`.
+> Historical plan disposition (2026-09-13): exact-22 backfill entry points referenced by this plan are `RETIRED_NON_RUNNABLE` and retained only for provenance. Current implementation evidence is governed by `supabase-operational-policy-v1`; do not execute or copy the historical paths below into a shell.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -43,7 +43,7 @@ no application, migration, or test code is changed by this handoff.
 
 | Finding | Explicit correction |
 |---|---|
-| P1-1 source coverage | Wave 1 contains only the 21 request-safe executable legacy names from `scripts/backfill-analysis-canonical.ts`; its two cache specs, `ai_analysis_cache` and `analysis_v2_ai_global_result_cache`, declare `requestIdColumn: null` and are rejected by the existing reader, so they are deferred. Wave 2 has an empty executable allowlist because `scripts/backfill-commerce-operations-canonical.ts` has no wired `readBatch`/`readCanonicalBatch`. The remaining 80 analysis and 37 commerce consolidate rows are named as deferred, and the two cross-wave declarations are called out separately. |
+| P1-1 source coverage | Wave 1 contains only the 21 request-safe executable legacy names from `RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts`; its two cache specs, `ai_analysis_cache` and `analysis_v2_ai_global_result_cache`, declare `requestIdColumn: null` and are rejected by the existing reader, so they are deferred. Wave 2 has an empty executable allowlist because `RETIRED_NON_RUNNABLE:scripts/backfill-commerce-operations-canonical.ts` has no wired `readBatch`/`readCanonicalBatch`. The remaining 80 analysis and 37 commerce consolidate rows are named as deferred, and the two cross-wave declarations are called out separately. |
 | P1-2 retry destination | Analysis retry markers use `enqueue_analysis_canonical_retry` and the existing `analysis_events` operational `canonical_retry` contract; `maintenance_jobs` is explicitly excluded from the analysis retry path. |
 | P1-3 private accounts | `private_accounts` is blocked, outside Wave 1, with no canonical destination or destructive proposal until a lossless profile/result-artifact contract covers fields, identity, ownership, publication, readers, dual-write, and rollback. |
 | P1-4 cohort cardinality/callers | `earlybird_concierge_batch_cohort_members` is blocked until order-wide uniqueness or a deterministic cohort/member identity and lossless frozen-manifest projection are proven. The inventory counts `scripts/warm-reimage-g1.ts` and `scripts/warm-reimage-g2.ts` as operational callers. |
@@ -93,7 +93,7 @@ The inventory contains exact machine-readable arrays:
 
 - `waves.wave1AnalysisCanonicalization.sourceAllowlist`: exactly 21
   request-safe executable analysis source tables from the current specs in
-  `scripts/backfill-analysis-canonical.ts`. The file still declares 23
+  `RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts`. The file still declares 23
   non-audit specs, but `ai_analysis_cache` and
   `analysis_v2_ai_global_result_cache` have `requestIdColumn: null` and the
   existing reader rejects them, so both remain deferred. The five defined
@@ -177,7 +177,7 @@ an inferred pass.
 ## Wave 1: mapped analysis canonicalization, additive only
 
 **Purpose:** Converge only the 21 request-safe executable analysis source
-tables from the current specs in `scripts/backfill-analysis-canonical.ts`
+tables from the historical specs in `RETIRED_NON_RUNNABLE:scripts/backfill-analysis-canonical.ts`
 across five defined source families (jobs, events, artifacts, costs, and
 cache), without deleting source data. The two cache specs with
 `requestIdColumn: null` are rejected by the existing reader and, together with

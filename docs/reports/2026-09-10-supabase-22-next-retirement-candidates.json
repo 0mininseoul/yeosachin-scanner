@@ -147,7 +147,7 @@
         "canonicalDestinationProof": [
           "scripts/generate-supabase-22-retirement-inventory.ts:225-237 explicit mapping",
           "scripts/generate-supabase-22-retirement-inventory.test.ts:50 mapping assertion",
-          "scripts/backfill-commerce-operations-canonical.ts:62-76 payment source list",
+          "RETIRED_NON_RUNNABLE:scripts/backfill-commerce-operations-canonical.ts:62-76 payment source list",
           "supabase/migrations/20260909095932_add_commerce_operation_canonical_tables.sql:6-28 canonical payment_events shape"
         ],
         "inventoryEvidence": {

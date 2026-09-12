@@ -146,7 +146,7 @@ const CANONICAL_NESTED_PAYLOAD_KEYS = new Set([
     'attemptCount', 'dependencyCount', 'completionHash', 'requestStatus', 'state', 'counts',
     'eventCode', 'copyCode', 'aggregateCount', 'tracks', 'kind', 'progress', 'result',
     'relationshipAi', 'interactions', 'finalization', 'stageCode', 'done', 'total',
-    'completed', 'lowSeconds', 'highSeconds', 'retryKey', 'family',
+    'completed', 'lowSeconds', 'highSeconds', 'retryKey', 'family', 'rank', 'score',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
