@@ -29,6 +29,12 @@
 4. **Fixed exact manifest/hash:** 위 fresh evidence를 바탕으로 exact object/dependency manifest와 no-CASCADE allowlist hash를 고정하고 embedded source/hash를 남긴다. shape-only closure, caller-supplied hash/boolean, 빈 배열은 승인 근거가 아니다.
 5. **Post-deploy contraction authoring/application:** 위 조건이 모두 충족된 뒤에만 W1A-only exact contraction migration을 새로 작성하고 별도 승인·적용한다. 이 implementation package에는 contraction migration이 없으며 production/remote apply는 수행하지 않는다.
 
+### 현재 predeploy package의 hard gate와 deferred evidence
+
+현재 package에는 separately reviewed fixed exact contraction manifest가 없으므로 operational policy evaluator는 어떤 입력 조합에서도 READY를 반환하지 않는다. evaluator는 항상 `status: blocked`, `policyReadiness: blocked`, `exact-contraction-manifest-missing`을 유지하며, caller-shaped closure/hash와 self-attested source/status/boolean을 contraction evidence로 승격하지 않는다.
+
+catalog, retirement-inventory, traffic, payment-pending, archive/restore helper는 현재 package에서 diagnostic/archive-only다. exact object/attribute manifest 비교, independent deployed-revision/window/queue-drain reader, read-only `payment_pending` aggregate/checksum collector, full policy composition과 separate manifest approval은 code deploy 후 fresh production evidence가 가능한 별도 post-deploy contraction package로 명시적으로 deferred한다. 따라서 archive checksum이나 diagnostic catalog completeness가 맞아도 CLI/report는 policy readiness를 승인하지 않는다.
+
 ## 결정된 operational policy
 
 ### supabase-operational-policy-v1
@@ -231,7 +237,7 @@ payment_events, payment_pending, payments, payment_orders, earlybird_orders, pen
 
 완료 조건: W1A commerce caller가 제거되고 legacy routes가 유지되며, maintenance mirror/parity/shared hash, payment/provider/operator audit contract에 변경이 없다. account_lifecycle과 dedicated account-deletion parity caller는 남아 있고, W1A family caller count만 0이다.
 
-## Task 3: exact-22 verifier를 operational policy verifier로 바꾼다
+## Task 3: catalog/archive diagnostics와 hard-blocked policy envelope를 고정한다
 
 **Files:**
 
@@ -247,13 +253,15 @@ payment_events, payment_pending, payments, payment_orders, earlybird_orders, pen
   - scripts/verify-supabase-22-archive-restore.test.ts
   - affected existing canonical-analysis/canonical-commerce/canonical-operations contract tests
 
-- [ ] **Step 1: policy schema/version과 classification output을 정의한다.**
+- [ ] **Step 1: policy schema/version과 blocked classification output을 정의한다.**
 
 SUPABASE_22_CANONICAL_TABLES와 187/165 expected count comparison을 제거한다. supabase-operational-policy-v1, sourceSha, retained, forbiddenW1A, approvedSubset, closure, noCascadeAllowlistHash와 deferred reason을 출력한다. policy version은 고정하되 table count와 approvedSubset 크기는 fresh evidence에 따라 변할 수 있다.
+현재 predeploy evaluator에는 exact contraction manifest 입력을 두지 않고 `exact-contraction-manifest-missing`을 unconditional gate로 둔다. closure/hash, source/status/boolean과 diagnostic helper 결과는 policy readiness를 열 수 없다.
 
-- [ ] **Step 2: retained/forbidden invariant를 검증한다.**
+- [ ] **Step 2: retained/forbidden invariant를 diagnostic output으로 기록한다.**
 
-verifier는 retained analysis_jobs, analysis_events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions가 존재하는지 확인한다. operator RPC 예시인 load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, claim_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot도 retained contract로 확인한다. analysis_audit_bundles는 approvedSubset의 W1A shadow table이며 analysis_order_audit_bundles와 다른 object다. forbiddenW1A에 대한 DROP/ALTER/DML, account_lifecycle mutation, payment_pending mutation, unexpected routine/flag/ACL/view/FK/sequence/trigger/publication change가 있으면 실패한다.
+verifier는 retained analysis_jobs, analysis_events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions가 존재하는지 diagnostic output에 기록한다. operator RPC 예시인 load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, claim_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot도 retained contract 후보로 기록한다. analysis_audit_bundles는 approvedSubset의 W1A shadow table이며 analysis_order_audit_bundles와 다른 object다. pre/post DROP/ALTER/DML, account_lifecycle/payment_pending mutation, exact routine/flag/ACL/view/FK/sequence/trigger/publication comparison은 현재 package에서 수행하지 않고 post-deploy manifest package로 deferred한다.
+이 결과는 catalog/archive diagnostic으로만 보존하며 contraction policy의 complete proof로 취급하지 않는다. exact attribute comparison과 full operator contract composition은 post-deploy package에서 fresh evidence와 fixed manifest를 함께 검토할 때 수행한다.
 
 - [ ] **Step 3: 기존 catalog PGlite fixture와 기존 contract assertion만 갱신한다.**
 
@@ -261,9 +269,9 @@ lib/services/operations/supabase-22-catalog-pglite.test.ts의 exact-22 table fix
 
 - [ ] **Step 4: historical document semantics를 유지한다.**
 
-실제 repo의 archive verifier 파일은 `scripts/verify-supabase-22-archive-restore.ts`와 `scripts/verify-supabase-22-archive-restore.test.ts`다. 이 verifier는 order-audit parity의 encrypted archive/isolated restore checksum을 검증하므로 retire하지 않고 operational-policy-v1의 새 schemaVersion/sourceSha/retained/forbiddenW1A/approvedSubset/closure/noCascadeAllowlistHash와 실제 retained operator table/RPC invariants를 소비하도록 갱신한다. `canonicalSetMatch`, exact-22 count/set만 검증하는 assertion은 제거한다. 기존 exact-22 design/report는 historical baseline으로 남기고, 새 inventory/policy가 160 snapshot 또는 exact-22 terminal count를 future guarantee로 표현하지 않는지 확인한다.
+실제 repo의 archive verifier 파일은 `scripts/verify-supabase-22-archive-restore.ts`와 `scripts/verify-supabase-22-archive-restore.test.ts`다. 이 verifier는 order-audit parity의 encrypted archive/isolated restore checksum을 검증하는 archive-only diagnostic으로 유지한다. 현재 package에서는 archive checksum이 맞아도 `policyReadiness: blocked`와 `exact-contraction-manifest-missing`을 출력하며, `canonicalSetMatch`, exact-22 count/set만 검증하는 assertion은 제거한다. 기존 exact-22 design/report는 historical baseline으로 남기고, 새 inventory/policy가 160 snapshot 또는 exact-22 terminal count를 future guarantee로 표현하지 않는지 확인한다.
 
-완료 조건: catalog와 archive/restore verifier가 exact count/set 대신 policy version, retained/forbidden invariant, closure completeness, approvedSubset과 no-CASCADE allowlist hash를 판정한다.
+완료 조건: catalog와 archive/restore verifier가 exact count/set 대신 diagnostic policy version과 retained/forbidden classification을 출력하고, predeploy contraction policy는 항상 blocked 상태와 명시적 missing gate를 반환한다.
 
 ## Task 4: migration manifest와 bounded contraction 순서를 고정한다
 

@@ -16,6 +16,22 @@ export const SUPABASE_OPERATIONAL_POLICY_SCHEMA = 'supabase-operational-policy-v
 export const SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA =
     '053d46326e7ecf45c02ebab9ae210ffe66624d00' as const;
 
+/**
+ * The predeploy package has no reviewed exact contraction manifest.  This gate
+ * is intentionally unconditional until the later post-deploy package supplies
+ * one from fresh independent production evidence.
+ */
+export const SUPABASE_OPERATIONAL_CONTRACTION_GATE =
+    'exact-contraction-manifest-missing' as const;
+
+/** Evidence intentionally deferred to the post-code-deploy contraction package. */
+export const SUPABASE_OPERATIONAL_POSTDEPLOY_DEFERRED_EVIDENCE = [
+    'exact object/attribute manifest comparisons',
+    'independent deployed-revision, observation-window, and queue-drain reader',
+    'payment_pending read-only aggregate/checksum collector',
+    'full contraction policy composition and separate manifest approval',
+] as const;
+
 export const SUPABASE_OPERATIONAL_RETAINED_TABLES = [
     'analysis_jobs', 'analysis_events',
     'analysis_provider_runs', 'analysis_v2_provider_runs',
@@ -291,6 +307,7 @@ export type Supabase22ArchiveEvidence = Readonly<{
     restoreManifest?: Supabase22RestoreManifest | null;
 }>;
 
+/** Diagnostic-only input; no activation evidence cannot open the predeploy gate. */
 export type Supabase22NoActivationEvidence = Readonly<{
     source: 'independent-read-only';
     observedAt: string;
@@ -298,6 +315,7 @@ export type Supabase22NoActivationEvidence = Readonly<{
     realCanaryStarted: false;
 }>;
 
+/** Catalog closure diagnostic; its hash is not a contraction manifest. */
 export type Supabase22ClosureEvidence = Readonly<{
     source: 'catalog-read-only';
     sourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
@@ -306,12 +324,14 @@ export type Supabase22ClosureEvidence = Readonly<{
     noCascadeAllowlistHash: string;
 }>;
 
+/** Catalog completeness diagnostic; exact object attributes are deferred. */
 export type Supabase22IndependentCatalogEvidence = Readonly<{
     source: 'catalog-read-only';
     observedAt: string;
     evidence: Supabase22CatalogEvidence;
 }>;
 
+/** Archive/operator diagnostic; not a complete contraction policy proof. */
 export type Supabase22CompletedBundleEvidence = Readonly<{
     source: 'order-audit-read-only';
     observedAt: string;
@@ -321,6 +341,7 @@ export type Supabase22CompletedBundleEvidence = Readonly<{
     parityStatus: Supabase22GateStatus;
 }>;
 
+/** Approval-shaped diagnostic input; separate manifest review is deferred. */
 export type Supabase22ApprovalEvidence = Readonly<{
     source: 'independent-read-only';
     observedAt: string;
@@ -337,7 +358,7 @@ export type SupabaseOperationalPolicyInput = Readonly<{
     forbiddenW1A: readonly string[];
     approvedSubset: readonly string[];
     deferredReasons: Readonly<Record<string, string>>;
-    /** Every readiness input below is independently sourced or null. */
+    /** Diagnostic/archive inputs only; none can authorize predeploy contraction. */
     closureEvidence: Supabase22ClosureEvidence | null;
     catalogEvidence: Supabase22IndependentCatalogEvidence | null;
     completedBundleEvidence: Supabase22CompletedBundleEvidence | null;
@@ -351,7 +372,9 @@ export type SupabaseOperationalPolicyInput = Readonly<{
 
 export type SupabaseOperationalPolicyEvidence = SupabaseOperationalPolicyInput & Readonly<{
     schemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
-    status: Supabase22GateStatus;
+    /** This predeploy evaluator can never authorize contraction. */
+    policyReadiness: 'blocked';
+    status: 'blocked';
     missingGates: readonly string[];
     closure: SupabaseOperationalPolicyClosure;
     noCascadeAllowlistHash: string | null;
@@ -366,27 +389,12 @@ export type SupabaseOperationalPolicyEvidence = SupabaseOperationalPolicyInput &
     destructiveOperations: 'refused';
 }>;
 
-const NO_ACTIVATION_EVIDENCE_KEYS = [
-    'source', 'observedAt', 'admissionActivated', 'realCanaryStarted',
-] as const;
-
 function sortedUnique(values: readonly string[]): string[] {
     return [...new Set(values)].sort((left, right) => left.localeCompare(right));
 }
 
 function addGate(gates: string[], gate: string): void {
     if (!gates.includes(gate)) gates.push(gate);
-}
-
-function isIndependentNoActivationEvidence(value: unknown): boolean {
-    return isRecord(value)
-        && Object.keys(value).length === NO_ACTIVATION_EVIDENCE_KEYS.length
-        && NO_ACTIVATION_EVIDENCE_KEYS.every(key => Object.prototype.hasOwnProperty.call(value, key))
-        && value.source === 'independent-read-only'
-        && typeof value.observedAt === 'string'
-        && ISO_DATE_PATTERN.test(value.observedAt)
-        && value.admissionActivated === false
-        && value.realCanaryStarted === false;
 }
 
 function isSafeRetentionClass(value: unknown): value is string {
@@ -424,32 +432,6 @@ export function isGenuineRestoreManifest(value: unknown): value is Supabase22Res
         && isSafeRetentionClass(value.retentionClass);
 }
 
-function archiveManifestEvidenceClean(
-    archive: Supabase22ArchiveEvidence,
-    expectedCount: number,
-): boolean {
-    return archive.source === 'independent-read-only'
-        && typeof archive.observedAt === 'string'
-        && ISO_DATE_PATTERN.test(archive.observedAt)
-        && typeof archive.aggregateChecksum === 'string'
-        && HASH_PATTERN.test(archive.aggregateChecksum)
-        && isGenuineArchiveManifest(archive.manifest)
-        && archive.manifest.selectedCount === expectedCount
-        && archive.manifest.aggregateChecksum === archive.aggregateChecksum;
-}
-
-function restoreManifestEvidenceClean(
-    archive: Supabase22ArchiveEvidence,
-    expectedCount: number,
-): boolean {
-    return archive.restoreStatus === 'verified'
-        && isGenuineRestoreManifest(archive.restoreManifest)
-        && archive.restoreManifest.selectedCount === expectedCount
-        && archive.restoreManifest.aggregateChecksum === archive.aggregateChecksum
-        && isGenuineArchiveManifest(archive.manifest)
-        && archive.restoreManifest.retentionClass === archive.manifest.retentionClass;
-}
-
 function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
     if (new Set(left).size !== left.length || new Set(right).size !== right.length) {
         return false;
@@ -458,33 +440,15 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
     return normalize(left).join('\u0000') === normalize(right).join('\u0000');
 }
 
-function operationalClosureComplete(closure: SupabaseOperationalPolicyClosure): boolean {
-    if (!isRecord(closure)) return false;
-    const values = Object.values(closure);
-    return values.every(items => Array.isArray(items)
-        && items.every(value => typeof value === 'string' && value.length > 0)
-        && new Set(items).size === items.length)
-        && closure.tables.length > 0
-        && closure.routines.length > 0
-        && closure.dependencies.length > 0;
-}
-
-function operationalArchiveEvidenceClean(archive: Supabase22ArchiveEvidence): boolean {
-    return archiveManifestEvidenceClean(
-        archive,
-        isGenuineArchiveManifest(archive.manifest) ? archive.manifest.selectedCount : -1,
-    ) && restoreManifestEvidenceClean(
-        archive,
-        isGenuineArchiveManifest(archive.manifest) ? archive.manifest.selectedCount : -1,
-    );
-}
-
 const OPERATIONAL_CLOSURE_KEYS = [
     'tables', 'routines', 'flags', 'indexes', 'triggers', 'policies', 'acls',
     'views', 'foreignKeys', 'sequences', 'publications', 'dependencies',
 ] as const;
 
-/** Hashes the canonical, sorted closure representation used by a later contract. */
+/**
+ * Hashes a diagnostic closure representation for the later contract. This
+ * helper is deliberately not accepted by the predeploy policy evaluator.
+ */
 export function hashSupabaseOperationalPolicyClosure(
     closure: SupabaseOperationalPolicyClosure,
 ): string {
@@ -498,75 +462,14 @@ export function hashSupabaseOperationalPolicyClosure(
         .digest('hex');
 }
 
-function closureEvidenceClean(value: Supabase22ClosureEvidence | null): boolean {
-    if (!value || value.source !== 'catalog-read-only'
-        || value.sourceSha !== SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA
-        || !ISO_DATE_PATTERN.test(value.observedAt)
-        || !operationalClosureComplete(value.closure)
-        || !HASH_PATTERN.test(value.noCascadeAllowlistHash)) {
-        return false;
-    }
-    return value.noCascadeAllowlistHash === hashSupabaseOperationalPolicyClosure(value.closure);
-}
-
-function catalogEvidenceClean(value: Supabase22IndependentCatalogEvidence | null): boolean {
-    if (!value || value.source !== 'catalog-read-only'
-        || !ISO_DATE_PATTERN.test(value.observedAt)
-        || !value.evidence
-        || value.evidence.sourceSha !== SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA
-        || value.evidence.status !== 'ready'
-        || value.evidence.clean !== true
-        || !sameStringSet(value.evidence.retainedTables, SUPABASE_OPERATIONAL_RETAINED_TABLES)
-        || !sameStringSet(value.evidence.forbiddenW1A, SUPABASE_OPERATIONAL_FORBIDDEN_W1A)
-        || value.evidence.operatorAuditTriggersClean !== true) {
-        return false;
-    }
-    return Object.values(value.evidence.metadataAvailability).every(Boolean);
-}
-
-function completedBundleEvidenceClean(value: Supabase22CompletedBundleEvidence | null): boolean {
-    return value !== null
-        && value.source === 'order-audit-read-only'
-        && ISO_DATE_PATTERN.test(value.observedAt)
-        && Number.isSafeInteger(value.genuineCompletedCount)
-        && value.genuineCompletedCount > 0
-        && Number.isSafeInteger(value.perOrderParityCount)
-        && value.perOrderParityCount === value.genuineCompletedCount
-        && HASH_PATTERN.test(value.aggregateChecksum)
-        && value.parityStatus === 'ready';
-}
-
-function approvalEvidenceClean(
-    value: Supabase22ApprovalEvidence | null,
-    allowlistHash: string | null,
-): boolean {
-    return value !== null
-        && value.source === 'independent-read-only'
-        && ISO_DATE_PATTERN.test(value.observedAt)
-        && HASH_PATTERN.test(value.allowlistHash)
-        && value.allowlistHash === allowlistHash
-        && ISO_DATE_PATTERN.test(value.approvedAt)
-        && (value.approvedByRole === 'owner' || value.approvedByRole === 'operator')
-        && Number.isSafeInteger(value.exactObjectCount)
-        && value.exactObjectCount > 0;
-}
-
-function paymentPendingEvidenceClean(value: Supabase22PaymentPendingEvidence | null): boolean {
-    return value !== null
-        && value.source === 'payment_pending-read-only'
-        && ISO_DATE_PATTERN.test(value.observedAt)
-        && HASH_PATTERN.test(value.sourceChecksum)
-        && isPaymentPendingDispositionRecorded(value);
-}
-
-function noActivationEvidenceClean(value: Supabase22NoActivationEvidence | null): boolean {
-    return isIndependentNoActivationEvidence(value);
-}
-
 /**
- * Evaluate the versioned operational policy. This is deliberately independent of
- * table cardinality: a fresh observation may approve any subset of the W1A upper
- * bound, and an omitted family must carry an explicit deferred reason.
+ * Evaluate the predeploy policy envelope.
+ *
+ * Catalog, archive, traffic, payment, and approval helpers in this package are
+ * diagnostic/archive-only.  They intentionally do not compose a contraction
+ * decision: the exact post-deploy manifest and its separate review do not exist
+ * yet, so this function is structurally incapable of returning READY even when
+ * a caller supplies mutually consistent evidence-shaped objects.
  */
 export function evaluateSupabaseOperationalPolicy(
     input: SupabaseOperationalPolicyInput,
@@ -590,69 +493,33 @@ export function evaluateSupabaseOperationalPolicy(
     if (!forbiddenComplete) addGate(missingGates, 'forbidden-invariant');
     if (!approvedSubsetValid) addGate(missingGates, 'approved-subset');
     if (!deferredComplete || !deferredKeysValid) addGate(missingGates, 'deferred-reason');
-    const closureReady = closureEvidenceClean(input.closureEvidence);
-    const allowlistHash = closureReady && input.closureEvidence
-        ? input.closureEvidence.noCascadeAllowlistHash
-        : null;
-    if (!closureReady) addGate(missingGates, 'closure-completeness');
-    if (allowlistHash === null) addGate(missingGates, 'no-cascade-allowlist');
-    const catalogReady = catalogEvidenceClean(input.catalogEvidence);
-    if (!catalogReady) {
-        addGate(missingGates, 'retained-catalog-proof');
-        addGate(missingGates, 'forbidden-catalog-proof');
-        addGate(missingGates, 'dependency-inventory');
-        addGate(missingGates, 'migration-history');
-    }
-    const completedReady = completedBundleEvidenceClean(input.completedBundleEvidence);
-    const parityStatus = input.completedBundleEvidence?.parityStatus ?? 'blocked';
-    if (!completedReady) addGate(missingGates, 'genuine-completed-bundle');
-    if (parityStatus !== 'ready') addGate(missingGates, 'per-order-parity');
-    const archiveReady = operationalArchiveEvidenceClean(input.archiveManifest);
-    if (!archiveReady) addGate(missingGates, 'archive-restore');
-    const rollbackEvaluation = input.rollbackEvidence === null
-        ? null
-        : evaluateSupabase22RollbackEvidence(input.rollbackEvidence);
-    const rollbackReady = rollbackEvaluation !== null
-        && rollbackEvaluation.missingGates.length === 0;
-    if (!rollbackReady) addGate(missingGates, 'rollback-evidence');
-    const observationWindowClosed = rollbackEvaluation?.observationWindowClosed === true;
-    if (!observationWindowClosed) addGate(missingGates, 'observation-window');
-    const approvalReady = approvalEvidenceClean(input.approvalEvidence, allowlistHash);
-    if (!approvalReady) addGate(missingGates, 'separate-approval');
-    const paymentReady = paymentPendingEvidenceClean(input.paymentPendingEvidence);
-    if (!paymentReady) addGate(missingGates, 'payment-pending-disposition');
-    const noActivationReady = noActivationEvidenceClean(input.noActivationEvidence);
-    if (!noActivationReady) addGate(missingGates, 'no-activation-or-canary');
-    const genuineCompletedBundleEvidence = completedReady;
-    const rollbackEvidenceVerified = rollbackReady;
-    const ownerApprovalRecorded = approvalReady;
-    const paymentPendingDispositionRecorded = paymentReady;
-    const noActivationOrCanary = noActivationReady;
-    const archiveRestoreChecksumMatch = archiveReady;
-    const status: Supabase22GateStatus = missingGates.length === 0
-        ? 'ready'
-        : parityStatus === 'mismatch' ? 'mismatch' : 'blocked';
-    const closure = input.closureEvidence?.closure ?? {
+    // The exact manifest is intentionally absent from this package.  Keep this
+    // gate unconditional so caller-shaped closure/hash/status/boolean inputs can
+    // never promote a predeploy diagnostic into contraction readiness.
+    addGate(missingGates, SUPABASE_OPERATIONAL_CONTRACTION_GATE);
+    const status: Supabase22GateStatus = 'blocked';
+    const closure: SupabaseOperationalPolicyClosure = {
         tables: [], routines: [], flags: [], indexes: [], triggers: [], policies: [],
         acls: [], views: [], foreignKeys: [], sequences: [], publications: [], dependencies: [],
     };
     const evidence: SupabaseOperationalPolicyEvidence = {
         ...input,
         schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        policyReadiness: 'blocked',
         retained: sortedUnique(input.retained),
         forbiddenW1A: sortedUnique(input.forbiddenW1A),
         approvedSubset: sortedUnique(input.approvedSubset),
         deferredReasons: Object.fromEntries(Object.entries(deferredReasons).sort(([a], [b]) => a.localeCompare(b))),
         closure,
-        noCascadeAllowlistHash: allowlistHash,
-        genuineCompletedBundleEvidence,
-        parityStatus,
-        rollbackEvidenceVerified,
-        observationWindowClosed,
-        ownerApprovalRecorded,
-        paymentPendingDispositionRecorded,
-        noActivationOrCanary,
-        archiveRestoreChecksumMatch,
+        noCascadeAllowlistHash: null,
+        genuineCompletedBundleEvidence: false,
+        parityStatus: 'blocked',
+        rollbackEvidenceVerified: false,
+        observationWindowClosed: false,
+        ownerApprovalRecorded: false,
+        paymentPendingDispositionRecorded: false,
+        noActivationOrCanary: false,
+        archiveRestoreChecksumMatch: false,
         status,
         missingGates,
         destructiveOperations: 'refused',
@@ -802,7 +669,9 @@ export type Supabase22CatalogSnapshot = Readonly<{
 export type Supabase22CatalogEvidence = Readonly<{
     schemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
     sourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
-    status: 'ready' | 'blocked';
+    /** Diagnostic completeness only; this is never contraction readiness. */
+    status: 'complete' | 'blocked';
+    policyReadiness: 'blocked';
     publicTableCount: number;
     canonicalTables: readonly string[];
     unexpectedTables: readonly string[];
@@ -962,6 +831,9 @@ function comparableCatalogRoutineName(value: unknown): string {
 function normalizeCatalogIdentityArguments(value: string): string {
     return value
         .trim()
+        // pg_identify_object may qualify built-in and public argument types,
+        // while the reviewed signature map intentionally uses canonical names.
+        .replace(/\b(?:pg_catalog|public)\./gi, '')
         .replace(/\bcharacter varying\b/gi, 'varchar')
         .replace(/\btimestamp with time zone\b/gi, 'timestamptz')
         .replace(/\btimestamp without time zone\b/gi, 'timestamp')
@@ -1362,7 +1234,8 @@ export function evaluateSupabase22Catalog(
     const evidence: Supabase22CatalogEvidence = {
         schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
         sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
-        status: clean ? 'ready' : 'blocked',
+        status: clean ? 'complete' : 'blocked',
+        policyReadiness: 'blocked',
         publicTableCount: publicTables.length,
         canonicalTables,
         unexpectedTables,
@@ -2640,6 +2513,7 @@ export type Supabase22FamilyTrafficEvidence = Readonly<{
     activeLegacyWriterCount: number;
 }>;
 
+/** Bounded traffic diagnostic input; independent drain reading is deferred. */
 export type Supabase22RollbackEvidenceInput = Readonly<{
     families: readonly Supabase22FamilyTrafficEvidence[];
     activeLegacyWriterCount: number;
@@ -2923,6 +2797,7 @@ export async function collectSupabase22RollbackEvidence(
     return evaluateSupabase22RollbackEvidence(parseTrafficEvidence(raw));
 }
 
+/** Shape-only payment diagnostic; aggregate/checksum collection is deferred. */
 export type Supabase22PaymentPendingEvidence = Readonly<{
     source: 'payment_pending-read-only';
     observedAt: string;

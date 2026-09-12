@@ -113,7 +113,10 @@ describe('Supabase 22 catalog verifier CLI', () => {
 
         expect(result.exitCode).toBe(1);
         const output = JSON.parse(writeStdout.mock.calls[0]?.[0] as string);
-        expect(output).toMatchObject({ schemaVersion: 'supabase-operational-policy-v1' });
+        expect(output).toMatchObject({
+            schemaVersion: 'supabase-operational-policy-v1',
+            policyReadiness: 'blocked',
+        });
         expect(JSON.stringify(output)).not.toContain('read_supabase_22_catalog');
     });
 
@@ -134,6 +137,7 @@ describe('Supabase 22 catalog verifier CLI', () => {
         ]);
         expect(JSON.parse(writeStdout.mock.calls[0]?.[0] as string)).toMatchObject({
             status: 'blocked',
+            policyReadiness: 'blocked',
             destructiveOperations: 'refused',
         });
     });

@@ -64,6 +64,8 @@ export type Supabase22RetirementInventoryRow = Readonly<{
 
 export type Supabase22RetirementInventoryReport = Readonly<{
     schemaVersion: typeof SUPABASE_22_RETIREMENT_SCHEMA;
+    /** Aggregate inventory is diagnostic only; it cannot authorize contraction. */
+    policyReadiness: 'blocked';
     historicalDisposition: typeof SUPABASE_22_HISTORICAL_DISPOSITION;
     sourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
     retained: readonly string[];
@@ -407,6 +409,7 @@ export async function buildSupabase22RetirementInventoryReport(
     };
     return {
         schemaVersion: SUPABASE_22_RETIREMENT_SCHEMA,
+        policyReadiness: 'blocked',
         historicalDisposition: SUPABASE_22_HISTORICAL_DISPOSITION,
         sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
         retained: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],

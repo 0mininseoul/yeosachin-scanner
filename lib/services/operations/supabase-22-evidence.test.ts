@@ -60,7 +60,8 @@ const catalogEvidence = {
     observedAt: '2026-09-09T12:00:00.000Z',
     evidence: {
         sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
-        status: 'ready' as const,
+        status: 'complete' as const,
+        policyReadiness: 'blocked' as const,
         clean: true,
         retainedTables: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],
         forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A],
@@ -174,14 +175,18 @@ function completeInput(
 }
 
 describe('supabase-operational-policy-v1 evidence gate', () => {
-    it('accepts a fresh approved subset without imposing a table-count invariant', () => {
+    it('stays blocked until a separately reviewed exact contraction manifest exists', () => {
         const approvedSubset = [SUPABASE_OPERATIONAL_W1A_UPPER_BOUND[0]];
         const result = evaluateSupabaseOperationalPolicy(completeInput({ approvedSubset }));
 
-        expect(result.status).toBe('ready');
+        expect(result.status).toBe('blocked');
+        expect(result.policyReadiness).toBe('blocked');
+        expect(result.missingGates).toContain('exact-contraction-manifest-missing');
         expect(result.schemaVersion).toBe(SUPABASE_OPERATIONAL_POLICY_SCHEMA);
         expect(result.sourceSha).toBe(SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA);
         expect(result.approvedSubset).toEqual(approvedSubset);
+        expect(result.noCascadeAllowlistHash).toBeNull();
+        expect(result.archiveRestoreChecksumMatch).toBe(false);
         expect(result.destructiveOperations).toBe('refused');
     });
 
@@ -207,27 +212,36 @@ describe('supabase-operational-policy-v1 evidence gate', () => {
         ]));
     });
 
-    it('fails closed when fresh catalog or no-activation evidence is absent', () => {
+    it('does not promote catalog or self-attested no-activation evidence into readiness', () => {
         const result = evaluateSupabaseOperationalPolicy(completeInput({
             catalogEvidence: null,
             noActivationEvidence: null,
         }));
 
         expect(result.status).toBe('blocked');
-        expect(result.missingGates).toEqual(expect.arrayContaining([
-            'retained-catalog-proof', 'no-activation-or-canary',
-        ]));
+        expect(result.missingGates).toContain('exact-contraction-manifest-missing');
+        expect(result.ownerApprovalRecorded).toBe(false);
+        expect(result.noActivationOrCanary).toBe(false);
     });
 
-    it('does not accept a missing no-CASCADE allowlist hash or empty closure', () => {
+    it('does not accept caller-shaped closure or no-CASCADE hashes as a gate', () => {
         const result = evaluateSupabaseOperationalPolicy(completeInput({
-            closureEvidence: null,
+            closureEvidence: {
+                source: 'catalog-read-only',
+                sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+                observedAt: '2026-09-09T12:00:00.000Z',
+                closure,
+                noCascadeAllowlistHash: CLOSURE_HASH,
+            },
         }));
 
         expect(result.status).toBe('blocked');
-        expect(result.missingGates).toEqual(expect.arrayContaining([
-            'closure-completeness', 'no-cascade-allowlist',
-        ]));
+        expect(result.missingGates).toContain('exact-contraction-manifest-missing');
+        expect(result.closure).toEqual({
+            tables: [], routines: [], flags: [], indexes: [], triggers: [], policies: [],
+            acls: [], views: [], foreignKeys: [], sequences: [], publications: [], dependencies: [],
+        });
+        expect(result.noCascadeAllowlistHash).toBeNull();
     });
 
     it('rejects unsafe approval records and accepts only complete sanitized approvals', () => {

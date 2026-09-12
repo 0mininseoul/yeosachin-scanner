@@ -79,6 +79,7 @@ describe('Supabase 22 retirement inventory generator', () => {
             aggregate('unrelated_legacy_table'),
         ]);
         expect(report.schemaVersion).toBe(SUPABASE_OPERATIONAL_POLICY_SCHEMA);
+        expect(report.policyReadiness).toBe('blocked');
         expect(report.publicBasePartitionedTableCount).toBe(3);
         expect(report.retainedTables.map(row => row.tableName)).toEqual(['analysis_jobs']);
         expect(report.w1aCandidates.map(row => row.tableName)).toEqual(['analysis_artifacts']);

@@ -74,6 +74,8 @@ describe('operational-policy-v1 archive/restore verifier CLI', () => {
         const result = await runSupabase22ArchiveRestoreCli(['--report-only'], deps);
         expect(result.exitCode).toBe(1);
         expect(result.report.status).toBe('blocked');
+        expect(result.report.policyReadiness).toBe('blocked');
+        expect(result.report.missingGates).toContain('exact-contraction-manifest-missing');
         expect(result.report.destructiveOperations).toBe('refused');
         expect(JSON.stringify(writeStdout.mock.calls)).not.toContain(REQUEST_ID);
     });
@@ -96,6 +98,7 @@ describe('operational-policy-v1 archive/restore verifier CLI', () => {
         ], deps);
         expect(result.exitCode).toBe(1);
         expect(result.report.status).toBe('blocked');
+        expect(result.report.policyReadiness).toBe('blocked');
         expect(result.report.destructiveOperations).toBe('refused');
     });
 });

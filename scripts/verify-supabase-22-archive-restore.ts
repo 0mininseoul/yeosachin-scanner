@@ -299,7 +299,10 @@ function archiveEvidenceFromProof(
 export type Supabase22ArchiveRestoreReport = Readonly<{
     schemaVersion: 'supabase-operational-policy-v1-archive-restore';
     policySchemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
-    status: 'ready' | 'mismatch' | 'blocked';
+    /** Archive/restore diagnostic status; never contraction readiness. */
+    status: 'mismatch' | 'blocked';
+    policyReadiness: 'blocked';
+    missingGates: readonly string[];
     selectedCount: number;
     aggregateChecksum: string | null;
     archiveManifest: Supabase22ArchiveEvidence & Readonly<{
@@ -328,8 +331,12 @@ function reportFromPolicy(
     const report: Supabase22ArchiveRestoreReport = {
         schemaVersion: 'supabase-operational-policy-v1-archive-restore',
         policySchemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
-        status: evidence.status === 'ready' && restoreStatus === 'verified' && checksumMatch
-            ? 'ready' : restoreStatus === 'mismatch' ? 'mismatch' : 'blocked',
+        // The archive verifier is intentionally diagnostic-only. The current
+        // package has no exact contraction manifest, so policy readiness is
+        // always blocked even when archive/restore checksums match.
+        status: restoreStatus === 'mismatch' ? 'mismatch' : 'blocked',
+        policyReadiness: 'blocked',
+        missingGates: evidence.missingGates,
         selectedCount,
         aggregateChecksum: typeof checksum === 'string' && HASH_PATTERN.test(checksum) ? checksum : null,
         archiveManifest: {
@@ -403,7 +410,7 @@ export async function runSupabase22ArchiveRestoreCli(
         ? report
         : Object.fromEntries(Object.entries(report).filter(([key]) => key !== 'archiveManifest'));
     dependencies.writeStdout(`${JSON.stringify(output, null, 2)}\n`);
-    return { exitCode: report.status === 'ready' ? 0 : 1, report };
+    return { exitCode: 1, report };
 }
 
 function isDirectExecution(): boolean {

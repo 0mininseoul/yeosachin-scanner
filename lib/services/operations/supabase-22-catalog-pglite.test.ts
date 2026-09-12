@@ -330,10 +330,12 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         });
         const privateRoutine = (name: string) => ({
             name,
-            identityArguments: formatSupabaseOperationalRoutineIdentity(name).slice(
+            identityArguments: (name === 'create_or_replay_landing_lead_exclusion'
+                ? 'pg_catalog.uuid,pg_catalog.text'
+                : formatSupabaseOperationalRoutineIdentity(name).slice(
                 name.length + 1,
                 -1,
-            ),
+            )),
             securityDefiner: true,
             searchPathEmpty: true,
             executePublic: false,
@@ -356,10 +358,12 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         });
         const invokerRoutine = (name: string) => ({
             name,
-            identityArguments: formatSupabaseOperationalRoutineIdentity(name).slice(
-                name.length + 1,
-                -1,
-            ),
+            identityArguments: name === 'analysis_order_audit_bundle_payload'
+                ? 'public.analysis_order_audit_bundles'
+                : formatSupabaseOperationalRoutineIdentity(name).slice(
+                    name.length + 1,
+                    -1,
+                ),
             securityDefiner: false,
             searchPathEmpty: true,
             executePublic: false,
@@ -380,6 +384,11 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             executeAuthenticated: true,
             executeServiceRole: false,
         });
+        const observedRoutineIdentity = (name: string) => name === 'create_or_replay_landing_lead_exclusion'
+            ? `public.${name}(pg_catalog.uuid,pg_catalog.text)`
+            : name === 'analysis_order_audit_bundle_payload'
+                ? `public.${name}(public.analysis_order_audit_bundles)`
+                : formatSupabaseOperationalRoutineIdentity(name);
         const snapshot = {
             tables: SUPABASE_OPERATIONAL_RETAINED_TABLES.map(name => ({
                 name,
@@ -390,20 +399,20 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             acls: [
                 ...SUPABASE_OPERATIONAL_RETAINED_TABLES.map(relationAcl),
                 ...SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES.map(name => ({
-                    ...relationAcl(formatSupabaseOperationalRoutineIdentity(name)),
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                 })),
                 ...SUPABASE_OPERATIONAL_RETAINED_OPERATOR_INVOKER_HELPER_NAMES.map(name => ({
-                    ...relationAcl(formatSupabaseOperationalRoutineIdentity(name)),
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                 })),
                 ...SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES.map(name => ({
-                    ...relationAcl(formatSupabaseOperationalRoutineIdentity(name)),
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                     serviceRoleAllowed: true,
                 })),
                 ...SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES.map(name => ({
-                    ...relationAcl(formatSupabaseOperationalRoutineIdentity(name)),
+                    ...relationAcl(observedRoutineIdentity(name)),
                     objectKind: 'routine' as const,
                     anonAllowed: name === 'set_analysis_v2_preflight_exclusion_with_landing',
                     authenticatedAllowed: true,
@@ -411,7 +420,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
             ],
             dependencies: [
                 ...SUPABASE_OPERATIONAL_RETAINED_TABLES,
-                ...SUPABASE_OPERATIONAL_ROUTINE_NAMES.map(formatSupabaseOperationalRoutineIdentity),
+                ...SUPABASE_OPERATIONAL_ROUTINE_NAMES.map(observedRoutineIdentity),
             ].map(objectName => ({
                 objectName,
                 resolved: true,
@@ -728,6 +737,188 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
         expect(migration).not.toMatch(
             /CREATE\s+(?:OR REPLACE\s+)?FUNCTION\s+public\.(?:record_analysis_canonical_job|append_analysis_canonical_event)/i,
         );
+    });
+
+    it('executes the additive migration and preserves old objects and nested execution behavior', async () => {
+        const migrationDb = await PGlite.create();
+        try {
+            await migrationDb.exec(`
+                CREATE ROLE anon;
+                CREATE ROLE authenticated;
+                CREATE ROLE service_role;
+                CREATE SCHEMA extensions;
+                CREATE FUNCTION extensions.digest(bytea, text)
+                RETURNS bytea LANGUAGE sql IMMUTABLE
+                AS $$ SELECT decode(md5($1), 'hex') $$;
+                CREATE TABLE public.analysis_jobs (
+                    id uuid PRIMARY KEY,
+                    request_id uuid NOT NULL,
+                    created_at timestamptz NOT NULL DEFAULT now()
+                );
+                CREATE TABLE public.analysis_events (
+                    id bigserial PRIMARY KEY,
+                    request_id uuid NOT NULL,
+                    kind text NOT NULL,
+                    state text NOT NULL,
+                    payload jsonb NOT NULL,
+                    content_hash text NOT NULL,
+                    retention_class text NOT NULL,
+                    created_at timestamptz NOT NULL DEFAULT now()
+                );
+                CREATE UNIQUE INDEX analysis_events_retry_unique
+                    ON public.analysis_events(request_id, state, content_hash)
+                    WHERE kind = 'operational' AND state = 'canonical_retry';
+                CREATE FUNCTION public.analysis_canonical_payload_valid(jsonb)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+                CREATE FUNCTION public.record_analysis_canonical_job(text)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+                CREATE FUNCTION public.append_analysis_canonical_event(text)
+                RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT true $$;
+            `);
+
+            const relationRows = async () => (await migrationDb.query<{
+                relname: string;
+                relkind: string;
+            }>(`
+                SELECT c.relname, c.relkind
+                FROM pg_catalog.pg_class AS c
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'i', 'S')
+                ORDER BY c.relname
+            `)).rows;
+            const routineRows = async () => (await migrationDb.query<{
+                proname: string;
+                identity_arguments: string;
+            }>(`
+                SELECT p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)
+                    AS identity_arguments
+                FROM pg_catalog.pg_proc AS p
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN (
+                      'analysis_canonical_payload_valid',
+                      'record_analysis_canonical_job',
+                      'append_analysis_canonical_event'
+                  )
+                ORDER BY p.proname
+            `)).rows;
+            const beforeRelations = await relationRows();
+            const beforeRoutines = await routineRows();
+            const migration = readFileSync(join(
+                process.cwd(),
+                'supabase/migrations/20260913130000_contract_supabase_operational_policy_v1.sql',
+            ), 'utf8');
+
+            await migrationDb.exec(migration);
+
+            expect(await relationRows()).toEqual(beforeRelations);
+            expect(await routineRows()).toEqual(beforeRoutines);
+            const addedRoutines = await migrationDb.query<{ proname: string }>(`
+                SELECT p.proname
+                FROM pg_catalog.pg_proc AS p
+                JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proname IN (
+                      'analysis_execution_json_object_has_exact_keys_v1',
+                      'analysis_execution_json_value_valid_v1',
+                      'analysis_execution_payload_valid_v1',
+                      'analysis_execution_payload_has_only_keys_v1',
+                      'enqueue_analysis_execution_retry_v1',
+                      'load_analysis_execution_family_v1'
+                  )
+                ORDER BY p.proname
+            `);
+            expect(addedRoutines.rows.map(row => row.proname)).toEqual([
+                'analysis_execution_json_object_has_exact_keys_v1',
+                'analysis_execution_json_value_valid_v1',
+                'analysis_execution_payload_has_only_keys_v1',
+                'analysis_execution_payload_valid_v1',
+                'enqueue_analysis_execution_retry_v1',
+                'load_analysis_execution_family_v1',
+            ]);
+            const legacyBehavior = await migrationDb.query<{
+                validator: boolean;
+                job: boolean;
+                event: boolean;
+            }>(`
+                SELECT
+                    public.analysis_canonical_payload_valid('{}'::jsonb) AS validator,
+                    public.record_analysis_canonical_job('legacy') AS job,
+                    public.append_analysis_canonical_event('legacy') AS event
+            `);
+            expect(legacyBehavior.rows[0]).toEqual({
+                validator: true,
+                job: true,
+                event: true,
+            });
+
+            const validation = await migrationDb.query<{
+                retry_valid: boolean;
+                nested_valid: boolean;
+                nested_invalid: boolean;
+            }>(`
+                SELECT
+                    public.analysis_execution_payload_valid_v1(
+                        '{"family":"events","retryKey":"fixture"}'::jsonb
+                    ) AS retry_valid,
+                    public.analysis_execution_payload_valid_v1(
+                        '{"schemaVersion":1,"progress":{"state":"running","completed":1,"total":2},"result":{"rank":1,"score":0.5}}'::jsonb
+                    ) AS nested_valid,
+                    public.analysis_execution_payload_valid_v1(
+                        '{"schemaVersion":1,"progress":{"state":"running","completed":1}}'::jsonb
+                    ) AS nested_invalid
+            `);
+            expect(validation.rows[0]).toEqual({
+                retry_valid: true,
+                nested_valid: true,
+                nested_invalid: false,
+            });
+
+            const requestId = '00000000-0000-4000-8000-000000000001';
+            const firstRetry = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.enqueue_analysis_execution_retry_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            const secondRetry = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.enqueue_analysis_execution_retry_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            expect(firstRetry.rows[0]?.result).toMatchObject({
+                kind: 'operational',
+                state: 'canonical_retry',
+            });
+            expect(secondRetry.rows[0]?.result).toMatchObject({
+                kind: 'operational',
+                state: 'canonical_retry',
+            });
+            expect(secondRetry.rows[0]?.result.id).toBe(firstRetry.rows[0]?.result.id);
+            const retryCount = await migrationDb.query<{ count: number }>(`
+                SELECT pg_catalog.count(*)::integer AS count
+                FROM public.analysis_events
+                WHERE request_id = '${requestId}'::uuid
+                  AND state = 'canonical_retry'
+            `);
+            expect(retryCount.rows[0]?.count).toBe(1);
+
+            const loaded = await migrationDb.query<{ result: Record<string, unknown> }>(`
+                SELECT public.load_analysis_execution_family_v1(
+                    '${requestId}'::uuid, 'events'
+                ) AS result
+            `);
+            expect(loaded.rows[0]?.result).toMatchObject({
+                jobs: [],
+                events: [expect.objectContaining({ state: 'canonical_retry' })],
+            });
+            await expect(migrationDb.query(`
+                SELECT public.load_analysis_execution_family_v1(
+                    '${requestId}'::uuid, 'artifacts'
+                )
+            `)).rejects.toThrow('ANALYSIS_CANONICAL_INVALID_READ_FAMILY');
+        } finally {
+            await migrationDb.close();
+        }
     });
 
     it('paginates a dependency catalog larger than one bounded response', async () => {

@@ -196,7 +196,10 @@ export async function runSupabase22CatalogCli(
     }
     assertPiiSafeConsolidationOutput(evidence);
     activeDependencies.writeStdout(`${JSON.stringify(evidence, null, 2)}\n`);
-    return { exitCode: evidence.clean ? 0 : 1, evidence };
+    // This package only emits a diagnostic catalog snapshot. A complete
+    // snapshot still cannot authorize contraction before the post-deploy
+    // exact-manifest package exists, so the CLI never exits as policy-ready.
+    return { exitCode: 1, evidence };
 }
 
 function isDirectExecution(): boolean {

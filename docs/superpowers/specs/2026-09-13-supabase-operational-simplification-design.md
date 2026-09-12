@@ -30,6 +30,12 @@ system_leases
 
 `account_lifecycle`은 W1A에서 완전히 제외한 retained/deferred family다. `account-deletion.ts`의 flag-gated lifecycle evidence와 irreversible-action guard를 대체 설계하지 않으며, account_lifecycle table/RPC/flags/callers는 이번 code/schema change에서 손대지 않는다.
 
+### 현재 predeploy implementation package의 명시적 차단
+
+현재 package에는 separately reviewed fixed exact contraction manifest가 없다. 따라서 `evaluateSupabaseOperationalPolicy`는 입력된 closure/hash, source/status/boolean, catalog/archive/traffic/payment 값을 조합해 contraction readiness를 만들지 않고, 항상 `status: blocked`, `policyReadiness: blocked`, `missingGates`의 `exact-contraction-manifest-missing`을 반환한다. catalog, retirement-inventory, traffic, payment-pending, archive/restore helper는 각각 diagnostic 또는 archive-only 결과만 제공하며 어떤 CLI/report도 operational contraction READY를 출력하지 않는다. catalog/archive verifier CLI는 non-zero로 종료하고 inventory report도 blocked를 표시한다.
+
+exact object/attribute manifest 비교, independent deployed-revision/observation-window/queue-drain reader, read-only `payment_pending` aggregate/checksum collector, full policy composition과 separate manifest approval은 code deploy 후 fresh production evidence가 존재하는 별도 post-deploy contraction package로 명시적으로 deferred한다. 이 package에서는 위 결과를 caller가 shape/hash로 채워도 gate가 열리지 않는다.
+
 다음은 W1A에서 보존하고 변경하지 않는다.
 
 - analysis_jobs와 analysis_events: 관측 snapshot은 각각 19행과 81행이며, W1A 선행 필수 full-row archive가 아니다. W1A에서는 table, row, schema, index, FK, trigger, ACL의 보존·비변경만 확인하고, 별도 preservation wave에서 archive를 판단한다.
@@ -118,9 +124,9 @@ closure 배열은 실행 시 catalog evidence로 채우며, 빈 배열을 승인
 4. source caller, flag, routine, view, FK, ACL, sequence, publication, trigger, pg_depend edge가 closure에 없으면 해당 family는 deferred다.
 5. fresh evidence에 따라 approvedSubset은 8개보다 작아질 수 있다. policy version이 같다고 table 수가 고정되는 것은 아니다.
 
-기존 catalog pglite 및 contract test는 새 policy에 맞게 갱신하지만 새 test file은 만들지 않는다. 최소 갱신 범위는 lib/services/operations/supabase-22-catalog-pglite.test.ts, lib/services/operations/supabase-22-evidence.test.ts, scripts/verify-supabase-22-catalog.test.ts, scripts/generate-supabase-22-retirement-inventory.test.ts, scripts/verify-supabase-22-archive-restore.test.ts이며, 변경한 분석/commerce store의 기존 contract test만 추가로 갱신한다.
+기존 catalog pglite 및 contract test는 새 policy에 맞게 갱신하지만 새 test file은 만들지 않는다. 현재 predeploy package의 catalog/archive/traffic helper assertion은 diagnostic/archive-only contract를 검증하고, operational contraction readiness를 검증하지 않는다. 최소 갱신 범위는 lib/services/operations/supabase-22-catalog-pglite.test.ts, lib/services/operations/supabase-22-evidence.test.ts, scripts/verify-supabase-22-catalog.test.ts, scripts/generate-supabase-22-retirement-inventory.test.ts, scripts/verify-supabase-22-archive-restore.test.ts이며, 변경한 분석/commerce store의 기존 contract test만 추가로 갱신한다.
 
-실제 repo의 archive verifier 파일은 `scripts/verify-supabase-22-archive-restore.ts`와 `scripts/verify-supabase-22-archive-restore.test.ts`다. 이 verifier는 order-audit parity의 encrypted archive/isolated restore checksum을 검증하므로 retain/update disposition으로 두고, operational-policy-v1의 schemaVersion/sourceSha/retained/forbiddenW1A/approvedSubset/closure/noCascadeAllowlistHash와 실제 retained operator table/RPC invariants를 소비하도록 갱신한다. `canonicalSetMatch`와 exact-22 count/set만 검증하는 assertion은 retire한다. 현재 repo verifier에는 order-audit archive/restore 검증이 있으므로 파일 자체를 retire하지 않는다.
+실제 repo의 archive verifier 파일은 `scripts/verify-supabase-22-archive-restore.ts`와 `scripts/verify-supabase-22-archive-restore.test.ts`다. 이 verifier는 order-audit parity의 encrypted archive/isolated restore checksum을 검증하는 archive-only diagnostic으로 retain/update한다. 현재 predeploy package에서 이 verifier는 operational-policy-v1의 contraction gate를 완성하지 않으며, archive checksum이 맞아도 `policyReadiness: blocked`와 `exact-contraction-manifest-missing`을 출력한다. `canonicalSetMatch`와 exact-22 count/set만 검증하는 assertion은 retire한다. 현재 repo verifier에는 order-audit archive/restore 검증이 있으므로 파일 자체를 retire하지 않는다.
 
 ## 분석 canonical 계층의 dependency closure
 
