@@ -667,7 +667,7 @@ SELECT pg_catalog.set_config('app.earlybird_v211_concierge_reviewed_source_regis
 SELECT pg_catalog.set_config('app.earlybird_v211_concierge_publication_marker', '0', TRUE);
 SELECT pg_catalog.set_config('app.earlybird_v211_concierge_publication_skip', '0', TRUE);
 DO $guard$
-DECLARE v_replay RECORD; v_order RECORD; v_request RECORD;
+DECLARE v_order RECORD; v_request RECORD;
 BEGIN
   SELECT * INTO v_order FROM public.earlybird_orders WHERE id = ${sqlString(input.orderId)}::uuid FOR UPDATE;
   SELECT * INTO v_request FROM public.analysis_requests WHERE id = ${sqlString(input.requestId)}::uuid FOR UPDATE;
@@ -686,17 +686,6 @@ BEGIN
   IF COALESCE(((${lineageSql})->'relationship'->>'completenessProven')::boolean, FALSE) IS NOT TRUE THEN
     RAISE EXCEPTION 'CONCIERGE_RELATIONSHIP_SNAPSHOT_INCOMPLETE';
   END IF;
-  SELECT * INTO v_replay FROM public.earlybird_v211_concierge_replays WHERE order_id = ${sqlString(input.orderId)}::uuid FOR UPDATE;
-  IF v_replay.reviewed_source_fingerprint IS NOT NULL AND v_replay.reviewed_source_fingerprint <> ${sourceFingerprintSql} THEN
-    RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
-  END IF;
-  IF v_replay.published_source_fingerprint IS NOT NULL THEN
-    IF v_replay.published_source_fingerprint = ${sourceFingerprintSql} AND v_replay.published_result_hash = ${resultHashSql} THEN
-      PERFORM pg_catalog.set_config('app.earlybird_v211_concierge_publication_skip', '1', TRUE);
-    ELSE
-      RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT';
-    END IF;
-  END IF;
 END $guard$;
 SELECT pg_catalog.set_config('app.earlybird_v211_concierge_reviewed_source_register', '1', TRUE);
 SELECT public.register_earlybird_v211_concierge_reviewed_source(
@@ -706,14 +695,16 @@ SELECT public.register_earlybird_v211_concierge_reviewed_source(
   ${targetPostsSql}, ${targetEvidenceSql}
 );
 DO $publish$
-DECLARE v_fingerprint text; v_hash text;
+DECLARE v_marked boolean;
 BEGIN
   IF pg_catalog.current_setting('app.earlybird_v211_concierge_publication_skip', TRUE) = '1' THEN RETURN; END IF;
-  SELECT published_source_fingerprint, published_result_hash INTO v_fingerprint, v_hash
-    FROM public.earlybird_v211_concierge_replays WHERE order_id = ${sqlString(input.orderId)}::uuid FOR UPDATE;
-  IF v_fingerprint IS NOT NULL OR v_hash IS NOT NULL THEN RAISE EXCEPTION 'CONCIERGE_PUBLICATION_CAS_CONFLICT'; END IF;
   PERFORM pg_catalog.set_config('app.earlybird_v211_concierge_publication_marker', '1', TRUE);
-  UPDATE public.earlybird_v211_concierge_replays SET published_source_fingerprint = ${sourceFingerprintSql}, published_result_hash = ${resultHashSql}, published_at = now() WHERE order_id = ${sqlString(input.orderId)}::uuid;
+  v_marked := public.mark_earlybird_v211_concierge_publication_source(
+    ${sqlString(input.orderId)}::uuid, ${sourceFingerprintSql}, ${resultHashSql}, now()
+  );
+  IF NOT v_marked THEN
+    PERFORM pg_catalog.set_config('app.earlybird_v211_concierge_publication_skip', '1', TRUE);
+  END IF;
 END $publish$;
 DO $write$
 BEGIN
