@@ -1,4 +1,8 @@
-# V2 historical legacy-dispatch terminalizer runbook
+# V2 historical legacy-dispatch terminalizer runbook (archived)
+
+> RETIRED: do not execute this runbook or call the historical terminalizer RPCs. The receipt relation and its owner-only candidate/resolver functions are retired by the Supabase 22 retirement wave. This page is retained only as a historical record of the pre-retirement procedure; use the retirement migration and isolated restore operation instead.
+
+## Archived pre-retirement procedure (do not execute)
 
 This runbook is for the one owner-authorized historical cohort behind the V2 capacity gate. It is deliberately narrow: a candidate must be a V2 request already in `failed`, have exactly roleless legacy delivered-job provenance, be at least seven days old, and have a pending job with no lease or a processing job whose lease has expired. The request/job may have zero, one, or multiple provider-run ledger rows; when rows exist, every row must be terminal and reconciled, and each row carrying `conservative_max_charge` must satisfy its recorded evidence invariants. A job does not need a conservative max-charge row, and no provider row is created or changed by this action.
 
