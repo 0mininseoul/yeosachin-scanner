@@ -14,7 +14,7 @@ The archive is historical evidence, not a queued job: every migrated row is `sta
 - The pinned CLI was verified first: `npx --yes supabase@2.102.0 --version` returned `2.102.0`.
 - Live reads used only the pinned linked CLI and `/private/tmp/yeosachin-public22-cli.0GC1rz`; queries returned catalog metadata and aggregates, never rows or identifiers.
 - Aggregate source counts are 2, 1, 1, 1, 1, 7, 1, 1, 2, 1, 1, 1, 1 in the order listed below: 21 total.
-- Live `maintenance_jobs` contained 23 rows before this cohort; its exact reviewed shape is 16 columns, RLS enabled and forced, with table grants revoked.
+- Live `maintenance_jobs` contained 23 rows before this cohort; its exact reviewed shape is 17 columns, including nullable `legacy_pending_user_id`, with RLS enabled and forced, with table grants revoked.
 - Every cohort source has primary key `(order_id)`, RLS enabled and forced, and one immutable BEFORE UPDATE/DELETE trigger. Catalog evidence found no incoming foreign keys.
 - PL/pgSQL table dependencies are not complete in `pg_depend`; the routine map combines sanitized live routine text with the local migration bodies and scoped app/script call-site search.
 

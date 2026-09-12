@@ -1145,6 +1145,7 @@ RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET timezone = 'UTC'
 AS $$
 DECLARE
     v_payload JSONB;
@@ -1222,6 +1223,7 @@ RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET timezone = 'UTC'
 AS $$
 DECLARE
     v_payload JSONB;
@@ -1325,6 +1327,7 @@ RETURNS VOID
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET timezone = 'UTC'
 AS $$
 DECLARE
     v_payload JSONB;
@@ -1425,6 +1428,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET timezone = 'UTC'
 AS $$
 DECLARE
     v_id UUID;
@@ -1432,6 +1436,7 @@ DECLARE
     v_row JSONB;
     v_next_payload JSONB;
 BEGIN
+    PERFORM public.assert_earlybird_receipt_archive_purge_safe();
     SELECT job.id, job.payload INTO v_id, v_payload
     FROM public.maintenance_jobs AS job
     WHERE job.kind = 'replay'
@@ -1494,6 +1499,7 @@ RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
+SET timezone = 'UTC'
 AS $$
 DECLARE
     v_id UUID;
@@ -1501,6 +1507,7 @@ DECLARE
     v_row JSONB;
     v_next_payload JSONB;
 BEGIN
+    PERFORM public.assert_earlybird_receipt_archive_purge_safe();
     SELECT job.id, job.payload INTO v_id, v_payload
     FROM public.maintenance_jobs AS job
     WHERE job.kind = 'replay'
@@ -1605,6 +1612,29 @@ BEGIN
             OR job.payload->>'schema_version' IS DISTINCT FROM '1'
             OR NOT (job.payload->'legacy_primary_key' ?& ARRAY['order_id'])
             OR job.payload->'legacy_primary_key'->>'order_id' IS NULL
+            OR pg_catalog.jsonb_typeof(
+                job.payload->'legacy_primary_key'->'order_id'
+            ) IS DISTINCT FROM 'string'
+            OR job.payload->'legacy_primary_key' IS DISTINCT FROM
+                pg_catalog.jsonb_build_object(
+                    'order_id', job.payload->'legacy_row'->'order_id'
+                )
+            OR job.content_hash IS DISTINCT FROM pg_catalog.encode(
+                extensions.digest(
+                    convert_to(job.payload::TEXT, 'UTF8'), 'sha256'
+                ), 'hex'
+            )
+            OR job.target_key_hash IS DISTINCT FROM pg_catalog.encode(
+                extensions.digest(
+                    convert_to(
+                        'supabase-22-legacy-earlybird-retirement-v1:'
+                        || job.kind || ':'
+                        || (job.payload->>'legacy_source_table') || ':'
+                        || (job.payload->'legacy_primary_key')::TEXT,
+                        'UTF8'
+                    ), 'sha256'
+                ), 'hex'
+            )
             OR (job.payload->>'legacy_source_table' = 'earlybird_adoption_policy_failure_rearms'
                 AND (NOT (job.payload->'legacy_row' ?& ARRAY['order_id','original_failed_request_id','policy_failed_request_id','rearmed_preflight_id','expected_fulfillment_attempt_count','expected_manual_review_at','created_at'])
                      OR job.payload->'legacy_row'->>'order_id' IS NULL
@@ -1738,7 +1768,7 @@ BEGIN
                      OR job.payload->'legacy_row'->>'expected_fulfillment_attempt_count' IS NULL
                      OR job.payload->'legacy_row'->>'expected_manual_review_at' IS NULL
                      OR job.payload->'legacy_row'->>'created_at' IS NULL))
-        ) THEN
+        )) THEN
         RAISE EXCEPTION USING MESSAGE = 'EARLYBIRD_RECEIPT_PURGE_ARCHIVE_INVALID', ERRCODE = 'P0001';
     END IF;
 END;
@@ -1900,10 +1930,31 @@ CROSS JOIN LATERAL (
     FROM pg_catalog.jsonb_to_record(archive_source.payload->'legacy_row')
         AS decoded(%s)
     WHERE archive_source.state = 'succeeded'
+      AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
+      AND archive_source.payload->>'schema_version' = '1'
+      AND decoded.order_id IS NOT NULL
+      AND archive_source.payload->'legacy_primary_key' =
+          pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND archive_source.content_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
+          ), 'hex'
+      )
+      AND archive_source.target_key_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(
+                  'supabase-22-legacy-earlybird-retirement-v1:'
+                  || archive_source.kind || ':'
+                  || (archive_source.payload->>'legacy_source_table') || ':'
+                  || (archive_source.payload->'legacy_primary_key')::TEXT,
+                  'UTF8'
+              ), 'sha256'
+          ), 'hex'
+      )
 ) AS$from_projection$,
                 v_projection.field_sql, v_projection.kind,
                 v_projection.source_table, v_projection.key_sql
@@ -1916,10 +1967,31 @@ JOIN LATERAL (
         archive_source.payload->'legacy_row'
     ) AS decoded(%s)
     WHERE archive_source.state = 'succeeded'
+      AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
+      AND archive_source.payload->>'schema_version' = '1'
+      AND decoded.order_id IS NOT NULL
+      AND archive_source.payload->'legacy_primary_key' =
+          pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND archive_source.content_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
+          ), 'hex'
+      )
+      AND archive_source.target_key_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(
+                  'supabase-22-legacy-earlybird-retirement-v1:'
+                  || archive_source.kind || ':'
+                  || (archive_source.payload->>'legacy_source_table') || ':'
+                  || (archive_source.payload->'legacy_primary_key')::TEXT,
+                  'UTF8'
+              ), 'sha256'
+          ), 'hex'
+      )
 ) AS$join_projection$,
                 v_projection.field_sql, v_projection.kind,
                 v_projection.source_table, v_projection.key_sql
@@ -1932,10 +2004,31 @@ FROM LATERAL (
         archive_source.payload->'legacy_row'
     ) AS decoded(%s)
     WHERE archive_source.state = 'succeeded'
+      AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
+      AND archive_source.payload->>'schema_version' = '1'
+      AND decoded.order_id IS NOT NULL
+      AND archive_source.payload->'legacy_primary_key' =
+          pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND archive_source.content_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
+          ), 'hex'
+      )
+      AND archive_source.target_key_hash = pg_catalog.encode(
+          extensions.digest(
+              convert_to(
+                  'supabase-22-legacy-earlybird-retirement-v1:'
+                  || archive_source.kind || ':'
+                  || (archive_source.payload->>'legacy_source_table') || ':'
+                  || (archive_source.payload->'legacy_primary_key')::TEXT,
+                  'UTF8'
+              ), 'sha256'
+          ), 'hex'
+      )
 ) AS legacy_receipt_row$unaliased_projection$,
                 v_projection.field_sql, v_projection.kind,
                 v_projection.source_table, v_projection.key_sql
@@ -1962,6 +2055,135 @@ FROM LATERAL (
                 v_unaliased_prefix
             );
         END LOOP;
+
+        IF v_routine.signature =
+            'public.bootstrap_earlybird_v211_concierge_first_order(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,text,text,smallint,integer,integer,integer,integer,integer,text,text,jsonb,jsonb,jsonb,jsonb,jsonb)'
+        THEN
+            v_rewritten := pg_catalog.regexp_replace(
+                v_rewritten,
+                pg_catalog.chr(10) || 'BEGIN' || pg_catalog.chr(10),
+                pg_catalog.chr(10) || 'BEGIN' || pg_catalog.chr(10)
+                    || '    PERFORM public.assert_earlybird_receipt_archive_purge_safe();'
+                    || pg_catalog.chr(10),
+                'n'
+            );
+            -- The reviewed bootstrap body used a dynamic table loop for six
+            -- recovery ledgers.  Those relations are retired in this
+            -- transaction, so preserve the order-scoped exclusion with
+            -- explicit archive branches instead of a disappearing
+            -- to_regclass/EXECUTE check.
+            v_before_count := pg_catalog.regexp_count(
+                v_rewritten,
+                E'(?s)FOREACH[[:space:]]+v_recovery_table[[:space:]]+IN[[:space:]]+ARRAY[[:space:]]+ARRAY\\[.*?\\][[:space:]]+LOOP[[:space:]]+.*?END LOOP;',
+                1, 'n'
+            );
+            IF v_before_count <> 1 THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = format(
+                        'EARLYBIRD_RECEIPT_CUTOVER_BOOTSTRAP_RECOVERY_GUARD_COUNT_BEFORE:%s',
+                        v_before_count
+                    ),
+                    ERRCODE = 'P0001';
+            END IF;
+
+            v_rewritten := pg_catalog.regexp_replace(
+                v_rewritten,
+                E'(?s)FOREACH[[:space:]]+v_recovery_table[[:space:]]+IN[[:space:]]+ARRAY[[:space:]]+ARRAY\\[.*?\\][[:space:]]+LOOP[[:space:]]+.*?END LOOP;',
+                $bootstrap_archive_recovery_guards$
+    IF EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'replay'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_v211_apify_transient_replays'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'replay'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_v211_profile_ai_diagnostic_replays'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'replay'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_v211_policy_identity_replays'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'rearm'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_v211_relationship_lineage_failure_rearms'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'rearm'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_v211_lease_policy_failure_rearms'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) OR EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS archive_source
+        CROSS JOIN LATERAL pg_catalog.jsonb_to_record(
+            archive_source.payload->'legacy_row'
+        ) AS archive_row(order_id UUID)
+        WHERE archive_source.state = 'succeeded'
+          AND archive_source.legacy_pending_user_id IS NULL
+          AND archive_source.kind = 'recovery'
+          AND archive_source.payload->>'legacy_source_table' =
+              'earlybird_schema_failure_recoveries'
+          AND archive_source.payload->>'schema_version' = '1'
+          AND archive_source.payload->'legacy_row' ?& ARRAY['order_id']::TEXT[]
+          AND archive_row.order_id = p_order_id
+    ) THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'CONCIERGE_FIRST_ORDER_BOOTSTRAP_RECOVERY_SCOPE_CONFLICT',
+            ERRCODE = 'P0001';
+    END IF;
+$bootstrap_archive_recovery_guards$,
+                'n'
+            );
+
+        END IF;
 
         -- Active state-machine writers use source-specific helpers.  The
         -- source table names are deliberately not replaced in the one-shot
@@ -2005,11 +2227,38 @@ FROM LATERAL (
                 'gi'
             );
         END IF;
+        IF v_routine.signature =
+            'public.bootstrap_earlybird_v211_concierge_first_order(uuid,uuid,uuid,uuid,uuid,uuid,uuid,uuid,text,text,smallint,integer,integer,integer,integer,integer,text,text,jsonb,jsonb,jsonb,jsonb,jsonb)'
+        THEN
+            v_after_count := pg_catalog.regexp_count(
+                v_rewritten,
+                E'(?s)FOREACH[[:space:]]+v_recovery_table[[:space:]]+IN[[:space:]]+ARRAY[[:space:]]+ARRAY\\[.*?\\][[:space:]]+LOOP[[:space:]]+.*?END LOOP;',
+                1, 'n'
+            );
+            IF v_after_count <> 0 THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = format(
+                        'EARLYBIRD_RECEIPT_CUTOVER_BOOTSTRAP_RECOVERY_GUARD_COUNT_AFTER:%s',
+                        v_after_count
+                    ),
+                    ERRCODE = 'P0001';
+            END IF;
+            IF v_rewritten ~* E'(FROM|JOIN|INSERT[[:space:]]+INTO|UPDATE|DELETE[[:space:]]+FROM)[[:space:]]+public\\.(earlybird_adoption_policy_failure_rearms|earlybird_concierge_snapshot_conflict_recoveries|earlybird_pfe_target_evidence_start_rejection_rearms|earlybird_pfe3_media_artifact_rearms|earlybird_profile_fetch_exhaustion_recoveries|earlybird_schema_failure_recoveries|earlybird_terminal_unavailable_exhaustion_rearms|earlybird_v211_apify_transient_replays|earlybird_v211_concierge_replays|earlybird_v211_lease_policy_failure_rearms|earlybird_v211_policy_identity_replays|earlybird_v211_profile_ai_diagnostic_replays|earlybird_v211_relationship_lineage_failure_rearms)([^a-z0-9_]|$)'
+               OR v_rewritten ~* E'to_regclass[[:space:]]*\\([[:space:]]*v_recovery_table'
+               OR v_rewritten ~* E'EXECUTE[[:space:]]+pg_catalog[.]format[[:space:]]*\\('
+            THEN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'EARLYBIRD_RECEIPT_CUTOVER_BOOTSTRAP_RECOVERY_GUARD_REMAINS',
+                    ERRCODE = 'P0001';
+            END IF;
+        END IF;
         IF v_routine.signature = 'public.purge_expired_analysis_v2_preflights(integer)' THEN
             v_rewritten := pg_catalog.regexp_replace(
                 v_rewritten,
-                E'\\nBEGIN\\n',
-                E'\\nBEGIN\\n    PERFORM public.assert_earlybird_receipt_archive_purge_safe();\\n'
+                pg_catalog.chr(10) || 'BEGIN' || pg_catalog.chr(10),
+                pg_catalog.chr(10) || 'BEGIN' || pg_catalog.chr(10)
+                    || '    PERFORM public.assert_earlybird_receipt_archive_purge_safe();'
+                    || pg_catalog.chr(10)
             );
             v_purge_guards := $purge_archive_guards$
           AND NOT EXISTS (
@@ -2300,7 +2549,7 @@ BEGIN
     ] LOOP
         v_routine_oid := pg_catalog.to_regprocedure(v_signature)::OID;
         v_function_name := pg_catalog.regexp_replace(
-            v_signature, '^public[.]([^ (]+).*$', '\\1'
+            v_signature, '^public[.]([^ (]+).*$', E'\\1'
         );
         IF EXISTS (
             SELECT 1
@@ -2316,12 +2565,14 @@ BEGIN
             FROM pg_catalog.pg_proc AS dependent
             JOIN pg_catalog.pg_namespace AS dependent_schema
               ON dependent_schema.oid = dependent.pronamespace
-            WHERE dependent_schema.nspname = 'public'
+            WHERE dependent_schema.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND dependent_schema.nspname NOT LIKE 'pg_toast%'
+              AND dependent_schema.nspname NOT LIKE 'pg_temp_%'
               AND dependent.prokind IN ('f', 'p')
               AND dependent.oid <> ALL(v_candidate_oids)
               AND pg_catalog.pg_get_functiondef(dependent.oid) ~* (
                   '(^|[^a-z0-9_])' || v_function_name
-                  || '[[:space:]]*\\('
+                  || E'[[:space:]]*\\('
               )
         ) THEN
             RAISE EXCEPTION USING
