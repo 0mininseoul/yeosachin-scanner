@@ -6,6 +6,7 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
+SET LOCAL TIME ZONE 'UTC';
 
 SELECT pg_catalog.pg_advisory_xact_lock(22091212, 22);
 
@@ -376,59 +377,206 @@ BEGIN
 END;
 $retirement_catalog_guard$;
 
+-- The reviewed source contract includes more than columns and primary keys:
+-- owner/ACL, RLS mode, policies, defaults, every constraint and index, and
+-- the table-owned trigger set are all covered by this compact fingerprint.
+-- The expected values were captured from the linked production catalog and
+-- intentionally exclude OIDs, which are not stable across databases.
+DO $retirement_source_contract_guard$
+DECLARE
+    v_table_name TEXT;
+    v_catalog_fingerprint TEXT;
+BEGIN
+    FOREACH v_table_name IN ARRAY ARRAY[
+        'analysis_v2_historical_legacy_dispatch_terminalization_receipts',
+        'payment_orders',
+        'payments'
+    ] LOOP
+        SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+            fingerprint.fingerprint_input, 'UTF8'
+        )), 'hex')
+          INTO v_catalog_fingerprint
+        FROM (
+            SELECT pg_catalog.format(
+                'owner=%s|acl=%s|rls=%s|force=%s|policies=%s|defaults=%s|constraints=%s|indexes=%s|triggers=%s',
+                relation_row.relowner::REGROLE::TEXT,
+                COALESCE(relation_row.relacl::TEXT, '<null>'),
+                relation_row.relrowsecurity,
+                relation_row.relforcerowsecurity,
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s:%s',
+                            policy_row.polname,
+                            policy_row.polpermissive,
+                            policy_row.polcmd,
+                            COALESCE(pg_catalog.pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
+                                || ':'
+                                || COALESCE(pg_catalog.pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '')
+                        ),
+                        ';' ORDER BY policy_row.polname
+                    )
+                    FROM pg_catalog.pg_policy AS policy_row
+                    WHERE policy_row.polrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s=%s',
+                            attribute_row.attname,
+                            pg_catalog.pg_get_expr(default_row.adbin, default_row.adrelid)
+                        ),
+                        ';' ORDER BY attribute_row.attnum
+                    )
+                    FROM pg_catalog.pg_attribute AS attribute_row
+                    JOIN pg_catalog.pg_attrdef AS default_row
+                      ON default_row.adrelid = attribute_row.attrelid
+                     AND default_row.adnum = attribute_row.attnum
+                    WHERE attribute_row.attrelid = relation_row.oid
+                      AND attribute_row.attnum > 0
+                      AND NOT attribute_row.attisdropped
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s:%s',
+                            constraint_row.conname,
+                            constraint_row.contype,
+                            pg_catalog.pg_get_constraintdef(constraint_row.oid, true),
+                            constraint_row.convalidated
+                        ),
+                        ';' ORDER BY constraint_row.conname
+                    )
+                    FROM pg_catalog.pg_constraint AS constraint_row
+                    WHERE constraint_row.conrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.pg_get_indexdef(index_row.indexrelid),
+                        ';' ORDER BY index_row.indexrelid::REGCLASS::TEXT
+                    )
+                    FROM pg_catalog.pg_index AS index_row
+                    WHERE index_row.indrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s',
+                            trigger_row.tgname,
+                            trigger_row.tgenabled,
+                            pg_catalog.pg_get_triggerdef(trigger_row.oid, true)
+                        ),
+                        ';' ORDER BY trigger_row.tgname
+                    )
+                    FROM pg_catalog.pg_trigger AS trigger_row
+                    WHERE trigger_row.tgrelid = relation_row.oid
+                      AND NOT trigger_row.tgisinternal
+                ), '')
+            ) AS fingerprint_input
+            FROM pg_catalog.pg_class AS relation_row
+            JOIN pg_catalog.pg_namespace AS relation_schema
+              ON relation_schema.oid = relation_row.relnamespace
+            WHERE relation_schema.nspname = 'public'
+              AND relation_row.relname = v_table_name
+        ) AS fingerprint;
+
+        IF v_catalog_fingerprint IS DISTINCT FROM (CASE v_table_name
+            WHEN 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+                THEN '1c71e94106ab0cfa908288171bec5b599b68a6a6880b8fe7a86eb1419f791493'
+            WHEN 'payment_orders'
+                THEN 'c3388362ec6fe66bd39844a546295db254ed241a420fda456c5c4fa12a2037f1'
+            WHEN 'payments'
+                THEN 'a97df2b722e35f78aba346dd64f3cd266045eaa4c6b2f1f2ad41be8af42af502'
+        END) THEN
+            RAISE EXCEPTION 'RETIREMENT_GUARD_SOURCE_CATALOG_SHAPE: public.%', v_table_name;
+        END IF;
+    END LOOP;
+END;
+$retirement_source_contract_guard$;
+
+-- Snapshot every retired routine and every in-scope payment entry point.  The
+-- payment wrappers are not changed by this migration, but their exact OID,
+-- definition, ACL, owner, SECURITY DEFINER bit, and configuration must remain
+-- stable across the destructive statements.
+CREATE TEMP TABLE pg_temp.retirement_expected_routines (
+    signature_text TEXT PRIMARY KEY,
+    routine_oid OID NOT NULL,
+    definition_hash TEXT NOT NULL,
+    acl TEXT NOT NULL,
+    owner_oid OID NOT NULL,
+    security_definer BOOLEAN NOT NULL,
+    config TEXT NOT NULL
+) ON COMMIT DROP;
+
+WITH expected(signature_text) AS (
+    SELECT *
+    FROM (VALUES
+        ('public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)'),
+        ('public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)'),
+        ('public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'),
+        ('public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
+        ('public.finalize_earlybird_groble_payment_reconciliation_aware(uuid,boolean,text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
+        ('public.finalize_earlybird_groble_payment(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
+        ('public.finalize_earlybird_groble_payment_by_reference(text,text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
+        ('public.finalize_earlybird_groble_payment(text,text,text,timestamp with time zone,text,text,text,integer,timestamp with time zone)'),
+        ('public.finalize_earlybird_groble_payment_refund_aware(uuid,boolean,text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)')
+    ) AS expected_signatures(signature_text)
+)
+INSERT INTO pg_temp.retirement_expected_routines (
+    signature_text,
+    routine_oid,
+    definition_hash,
+    acl,
+    owner_oid,
+    security_definer,
+    config
+)
+SELECT
+    expected.signature_text,
+    routine_row.oid,
+    pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+        pg_catalog.pg_get_functiondef(routine_row.oid), 'UTF8'
+    )), 'hex'),
+    COALESCE(routine_row.proacl::TEXT, '<null>'),
+    routine_row.proowner,
+    routine_row.prosecdef,
+    COALESCE(routine_row.proconfig::TEXT, '<null>')
+FROM expected
+JOIN pg_catalog.pg_proc AS routine_row
+  ON routine_row.oid = pg_catalog.to_regprocedure(expected.signature_text)::OID;
+
 DO $retirement_routine_guard$
 DECLARE
-    v_signature TEXT;
-    v_oid OID;
-    v_index INTEGER := 0;
-    v_preserved_definition_hash TEXT;
-    v_preserved_acl TEXT;
+    v_expected_count INTEGER;
 BEGIN
-    -- The payment pre-reconciliation implementation is intentionally kept:
-    -- the reconciliation-aware wrapper invokes this owner-only routine. Its
-    -- definition and ACL are hashed here and rechecked around the table drop.
-    FOREACH v_signature IN ARRAY ARRAY[
-        'public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)',
-        'public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)',
-        'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)',
-        'public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'
-    ] LOOP
-        v_index := v_index + 1;
-        v_oid := pg_catalog.to_regprocedure(v_signature);
-        IF v_oid IS NULL THEN
-            RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_MISSING: %', v_signature;
-        END IF;
-        PERFORM pg_catalog.set_config(
-            'retirement.expected_routine_' || pg_catalog.lpad(v_index::TEXT, 2, '0') || '_oid',
-            v_oid::TEXT,
-            true
-        );
-    END LOOP;
+    SELECT pg_catalog.count(*) INTO v_expected_count
+    FROM pg_temp.retirement_expected_routines;
+    IF v_expected_count <> 9 THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_SET: expected 9, found %', v_expected_count;
+    END IF;
 
-    v_oid := pg_catalog.to_regprocedure(
-        'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'
-    );
-    SELECT
-        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-            pg_catalog.pg_get_functiondef(v_oid), 'UTF8'
-        )), 'hex'),
-        COALESCE(routine_row.proacl::TEXT, '<null>')
-      INTO v_preserved_definition_hash, v_preserved_acl
-    FROM pg_catalog.pg_proc AS routine_row
-    WHERE routine_row.oid = v_oid;
-    PERFORM pg_catalog.set_config(
-        'retirement.preserved_payment_routine_definition_hash',
-        v_preserved_definition_hash,
-        true
-    );
-    PERFORM pg_catalog.set_config(
-        'retirement.preserved_payment_routine_acl',
-        v_preserved_acl,
-        true
-    );
+    -- Enumerate every live public prefix match.  Any unreviewed overload could
+    -- be a live payment entry point, so fail closed instead of treating the
+    -- six-signature payment allowlist as a best-effort inventory.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS routine_row
+        JOIN pg_catalog.pg_namespace AS routine_schema
+          ON routine_schema.oid = routine_row.pronamespace
+        WHERE routine_schema.nspname = 'public'
+          AND routine_row.prokind IN ('f', 'p')
+          AND routine_row.proname LIKE 'finalize_earlybird_groble_payment%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_temp.retirement_expected_routines AS expected
+              WHERE expected.routine_oid = routine_row.oid
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_UNREVIEWED_PAYMENT_ROUTINE';
+    END IF;
 
     IF (
-        SELECT count(*)
+        SELECT pg_catalog.count(*)
         FROM pg_catalog.pg_trigger AS trigger_row
         WHERE NOT trigger_row.tgisinternal
           AND trigger_row.tgfoid = pg_catalog.to_regprocedure(
@@ -441,52 +589,69 @@ END;
 $retirement_routine_guard$;
 
 -- A routine caller that is not in this literal retirement allowlist would make
--- dropping the old receipt/payment objects unsafe. Dynamic SQL callers are
--- caught by the definition scan below; local app/ops callers are recorded in
--- the companion report and the historical terminalizer is retired there.
+-- dropping the old receipt/payment objects unsafe.  The dependency check is
+-- complemented by a bounded lexical scan over every non-system routine
+-- schema.  It strips SQL comments only; quoted strings (including dynamic
+-- EXECUTE text) remain visible, so a literal target reference fails closed.
+-- Opaque identifiers assembled without a target literal cannot be proven by a
+-- catalog scan and remain an explicit coordinator/repository-inventory gate.
 DO $retirement_routine_caller_guard$
 BEGIN
     IF EXISTS (
-        WITH expected AS (
-            SELECT pg_catalog.to_regprocedure(signature_text)::OID AS routine_oid
-            FROM (VALUES
-                ('public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)'),
-                ('public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)'),
-                ('public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
-                ('public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()')
-            ) AS expected_signatures(signature_text)
-        )
         SELECT 1
         FROM pg_catalog.pg_depend AS dependency
         JOIN pg_catalog.pg_proc AS caller ON caller.oid = dependency.objid
         WHERE dependency.classid = 'pg_catalog.pg_proc'::REGCLASS
           AND dependency.refclassid = 'pg_catalog.pg_proc'::REGCLASS
-          AND dependency.refobjid IN (SELECT routine_oid FROM expected)
-          AND caller.oid NOT IN (SELECT routine_oid FROM expected)
+          AND dependency.refobjid IN (
+              SELECT expected.routine_oid
+              FROM pg_temp.retirement_expected_routines AS expected
+              WHERE expected.signature_text IN (
+                  'public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)',
+                  'public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)',
+                  'public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'
+              )
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_temp.retirement_expected_routines AS expected
+              WHERE expected.routine_oid = caller.oid
+          )
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_RETAINED_ROUTINE_CALLER';
     END IF;
 
     IF EXISTS (
+        WITH routine_definitions AS (
+            SELECT
+                caller.oid,
+                pg_catalog.regexp_replace(
+                    pg_catalog.regexp_replace(
+                        pg_catalog.pg_get_functiondef(caller.oid),
+                        E'/[*]([^*]|[*][^/])*[*]/',
+                        ' ',
+                        'g'
+                    ),
+                    E'--[^\\r\\n]*',
+                    ' ',
+                    'g'
+                ) AS normalized_definition
+            FROM pg_catalog.pg_proc AS caller
+            JOIN pg_catalog.pg_namespace AS routine_schema
+              ON routine_schema.oid = caller.pronamespace
+            WHERE routine_schema.nspname NOT LIKE 'pg!_%' ESCAPE '!'
+              AND routine_schema.nspname <> 'information_schema'
+              AND caller.prokind IN ('f', 'p')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_temp.retirement_expected_routines AS expected
+                  WHERE expected.routine_oid = caller.oid
+              )
+        )
         SELECT 1
-        FROM pg_catalog.pg_proc AS caller
-        JOIN pg_catalog.pg_namespace AS n ON n.oid = caller.pronamespace
-        WHERE n.nspname = 'public'
-          AND caller.prokind IN ('f', 'p')
-          AND caller.oid NOT IN (
-              pg_catalog.to_regprocedure('public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)'),
-              pg_catalog.to_regprocedure('public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)'),
-              pg_catalog.to_regprocedure('public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'),
-              pg_catalog.to_regprocedure('public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()')
-          )
-          AND (
-              pg_catalog.strpos(
-                  pg_catalog.pg_get_functiondef(caller.oid),
-                  'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
-              ) > 0
-              OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(caller.oid), 'payment_orders') > 0
-              OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(caller.oid), 'payments') > 0
-          )
+        FROM routine_definitions
+        WHERE normalized_definition ~* '(^|[^[:alnum:]_])(list_analysis_v2_historical_legacy_dispatch_candidates|resolve_analysis_v2_historical_legacy_dispatch)([^[:alnum:]_]|$)'
+           OR normalized_definition ~* '(^|[^[:alnum:]_])(analysis_v2_historical_legacy_dispatch_terminalization_receipts|payment_orders|payments)([^[:alnum:]_]|$)'
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_RETAINED_ROUTINE_DEFINITION_REFERENCE';
     END IF;
@@ -640,46 +805,39 @@ $retirement_parity_guard$;
 -- same-signature drop/recreate after the evidence reads aborts the transaction.
 DO $retirement_routine_revalidation_guard$
 DECLARE
-    v_signature TEXT;
-    v_oid OID;
-    v_index INTEGER := 0;
-    v_definition_hash TEXT;
-    v_acl TEXT;
 BEGIN
-    FOREACH v_signature IN ARRAY ARRAY[
-        'public.list_analysis_v2_historical_legacy_dispatch_candidates(integer)',
-        'public.resolve_analysis_v2_historical_legacy_dispatch(uuid,text,text,text,text,integer,uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone,text,text,smallint,text,smallint,uuid,timestamp with time zone,text,text,text,text)',
-        'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)',
-        'public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'
-    ] LOOP
-        v_index := v_index + 1;
-        v_oid := pg_catalog.to_regprocedure(v_signature);
-        IF v_oid IS NULL
-           OR v_oid::TEXT IS DISTINCT FROM pg_catalog.current_setting(
-               'retirement.expected_routine_' || pg_catalog.lpad(v_index::TEXT, 2, '0') || '_oid', true
-           ) THEN
-            RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_REPLACED';
-        END IF;
-    END LOOP;
+    IF EXISTS (
+        SELECT 1
+        FROM pg_temp.retirement_expected_routines AS expected
+        LEFT JOIN pg_catalog.pg_proc AS routine_row
+          ON routine_row.oid = expected.routine_oid
+        WHERE routine_row.oid IS NULL
+           OR pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                  pg_catalog.pg_get_functiondef(routine_row.oid), 'UTF8'
+              )), 'hex') IS DISTINCT FROM expected.definition_hash
+           OR COALESCE(routine_row.proacl::TEXT, '<null>') IS DISTINCT FROM expected.acl
+           OR routine_row.proowner IS DISTINCT FROM expected.owner_oid
+           OR routine_row.prosecdef IS DISTINCT FROM expected.security_definer
+           OR COALESCE(routine_row.proconfig::TEXT, '<null>') IS DISTINCT FROM expected.config
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_CONTRACT_CHANGED';
+    END IF;
 
-    v_oid := pg_catalog.to_regprocedure(
-        'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'
-    );
-    SELECT
-        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-            pg_catalog.pg_get_functiondef(v_oid), 'UTF8'
-        )), 'hex'),
-        COALESCE(routine_row.proacl::TEXT, '<null>')
-      INTO v_definition_hash, v_acl
-    FROM pg_catalog.pg_proc AS routine_row
-    WHERE routine_row.oid = v_oid;
-    IF v_definition_hash IS DISTINCT FROM pg_catalog.current_setting(
-           'retirement.preserved_payment_routine_definition_hash', true
-       )
-       OR v_acl IS DISTINCT FROM pg_catalog.current_setting(
-           'retirement.preserved_payment_routine_acl', true
-       ) THEN
-        RAISE EXCEPTION 'RETIREMENT_GUARD_PRESERVED_PAYMENT_ROUTINE_CHANGED';
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS routine_row
+        JOIN pg_catalog.pg_namespace AS routine_schema
+          ON routine_schema.oid = routine_row.pronamespace
+        WHERE routine_schema.nspname = 'public'
+          AND routine_row.prokind IN ('f', 'p')
+          AND routine_row.proname LIKE 'finalize_earlybird_groble_payment%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pg_temp.retirement_expected_routines AS expected
+              WHERE expected.routine_oid = routine_row.oid
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_UNREVIEWED_PAYMENT_ROUTINE';
     END IF;
 END;
 $retirement_routine_revalidation_guard$;
@@ -710,8 +868,6 @@ DO $retirement_terminal_guard$
 DECLARE
     v_public_table_count BIGINT;
     v_canonical_count BIGINT;
-    v_preserved_definition_hash TEXT;
-    v_preserved_acl TEXT;
 BEGIN
     IF pg_catalog.to_regclass('public.analysis_v2_historical_legacy_dispatch_terminalization_receipts') IS NOT NULL
        OR pg_catalog.to_regclass('public.payment_orders') IS NOT NULL
@@ -725,43 +881,61 @@ BEGIN
         RAISE EXCEPTION 'RETIREMENT_GUARD_ROUTINE_REMAINS';
     END IF;
 
-    IF pg_catalog.to_regprocedure('public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)') IS NULL THEN
-        RAISE EXCEPTION 'RETIREMENT_GUARD_PRESERVED_PAYMENT_ROUTINE_MISSING';
-    END IF;
-
-    SELECT
-        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-            pg_catalog.pg_get_functiondef(routine_row.oid), 'UTF8'
-        )), 'hex'),
-        COALESCE(routine_row.proacl::TEXT, '<null>')
-      INTO v_preserved_definition_hash, v_preserved_acl
-    FROM pg_catalog.pg_proc AS routine_row
-    WHERE routine_row.oid = pg_catalog.to_regprocedure(
-        'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'
-    );
-    IF v_preserved_definition_hash IS DISTINCT FROM pg_catalog.current_setting(
-           'retirement.preserved_payment_routine_definition_hash', true
-       )
-       OR v_preserved_acl IS DISTINCT FROM pg_catalog.current_setting(
-           'retirement.preserved_payment_routine_acl', true
-       ) THEN
-        RAISE EXCEPTION 'RETIREMENT_GUARD_PRESERVED_PAYMENT_ROUTINE_CHANGED';
-    END IF;
-
     IF EXISTS (
         SELECT 1
-        FROM pg_catalog.pg_proc AS routine_row
-        JOIN pg_catalog.pg_namespace AS routine_schema ON routine_schema.oid = routine_row.pronamespace
-        WHERE routine_schema.nspname = 'public'
-          AND routine_row.prokind IN ('f', 'p')
-          AND routine_row.oid <> pg_catalog.to_regprocedure(
-              'public.finalize_earlybird_groble_payment_pre_reconciliation(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'
-          )
+        FROM pg_temp.retirement_expected_routines AS expected
+        LEFT JOIN pg_catalog.pg_proc AS routine_row
+          ON routine_row.oid = expected.routine_oid
+        WHERE expected.signature_text LIKE 'public.finalize_earlybird_groble_payment%'
           AND (
-              pg_catalog.strpos(pg_catalog.pg_get_functiondef(routine_row.oid), 'analysis_v2_historical_legacy_dispatch_terminalization_receipts') > 0
-              OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(routine_row.oid), 'payment_orders') > 0
-              OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(routine_row.oid), 'payments') > 0
+              routine_row.oid IS NULL
+              OR pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+                     pg_catalog.pg_get_functiondef(routine_row.oid), 'UTF8'
+                 )), 'hex') IS DISTINCT FROM expected.definition_hash
+              OR COALESCE(routine_row.proacl::TEXT, '<null>') IS DISTINCT FROM expected.acl
+              OR routine_row.proowner IS DISTINCT FROM expected.owner_oid
+              OR routine_row.prosecdef IS DISTINCT FROM expected.security_definer
+              OR COALESCE(routine_row.proconfig::TEXT, '<null>') IS DISTINCT FROM expected.config
           )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_GUARD_PAYMENT_ROUTINE_CONTRACT_CHANGED';
+    END IF;
+
+    -- Reviewed payment wrappers may retain literal references to the payment
+    -- tables; their exact contracts were checked above.  Scan every other
+    -- non-system routine for an unreviewed target reference.
+    IF EXISTS (
+        WITH routine_definitions AS (
+            SELECT
+                routine_row.oid,
+                pg_catalog.regexp_replace(
+                    pg_catalog.regexp_replace(
+                        pg_catalog.pg_get_functiondef(routine_row.oid),
+                        E'/[*]([^*]|[*][^/])*[*]/',
+                        ' ',
+                        'g'
+                    ),
+                    E'--[^\\r\\n]*',
+                    ' ',
+                    'g'
+                ) AS normalized_definition
+            FROM pg_catalog.pg_proc AS routine_row
+            JOIN pg_catalog.pg_namespace AS routine_schema
+              ON routine_schema.oid = routine_row.pronamespace
+            WHERE routine_schema.nspname NOT LIKE 'pg!_%' ESCAPE '!'
+              AND routine_schema.nspname <> 'information_schema'
+              AND routine_row.prokind IN ('f', 'p')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_temp.retirement_expected_routines AS expected
+                  WHERE expected.routine_oid = routine_row.oid
+                    AND expected.signature_text LIKE 'public.finalize_earlybird_groble_payment%'
+              )
+        )
+        SELECT 1
+        FROM routine_definitions
+        WHERE normalized_definition ~* '(^|[^[:alnum:]_])(list_analysis_v2_historical_legacy_dispatch_candidates|resolve_analysis_v2_historical_legacy_dispatch)([^[:alnum:]_]|$)'
+           OR normalized_definition ~* '(^|[^[:alnum:]_])(analysis_v2_historical_legacy_dispatch_terminalization_receipts|payment_orders|payments)([^[:alnum:]_]|$)'
     ) THEN
         RAISE EXCEPTION 'RETIREMENT_GUARD_RETAINED_TABLE_REFERENCE';
     END IF;

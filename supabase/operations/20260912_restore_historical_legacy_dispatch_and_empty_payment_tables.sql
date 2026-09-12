@@ -12,6 +12,7 @@
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '2min';
+SET LOCAL TIME ZONE 'UTC';
 
 DO $restore_guard$
 BEGIN
@@ -30,20 +31,97 @@ BEGIN
         RAISE EXCEPTION 'RETIREMENT_RESTORE_TARGET_ALREADY_PRESENT';
     END IF;
 
-    IF (
-        SELECT count(*)
-        FROM public.maintenance_jobs AS job
-        WHERE job.kind = 'terminalize'
-          AND job.payload->>'legacy_source_table'
-              = 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
-          AND job.payload->>'schema_version' = '1'
-    ) <> 5 THEN
-        RAISE EXCEPTION 'RETIREMENT_RESTORE_CANONICAL_COUNT';
+    -- CREATE OR REPLACE would overwrite an unexpected routine in the
+    -- disposable database before the restore contract is checked.
+    IF pg_catalog.to_regprocedure(
+        'public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'
+    ) IS NOT NULL THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_TRIGGER_FUNCTION_ALREADY_PRESENT';
     END IF;
 END;
 $restore_guard$;
 
 LOCK TABLE public.maintenance_jobs IN SHARE MODE;
+
+DO $restore_archive_guard$
+DECLARE
+    v_archive_count BIGINT;
+    v_distinct_receipt_count BIGINT;
+    v_distinct_key_hash_count BIGINT;
+BEGIN
+    IF pg_catalog.to_regclass('public.analysis_requests') IS NULL
+       OR pg_catalog.to_regclass('public.analysis_pipeline_jobs') IS NULL THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_PARENT_RELATION_MISSING';
+    END IF;
+
+    SELECT
+        pg_catalog.count(*),
+        pg_catalog.count(DISTINCT job.payload->'legacy_row'->>'receipt_id'),
+        pg_catalog.count(DISTINCT job.target_key_hash)
+      INTO v_archive_count, v_distinct_receipt_count, v_distinct_key_hash_count
+    FROM public.maintenance_jobs AS job
+    WHERE job.kind = 'terminalize'
+      AND job.payload->>'legacy_source_table'
+          = 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+      AND job.payload->>'schema_version' = '1';
+    IF v_archive_count <> 5
+       OR v_distinct_receipt_count <> 5
+       OR v_distinct_key_hash_count <> 5 THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_CANONICAL_COUNT_OR_KEYS';
+    END IF;
+
+    -- Verify the archive state, metadata, and both deterministic hashes before
+    -- accepting any archived JSONB as restore input.  The row key is included
+    -- in the domain-separated target hash; content_hash covers the full
+    -- canonical payload text.
+    IF EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS job
+        WHERE job.kind = 'terminalize'
+          AND job.payload->>'legacy_source_table'
+              = 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+          AND job.payload->>'schema_version' = '1'
+          AND (
+              job.state IS DISTINCT FROM 'succeeded'
+              OR job.payload->'legacy_primary_key' IS DISTINCT FROM pg_catalog.jsonb_build_object(
+                  'receipt_id', (job.payload->'legacy_row'->>'receipt_id')::UUID
+              )
+              OR job.target_key_hash IS DISTINCT FROM pg_catalog.encode(pg_catalog.sha256(
+                  pg_catalog.convert_to(
+                      'supabase-22-public-retirement-v1:terminalize:analysis_v2_historical_legacy_dispatch_terminalization_receipts:'
+                          || (job.payload->'legacy_primary_key')::TEXT,
+                      'UTF8'
+                  )
+              ), 'hex')
+              OR job.content_hash IS DISTINCT FROM pg_catalog.encode(pg_catalog.sha256(
+                  pg_catalog.convert_to(job.payload::TEXT, 'UTF8')
+              ), 'hex')
+          )
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_CANONICAL_HASH_OR_METADATA_MISMATCH';
+    END IF;
+
+    -- This is a data-only restore with an explicit parent-row precondition;
+    -- canonical archive rows remain valid even if a later purge removed a
+    -- parent, but this typed reconstruction cannot recreate its FKs then.
+    IF EXISTS (
+        SELECT 1
+        FROM public.maintenance_jobs AS job
+        LEFT JOIN public.analysis_requests AS request_row
+          ON request_row.id = (job.payload->'legacy_row'->>'request_id')::UUID
+        LEFT JOIN public.analysis_pipeline_jobs AS pipeline_job
+          ON pipeline_job.request_id = (job.payload->'legacy_row'->>'request_id')::UUID
+         AND pipeline_job.job_key = job.payload->'legacy_row'->>'job_key'
+        WHERE job.kind = 'terminalize'
+          AND job.payload->>'legacy_source_table'
+              = 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+          AND job.payload->>'schema_version' = '1'
+          AND (request_row.id IS NULL OR pipeline_job.request_id IS NULL)
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_PARENT_ROW_MISSING';
+    END IF;
+END;
+$restore_archive_guard$;
 
 -- Copied from the committed 20260904000000 historical migration.  Parent
 -- relations (analysis_requests and analysis_pipeline_jobs) must already exist
@@ -123,7 +201,7 @@ ALTER TABLE public.analysis_v2_historical_legacy_dispatch_terminalization_receip
 REVOKE ALL ON TABLE public.analysis_v2_historical_legacy_dispatch_terminalization_receipts
     FROM PUBLIC, anon, authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()
+CREATE FUNCTION public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -186,6 +264,169 @@ CREATE INDEX idx_payments_user_id ON public.payments(user_id);
 ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.payments FROM PUBLIC, anon, authenticated, service_role;
 GRANT ALL ON TABLE public.payments TO service_role;
+
+-- Refuse to continue if the reconstructed catalog differs from the reviewed
+-- source contract.  This covers owner/ACL, RLS mode, policies, defaults,
+-- constraints, indexes, and triggers; a failed check rolls back every object
+-- created by this disposable operation.
+DO $restore_source_contract_guard$
+DECLARE
+    v_table_name TEXT;
+    v_catalog_fingerprint TEXT;
+    v_guard_oid OID;
+    v_guard_definition_hash TEXT;
+    v_guard_acl TEXT;
+    v_guard_owner OID;
+    v_guard_security BOOLEAN;
+    v_guard_config TEXT;
+    v_guard_language TEXT;
+BEGIN
+    FOREACH v_table_name IN ARRAY ARRAY[
+        'analysis_v2_historical_legacy_dispatch_terminalization_receipts',
+        'payment_orders',
+        'payments'
+    ] LOOP
+        SELECT pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+            fingerprint.fingerprint_input, 'UTF8'
+        )), 'hex')
+          INTO v_catalog_fingerprint
+        FROM (
+            SELECT pg_catalog.format(
+                'owner=%s|acl=%s|rls=%s|force=%s|policies=%s|defaults=%s|constraints=%s|indexes=%s|triggers=%s',
+                relation_row.relowner::REGROLE::TEXT,
+                COALESCE(relation_row.relacl::TEXT, '<null>'),
+                relation_row.relrowsecurity,
+                relation_row.relforcerowsecurity,
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s:%s',
+                            policy_row.polname,
+                            policy_row.polpermissive,
+                            policy_row.polcmd,
+                            COALESCE(pg_catalog.pg_get_expr(policy_row.polqual, policy_row.polrelid), '')
+                                || ':'
+                                || COALESCE(pg_catalog.pg_get_expr(policy_row.polwithcheck, policy_row.polrelid), '')
+                        ),
+                        ';' ORDER BY policy_row.polname
+                    )
+                    FROM pg_catalog.pg_policy AS policy_row
+                    WHERE policy_row.polrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s=%s',
+                            attribute_row.attname,
+                            pg_catalog.pg_get_expr(default_row.adbin, default_row.adrelid)
+                        ),
+                        ';' ORDER BY attribute_row.attnum
+                    )
+                    FROM pg_catalog.pg_attribute AS attribute_row
+                    JOIN pg_catalog.pg_attrdef AS default_row
+                      ON default_row.adrelid = attribute_row.attrelid
+                     AND default_row.adnum = attribute_row.attnum
+                    WHERE attribute_row.attrelid = relation_row.oid
+                      AND attribute_row.attnum > 0
+                      AND NOT attribute_row.attisdropped
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s:%s',
+                            constraint_row.conname,
+                            constraint_row.contype,
+                            pg_catalog.pg_get_constraintdef(constraint_row.oid, true),
+                            constraint_row.convalidated
+                        ),
+                        ';' ORDER BY constraint_row.conname
+                    )
+                    FROM pg_catalog.pg_constraint AS constraint_row
+                    WHERE constraint_row.conrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.pg_get_indexdef(index_row.indexrelid),
+                        ';' ORDER BY index_row.indexrelid::REGCLASS::TEXT
+                    )
+                    FROM pg_catalog.pg_index AS index_row
+                    WHERE index_row.indrelid = relation_row.oid
+                ), ''),
+                COALESCE((
+                    SELECT pg_catalog.string_agg(
+                        pg_catalog.format(
+                            '%s:%s:%s',
+                            trigger_row.tgname,
+                            trigger_row.tgenabled,
+                            pg_catalog.pg_get_triggerdef(trigger_row.oid, true)
+                        ),
+                        ';' ORDER BY trigger_row.tgname
+                    )
+                    FROM pg_catalog.pg_trigger AS trigger_row
+                    WHERE trigger_row.tgrelid = relation_row.oid
+                      AND NOT trigger_row.tgisinternal
+                ), '')
+            ) AS fingerprint_input
+            FROM pg_catalog.pg_class AS relation_row
+            JOIN pg_catalog.pg_namespace AS relation_schema
+              ON relation_schema.oid = relation_row.relnamespace
+            WHERE relation_schema.nspname = 'public'
+              AND relation_row.relname = v_table_name
+        ) AS fingerprint;
+
+        IF v_catalog_fingerprint IS DISTINCT FROM (CASE v_table_name
+            WHEN 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+                THEN '1c71e94106ab0cfa908288171bec5b599b68a6a6880b8fe7a86eb1419f791493'
+            WHEN 'payment_orders'
+                THEN 'c3388362ec6fe66bd39844a546295db254ed241a420fda456c5c4fa12a2037f1'
+            WHEN 'payments'
+                THEN 'a97df2b722e35f78aba346dd64f3cd266045eaa4c6b2f1f2ad41be8af42af502'
+        END) THEN
+            RAISE EXCEPTION 'RETIREMENT_RESTORE_SOURCE_CATALOG_SHAPE: public.%', v_table_name;
+        END IF;
+    END LOOP;
+
+    v_guard_oid := pg_catalog.to_regprocedure(
+        'public.guard_analysis_v2_historical_legacy_dispatch_terminalization_receipt_immutability()'
+    );
+    SELECT
+        pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+            pg_catalog.pg_get_functiondef(routine_row.oid), 'UTF8'
+        )), 'hex'),
+        COALESCE(routine_row.proacl::TEXT, '<null>'),
+        routine_row.proowner,
+        routine_row.prosecdef,
+        COALESCE(routine_row.proconfig::TEXT, '<null>'),
+        language_row.lanname
+      INTO v_guard_definition_hash, v_guard_acl, v_guard_owner,
+           v_guard_security, v_guard_config, v_guard_language
+    FROM pg_catalog.pg_proc AS routine_row
+    JOIN pg_catalog.pg_language AS language_row
+      ON language_row.oid = routine_row.prolang
+    WHERE routine_row.oid = v_guard_oid;
+    IF v_guard_definition_hash IS DISTINCT FROM
+           'f4a872680502e7f7889b81439614b8fa05891287bd441012bc57f37915f77b09'
+       OR v_guard_acl IS DISTINCT FROM '{postgres=X/postgres}'
+       OR v_guard_owner::REGROLE::TEXT IS DISTINCT FROM 'postgres'
+       OR v_guard_security IS DISTINCT FROM TRUE
+       OR v_guard_config IS DISTINCT FROM '{"search_path=\"\""}'
+       OR v_guard_language IS DISTINCT FROM 'plpgsql' THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_TRIGGER_FUNCTION_CONTRACT';
+    END IF;
+
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM pg_catalog.pg_trigger AS trigger_row
+        WHERE NOT trigger_row.tgisinternal
+          AND trigger_row.tgrelid = pg_catalog.to_regclass(
+              'public.analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+          )
+          AND trigger_row.tgfoid = v_guard_oid
+    ) <> 1 THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_TRIGGER_CONTRACT';
+    END IF;
+END;
+$restore_source_contract_guard$;
 
 INSERT INTO public.analysis_v2_historical_legacy_dispatch_terminalization_receipts (
     receipt_id,
@@ -270,6 +511,44 @@ BEGIN
        OR v_source_hash <> v_canonical_hash THEN
         RAISE EXCEPTION 'RETIREMENT_RESTORE_PARITY_MISMATCH';
     END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.analysis_v2_historical_legacy_dispatch_terminalization_receipts AS restored_row
+        LEFT JOIN public.maintenance_jobs AS job
+          ON job.kind = 'terminalize'
+         AND job.target_key_hash = pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+              'supabase-22-public-retirement-v1:terminalize:analysis_v2_historical_legacy_dispatch_terminalization_receipts:'
+              || pg_catalog.jsonb_build_object('receipt_id', restored_row.receipt_id)::TEXT,
+              'UTF8'
+         )), 'hex')
+        WHERE job.id IS NULL
+           OR job.state IS DISTINCT FROM 'succeeded'
+           OR job.payload->'legacy_primary_key'
+                 IS DISTINCT FROM pg_catalog.jsonb_build_object('receipt_id', restored_row.receipt_id)
+           OR job.payload->'legacy_row' IS DISTINCT FROM pg_catalog.to_jsonb(restored_row)
+           OR job.payload->>'schema_version' IS DISTINCT FROM '1'
+    ) THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_FULL_ROW_PARITY_MISMATCH';
+    END IF;
+
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM public.maintenance_jobs AS job
+        WHERE job.kind = 'terminalize'
+          AND job.payload->>'legacy_source_table'
+              = 'analysis_v2_historical_legacy_dispatch_terminalization_receipts'
+          AND job.payload->>'schema_version' = '1'
+          AND (
+              job.state IS DISTINCT FROM 'succeeded'
+              OR job.content_hash IS DISTINCT FROM pg_catalog.encode(pg_catalog.sha256(
+                  pg_catalog.convert_to(job.payload::TEXT, 'UTF8')
+              ), 'hex')
+          )
+    ) <> 0 THEN
+        RAISE EXCEPTION 'RETIREMENT_RESTORE_CANONICAL_HASH_CHANGED';
+    END IF;
+
     IF (SELECT count(*) FROM public.payment_orders) <> 0
        OR (SELECT count(*) FROM public.payments) <> 0 THEN
         RAISE EXCEPTION 'RETIREMENT_RESTORE_EMPTY_PAYMENT_MISMATCH';

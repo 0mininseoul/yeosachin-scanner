@@ -2,7 +2,13 @@
 
 Status: `READY_FOR_REVIEW_NOT_APPLIED`
 
-This report records the production read-only decision and the local implementation. No production migration, push, activation, canary, payment-state change, or analysis-runtime change was performed.
+Reviewed base SHA: `e9c7abe3df0d0569b8eda178b42382e1e8789de2`
+
+Predecessor schema SHA: `60423b338d6f8f617c2c1457405bda719c3cf02b`
+
+This report records the production read-only decision and the local
+implementation. No production migration, push, activation, canary,
+payment-state change, or analysis-runtime change was performed.
 
 ## Decision
 
@@ -12,64 +18,220 @@ Implement the largest defensible three-table group:
 | --- | ---: | --- |
 | `public.analysis_v2_historical_legacy_dispatch_terminalization_receipts` | 5 | Preserve every typed row in `public.maintenance_jobs`, then drop the table and its three retired owner-only routines/trigger guard |
 | `public.payment_orders` | 0 | Require an empty table, then drop it explicitly |
-| `public.payments` | 0 | Require an empty table, preserve the owner-only pre-reconciliation routine and its wrapper contract unchanged, then drop the table explicitly |
+| `public.payments` | 0 | Require an empty table, preserve all six reviewed payment entry-point contracts unchanged, then drop it explicitly |
 
-The fresh production public base/partitioned-table count was 177. The migration asserts that baseline and expects 174 after these three targets are removed. `public.pending_analysis` has 11 rows, all currently `awaiting_payment`, and remains untouched; no payment state was inferred or changed. `public.account_deletion_jobs` is deferred.
+The fresh production public base/partitioned-table count was 177. The
+migration asserts that baseline and expects 174 after these three targets are
+removed. `public.pending_analysis` has 11 rows, all currently
+`awaiting_payment`, and remains untouched; no payment state was inferred or
+changed. `public.account_deletion_jobs` is deferred.
 
 ## Preservation contract
 
-The five historical receipt rows are copied losslessly into the existing `public.maintenance_jobs` canonical ledger before any destructive statement. Each canonical row uses:
+The five historical receipt rows are copied losslessly into the existing
+`public.maintenance_jobs` canonical ledger before any destructive statement.
+Each canonical row uses:
 
 - `kind = 'terminalize'`;
-- a domain-separated SHA-256 `target_key_hash` over the retirement contract, kind, source table, and the stable `receipt_id` key;
+- a domain-separated SHA-256 `target_key_hash` over the retirement contract, kind, source table, and stable `receipt_id` key;
 - `payload.legacy_source_table` with the exact source relation name;
 - `payload.legacy_primary_key = {"receipt_id": ...}`;
 - `payload.legacy_row = to_jsonb(source_row)`, retaining every typed source column and null value;
 - `payload.schema_version = 1`; and
 - `content_hash` as SHA-256 over the canonical payload text.
 
-The migration fails closed on an existing conflicting canonical key, checks source count and distinct primary-key multiplicity, verifies ordered aggregate hashes, and verifies every source row's key, full JSONB row, and schema version before dropping. Empty payment tables have a vacuous preservation proof through exact zero-row guards.
+The migration pins `TIME ZONE 'UTC'` before archive serialization and keeps the
+existing source count, distinct-key, canonical conflict, ordered aggregate
+hash, key, full JSONB row, and schema-version checks before dropping. The
+source catalog fingerprint also covers owner/ACL, RLS and FORCE RLS, policy
+set, defaults, constraints, indexes, and non-internal trigger set. Its reviewed
+fingerprints are:
+
+| Source | Catalog fingerprint |
+| --- | --- |
+| historical receipts | `1c71e94106ab0cfa908288171bec5b599b68a6a6880b8fe7a86eb1419f791493` |
+| `payment_orders` | `c3388362ec6fe66bd39844a546295db254ed241a420fda456c5c4fa12a2037f1` |
+| `payments` | `a97df2b722e35f78aba346dd64f3cd266045eaa4c6b2f1f2ad41be8af42af502` |
 
 ## Dependency evidence and exclusions
 
-All 14 historical receipt tables were present as ordinary public base tables. For each, the production catalog showed zero incoming foreign keys, zero direct dependent views, zero direct dependent routines, and no publication membership; each has one immutability trigger owned by the table. The selected historical table's two body references are the owner-only candidate/resolver routines being retired, plus its immutability trigger guard.
+The migration keeps the exact relation allowlist and non-CASCADE drops. It
+checks catalog dependencies for incoming foreign keys, dependent views,
+dependent routines, and publication membership. The retired-routine guard
+now scans `pg_proc` definitions in every non-system routine schema, not only
+`public`, after removing SQL comments. It does not strip quoted strings, so a
+literal reference inside dynamic `EXECUTE` text remains visible and fails
+closed. A dynamic identifier assembled without a target literal cannot be
+proven by a bounded catalog scan; the coordinator's repository inventory and
+rollout review remain required for that case.
 
-The other 13 historical receipt tables remain because dynamic routine-body references connect them to active analysis/preflight/provider/job paths:
+The repository caller inventory is explicit:
 
-Those 13 deferred sources contain 21 rows (the complete 14-table historical cohort contains 26 rows including the selected five).
+- `scripts/generate-analysis-v2-historical-legacy-dispatch-terminalizer.ts:278` and its contract test reference the resolver only as archived SQL-generation coverage; the generator entry point now fails closed.
+- `supabase/operations/20260912_restore_historical_legacy_dispatch_and_empty_payment_tables.sql` contains only the isolated data restore path.
+- `docs/analysis-v2-historical-legacy-dispatch-terminalizer-runbook.md` is the archived runbook for the retired path.
+- No active `app/` or `lib/` runtime caller was found, and no other `scripts/**` or `supabase/operations/**` caller was found.
 
-| Deferred source | Rows | Active reference evidence |
-| --- | ---: | --- |
-| `earlybird_adoption_policy_failure_rearms` | 2 | `purge_expired_analysis_v2_preflights` and active preflight retention |
-| `earlybird_concierge_snapshot_conflict_recoveries` | 1 | `list_analysis_v2_dispatchable_jobs` and active V2 job store |
-| `earlybird_pfe_target_evidence_start_rejection_rearms` | 1 | active recovery-provider adoption chain |
-| `earlybird_pfe3_media_artifact_rearms` | 1 | active recovery-provider adoption chain |
-| `earlybird_profile_fetch_exhaustion_recoveries` | 1 | active recovery-provider adoption chain |
-| `earlybird_schema_failure_recoveries` | 7 | preflight retention, fulfillment recovery, and preflight admission |
-| `earlybird_terminal_unavailable_exhaustion_rearms` | 1 | `purge_expired_analysis_v2_preflights` and active preflight retention |
-| `earlybird_v211_apify_transient_replays` | 1 | active recovery-provider adoption chain |
-| `earlybird_v211_concierge_replays` | 2 | active recovery-provider adoption chain |
-| `earlybird_v211_lease_policy_failure_rearms` | 1 | active recovery-provider adoption chain |
-| `earlybird_v211_policy_identity_replays` | 1 | active recovery-provider adoption chain |
-| `earlybird_v211_profile_ai_diagnostic_replays` | 1 | active recovery-provider adoption chain |
-| `earlybird_v211_relationship_lineage_failure_rearms` | 1 | active recovery-provider adoption chain |
+The selected historical table's only database body references are the two
+retired candidate/resolver routines and its immutability trigger guard. The
+other historical tables remain deferred because active routines reference
+them. `pending_analysis` is explicitly out of scope because it contains live
+payment-gated rows.
 
-The selected `public.payments` table had one lexical body match, `public.finalize_earlybird_groble_payment_pre_reconciliation`, but the live match is comment-only. The routine is intentionally preserved: the `finalize_earlybird_groble_payment_reconciliation_aware` wrapper invokes it, and its database-owner-only ACL is the expected `SECURITY DEFINER` boundary. The migration allowlists its exact signature, snapshots and rechecks its definition/ACL hashes, and leaves its body, grants, and existence unchanged. `public.payment_orders` had no incoming/dependent catalog or body references. `public.pending_analysis` had no body references but is explicitly excluded because it contains live payment-gated rows.
+## Payment routine preservation
 
-## Local implementation
+The migration's literal payment allowlist covers all six current signatures:
 
-- Supabase-specific migration guidance was followed: the pinned CLI generated the migration filename, production checks used only the authenticated linked workdir, and no production mutation was attempted.
-- Migration: `supabase/migrations/20260912070144_retire_historical_legacy_dispatch_and_empty_payment_tables.sql`
-- Isolated restore operation: `supabase/operations/20260912_restore_historical_legacy_dispatch_and_empty_payment_tables.sql`
-- The migration uses a transaction, advisory lock, lock/statement timeouts, exact relation OID revalidation, literal target allowlists, exact source/canonical shapes and primary keys, incoming-FK/view/routine/publication guards, preserved payment-routine definition/ACL hash revalidation, explicit non-`CASCADE` drops, and a final table/routine/reference/count guard.
-- The historical terminalizer runbook is marked archived/retired, and the generator CLI now fails closed with a retirement error. Its pure validation/SQL-generation helpers remain available only for existing contract tests; no runtime adapter or analysis canonical adapter was changed.
+- `public.finalize_earlybird_groble_payment_pre_reconciliation(...)`;
+- `public.finalize_earlybird_groble_payment_reconciliation_aware(...)`;
+- the 12-argument `public.finalize_earlybird_groble_payment(...)`;
+- `public.finalize_earlybird_groble_payment_by_reference(...)`;
+- the 9-argument `public.finalize_earlybird_groble_payment(...)`; and
+- `public.finalize_earlybird_groble_payment_refund_aware(...)`.
 
-## Rollback and verification
+For each signature it snapshots exact OID, definition SHA-256, ACL, owner,
+`SECURITY DEFINER`, and `proconfig`, then revalidates the complete contract
+immediately before destructive DDL and again in the terminal guard. Any
+unreviewed `finalize_earlybird_groble_payment%` prefix match aborts. The migration
+does not lock or mutate `pending_analysis`, payment rows, or payment wrappers.
+The terminal target-literal scan exempts only these six after their complete
+contract revalidation, so an unreviewed routine remains a hard failure.
 
-Before commit, any failed guard rolls back the transaction automatically. After a reviewed production commit, recovery is intentionally isolated: execute the restore operation only in a disposable database after `SET supabase.retirement_isolated = 'true'`. It requires the canonical ledger and parent relations, refuses pre-existing targets, reconstructs the historical table with its typed constraints/index, recreates the server-only empty payment relations with their constraints/indexes/RLS boundary, restores the five rows from `legacy_row`, and verifies exact ordered row parity and zero payment rows. It does not delete or rewrite canonical rows and is not a production rollback command.
+F2/F3 rollout evidence is coordinator-owned rather than an unrelated business
+lock. The narrow read-only operation
+`supabase/operations/20260912_verify_historical_legacy_dispatch_empty_payment_retirement.sql`
+emits the pending count/status/key hash, all six wrapper contract
+fingerprints, canonical archive count/hash, target presence, retired-routine
+presence, public table count, and migration-history occurrence count. Run it
+once before and once after apply and compare the complete sanitized JSON
+object; do not run a concurrent coordinated rollout.
 
-Local checks completed before coordinator handoff: `git diff --check`, `npx tsc --noEmit`, a narrow PGlite retirement proof (`public_tables=174`, `canonical_rows=5`, and `pending_analysis` retained), and the isolated restore proof (`restored_receipts=5`, both payment tables zero, and `canonical_rows=5`). Broad tests/build/CI and production SQL mutation are out of scope for this task.
+## Isolated restore and parity
 
-## Coordinator rollout gate
+`supabase/operations/20260912_restore_historical_legacy_dispatch_and_empty_payment_tables.sql`
+is a data-only recovery operation, not a production rollback. It requires the
+caller to set `supabase.retirement_isolated = 'true'`, requires the canonical
+ledger and both parent relations/rows, and takes a scoped `SHARE` lock on
+`maintenance_jobs` while reading archive input. It refuses pre-existing target
+tables and refuses a pre-existing trigger routine before using `CREATE FUNCTION`.
 
-The coordinator must review the exact migration allowlist and run its own production dry-run/dependency verification before any apply. If accepted, apply only this migration in the authenticated linked production workdir, then verify the migration history, final public count, absence of the three targets and three retired historical routines, presence and unchanged definition/ACL of `finalize_earlybird_groble_payment_pre_reconciliation`, canonical archive count, and unchanged `pending_analysis` count/status; do not run activation/canary or mutate payment state.
+The restore pins UTC, requires exactly five `state = 'succeeded'` archive rows,
+recomputes and verifies every deterministic `target_key_hash` and
+`content_hash`, verifies `legacy_primary_key` metadata and distinct receipt
+keys, recreates the reviewed constraints/defaults/indexes/RLS/ACL/trigger
+contract, and then checks exact typed full-row parity. It never deletes or
+rewrites canonical rows. If a later purge removed a required parent row, the
+archive remains authoritative but this typed reconstruction must refuse to
+run.
+
+A disposable PostgreSQL 17.10 fixture seeded UTC archive rows, the two parent
+relations, the six live payment-prefix signatures (including `refund_aware`),
+and the isolated-restore setting. The restore completed with 5 archive rows,
+5 typed rows, 0 payment rows, and a six-wrapper prefix count; the session was
+started in `Asia/Seoul` to verify the operation's UTC pin.
+
+The revised retirement migration also completed on a bounded PostgreSQL 17.10
+fixture: 177 public tables before the run, 5 source rows, six payment-prefix
+signatures, then 174 public tables, 5 canonical archive rows, zero retired
+routines, and all three targets absent. That fixture used 168 inert public
+tables, synthetic parent/archive rows and roles, and a public
+`uuid_generate_v4()` alias so local deparsing matched the reviewed production
+catalog; these substitutions were fixture-only and no production guard was
+weakened.
+
+A local collision probe dropped only the disposable target relations inside a
+rollback while retaining the trigger routine; restore refused with
+`RETIREMENT_RESTORE_TRIGGER_FUNCTION_ALREADY_PRESENT`, and the outer rollback
+left all three targets intact.
+
+## Exact coordinator handoff
+
+Migration allowlist: exactly
+`supabase/migrations/20260912070144_retire_historical_legacy_dispatch_and_empty_payment_tables.sql`.
+The following commands are concrete, sanitized handoff commands. They were
+not used by this worker for production apply.
+
+```sh
+SOURCE_CLI_WORKDIR=/private/tmp/yeosachin-public22-cli.0GC1rz
+ROLLOUT_CLI_WORKDIR=$(mktemp -d /private/tmp/yeosachin-public22-cli-rollout.XXXXXX)
+MIGRATION=/Users/youngminpark/orca/workspaces/yeosachin_scanner/supabase-public-retirement-implementation-20260912/supabase/migrations/20260912070144_retire_historical_legacy_dispatch_and_empty_payment_tables.sql
+VERIFY=/Users/youngminpark/orca/workspaces/yeosachin_scanner/supabase-public-retirement-implementation-20260912/supabase/operations/20260912_verify_historical_legacy_dispatch_empty_payment_retirement.sql
+
+mkdir -p "$ROLLOUT_CLI_WORKDIR/supabase"
+cp "$SOURCE_CLI_WORKDIR/supabase/config.toml" "$ROLLOUT_CLI_WORKDIR/supabase/config.toml"
+cp -R "$SOURCE_CLI_WORKDIR/supabase/.temp" "$ROLLOUT_CLI_WORKDIR/supabase/.temp"
+
+npx --yes supabase@2.102.0 --version
+```
+
+The remote history currently contains 386 applied versions, including the
+legacy `001` through `010` versions. Populate the fresh rollout workdir with
+empty history-only stubs from a linked read-only query, then copy exactly one
+non-empty reviewed migration and verify that the non-empty allowlist is
+separate from the stubs:
+
+```sh
+set -euo pipefail
+mkdir -p "$ROLLOUT_CLI_WORKDIR/supabase/migrations"
+HISTORY_VERSIONS=$(npx --yes supabase@2.102.0 db query \
+  --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json \
+  "SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;" \
+  2>/dev/null | jq -r '.rows[].version')
+test "$(printf '%s\n' "$HISTORY_VERSIONS" | awk 'NF { count++ } END { print count + 0 }')" = "386"
+while IFS= read -r version; do
+  case "$version" in
+    00[1-9]|010) : ;;
+    *[!0-9]*|'') echo "unexpected migration version shape" >&2; exit 1 ;;
+    *) test "${#version}" = "14" || { echo "unexpected migration version shape" >&2; exit 1; } ;;
+  esac
+  touch "$ROLLOUT_CLI_WORKDIR/supabase/migrations/${version}_remote_applied.sql"
+done <<< "$HISTORY_VERSIONS"
+cp "$MIGRATION" "$ROLLOUT_CLI_WORKDIR/supabase/migrations/"
+test "$(find "$ROLLOUT_CLI_WORKDIR/supabase/migrations" -maxdepth 1 -type f -name '*.sql' ! -size 0c -exec basename {} \; | sort)" = "$(basename "$MIGRATION")"
+test "$(find "$ROLLOUT_CLI_WORKDIR/supabase/migrations" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')" = "387"
+
+# Read-only dry run, before any approval to apply:
+npx --yes supabase@2.102.0 db push --workdir "$ROLLOUT_CLI_WORKDIR" --linked --dry-run
+
+# Coordinator-approved apply of the one-file allowlist only:
+npx --yes supabase@2.102.0 db push --workdir "$ROLLOUT_CLI_WORKDIR" --linked
+```
+
+Immediately after apply, verify migration history with the linked read-only
+query and rerun the evidence operation:
+
+```sh
+npx --yes supabase@2.102.0 db query --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json \
+  "SELECT count(*) AS migration_history_occurrences FROM supabase_migrations.schema_migrations WHERE version = '20260912070144';"
+npx --yes supabase@2.102.0 db query --workdir "$ROLLOUT_CLI_WORKDIR" --linked --output json --file "$VERIFY"
+```
+
+For disposable restore only, provide the connection to that disposable
+database outside this report, set the isolation flag in the same SQL session,
+and run the restore operation with no production link or target:
+
+```sh
+RESTORE=/Users/youngminpark/orca/workspaces/yeosachin_scanner/supabase-public-retirement-implementation-20260912/supabase/operations/20260912_restore_historical_legacy_dispatch_and_empty_payment_tables.sql
+psql "$DISPOSABLE_DB_URL" -v ON_ERROR_STOP=1 <<SQL
+SET supabase.retirement_isolated = 'true';
+\\i $RESTORE
+SQL
+```
+
+The linked pre/post evidence must show unchanged pending count/status/key hash
+and all six wrapper fingerprints, post-apply absence of the three target
+tables and three retired routines, canonical archive count/hash of five rows,
+public table count 174, and exactly one migration-history occurrence. No
+activation/canary or payment-state reconciliation is part of this handoff.
+
+## Verification boundary
+
+The implementation files are:
+
+- `supabase/migrations/20260912070144_retire_historical_legacy_dispatch_and_empty_payment_tables.sql`;
+- `supabase/operations/20260912_restore_historical_legacy_dispatch_and_empty_payment_tables.sql`;
+- `supabase/operations/20260912_verify_historical_legacy_dispatch_empty_payment_retirement.sql`; and
+- this evidence report.
+
+Archived generator/runbook files were not changed. Broad tests, build, CI,
+production SQL mutation, push, merge, and activation remain out of scope.
