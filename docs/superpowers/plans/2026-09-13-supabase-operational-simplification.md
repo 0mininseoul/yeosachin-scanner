@@ -28,39 +28,54 @@
 ~~~
 {
   "schemaVersion": "supabase-operational-policy-v1",
-  "baseSha": "053d46326e7ecf45c02ebab9ae210ffe66624d00",
-  "retained": [
-    "analysis_jobs", "analysis_events", "analysis_provider_runs",
-    "analysis_v2_provider_runs", "payment_events", "maintenance_jobs",
-    "analysis_order_audit_assembly_queue", "analysis_order_audit_bundles",
-    "analysis_order_audit_candidates", "analysis_order_audit_interactions"
-  ],
-  "w1aCandidateUpperBound": [
-    "account_lifecycle", "analysis_artifacts", "analysis_audit_bundles",
-    "analysis_cache", "analysis_costs", "fulfillment_jobs",
-    "notification_outbox", "system_configuration", "system_leases"
-  ],
+  "sourceSha": "053d46326e7ecf45c02ebab9ae210ffe66624d00",
+  "retained": {
+    "execution": ["analysis_jobs", "analysis_events"],
+    "provider": ["analysis_provider_runs", "analysis_v2_provider_runs"],
+    "payment": ["payment_events", "payment_pending", "payments", "payment_orders", "earlybird_orders", "pending_analysis"],
+    "recovery": ["maintenance_jobs"],
+    "identityDeferred": ["account_lifecycle"],
+    "operatorAudit": {
+      "tables": [
+        "analysis_order_audit_assembly_queue", "analysis_order_audit_bundles",
+        "analysis_order_audit_candidates", "analysis_order_audit_interactions"
+      ],
+      "rpcExamples": [
+        "load_analysis_order_audit_bundle", "list_analysis_order_audit_bundles",
+        "claim_analysis_order_audit_bundle", "read_analysis_order_audit_parity_snapshot"
+      ]
+    }
+  },
   "forbiddenW1A": [
     "analysis_jobs", "analysis_events", "analysis_provider_runs",
     "analysis_v2_provider_runs", "payment_events", "maintenance_jobs",
     "analysis_order_audit_assembly_queue", "analysis_order_audit_bundles",
-    "analysis_order_audit_candidates", "analysis_order_audit_interactions"
+    "analysis_order_audit_candidates", "analysis_order_audit_interactions",
+    "account_lifecycle"
+  ],
+  "approvedSubset": [
+    "analysis_artifacts", "analysis_audit_bundles", "analysis_cache",
+    "analysis_costs", "fulfillment_jobs", "notification_outbox",
+    "system_configuration", "system_leases"
   ],
   "closure": {
     "tables": [], "routines": [], "flags": [], "indexes": [],
     "triggers": [], "policies": [], "acls": [], "views": [],
     "foreignKeys": [], "sequences": [], "publications": [],
     "dependencies": []
-  }
+  },
+  "noCascadeAllowlistHash": null
 }
 ~~~
 
-closure는 fresh catalog 결과로 채우며 빈 배열을 통과값으로 취급하지 않는다. retained/forbiddenW1A object는 pre/post에 존재하고 checksum이 허용된 변화 외에는 동일해야 한다. W1A candidate는 fresh evidence에 따라 9개보다 작아질 수 있고, 구현자는 9개를 억지로 맞추지 않는다.
+closure는 fresh catalog 결과로 채우며 빈 배열을 통과값으로 취급하지 않는다. noCascadeAllowlistHash는 exact no-CASCADE manifest를 확인한 뒤에만 채우며 null을 승인값으로 취급하지 않는다. retained/forbiddenW1A object는 pre/post에 존재하고 checksum이 허용된 변화 외에는 동일해야 한다. approvedSubset은 다음 8개 upper bound에서 fresh evidence가 승인한 family만 담고, 8개보다 줄어들 수 있으며 구현자는 숫자를 억지로 맞추지 않는다.
 
 ### W1A와 보존 경계
 
-- W1A upper bound: account_lifecycle, analysis_artifacts, analysis_audit_bundles, analysis_cache, analysis_costs, fulfillment_jobs, notification_outbox, system_configuration, system_leases.
-- W1A에서 보존: analysis_jobs/events table·row·schema·index·FK·trigger·ACL, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs, analysis_order_audit_* operator contract.
+- W1A upper bound: analysis_artifacts, analysis_audit_bundles, analysis_cache, analysis_costs, fulfillment_jobs, notification_outbox, system_configuration, system_leases.
+- account_lifecycle은 W1A에서 완전히 제외한 retained/deferred family다. account-deletion.ts의 flag-gated lifecycle evidence와 irreversible-action guard를 대체 설계하지 않으며, account_lifecycle table/RPC/flags/callers는 이번 code/schema change에서 손대지 않는다.
+- W1A에서 보존: analysis_jobs/events table·row·schema·index·FK·trigger·ACL, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs.
+- operator audit contract는 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions table과 load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, claim_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot RPC 예시를 포함하며 W1A에서 보존한다. analysis_audit_bundles는 이 계층과 다른 W1A analysis canonical shadow table이다.
 - analysis_jobs/events 19/81 full-row archive는 W1A 선행 조건이 아니다. W1A에서는 object 보존·비변경만 확인하고, 후속 preservation wave에서 consistent snapshot/archive/checksum/reference manifest를 독립 수행한다.
 - payment_events hold와 payment_pending read-only 관찰은 유지하되 status mutation은 하지 않는다.
 - 실제 0_min._.00 canary, synthetic canary, fake production bundle은 실행하거나 evidence로 사용하지 않는다.
@@ -71,7 +86,7 @@ closure는 fresh catalog 결과로 채우며 빈 배열을 통과값으로 취�
 | --- | --- | --- |
 | analysis adapter split | lib/services/analysis/canonical-analysis-store.ts, lib/services/analysis/canonical-analysis-read.ts, lib/services/analysis/v2-worker.ts, lib/services/analysis/v2-progress-reporter.ts, lib/services/analysis/provider-cost-reconciliation.ts, lib/services/analysis/v2-result-store.ts | retained jobs/events만 남기고 W1A artifact/audit/cache/cost branch 제거 |
 | analysis SQL closure | 새 contraction migration과 restore manifest; 기존 20260909095740, 20260911123000, 20260911100000은 immutable history | validator/RPC/index/trigger/grant/backfill branch를 exact allowlist로 분리 |
-| commerce/account closure | lib/services/operations/canonical-operations-store.ts, lib/services/commerce/canonical-commerce-store.ts, lib/services/identity/account-principal-store.ts, lib/services/identity/account-deletion.ts, lib/services/identity/account-deletion-canonical-adapter.ts, earlybird/notification callers | W1A mirror만 제거하고 maintenance mirror/parity/shared hash/payment hold 보존 |
+| commerce/account closure | lib/services/operations/canonical-operations-store.ts, lib/services/commerce/canonical-commerce-store.ts, lib/services/identity/account-principal-store.ts, lib/services/identity/account-deletion.ts, lib/services/identity/account-deletion-canonical-adapter.ts, earlybird/notification callers | W1A fulfillment/notification/config/lease mirror만 제거하고 account_lifecycle, maintenance mirror/parity/shared hash/payment hold 보존 |
 | policy replacement | lib/services/operations/supabase-22-evidence.ts, scripts/generate-supabase-22-retirement-inventory.ts, scripts/verify-supabase-22-catalog.ts | exact-22 count/set 대신 operational policy v1 검증 |
 | existing tests only | 기존 canonical/catalog/evidence/contract/PGlite test 파일 | 새 test file 없이 정책 및 retained/forbidden invariant 갱신 |
 
@@ -103,9 +118,9 @@ git show -s --format='%H%n%s' 053d46326e7ecf45c02ebab9ae210ffe66624d00
 
 public table count, exact row count, PK digest, column/type/default, index, FK, trigger, policy/RLS, ACL, view, sequence, publication, partition, pg_depend, migration history, source caller, flag/config source를 하나의 observation window에 기록한다. pg_stat.stats_reset, last updated timestamp, 0행만으로 quiescence를 판정하지 않는다.
 
-- [ ] **Step 3: retained/forbidden/W1A candidate를 policy v1로 분류한다.**
+- [ ] **Step 3: retained/forbidden/approvedSubset을 policy v1로 분류한다.**
 
-retained에는 analysis_jobs/events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, maintenance_jobs, analysis_order_audit_* 4개와 payment/order source를 넣는다. W1A candidate는 9개 upper bound로 시작하되 caller/dependency/legacy/operator evidence가 부족한 family를 deferred로 이동한다.
+retained에는 analysis_jobs, analysis_events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions를 넣는다. operator RPC 예시는 load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, claim_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot이다. account_lifecycle은 retained/deferred이며 W1A approvedSubset에는 넣지 않는다. W1A approvedSubset은 8개 upper bound에서 시작하되 caller/dependency/legacy/operator evidence가 부족한 family를 deferred로 이동한다.
 
 완료 조건: policy schemaVersion이 supabase-operational-policy-v1이고, table count가 future guarantee로 노출되지 않으며, forbiddenW1A와 closure가 명시되어 있다.
 
@@ -150,7 +165,7 @@ analysis_events_append_only와 retained-only reject trigger function을 유지�
 
 - [ ] **Step 7: 20260911123000 backfill branch를 W1A에서 실행하지 않는다.**
 
-analysis_jobs/events payload constraint, analysis_events_backfill_copy_key_idx와 jobs/events branch는 preservation wave의 deferred evidence로 object non-change만 확인한다. append_analysis_canonical_artifact 재정의와 artifacts/costs branch를 W1A code/migration dependency에서 제거한다. apply_analysis_canonical_backfill_row(TEXT,TEXT,TEXT,TEXT,TEXT,UUID,JSONB)는 W1A에서 호출하지 않고 contraction migration에서 exact signature로 drop한다. 기존 multi-family RPC를 wrapper로 남기지 않으며 retained-only preservation RPC는 별도 wave에서 새로 설계한다. 20260911100000의 artifact/cost column grant는 제거하고 jobs/events grant는 유지한다.
+analysis_jobs/events payload constraint, analysis_events_backfill_copy_key_idx와 jobs/events branch는 preservation wave의 deferred evidence로 object non-change만 확인한다. append_analysis_canonical_artifact 재정의와 artifacts/costs branch를 W1A code/migration dependency에서 제거한다. apply_analysis_canonical_backfill_row(TEXT,TEXT,TEXT,TEXT,TEXT,UUID,JSONB)는 W1A에서 호출하지 않으며, source/DB caller count가 0이고 old revision drain이 끝난 뒤 contraction migration에서 exact signature로 no-CASCADE drop한다. 기존 multi-family RPC를 wrapper로 남기지 않으며 retained-only preservation RPC는 별도 wave에서 새로 설계한다. W1A에서는 retained jobs/events용 새 backfill script/RPC를 만들지 않는다. 20260911100000의 artifact/cost column grant는 제거하고 jobs/events grant는 유지한다.
 
 완료 조건: retained execution source에 W1A table name, W1A flag, W1A RPC, six-array response key, W1A retry branch가 없고, analysis_jobs/events table/index/constraint/grant와 legacy path가 동일하다.
 
@@ -182,9 +197,9 @@ upsert_fulfillment_job_v1와 fulfillment dual-write/fallback, enqueue_notificati
 
 list_notification_legacy_outbox_v1는 canonical parity 전용 reader이므로 source caller와 W1A disposition을 기록한다. shadowReadCanonicalNotificationOutbox 제거 후 list_notification_outbox_v1와 함께 exact drop allowlist에 넣는다. legacy outbox source tables와 delivery route는 유지하며 두 reader를 delivery contract로 오인하지 않는다.
 
-- [ ] **Step 3: account deletion에서는 account_lifecycle 전용 부분만 제거한다.**
+- [ ] **Step 3: account deletion과 account_lifecycle을 이번 wave에서 no-touch로 고정한다.**
 
-account_lifecycle table, account_lifecycle_account_recorded_idx, account_lifecycle_immutable, append_account_lifecycle_v1, account lifecycle flags와 lifecycle-only mirror call만 제거한다. account_deletion.ts의 begin_account_deletion_v1, finalize_account_deletion_database_v1, complete_account_deletion_v1, irreversible-action guard와 maintenance mirror/recovery branch는 유지한다.
+account_lifecycle table, account_lifecycle_account_recorded_idx, account_lifecycle_immutable, append_account_lifecycle_v1, account lifecycle flags와 callers를 이번 code/schema change에서 제거·변경하지 않는다. account-deletion.ts의 flag-gated lifecycle evidence, begin_account_deletion_v1, finalize_account_deletion_database_v1, complete_account_deletion_v1, irreversible-action guard와 maintenance mirror/recovery branch를 그대로 유지한다. lifecycle evidence/guard 대체 설계는 별도 deferred wave로 이동한다.
 
 - [ ] **Step 4: maintenance_jobs mirror/parity/shared hash를 보존한다.**
 
@@ -196,7 +211,15 @@ canonicalJsonHash, canonicalEvidenceHash와 SQL canonical_json_string_v1, canoni
 
 payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, record_payment_event_v1, analysis_provider_runs, analysis_v2_provider_runs와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions 및 load/list/claim/release/enqueue/assemble/read parity RPC를 W1A drop/mutation allowlist에서 제외한다.
 
-완료 조건: W1A commerce caller가 제거되고 legacy routes가 유지되며, maintenance mirror/parity/shared hash, payment/provider/operator audit contract에 변경이 없다.
+- [ ] **Step 6: W1A를 참조하는 old backfill entry point의 caller와 파일 disposition을 고정한다.**
+
+`scripts/backfill-analysis-canonical.ts`는 abandoned exact-22 multi-family backfill entry point이므로 W1A code deploy에서 retire/delete한다. `scripts/backfill-analysis-canonical.test.ts`도 함께 retire/delete하고, `package.json`의 해당 script alias(현재 repo에는 없음), production import(현재 없음), 다음 docs caller의 runnable command/reference를 제거하거나 retired historical note로 바꾼다: `docs/reports/2026-09-11-supabase-22-final-convergence-inventory.json`, `docs/reports/2026-09-11-supabase-22-wave1-production-readonly-evidence.md`, `docs/superpowers/plans/2026-09-09-supabase-22-table-analysis-canonicalization.md`, `docs/superpowers/plans/2026-09-09-supabase-22-table-master.md`, `docs/superpowers/plans/2026-09-11-supabase-22-final-convergence.md`. `apply_analysis_canonical_backfill_row(TEXT,TEXT,TEXT,TEXT,TEXT,UUID,JSONB)`는 source/DB caller count가 0이고 old revision drain이 끝난 뒤에만 exact signature로 no-CASCADE drop한다. W1A에서는 retained jobs/events용 새 backfill script/RPC를 만들지 않는다.
+
+`scripts/backfill-commerce-operations-canonical.ts`는 fulfillment/notification/config/lease 등 W1A family를 함께 노출하는 old multi-family entry point이므로 W1A code deploy에서 retire/delete하고 `scripts/backfill-commerce-operations-canonical.test.ts`와 package/import/docs caller를 함께 정리한다. commerce docs caller는 `docs/reports/2026-09-09-supabase-22-commerce-operations-evidence.md`, `docs/reports/2026-09-10-supabase-22-next-retirement-candidates.json`, `docs/reports/2026-09-11-supabase-22-final-convergence-inventory.json`, `docs/superpowers/plans/2026-09-09-supabase-22-table-commerce-operations-canonicalization.md`, `docs/superpowers/plans/2026-09-09-supabase-22-table-master.md`, `docs/superpowers/plans/2026-09-11-supabase-22-final-convergence.md`이며 historical evidence는 실행 가능한 caller가 아니도록 disposition을 기록한다. account_lifecycle caller는 삭제하지 않고 no-touch로 유지한다.
+
+`scripts/backfill-account-deletion-canonical.ts`, `scripts/backfill-account-deletion-canonical.test.ts`, `lib/services/identity/account-deletion-canonical-pglite.test.ts`의 import/test와 `backfill_account_deletion_jobs_v1`/`collect_account_deletion_parity_v1` maintenance parity는 보존한다. 이 dedicated account-deletion/maintenance parity path와 `canonicalJsonHash`, `canonicalEvidenceHash`, `canonical_json_string_v1`, `canonical_json_number_v1`, `canonical_json_v1`, `canonical_json_hash_v1` shared hash는 W1A backfill retire에 포함하지 않는다.
+
+완료 조건: W1A commerce caller가 제거되고 legacy routes가 유지되며, maintenance mirror/parity/shared hash, payment/provider/operator audit contract에 변경이 없다. account_lifecycle과 dedicated account-deletion parity caller는 남아 있고, W1A family caller count만 0이다.
 
 ## Task 3: exact-22 verifier를 operational policy verifier로 바꾼다
 
@@ -205,30 +228,32 @@ payment_events, payment_pending, payments, payment_orders, earlybird_orders, pen
 - Modify: lib/services/operations/supabase-22-evidence.ts
 - Modify: scripts/generate-supabase-22-retirement-inventory.ts
 - Modify: scripts/verify-supabase-22-catalog.ts
+- Modify: scripts/verify-supabase-22-archive-restore.ts (retain and update; actual repo path)
 - Modify: existing tests only:
   - lib/services/operations/supabase-22-catalog-pglite.test.ts
   - lib/services/operations/supabase-22-evidence.test.ts
   - scripts/verify-supabase-22-catalog.test.ts
   - scripts/generate-supabase-22-retirement-inventory.test.ts
+  - scripts/verify-supabase-22-archive-restore.test.ts
   - affected existing canonical-analysis/canonical-commerce/canonical-operations contract tests
 
 - [ ] **Step 1: policy schema/version과 classification output을 정의한다.**
 
-SUPABASE_22_CANONICAL_TABLES와 187/165 expected count comparison을 제거한다. supabase-operational-policy-v1, sourceSha, retained set, W1A candidate subset, forbiddenW1A set, closure evidence, deferred reason과 no-CASCADE allowlist hash를 출력한다. policy version은 고정하되 table count는 fresh evidence에 따라 변할 수 있다.
+SUPABASE_22_CANONICAL_TABLES와 187/165 expected count comparison을 제거한다. supabase-operational-policy-v1, sourceSha, retained, forbiddenW1A, approvedSubset, closure, noCascadeAllowlistHash와 deferred reason을 출력한다. policy version은 고정하되 table count와 approvedSubset 크기는 fresh evidence에 따라 변할 수 있다.
 
 - [ ] **Step 2: retained/forbidden invariant를 검증한다.**
 
-verifier는 retained analysis_jobs/events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, maintenance_jobs, analysis_order_audit_*와 payment/order source가 존재하는지 확인한다. forbiddenW1A에 대한 DROP/ALTER/DML, payment_pending mutation, unexpected routine/flag/ACL/view/FK/sequence/trigger/publication change가 있으면 실패한다.
+verifier는 retained analysis_jobs, analysis_events, analysis_provider_runs, analysis_v2_provider_runs, payment_events, payment_pending, payments, payment_orders, earlybird_orders, pending_analysis, maintenance_jobs와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions가 존재하는지 확인한다. operator RPC 예시인 load_analysis_order_audit_bundle, list_analysis_order_audit_bundles, claim_analysis_order_audit_bundle, read_analysis_order_audit_parity_snapshot도 retained contract로 확인한다. analysis_audit_bundles는 approvedSubset의 W1A shadow table이며 analysis_order_audit_bundles와 다른 object다. forbiddenW1A에 대한 DROP/ALTER/DML, account_lifecycle mutation, payment_pending mutation, unexpected routine/flag/ACL/view/FK/sequence/trigger/publication change가 있으면 실패한다.
 
 - [ ] **Step 3: 기존 catalog PGlite fixture와 기존 contract assertion만 갱신한다.**
 
-lib/services/operations/supabase-22-catalog-pglite.test.ts의 exact-22 table fixture/assertion을 policy class와 retained/forbidden invariant로 바꾼다. supabase-22-evidence, verify catalog, generate inventory의 기존 assertion을 새 schemaVersion과 subset semantics에 맞게 갱신한다. 새 test file, snapshot suite, broad CI job은 만들지 않는다.
+lib/services/operations/supabase-22-catalog-pglite.test.ts의 exact-22 table fixture/assertion을 policy class와 retained/forbidden invariant로 바꾼다. supabase-22-evidence, verify catalog, generate inventory, verify-supabase-22-archive-restore의 기존 assertion을 새 schemaVersion/sourceSha/retained/forbiddenW1A/approvedSubset/closure/noCascadeAllowlistHash와 subset semantics에 맞게 갱신한다. 새 test file, snapshot suite, broad CI job은 만들지 않는다.
 
 - [ ] **Step 4: historical document semantics를 유지한다.**
 
-기존 exact-22 design/report는 historical baseline으로 남기고, 새 inventory/policy가 160 snapshot 또는 exact-22 terminal count를 future guarantee로 표현하지 않는지 확인한다.
+실제 repo의 archive verifier 파일은 `scripts/verify-supabase-22-archive-restore.ts`와 `scripts/verify-supabase-22-archive-restore.test.ts`다. 이 verifier는 order-audit parity의 encrypted archive/isolated restore checksum을 검증하므로 retire하지 않고 operational-policy-v1의 새 schemaVersion/sourceSha/retained/forbiddenW1A/approvedSubset/closure/noCascadeAllowlistHash와 실제 retained operator table/RPC invariants를 소비하도록 갱신한다. `canonicalSetMatch`, exact-22 count/set만 검증하는 assertion은 제거한다. 기존 exact-22 design/report는 historical baseline으로 남기고, 새 inventory/policy가 160 snapshot 또는 exact-22 terminal count를 future guarantee로 표현하지 않는지 확인한다.
 
-완료 조건: verifier가 exact count/set 대신 policy version, retained/forbidden invariant, closure completeness, W1A subset을 판정한다.
+완료 조건: catalog와 archive/restore verifier가 exact count/set 대신 policy version, retained/forbidden invariant, closure completeness, approvedSubset과 no-CASCADE allowlist hash를 판정한다.
 
 ## Task 4: migration manifest와 bounded contraction 순서를 고정한다
 
@@ -250,7 +275,7 @@ drop 후보는 analysis_artifacts, analysis_audit_bundles, analysis_cache, analy
 
 - [ ] **Step 3: commerce exact drop/retain list를 고정한다.**
 
-drop 후보는 account_lifecycle, fulfillment_jobs, notification_outbox, system_configuration, system_leases와 W1A-only routine/index/trigger/ACL/FK/sequence/view dependency다. retain list는 payment_events, its immutable trigger/function, maintenance_jobs and recovery index/RPC, shared canonical JSON/hash, legacy source outbox tables/routes, provider tables, order/payment source와 analysis_order_audit_*이다.
+drop 후보는 fulfillment_jobs, notification_outbox, system_configuration, system_leases와 W1A-only routine/index/trigger/ACL/FK/sequence/view dependency다. account_lifecycle은 table/RPC/flags/callers를 포함해 retained/deferred로 유지한다. retain list는 payment_events, its immutable trigger/function, maintenance_jobs and recovery index/RPC, shared canonical JSON/hash, legacy source outbox tables/routes, provider tables, order/payment source와 analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions이다.
 
 - [ ] **Step 4: no-CASCADE migration precondition을 명시한다.**
 
@@ -258,7 +283,7 @@ drop 후보는 account_lifecycle, fulfillment_jobs, notification_outbox, system_
 
 - [ ] **Step 5: code deploy → old revision drain → verified evidence → flags hard-off/removed → schema contraction 순서를 적용한다.**
 
-old Vercel/worker revision이 drain되어 in-flight request/job/queue와 old RPC caller가 0임을 증명하기 전에는 schema를 줄이지 않는다. drain 후 fresh evidence를 검증하고, W1A flags를 모두 hard-off한 뒤 source/config에서 제거한다. W1A flags는 ANALYSIS_CANONICAL_EVIDENCE_READ, ANALYSIS_CANONICAL_EVIDENCE_WRITE, ANALYSIS_CANONICAL_COST_READ, ANALYSIS_CANONICAL_COST_WRITE, ANALYSIS_CANONICAL_CACHE_READ, ANALYSIS_CANONICAL_CACHE_WRITE, ANALYSIS_CANONICAL_AUDIT_READ, ANALYSIS_CANONICAL_AUDIT_WRITE와 COMMERCE_CANONICAL_FULFILLMENT_READ, COMMERCE_CANONICAL_FULFILLMENT_WRITE, COMMERCE_CANONICAL_NOTIFICATION_READ, COMMERCE_CANONICAL_NOTIFICATION_WRITE, COMMERCE_CANONICAL_ACCOUNT_READ, COMMERCE_CANONICAL_ACCOUNT_WRITE, COMMERCE_CANONICAL_CONFIG_READ, COMMERCE_CANONICAL_CONFIG_WRITE, COMMERCE_CANONICAL_LEASE_READ, COMMERCE_CANONICAL_LEASE_WRITE다. retained jobs/events flags, maintenance, payment hold flag는 별도 policy로 남긴다.
+old Vercel/worker revision이 drain되어 in-flight request/job/queue와 old RPC caller가 0임을 증명하기 전에는 schema를 줄이지 않는다. drain 후 fresh evidence를 검증하고, W1A flags를 모두 hard-off한 뒤 source/config에서 제거한다. W1A flags는 ANALYSIS_CANONICAL_EVIDENCE_READ, ANALYSIS_CANONICAL_EVIDENCE_WRITE, ANALYSIS_CANONICAL_COST_READ, ANALYSIS_CANONICAL_COST_WRITE, ANALYSIS_CANONICAL_CACHE_READ, ANALYSIS_CANONICAL_CACHE_WRITE, ANALYSIS_CANONICAL_AUDIT_READ, ANALYSIS_CANONICAL_AUDIT_WRITE와 COMMERCE_CANONICAL_FULFILLMENT_READ, COMMERCE_CANONICAL_FULFILLMENT_WRITE, COMMERCE_CANONICAL_NOTIFICATION_READ, COMMERCE_CANONICAL_NOTIFICATION_WRITE, COMMERCE_CANONICAL_CONFIG_READ, COMMERCE_CANONICAL_CONFIG_WRITE, COMMERCE_CANONICAL_LEASE_READ, COMMERCE_CANONICAL_LEASE_WRITE다. account lifecycle flags/callers는 no-touch retained/deferred이고, retained jobs/events flags, maintenance, payment hold flag는 별도 policy로 남긴다.
 
 - [ ] **Step 6: post evidence를 수집한다.**
 
@@ -314,10 +339,10 @@ git rev-parse HEAD
 
 - 기준 SHA가 두 문서에 053d46326e7ecf45c02ebab9ae210ffe66624d00으로 기록되어 있다.
 - retained analysis_jobs/events와 W1A artifacts/audit/cache/cost의 common evidence flag, bundle/load/retry RPC, validator, trigger, index, 20260911123000 backfill branch split이 명시되어 있다.
-- account deletion은 maintenance_jobs mirror/parity/shared hash를 보존하고 account_lifecycle 전용 부분만 제거하도록 명시되어 있다.
+- account deletion은 maintenance_jobs mirror/parity/shared hash를 보존하고, account_lifecycle table/RPC/flags/callers와 flag-gated lifecycle evidence/irreversible-action guard를 이번 wave에서 no-touch retained/deferred로 둔다.
 - exact-22 대신 supabase-operational-policy-v1과 retained/forbiddenW1A invariant, 기존 catalog PGlite test 갱신 범위가 정의되어 있다.
 - analysis_jobs/events full-row archive가 W1A 선행 필수가 아니고 후속 preservation wave이며 W1A object non-change만 확인한다고 명시되어 있다.
-- payment_events/payment_pending, analysis_provider_runs/analysis_v2_provider_runs, analysis_order_audit_* operator contract, maintenance_jobs 보존 이름이 선명하다.
+- payment_events/payment_pending, analysis_provider_runs/analysis_v2_provider_runs, analysis_order_audit_assembly_queue, analysis_order_audit_bundles, analysis_order_audit_candidates, analysis_order_audit_interactions operator contract, maintenance_jobs 보존 이름이 선명하다.
 - shared canonical JSON/hash, legacy notification reader, ACL/view/FK/sequence/trigger/pg_depend closure가 migration manifest에 포함되어 있다.
 - code deploy, old revision drain, verified evidence, all W1A flags hard-off/removed, no-CASCADE exact allowlist 순서와 실제 0_min._.00 canary 금지가 명시되어 있다.
 - 검증 범위가 기본 tsc와 관련 기존 contract test로 제한되고, 새 테스트와 광범위 CI가 금지되어 있다.
