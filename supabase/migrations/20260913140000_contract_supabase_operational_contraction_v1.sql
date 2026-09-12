@@ -1673,7 +1673,6 @@ DROP INDEX public.system_configuration_effective_idx;
 DROP INDEX public.system_leases_expiry_idx;
 
 ALTER TABLE public.analysis_costs ALTER COLUMN id DROP IDENTITY;
-DROP SEQUENCE public.analysis_costs_id_seq;
 
 DROP TABLE public.analysis_artifacts;
 DROP TABLE public.analysis_audit_bundles;
