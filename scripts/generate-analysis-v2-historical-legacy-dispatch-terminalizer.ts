@@ -347,7 +347,7 @@ export function parseGeneratorArguments(argv: readonly string[]): {
 }
 
 if (process.argv[1]?.endsWith('generate-analysis-v2-historical-legacy-dispatch-terminalizer.ts')) {
-    const { input, output, auditEvidenceHash, terminalStatus } = parseGeneratorArguments(process.argv.slice(2));
-    const candidates = parseCandidateFile(readPrivateCandidateFile(input));
-    writePrivateTerminalizationSqlFile(output, generateTerminalizationSql(candidates, auditEvidenceHash, terminalStatus));
+    throw new Error(
+        'HISTORICAL_LEGACY_DISPATCH_TERMINALIZER_RETIRED: do not generate or execute terminalization SQL; use the Supabase 22 retirement migration.'
+    );
 }
