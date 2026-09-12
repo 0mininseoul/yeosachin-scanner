@@ -1,5 +1,7 @@
 # Supabase 22 Final Convergence Implementation Plan
 
+> Historical plan disposition (2026-09-13): exact-22 backfill entry points referenced by this plan are retired and non-runnable. Current implementation evidence is governed by `supabase-operational-policy-v1`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move every defensible legacy public table toward the approved exact 22-table Supabase catalog while preserving required data, and retire a source only after an explicit, reversible evidence gate proves that it is safe.

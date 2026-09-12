@@ -1,5 +1,7 @@
 # Supabase 22 Wave 1 production read-only evidence
 
+> Historical disposition (2026-09-13): the referenced exact-22 analysis backfill entry point has been retired and is no longer runnable. Use the `supabase-operational-policy-v1` inventory/verifier for current evidence.
+
 ## Status and boundary
 
 Production read-only collection is **VERIFIED**. Wave 1 parity and cutover are

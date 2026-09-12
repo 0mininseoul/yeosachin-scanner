@@ -1,5 +1,7 @@
 # Supabase commerce and operations canonicalization evidence
 
+> Historical disposition (2026-09-13): the referenced exact-22 commerce backfill entry point has been retired and is no longer runnable. Use the `supabase-operational-policy-v1` inventory/verifier for current evidence.
+
 Date: 2026-09-09 (Asia/Seoul)
 
 ## Decision

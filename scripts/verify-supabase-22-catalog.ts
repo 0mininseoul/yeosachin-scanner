@@ -7,7 +7,11 @@ import {
     adaptSupabase22CatalogRows,
     collectSupabase22CatalogEvidence,
     evaluateSupabase22Catalog,
-    SUPABASE_22_CANONICAL_TABLES,
+    SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+    SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
+    SUPABASE_OPERATIONAL_FORBIDDEN_W1A,
+    SUPABASE_OPERATIONAL_W1A_UPPER_BOUND,
     type Supabase22CatalogEvidence,
 } from '../lib/services/operations/supabase-22-evidence';
 
@@ -45,13 +49,14 @@ const CATALOG_METADATA_KEYS = [
     'view', 'publication', 'sequence', 'partition', 'foreignKey', 'legacyWriter',
 ] as const;
 const CATALOG_EVIDENCE_KEYS = [
-    'schemaVersion', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
+    'schemaVersion', 'sourceSha', 'status', 'publicTableCount', 'canonicalTables', 'unexpectedTables',
     'missingTables', 'dependencyClean', 'migrationHistoryClean', 'rlsClean',
     'routinesClean', 'canonicalRelationsAclClean', 'privateRoutinesAclClean',
     'serviceRpcsAclClean', 'clientRpcsAclClean', 'aclClean', 'triggersClean',
     'foreignKeysClean', 'viewsClean',
     'publicationsClean', 'sequencesClean', 'partitionsClean', 'legacyWritersClean',
-    'metadataAvailability', 'clean', 'destructiveOperations',
+    'metadataAvailability', 'retainedTables', 'forbiddenW1A', 'approvedSubset',
+    'deferredReasons', 'closure', 'noCascadeAllowlistHash', 'clean', 'destructiveOperations',
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -165,13 +170,22 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     const manifest = value as Partial<Supabase22CatalogEvidence>;
-    if (manifest.schemaVersion !== 'supabase-22-catalog-v1'
+    if (manifest.schemaVersion !== SUPABASE_OPERATIONAL_POLICY_SCHEMA
+        || manifest.sourceSha !== SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA
         || !Number.isSafeInteger(manifest.publicTableCount)
         || (manifest.publicTableCount ?? -1) < 0
         || (manifest.status !== 'ready' && manifest.status !== 'blocked')
         || !Array.isArray(manifest.canonicalTables)
         || !Array.isArray(manifest.unexpectedTables)
         || !Array.isArray(manifest.missingTables)
+        || !Array.isArray(manifest.retainedTables)
+        || !Array.isArray(manifest.forbiddenW1A)
+        || !Array.isArray(manifest.approvedSubset)
+        || !isRecord(manifest.deferredReasons)
+        || !isRecord(manifest.closure)
+        || (manifest.noCascadeAllowlistHash !== null
+            && (typeof manifest.noCascadeAllowlistHash !== 'string'
+                || !/^[0-9a-f]{64}$/i.test(manifest.noCascadeAllowlistHash)))
         || typeof manifest.dependencyClean !== 'boolean'
         || typeof manifest.migrationHistoryClean !== 'boolean'
         || typeof manifest.rlsClean !== 'boolean'
@@ -195,7 +209,36 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
     }
     if (manifest.canonicalTables.some(table => !safeCatalogName(table))
         || manifest.unexpectedTables.some(table => !safeCatalogName(table))
-        || manifest.missingTables.some(table => !safeCatalogName(table))) {
+        || manifest.missingTables.some(table => !safeCatalogName(table))
+        || manifest.retainedTables.some(table => !safeCatalogName(table))
+        || manifest.forbiddenW1A.some(table => !safeCatalogName(table))
+        || manifest.approvedSubset.some(table => !safeCatalogName(table))
+        || Object.entries(manifest.deferredReasons).some(([key, value]) =>
+            !safeCatalogName(key) || typeof value !== 'string' || value.trim().length === 0)) {
+        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
+    }
+    const retainedSet = new Set(manifest.retainedTables);
+    const forbiddenSet = new Set(manifest.forbiddenW1A);
+    const approvedSet = new Set(manifest.approvedSubset);
+    const retainedClassificationClean = retainedSet.size === manifest.retainedTables.length
+        && retainedSet.size === SUPABASE_OPERATIONAL_RETAINED_TABLES.length
+        && SUPABASE_OPERATIONAL_RETAINED_TABLES.every(table => retainedSet.has(table));
+    const forbiddenClassificationClean = forbiddenSet.size === manifest.forbiddenW1A.length
+        && forbiddenSet.size === SUPABASE_OPERATIONAL_FORBIDDEN_W1A.length
+        && SUPABASE_OPERATIONAL_FORBIDDEN_W1A.every(table => forbiddenSet.has(table));
+    const approvedSubsetClean = approvedSet.size === manifest.approvedSubset.length
+        && manifest.approvedSubset.every(table => SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(table as never));
+    const deferredReasonsComplete = SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.every(table =>
+        approvedSet.has(table)
+        || typeof manifest.deferredReasons?.[table] === 'string'
+            && manifest.deferredReasons[table].trim().length > 0);
+    const deferredReasonsClean = Object.keys(manifest.deferredReasons).every(table =>
+        SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(table as never));
+    if (!retainedClassificationClean
+        || !forbiddenClassificationClean
+        || !approvedSubsetClean
+        || !deferredReasonsComplete
+        || !deferredReasonsClean) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     const metadataAvailability = manifest.metadataAvailability;
@@ -206,6 +249,20 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
     if (!isRecord(metadataAvailability)
         || !hasOnlyKeys(metadataAvailability, CATALOG_METADATA_KEYS)
         || metadataKeys.some(key => typeof metadataAvailability[key] !== 'boolean')) {
+        throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
+    }
+    const closureKeys = [
+        'tables', 'routines', 'flags', 'indexes', 'triggers', 'policies', 'acls',
+        'views', 'foreignKeys', 'sequences', 'publications', 'dependencies',
+    ] as const;
+    if (!hasOnlyKeys(manifest.closure!, closureKeys)
+        || closureKeys.some(key => {
+            const values = manifest.closure![key];
+            return !Array.isArray(values)
+                || values.length === 0
+                || values.some(value => !safeCatalogName(value))
+                || new Set(values).size !== values.length;
+        })) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     const allChecksClean = manifest.dependencyClean
@@ -224,20 +281,22 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         && manifest.sequencesClean
         && manifest.partitionsClean
         && manifest.legacyWritersClean;
-    const exactCanonicalSet = manifest.publicTableCount === SUPABASE_22_CANONICAL_TABLES.length
-        && [...manifest.canonicalTables].sort().join('\u0000')
-        === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
-        && manifest.unexpectedTables.length === 0
-        && manifest.missingTables.length === 0;
     const allMetadataAvailable = metadataKeys.every(key => metadataAvailability[key] === true);
+    const policyClassificationClean = retainedClassificationClean
+        && forbiddenClassificationClean
+        && approvedSubsetClean
+        && deferredReasonsComplete
+        && deferredReasonsClean
+        && manifest.noCascadeAllowlistHash !== null;
     if (manifest.clean !== allChecksClean
         || manifest.clean !== allMetadataAvailable
-        || (manifest.clean && !exactCanonicalSet)
+        || manifest.clean !== policyClassificationClean
         || manifest.clean !== (manifest.status === 'ready')) {
         throw new Error('SUPABASE_22_CATALOG_MANIFEST_INVALID');
     }
     return {
-        schemaVersion: 'supabase-22-catalog-v1',
+        schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
         status: manifest.clean ? 'ready' : 'blocked',
         publicTableCount: manifest.publicTableCount!,
         canonicalTables: [...manifest.canonicalTables],
@@ -262,6 +321,12 @@ function parseManifest(value: unknown): Supabase22CatalogEvidence {
         metadataAvailability: Object.fromEntries(
             metadataKeys.map(key => [key, metadataAvailability[key] === true]),
         ) as Supabase22CatalogEvidence['metadataAvailability'],
+        retainedTables: [...manifest.retainedTables],
+        forbiddenW1A: [...manifest.forbiddenW1A],
+        approvedSubset: [...manifest.approvedSubset],
+        deferredReasons: { ...manifest.deferredReasons } as Record<string, string>,
+        closure: manifest.closure as Supabase22CatalogEvidence['closure'],
+        noCascadeAllowlistHash: manifest.noCascadeAllowlistHash,
         clean: manifest.clean,
         destructiveOperations: 'refused',
     };

@@ -1,5 +1,7 @@
 # Commerce and Operations Canonicalization Implementation Plan
 
+> Historical plan disposition (2026-09-13): this exact-22 multi-family backfill plan is retained for provenance only; its backfill entry point was retired. Do not run commands referencing `scripts/backfill-commerce-operations-canonical.ts`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
 **Goal:** 결제·fulfillment·notification·account lifecycle·configuration·lease·maintenance family를 12개 canonical public table로 정리하고 기존 commercial evidence를 손실 없이 보존한다.

@@ -1,5 +1,6 @@
 {
   "schemaVersion": "supabase-22-final-convergence-inventory-v1",
+  "historicalDisposition": "retired-non-runnable-exact-22-backfill-references",
   "capturedOn": "2026-09-11",
   "sourceBoundary": {
     "repositoryRef": "origin/main",

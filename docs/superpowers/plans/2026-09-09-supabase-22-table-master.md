@@ -1,5 +1,7 @@
 # Supabase 22-Table Consolidation Master Implementation Plan
 
+> Historical plan disposition (2026-09-13): the exact-22 multi-family backfill plans and entry points referenced below are retired and non-runnable. Current implementation evidence is governed by `supabase-operational-policy-v1`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
 **Goal:** 승인된 설계의 사용자·분석·상거래·운영 증거를 보존하면서 production \`public\` base/partitioned table 수를 정확히 22개로 수렴시킨다.

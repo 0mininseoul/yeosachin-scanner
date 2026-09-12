@@ -7,8 +7,8 @@ import {
     type Supabase22CatalogCliDependencies,
 } from './verify-supabase-22-catalog';
 import {
-    SUPABASE_22_CANONICAL_TABLES,
     SUPABASE_22_CATALOG_QUERIES,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
 } from '../lib/services/operations/supabase-22-evidence';
 
 describe('Supabase 22 catalog verifier CLI', () => {
@@ -70,11 +70,11 @@ describe('Supabase 22 catalog verifier CLI', () => {
         expect(SUPABASE_22_CATALOG_QUERIES.dependencies).toContain('CROSS JOIN LATERAL');
     });
 
-    it('prints sanitized catalog evidence and exits non-zero when the live set is not exact', async () => {
+    it('prints sanitized policy evidence and exits non-zero when retained metadata is unavailable', async () => {
         const writeStdout = vi.fn();
         const readCatalog = vi.fn(async () => ({
             tables: [{
-                name: SUPABASE_22_CANONICAL_TABLES[0],
+                name: SUPABASE_OPERATIONAL_RETAINED_TABLES[0],
                 relkind: 'r' as const,
                 rlsEnabled: true,
                 forceRls: false,
@@ -113,7 +113,7 @@ describe('Supabase 22 catalog verifier CLI', () => {
 
         expect(result.exitCode).toBe(1);
         const output = JSON.parse(writeStdout.mock.calls[0]?.[0] as string);
-        expect(output).toMatchObject({ schemaVersion: 'supabase-22-catalog-v1' });
+        expect(output).toMatchObject({ schemaVersion: 'supabase-operational-policy-v1' });
         expect(JSON.stringify(output)).not.toContain('read_supabase_22_catalog');
     });
 

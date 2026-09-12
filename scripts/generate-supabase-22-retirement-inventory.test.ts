@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-    SUPABASE_22_EXPECTED_LEGACY_COUNT,
     SUPABASE_22_RETIREMENT_INVENTORY_QUERY,
     assertSupabase22RetirementQueryReadOnly,
     buildSupabase22RetirementInventoryReport,
@@ -10,6 +9,10 @@ import {
     parseSupabase22RetirementInventoryArgs,
     scanSupabase22RuntimeCallers,
 } from './generate-supabase-22-retirement-inventory';
+import {
+    SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+    SUPABASE_OPERATIONAL_W1A_UPPER_BOUND,
+} from '../lib/services/operations/supabase-22-evidence';
 
 const aggregate = (tableName: string) => ({
     tableName,
@@ -69,24 +72,21 @@ describe('Supabase 22 retirement inventory generator', () => {
         expect(dispositionFor('unrelated_legacy_table')).toBe('unknown');
     });
 
-    it('fails closed unless the production aggregate closes 22 + 165', async () => {
-        const canonical = [
-            'account_lifecycle', 'analysis_artifacts', 'analysis_audit_bundles', 'analysis_cache',
-            'analysis_costs', 'analysis_events', 'analysis_jobs', 'analysis_preflights',
-            'analysis_provider_runs', 'analysis_requests', 'analysis_results', 'earlybird_orders',
-            'earlybird_waitlist', 'fulfillment_jobs', 'landing_leads', 'maintenance_jobs',
-            'notification_outbox', 'payment_events', 'result_feedback', 'system_configuration',
-            'system_leases', 'users',
-        ].map(aggregate);
-        const legacy = Array.from({ length: SUPABASE_22_EXPECTED_LEGACY_COUNT }, (_, index) =>
-            aggregate(`legacy_${String(index).padStart(3, '0')}`));
-        const report = await buildSupabase22RetirementInventoryReport([...canonical, ...legacy]);
-        expect(report.publicBasePartitionedTableCount).toBe(187);
-        expect(report.canonicalTableCount).toBe(22);
-        expect(report.legacyTableCount).toBe(165);
+    it('classifies retained, W1A, and legacy observations without a numeric invariant', async () => {
+        const report = await buildSupabase22RetirementInventoryReport([
+            aggregate('analysis_jobs'),
+            aggregate('analysis_artifacts'),
+            aggregate('unrelated_legacy_table'),
+        ]);
+        expect(report.schemaVersion).toBe(SUPABASE_OPERATIONAL_POLICY_SCHEMA);
+        expect(report.publicBasePartitionedTableCount).toBe(3);
+        expect(report.retainedTables.map(row => row.tableName)).toEqual(['analysis_jobs']);
+        expect(report.w1aCandidates.map(row => row.tableName)).toEqual(['analysis_artifacts']);
+        expect(report.legacyTables.map(row => row.tableName)).toEqual(['unrelated_legacy_table']);
+        expect(report.approvedSubset).toEqual([]);
+        expect(Object.keys(report.deferredReasons)).toEqual([...SUPABASE_OPERATIONAL_W1A_UPPER_BOUND].sort());
         expect(report.contractionCandidateAllowlist).toEqual([]);
         expect(report.contractionCandidateAllowlistSha256).toMatch(/^[0-9a-f]{64}$/);
-        expect(report.legacyTables.every(row => row.disposition && row.reason && row.dependencyEvidence && row.callerEvidence)).toBe(true);
-        expect(report.legacyTables.every(row => row.intendedCanonicalDestination === null && row.disposition === 'unknown')).toBe(true);
+        expect(report.destructiveOperations).toBe('refused');
     });
 });

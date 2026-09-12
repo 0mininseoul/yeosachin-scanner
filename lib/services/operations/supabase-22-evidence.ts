@@ -10,15 +10,41 @@ const ARCHIVE_MANIFEST_SCHEMA = 'supabase-22-archive-manifest-v1' as const;
 const RESTORE_MANIFEST_SCHEMA = 'supabase-22-restore-manifest-v1' as const;
 const ARCHIVE_ENCRYPTION_ALGORITHM = 'AES-256-GCM' as const;
 
-/** The only public base/partitioned tables that the approved contract permits. */
-export const SUPABASE_22_CANONICAL_TABLES = [
-    'account_lifecycle', 'analysis_artifacts', 'analysis_audit_bundles',
-    'analysis_cache', 'analysis_costs', 'analysis_events', 'analysis_jobs',
-    'analysis_preflights', 'analysis_provider_runs', 'analysis_requests',
-    'analysis_results', 'earlybird_orders', 'earlybird_waitlist',
-    'fulfillment_jobs', 'landing_leads', 'maintenance_jobs',
-    'notification_outbox', 'payment_events', 'result_feedback',
-    'system_configuration', 'system_leases', 'users',
+/** Versioned policy contract; table cardinality is observation data, never a gate. */
+export const SUPABASE_OPERATIONAL_POLICY_SCHEMA = 'supabase-operational-policy-v1' as const;
+export const SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA =
+    '053d46326e7ecf45c02ebab9ae210ffe66624d00' as const;
+
+export const SUPABASE_OPERATIONAL_RETAINED_TABLES = [
+    'analysis_jobs', 'analysis_events',
+    'analysis_provider_runs', 'analysis_v2_provider_runs',
+    'payment_events', 'payment_pending', 'payments', 'payment_orders',
+    'earlybird_orders', 'pending_analysis', 'maintenance_jobs',
+    'analysis_order_audit_assembly_queue', 'analysis_order_audit_bundles',
+    'analysis_order_audit_candidates', 'analysis_order_audit_interactions',
+    'account_lifecycle',
+] as const;
+
+export const SUPABASE_OPERATIONAL_W1A_UPPER_BOUND = [
+    'analysis_artifacts', 'analysis_audit_bundles', 'analysis_cache',
+    'analysis_costs', 'fulfillment_jobs', 'notification_outbox',
+    'system_configuration', 'system_leases',
+] as const;
+
+/** Objects whose retention/non-mutation must be proven before contraction. */
+export const SUPABASE_OPERATIONAL_FORBIDDEN_W1A = [
+    'analysis_jobs', 'analysis_events', 'analysis_provider_runs',
+    'analysis_v2_provider_runs', 'payment_events', 'maintenance_jobs',
+    'analysis_order_audit_assembly_queue', 'analysis_order_audit_bundles',
+    'analysis_order_audit_candidates', 'analysis_order_audit_interactions',
+    'account_lifecycle',
+] as const;
+
+export const SUPABASE_OPERATIONAL_RETAINED_OPERATOR_RPC_EXAMPLES = [
+    'load_analysis_order_audit_bundle',
+    'list_analysis_order_audit_bundles',
+    'claim_analysis_order_audit_bundle',
+    'read_analysis_order_audit_parity_snapshot',
 ] as const;
 
 /**
@@ -26,10 +52,10 @@ export const SUPABASE_22_CANONICAL_TABLES = [
  * canonical migrations' explicit REVOKE/GRANT statements; they are never
  * inferred from observed catalog rows. The four analysis JSON validators are
  * SECURITY INVOKER and intentionally omitted because the catalog query below
- * is restricted to p.prosecdef. Any missing, extra, or cross-classified object
- * keeps catalog readiness blocked.
+ * is restricted to p.prosecdef. Missing or cross-classified retained objects
+ * keep catalog readiness blocked; unrelated catalog objects remain descriptive.
  */
-export const SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES = [
+export const SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES = [
     'reject_analysis_canonical_mutation',
     'reject_commerce_append_only_mutation',
     'canonical_json_string_v1',
@@ -39,32 +65,21 @@ export const SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES = [
     'create_or_replay_landing_lead_exclusion',
 ] as const;
 
-export const SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES = [
+export const SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES = [
     'record_analysis_canonical_job',
     'append_analysis_canonical_event',
-    'append_analysis_canonical_artifact',
-    'append_analysis_canonical_cost',
-    'upsert_analysis_canonical_cache',
-    'append_analysis_canonical_audit',
-    'append_analysis_canonical_late_cost_audit',
-    'enqueue_analysis_canonical_retry',
-    'load_analysis_canonical_family',
-    'canonical_system_configuration_json',
+    'enqueue_analysis_execution_retry_v1',
+    'load_analysis_execution_family_v1',
     'record_payment_event_v1',
-    'upsert_fulfillment_job_v1',
-    'enqueue_notification_v1',
     'append_account_lifecycle_v1',
-    'record_system_configuration_v1',
-    'acquire_system_lease_v1',
     'enqueue_maintenance_job_v1',
-    'claim_notification_outbox_v1',
-    'finish_notification_outbox_v1',
-    'reconcile_stale_notification_outbox_v1',
+    'mirror_account_deletion_job_v1',
     'claim_maintenance_jobs_v1',
     'finish_maintenance_job_v1',
     'reconcile_stale_maintenance_jobs_v1',
-    'list_notification_legacy_outbox_v1',
-    'list_notification_outbox_v1',
+    'backfill_account_deletion_jobs_v1',
+    'collect_account_deletion_parity_v1',
+    ...SUPABASE_OPERATIONAL_RETAINED_OPERATOR_RPC_EXAMPLES,
     'create_or_replay_landing_lead_capture',
     'bind_landing_lead_journey_to_preflight',
     'claim_landing_lead_journey',
@@ -74,23 +89,23 @@ export const SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES = [
 ] as const;
 
 /** Browser-facing SECURITY DEFINER RPCs retain their migration ACLs exactly. */
-export const SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES = [
+export const SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES = [
     'claim_anonymous_analysis_v2_preflight_with_landing',
     'set_analysis_v2_preflight_exclusion_with_landing',
     'set_authenticated_analysis_v2_preflight_exclusion',
 ] as const;
 
-/** Backwards-compatible union for callers that only need routine coverage. */
-export const SUPABASE_22_CANONICAL_ROUTINE_NAMES = [
-    ...SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
-    ...SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
-    ...SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES,
+/** Operational-policy union for callers that only need routine coverage. */
+export const SUPABASE_OPERATIONAL_ROUTINE_NAMES = [
+    ...SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES,
+    ...SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES,
+    ...SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES,
 ] as const;
 
-const canonicalTableSet = new Set<string>(SUPABASE_22_CANONICAL_TABLES);
-const canonicalPrivateRoutineSet = new Set<string>(SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES);
-const canonicalServiceRpcSet = new Set<string>(SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES);
-const canonicalClientRpcSet = new Set<string>(SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES);
+const retainedTableSet = new Set<string>(SUPABASE_OPERATIONAL_RETAINED_TABLES);
+const canonicalPrivateRoutineSet = new Set<string>(SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES);
+const canonicalServiceRpcSet = new Set<string>(SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES);
+const canonicalClientRpcSet = new Set<string>(SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES);
 
 const canonicalClientRpcAclExpectations = {
     claim_anonymous_analysis_v2_preflight_with_landing: {
@@ -115,6 +130,58 @@ const canonicalClientRpcAclExpectations = {
 
 export type Supabase22GateStatus = 'ready' | 'mismatch' | 'blocked';
 export type Supabase22ArchiveRestoreStatus = 'verified' | 'mismatch' | 'blocked' | 'not_run';
+
+export type SupabaseOperationalPolicyClosure = Readonly<{
+    tables: readonly string[];
+    routines: readonly string[];
+    flags: readonly string[];
+    indexes: readonly string[];
+    triggers: readonly string[];
+    policies: readonly string[];
+    acls: readonly string[];
+    views: readonly string[];
+    foreignKeys: readonly string[];
+    sequences: readonly string[];
+    publications: readonly string[];
+    dependencies: readonly string[];
+}>;
+
+export type SupabaseOperationalPolicyInput = Readonly<{
+    schemaVersion: string;
+    sourceSha: string;
+    retained: readonly string[];
+    forbiddenW1A: readonly string[];
+    approvedSubset: readonly string[];
+    closure: SupabaseOperationalPolicyClosure;
+    noCascadeAllowlistHash: string | null;
+    retainedInvariantVerified: boolean;
+    forbiddenInvariantVerified: boolean;
+    dependencyClean: boolean;
+    migrationHistoryClean: boolean;
+    genuineCompletedBundleEvidence: boolean;
+    parityStatus: Supabase22GateStatus;
+    archiveManifest: Supabase22ArchiveEvidence;
+    rollbackEvidenceVerified: boolean;
+    observationWindowClosed: boolean;
+    ownerApprovalRecorded: boolean;
+    paymentPendingDispositionRecorded: boolean;
+    noActivationOrCanary: boolean;
+    noActivationEvidence?: Readonly<{
+        source: 'independent-read-only';
+        verified: true;
+        admissionActivated: false;
+        realCanaryStarted: false;
+    }>;
+    deferredReasons?: Readonly<Record<string, string>>;
+    archiveRestoreChecksumMatch: boolean;
+}>;
+
+export type SupabaseOperationalPolicyEvidence = SupabaseOperationalPolicyInput & Readonly<{
+    schemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
+    status: Supabase22GateStatus;
+    missingGates: readonly string[];
+    destructiveOperations: 'refused';
+}>;
 
 export type Supabase22EncryptionEvidence = Readonly<{
     algorithm: string;
@@ -149,64 +216,12 @@ export type Supabase22ArchiveEvidence = Readonly<{
     restoreManifest?: Supabase22RestoreManifest | null;
 }>;
 
-export type Supabase22GateInput = Readonly<{
-    publicTableCount: number;
-    canonicalTables: readonly string[];
-    unexpectedTables: readonly string[];
-    missingTables: readonly string[];
-    dependencyClean: boolean;
-    migrationHistoryClean: boolean;
-    genuineCompletedBundleCount: number;
-    parityStatus: Supabase22GateStatus;
-    archiveManifest: Supabase22ArchiveEvidence;
-    rollbackEvidenceVerified: boolean;
-    observationWindowClosed: boolean;
-    ownerApprovalRecorded: boolean;
-    /** Production attestations are mandatory; missing values fail closed at runtime. */
-    canonicalSetMatch: boolean;
-    catalogDependencyClean: boolean;
-    archiveRestoreChecksumMatch: boolean;
-    /** True only when all pending payment evidence has an independent disposition. */
-    paymentPendingDispositionRecorded: boolean;
-    /** True only when the run was proven not to activate admission or a real canary. */
-    noActivationOrCanary: boolean;
-    /** Independent read-only proof for the legacy no-activation attestation. */
-    noActivationEvidence?: Readonly<{
-        source: 'independent-read-only';
-        verified: true;
-        admissionActivated: false;
-        realCanaryStarted: false;
-    }>;
-    /** Independent provider/disposition counts; zero/zero/zero is not proof. */
-    paymentPendingEvidence?: Readonly<{
-        pendingOrderCount: number;
-        independentlyEvidencedCount: number;
-        dispositionRecordedCount: number;
-    }>;
-}>;
-
 const NO_ACTIVATION_EVIDENCE_KEYS = [
     'source', 'verified', 'admissionActivated', 'realCanaryStarted',
 ] as const;
 
-export type Supabase22Evidence = Supabase22GateInput & Readonly<{
-    schemaVersion: 'supabase-22-evidence-v1';
-    status: Supabase22GateStatus;
-    destructiveOperations: 'refused';
-    missingGates: readonly string[];
-}>;
-
 function sortedUnique(values: readonly string[]): string[] {
     return [...new Set(values)].sort((left, right) => left.localeCompare(right));
-}
-
-function exactCanonicalSet(input: Supabase22GateInput): boolean {
-    const observed = sortedUnique(input.canonicalTables);
-    return observed.length === SUPABASE_22_CANONICAL_TABLES.length
-        && observed.join('\u0000')
-        === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
-        && input.unexpectedTables.length === 0
-        && input.missingTables.length === 0;
 }
 
 function addGate(gates: string[], gate: string): void {
@@ -282,73 +297,90 @@ function restoreManifestEvidenceClean(
         && archive.restoreManifest.retentionClass === archive.manifest.retentionClass;
 }
 
-/**
- * Evaluate every contraction prerequisite without granting a destructive capability.
- * Missing evidence is intentionally represented as a missing gate rather than inferred
- * from a count or from an empty fixture.
- */
-export function evaluateSupabase22Gate(input: Supabase22GateInput): Supabase22Evidence {
-    const missingGates: string[] = [];
-    const canonicalSetMatch = exactCanonicalSet(input);
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+    if (new Set(left).size !== left.length || new Set(right).size !== right.length) {
+        return false;
+    }
+    const normalize = (values: readonly string[]) => [...new Set(values)].sort((a, b) => a.localeCompare(b));
+    return normalize(left).join('\u0000') === normalize(right).join('\u0000');
+}
 
-    if (input.publicTableCount !== SUPABASE_22_CANONICAL_TABLES.length) {
-        addGate(missingGates, 'public-table-count');
+function operationalClosureComplete(closure: SupabaseOperationalPolicyClosure): boolean {
+    if (!isRecord(closure)) return false;
+    return Object.values(closure).every(values => Array.isArray(values) && values.length > 0
+        && values.every(value => typeof value === 'string' && value.length > 0)
+        && new Set(values).size === values.length);
+}
+
+function operationalArchiveEvidenceClean(archive: Supabase22ArchiveEvidence): boolean {
+    return archive.verified === true
+        && typeof archive.aggregateChecksum === 'string'
+        && HASH_PATTERN.test(archive.aggregateChecksum)
+        && isGenuineArchiveManifest(archive.manifest)
+        && archive.manifest.aggregateChecksum === archive.aggregateChecksum
+        && restoreManifestEvidenceClean(archive, archive.manifest.selectedCount);
+}
+
+/**
+ * Evaluate the versioned operational policy. This is deliberately independent of
+ * table cardinality: a fresh observation may approve any subset of the W1A upper
+ * bound, and an omitted family must carry an explicit deferred reason.
+ */
+export function evaluateSupabaseOperationalPolicy(
+    input: SupabaseOperationalPolicyInput,
+): SupabaseOperationalPolicyEvidence {
+    const missingGates: string[] = [];
+    const retainedComplete = sameStringSet(input.retained, SUPABASE_OPERATIONAL_RETAINED_TABLES);
+    const forbiddenComplete = sameStringSet(input.forbiddenW1A, SUPABASE_OPERATIONAL_FORBIDDEN_W1A);
+    const approvedUnique = new Set(input.approvedSubset).size === input.approvedSubset.length;
+    const approvedSubsetValid = approvedUnique
+        && input.approvedSubset.every(name => SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(name as never));
+    const deferredReasons = input.deferredReasons ?? {};
+    const deferredKeysValid = Object.keys(deferredReasons).every(name =>
+        SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.includes(name as never));
+    const deferredComplete = SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.every(name =>
+        input.approvedSubset.includes(name)
+        || typeof deferredReasons[name] === 'string' && deferredReasons[name].trim().length > 0,
+    );
+    if (input.schemaVersion !== SUPABASE_OPERATIONAL_POLICY_SCHEMA) addGate(missingGates, 'policy-version');
+    if (input.sourceSha !== SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA) addGate(missingGates, 'policy-source');
+    if (!retainedComplete) addGate(missingGates, 'retained-invariant');
+    if (!forbiddenComplete) addGate(missingGates, 'forbidden-invariant');
+    if (!approvedSubsetValid) addGate(missingGates, 'approved-subset');
+    if (!deferredComplete || !deferredKeysValid) addGate(missingGates, 'deferred-reason');
+    if (!operationalClosureComplete(input.closure)) addGate(missingGates, 'closure-completeness');
+    if (typeof input.noCascadeAllowlistHash !== 'string'
+        || !HASH_PATTERN.test(input.noCascadeAllowlistHash)) {
+        addGate(missingGates, 'no-cascade-allowlist');
     }
-    if (input.missingTables.length > 0) addGate(missingGates, 'missing-table');
-    if (input.unexpectedTables.length > 0) addGate(missingGates, 'unexpected-table');
-    if (!canonicalSetMatch) addGate(missingGates, 'canonical-table-set');
-    if (!input.dependencyClean) addGate(missingGates, 'dependency-inventory');
-    if (input.canonicalSetMatch !== true) {
-        addGate(missingGates, 'canonical-table-set');
-    }
-    if (input.catalogDependencyClean !== true) {
-        addGate(missingGates, 'dependency-inventory');
-    }
-    if (!input.migrationHistoryClean) addGate(missingGates, 'migration-history');
-    if (input.genuineCompletedBundleCount <= 0) addGate(missingGates, 'genuine-completed-bundle');
+    if (input.retainedInvariantVerified !== true) addGate(missingGates, 'retained-catalog-proof');
+    if (input.forbiddenInvariantVerified !== true) addGate(missingGates, 'forbidden-catalog-proof');
+    if (input.dependencyClean !== true) addGate(missingGates, 'dependency-inventory');
+    if (input.migrationHistoryClean !== true) addGate(missingGates, 'migration-history');
+    if (input.genuineCompletedBundleEvidence !== true) addGate(missingGates, 'genuine-completed-bundle');
     if (input.parityStatus !== 'ready') addGate(missingGates, 'per-order-parity');
-    if (!archiveManifestEvidenceClean(input.archiveManifest, input.genuineCompletedBundleCount)) {
-        addGate(missingGates, 'archive-manifest');
-    }
-    if (!restoreManifestEvidenceClean(input.archiveManifest, input.genuineCompletedBundleCount)) {
-        addGate(missingGates, 'restore-drill');
-    }
-    if (input.archiveRestoreChecksumMatch !== true) {
-        addGate(missingGates, 'restore-drill');
-    }
-    if (!input.rollbackEvidenceVerified) addGate(missingGates, 'rollback-evidence');
-    if (!input.observationWindowClosed) addGate(missingGates, 'observation-window');
-    if (!input.ownerApprovalRecorded) addGate(missingGates, 'separate-approval');
-    const paymentEvidence = input.paymentPendingEvidence;
-    const paymentEvidenceVerified = paymentEvidence !== undefined
-        && Number.isSafeInteger(paymentEvidence.pendingOrderCount)
-        && paymentEvidence.pendingOrderCount > 0
-        && Number.isSafeInteger(paymentEvidence.independentlyEvidencedCount)
-        && paymentEvidence.independentlyEvidencedCount === paymentEvidence.pendingOrderCount
-        && Number.isSafeInteger(paymentEvidence.dispositionRecordedCount)
-        && paymentEvidence.dispositionRecordedCount === paymentEvidence.pendingOrderCount;
-    if (input.paymentPendingDispositionRecorded !== true || !paymentEvidenceVerified) {
-        addGate(missingGates, 'payment-pending-disposition');
-    }
-    const activationEvidenceVerified = isIndependentNoActivationEvidence(input.noActivationEvidence);
-    if (input.noActivationOrCanary !== true || !activationEvidenceVerified) {
+    if (!operationalArchiveEvidenceClean(input.archiveManifest)) addGate(missingGates, 'archive-restore');
+    if (input.archiveRestoreChecksumMatch !== true) addGate(missingGates, 'archive-restore');
+    if (input.rollbackEvidenceVerified !== true) addGate(missingGates, 'rollback-evidence');
+    if (input.observationWindowClosed !== true) addGate(missingGates, 'observation-window');
+    if (input.ownerApprovalRecorded !== true) addGate(missingGates, 'separate-approval');
+    if (input.paymentPendingDispositionRecorded !== true) addGate(missingGates, 'payment-pending-disposition');
+    if (input.noActivationOrCanary !== true || !isIndependentNoActivationEvidence(input.noActivationEvidence)) {
         addGate(missingGates, 'no-activation-or-canary');
     }
-
-    const mismatchOnly = missingGates.length > 0
-        && missingGates.every(gate => gate === 'public-table-count' || gate === 'per-order-parity');
     const status: Supabase22GateStatus = missingGates.length === 0
         ? 'ready'
-        : mismatchOnly ? 'mismatch' : 'blocked';
-    const evidence: Supabase22Evidence = {
+        : input.parityStatus === 'mismatch' ? 'mismatch' : 'blocked';
+    const evidence: SupabaseOperationalPolicyEvidence = {
         ...input,
-        canonicalTables: sortedUnique(input.canonicalTables),
-        unexpectedTables: sortedUnique(input.unexpectedTables),
-        missingTables: sortedUnique(input.missingTables),
-        schemaVersion: 'supabase-22-evidence-v1',
+        schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        retained: sortedUnique(input.retained),
+        forbiddenW1A: sortedUnique(input.forbiddenW1A),
+        approvedSubset: sortedUnique(input.approvedSubset),
+        deferredReasons: Object.fromEntries(Object.entries(deferredReasons).sort(([a], [b]) => a.localeCompare(b))),
         status,
-        destructiveOperations: 'refused',
         missingGates,
+        destructiveOperations: 'refused',
     };
     assertPiiSafeConsolidationOutput(evidence);
     return evidence;
@@ -498,7 +530,8 @@ export type Supabase22CatalogSnapshot = Readonly<{
 }>;
 
 export type Supabase22CatalogEvidence = Readonly<{
-    schemaVersion: 'supabase-22-catalog-v1';
+    schemaVersion: typeof SUPABASE_OPERATIONAL_POLICY_SCHEMA;
+    sourceSha: typeof SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA;
     status: 'ready' | 'blocked';
     publicTableCount: number;
     canonicalTables: readonly string[];
@@ -521,6 +554,12 @@ export type Supabase22CatalogEvidence = Readonly<{
     partitionsClean: boolean;
     legacyWritersClean: boolean;
     metadataAvailability: Supabase22CatalogMetadataAvailability;
+    retainedTables: readonly string[];
+    forbiddenW1A: readonly string[];
+    approvedSubset: readonly string[];
+    deferredReasons: Readonly<Record<string, string>>;
+    closure: SupabaseOperationalPolicyClosure;
+    noCascadeAllowlistHash: string | null;
     clean: boolean;
     destructiveOperations: 'refused';
 }>;
@@ -657,16 +696,15 @@ function completeRoutineCoverage(
 ): boolean {
     if (values.length === 0) return false;
     const observed = values.map(value => comparableCatalogRoutineName(value.name));
-    const expected = SUPABASE_22_CANONICAL_ROUTINE_NAMES.map(comparableCatalogRoutineName);
+    const expected = SUPABASE_OPERATIONAL_ROUTINE_NAMES.map(comparableCatalogRoutineName);
     return values.every(value => typeof value.identityArguments === 'string')
         && observed.every(name => name.length > 0)
         && new Set(observed).size === observed.length
         && new Set(expected).size === expected.length
-        && observed.length === expected.length
         && expected.every(name => observed.includes(name));
 }
 
-function exactAclCoverage(
+function aclCoverage(
     values: readonly Supabase22CatalogAcl[],
     expectedObjectNames: readonly string[],
     objectKind: Supabase22CatalogAcl['objectKind'],
@@ -674,14 +712,17 @@ function exactAclCoverage(
 ): boolean {
     if (values.length === 0 || expectedObjectNames.length === 0) return false;
     const expected = expectedObjectNames.map(comparableCatalogRoutineName);
-    const observed = values.map(value => comparableCatalogRoutineName(value.objectName));
-    return values.length === expected.length
-        && values.every(value => value.objectKind === objectKind)
+    const observed = values
+        .filter(value => value.objectKind === objectKind)
+        .map(value => comparableCatalogRoutineName(value.objectName));
+    const expectedRows = values.filter(value => value.objectKind === objectKind
+        && expected.includes(comparableCatalogRoutineName(value.objectName)));
+    return values.every(value => value.resolved === true)
         && observed.every(name => name.length > 0)
         && new Set(observed).size === observed.length
         && new Set(expected).size === expected.length
-        && expected.every(name => observed.includes(name))
-        && values.every(predicate);
+        && expectedRows.length === expected.length
+        && expectedRows.every(predicate);
 }
 
 function privateRoutineConfigurationClean(
@@ -689,7 +730,7 @@ function privateRoutineConfigurationClean(
 ): boolean {
     const category = routines.filter(routine =>
         canonicalPrivateRoutineSet.has(comparableCatalogRoutineName(routine.name)));
-    return category.length === SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES.length
+    return category.length === SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES.length
         && new Set(category.map(routine => comparableCatalogRoutineName(routine.name))).size
             === category.length
         && category.every(routine => {
@@ -704,7 +745,7 @@ function serviceRpcConfigurationClean(
 ): boolean {
     const category = routines.filter(routine =>
         canonicalServiceRpcSet.has(comparableCatalogRoutineName(routine.name)));
-    return category.length === SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES.length
+    return category.length === SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES.length
         && new Set(category.map(routine => comparableCatalogRoutineName(routine.name))).size
             === category.length
         && category.every(routine => {
@@ -719,7 +760,7 @@ function clientRpcConfigurationClean(
 ): boolean {
     const category = routines.filter(routine =>
         canonicalClientRpcSet.has(comparableCatalogRoutineName(routine.name)));
-    return category.length === SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES.length
+    return category.length === SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES.length
         && new Set(category.map(routine => comparableCatalogRoutineName(routine.name))).size
             === category.length
         && category.every(isSafeClientRpcRoutine);
@@ -782,9 +823,9 @@ export function evaluateSupabase22Catalog(
         .filter(table => table.relkind === 'r' || table.relkind === 'p')
         .map(table => table.name)
         .sort((left, right) => left.localeCompare(right));
-    const canonicalTables = publicTables.filter(name => canonicalTableSet.has(name));
-    const unexpectedTables = publicTables.filter(name => !canonicalTableSet.has(name));
-    const missingTables = SUPABASE_22_CANONICAL_TABLES.filter(name => !publicTables.includes(name));
+    const canonicalTables = publicTables.filter(name => retainedTableSet.has(name));
+    const unexpectedTables = publicTables.filter(name => !retainedTableSet.has(name));
+    const missingTables = SUPABASE_OPERATIONAL_RETAINED_TABLES.filter(name => !publicTables.includes(name));
     const rlsClean = metadataAvailability.rls
         && publicTables.length > 0
         && tables
@@ -803,18 +844,18 @@ export function evaluateSupabase22Catalog(
     const relationAclRows = acls?.filter(acl => acl.objectKind === 'relation') ?? null;
     const routineAclRows = acls?.filter(acl => acl.objectKind === 'routine') ?? null;
     const routineAclCoverage = routineAclRows !== null
-        && exactAclCoverage(
+        && aclCoverage(
             routineAclRows,
-            SUPABASE_22_CANONICAL_ROUTINE_NAMES,
+            SUPABASE_OPERATIONAL_ROUTINE_NAMES,
             'routine',
             acl => acl.resolved === true,
         );
     const canonicalRelationsAclClean = metadataAvailability.acl
         && acls !== null
         && relationAclRows !== null
-        && exactAclCoverage(
+        && aclCoverage(
             relationAclRows,
-            SUPABASE_22_CANONICAL_TABLES,
+            SUPABASE_OPERATIONAL_RETAINED_TABLES,
             'relation',
             acl => acl.resolved === true
                 && acl.publicAllowed === false
@@ -828,11 +869,11 @@ export function evaluateSupabase22Catalog(
         && routineAclRows !== null
         && routineAclCoverage
         && privateRoutineConfigClean
-        && exactAclCoverage(
+        && aclCoverage(
             routineAclRows.filter(acl => canonicalPrivateRoutineSet.has(
                 comparableCatalogRoutineName(acl.objectName),
             )),
-            SUPABASE_22_CANONICAL_PRIVATE_ROUTINE_NAMES,
+            SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES,
             'routine',
             acl => acl.resolved === true
                 && acl.publicAllowed === false
@@ -846,11 +887,11 @@ export function evaluateSupabase22Catalog(
         && routineAclRows !== null
         && routineAclCoverage
         && serviceRpcConfigClean
-        && exactAclCoverage(
+        && aclCoverage(
             routineAclRows.filter(acl => canonicalServiceRpcSet.has(
                 comparableCatalogRoutineName(acl.objectName),
             )),
-            SUPABASE_22_CANONICAL_SERVICE_RPC_NAMES,
+            SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES,
             'routine',
             acl => acl.resolved === true
                 && acl.publicAllowed === false
@@ -864,11 +905,11 @@ export function evaluateSupabase22Catalog(
         && routineAclRows !== null
         && routineAclCoverage
         && clientRpcConfigClean
-        && exactAclCoverage(
+        && aclCoverage(
             routineAclRows.filter(acl => canonicalClientRpcSet.has(
                 comparableCatalogRoutineName(acl.objectName),
             )),
-            SUPABASE_22_CANONICAL_CLIENT_RPC_NAMES,
+            SUPABASE_OPERATIONAL_CLIENT_RPC_NAMES,
             'routine',
             acl => {
                 const routineName = comparableCatalogRoutineName(acl.objectName);
@@ -937,11 +978,13 @@ export function evaluateSupabase22Catalog(
     const publicationsClean = metadataAvailability.publication
         && publications !== null && catalogObjectsClean(publications);
     const triggersClean = metadataAvailability.trigger && triggers !== null && catalogObjectsClean(triggers);
+    // The live catalog may contain active-runtime and historical tables outside
+    // this policy.  Only the retained contract is an invariant; extras are
+    // reported for classification and never treated as a numeric mismatch.
+    const retainedTablesComplete = sameStringSet(canonicalTables, SUPABASE_OPERATIONAL_RETAINED_TABLES)
+        && missingTables.length === 0;
     const clean = metadataAvailability.catalog
-        && publicTables.length === SUPABASE_22_CANONICAL_TABLES.length
-        && canonicalTables.join('\u0000') === SUPABASE_22_CANONICAL_TABLES.join('\u0000')
-        && unexpectedTables.length === 0
-        && missingTables.length === 0
+        && retainedTablesComplete
         && metadataComplete
         && dependencyClean
         && aclClean
@@ -957,7 +1000,8 @@ export function evaluateSupabase22Catalog(
         && policiesClean
         && legacyWritersClean;
     const evidence: Supabase22CatalogEvidence = {
-        schemaVersion: 'supabase-22-catalog-v1',
+        schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
         status: clean ? 'ready' : 'blocked',
         publicTableCount: publicTables.length,
         canonicalTables,
@@ -980,6 +1024,32 @@ export function evaluateSupabase22Catalog(
         partitionsClean,
         legacyWritersClean,
         metadataAvailability,
+        retainedTables: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],
+        forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A],
+        approvedSubset: [],
+        deferredReasons: Object.fromEntries(
+            SUPABASE_OPERATIONAL_W1A_UPPER_BOUND.map(name => [
+                name,
+                'fresh evidence required before this family can be approved',
+            ]),
+        ),
+        closure: {
+            tables: [...publicTables],
+            routines: (routines ?? []).map(routine => routine.identityArguments === undefined
+                ? routine.name
+                : `${routine.name}(${routine.identityArguments})`),
+            flags: [],
+            indexes: [],
+            triggers: (triggers ?? []).map(value => value.objectName),
+            policies: (policies ?? []).map(value => value.tableName),
+            acls: (acls ?? []).map(value => value.objectName),
+            views: (views ?? []).map(value => value.objectName),
+            foreignKeys: (foreignKeys ?? []).map(value => value.objectName),
+            sequences: (sequences ?? []).map(value => value.objectName),
+            publications: (publications ?? []).map(value => value.objectName),
+            dependencies: (dependencies ?? []).map(value => value.objectName),
+        },
+        noCascadeAllowlistHash: null,
         clean,
         destructiveOperations: 'refused',
     };
@@ -2135,6 +2205,16 @@ export async function collectSupabase22CatalogEvidence(
 ): Promise<Supabase22CatalogEvidence> {
     return evaluateSupabase22Catalog(await collectSupabase22CatalogSnapshot(client));
 }
+
+/** Operational-policy-v1 names for new callers; the historical file path remains stable. */
+export const SUPABASE_OPERATIONAL_CATALOG_QUERIES = SUPABASE_22_CATALOG_QUERIES;
+export const SUPABASE_OPERATIONAL_CATALOG_QUERY = SUPABASE_22_CATALOG_QUERY;
+export const SUPABASE_OPERATIONAL_CATALOG_PAGE_SIZE = SUPABASE_22_CATALOG_PAGE_SIZE;
+export const SUPABASE_OPERATIONAL_CATALOG_ROW_LIMIT = SUPABASE_22_CATALOG_ROW_LIMIT;
+export const SUPABASE_OPERATIONAL_CATALOG_MAX_PAGES = SUPABASE_22_CATALOG_MAX_PAGES;
+export const evaluateSupabaseOperationalCatalog = evaluateSupabase22Catalog;
+export const collectSupabaseOperationalCatalogEvidence = collectSupabase22CatalogEvidence;
+export const collectSupabaseOperationalCatalogSnapshot = collectSupabase22CatalogSnapshot;
 
 export type Supabase22FamilyReaderInput = Readonly<{
     canonicalEnabled: boolean;

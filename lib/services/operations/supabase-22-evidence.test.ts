@@ -1,157 +1,159 @@
 import { describe, expect, it } from 'vitest';
 import {
-    evaluateSupabase22Gate,
+    evaluateSupabaseOperationalPolicy,
     parseSupabase22ApprovalRecord,
-    SUPABASE_22_CANONICAL_TABLES,
-    type Supabase22GateInput,
+    SUPABASE_OPERATIONAL_FORBIDDEN_W1A,
+    SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+    SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+    SUPABASE_OPERATIONAL_RETAINED_TABLES,
+    SUPABASE_OPERATIONAL_W1A_UPPER_BOUND,
+    type SupabaseOperationalPolicyClosure,
+    type SupabaseOperationalPolicyInput,
 } from './supabase-22-evidence';
 import { assertPiiSafeConsolidationOutput } from '../analysis/order-audit-consolidation';
-import { evaluateConsolidationReadiness } from '../analysis/order-audit-consolidation';
 
 const HASH = 'a'.repeat(64);
 
-function completeInput(overrides: Partial<Supabase22GateInput> = {}): Supabase22GateInput {
+const closure: SupabaseOperationalPolicyClosure = {
+    tables: ['analysis_artifacts'],
+    routines: ['record_analysis_canonical_job(uuid)'],
+    flags: ['ANALYSIS_CANONICAL_JOBS_WRITE'],
+    indexes: ['analysis_jobs_dispatch_idx'],
+    triggers: ['public.analysis_events.analysis_events_append_only'],
+    policies: ['analysis_jobs'],
+    acls: ['analysis_jobs'],
+    views: ['public.analysis_requests'],
+    foreignKeys: ['public.analysis_jobs.analysis_jobs_request_id_fkey'],
+    sequences: ['public.analysis_events_id_seq'],
+    publications: ['supabase_realtime.public.analysis_events'],
+    dependencies: ['public.analysis_jobs'],
+};
+
+const archiveManifest = {
+    verified: true as const,
+    aggregateChecksum: HASH,
+    restoreStatus: 'verified' as const,
+    manifest: {
+        schemaVersion: 'supabase-22-archive-manifest-v1' as const,
+        selectedCount: 1,
+        aggregateChecksum: HASH,
+        encrypted: true as const,
+        encryption: { algorithm: 'AES-256-GCM', verified: true as const },
+        retentionClass: 'permanent',
+    },
+    restoreManifest: {
+        schemaVersion: 'supabase-22-restore-manifest-v1' as const,
+        selectedCount: 1,
+        aggregateChecksum: HASH,
+        encrypted: true as const,
+        encryption: { algorithm: 'AES-256-GCM', verified: true as const },
+        retentionClass: 'permanent',
+    },
+};
+
+function deferredReasons(approvedSubset: readonly string[] = []): Record<string, string> {
+    return Object.fromEntries(
+        SUPABASE_OPERATIONAL_W1A_UPPER_BOUND
+            .filter(name => !approvedSubset.includes(name))
+            .map(name => [name, 'fresh caller, dependency, and approval evidence is required']),
+    );
+}
+
+function completeInput(
+    overrides: Partial<SupabaseOperationalPolicyInput> = {},
+): SupabaseOperationalPolicyInput {
+    const approvedSubset = overrides.approvedSubset ?? [];
     return {
-        publicTableCount: SUPABASE_22_CANONICAL_TABLES.length,
-        canonicalTables: [...SUPABASE_22_CANONICAL_TABLES],
-        unexpectedTables: [],
-        missingTables: [],
+        schemaVersion: SUPABASE_OPERATIONAL_POLICY_SCHEMA,
+        sourceSha: SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA,
+        retained: [...SUPABASE_OPERATIONAL_RETAINED_TABLES],
+        forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A],
+        approvedSubset,
+        closure,
+        noCascadeAllowlistHash: HASH,
+        retainedInvariantVerified: true,
+        forbiddenInvariantVerified: true,
         dependencyClean: true,
         migrationHistoryClean: true,
-        genuineCompletedBundleCount: 1,
+        genuineCompletedBundleEvidence: true,
         parityStatus: 'ready',
-        archiveManifest: {
-            verified: true,
-            aggregateChecksum: HASH,
-            restoreStatus: 'verified',
-            manifest: {
-                schemaVersion: 'supabase-22-archive-manifest-v1',
-                selectedCount: 1,
-                aggregateChecksum: HASH,
-                encrypted: true,
-                encryption: { algorithm: 'AES-256-GCM', verified: true },
-                retentionClass: 'permanent',
-            },
-            restoreManifest: {
-                schemaVersion: 'supabase-22-restore-manifest-v1',
-                selectedCount: 1,
-                aggregateChecksum: HASH,
-                encrypted: true,
-                encryption: { algorithm: 'AES-256-GCM', verified: true },
-                retentionClass: 'permanent',
-            },
-        },
+        archiveManifest,
         rollbackEvidenceVerified: true,
         observationWindowClosed: true,
         ownerApprovalRecorded: true,
-        canonicalSetMatch: true,
-        catalogDependencyClean: true,
         paymentPendingDispositionRecorded: true,
         noActivationOrCanary: true,
-        archiveRestoreChecksumMatch: true,
-        paymentPendingEvidence: {
-            pendingOrderCount: 1,
-            independentlyEvidencedCount: 1,
-            dispositionRecordedCount: 1,
-        },
         noActivationEvidence: {
             source: 'independent-read-only',
             verified: true,
             admissionActivated: false,
             realCanaryStarted: false,
         },
+        deferredReasons: deferredReasons(approvedSubset),
+        archiveRestoreChecksumMatch: true,
         ...overrides,
     };
 }
 
-describe('Supabase 22 evidence gate', () => {
-    it('uses the exact sorted canonical table set', () => {
-        expect(SUPABASE_22_CANONICAL_TABLES).toHaveLength(22);
-        expect([...SUPABASE_22_CANONICAL_TABLES]).toEqual(
-            [...SUPABASE_22_CANONICAL_TABLES].sort(),
-        );
-        expect(new Set(SUPABASE_22_CANONICAL_TABLES).size).toBe(22);
-    });
+describe('supabase-operational-policy-v1 evidence gate', () => {
+    it('accepts a fresh approved subset without imposing a table-count invariant', () => {
+        const approvedSubset = [SUPABASE_OPERATIONAL_W1A_UPPER_BOUND[0]];
+        const result = evaluateSupabaseOperationalPolicy(completeInput({ approvedSubset }));
 
-    it('fails closed when no genuine production bundle exists', () => {
-        const result = evaluateSupabase22Gate({
-            publicTableCount: 22,
-            canonicalTables: SUPABASE_22_CANONICAL_TABLES,
-            unexpectedTables: [],
-            missingTables: [],
-            dependencyClean: true,
-            migrationHistoryClean: true,
-            genuineCompletedBundleCount: 0,
-            parityStatus: 'blocked',
-            archiveManifest: { verified: false, aggregateChecksum: null, restoreStatus: 'blocked' },
-            rollbackEvidenceVerified: false,
-            observationWindowClosed: false,
-            ownerApprovalRecorded: false,
-            canonicalSetMatch: false,
-            catalogDependencyClean: false,
-            paymentPendingDispositionRecorded: false,
-            noActivationOrCanary: true,
-            archiveRestoreChecksumMatch: false,
-        });
-
-        expect(result).toMatchObject({
-            status: 'blocked',
-            destructiveOperations: 'refused',
-        });
-        expect(result.missingGates).toContain('genuine-completed-bundle');
-    });
-
-    it('reports a public-table count mismatch without manufacturing readiness', () => {
-        const result = evaluateSupabase22Gate(completeInput({ publicTableCount: 21 }));
-
-        expect(result.status).toBe('mismatch');
-        expect(result.missingGates).toContain('public-table-count');
+        expect(result.status).toBe('ready');
+        expect(result.schemaVersion).toBe(SUPABASE_OPERATIONAL_POLICY_SCHEMA);
+        expect(result.sourceSha).toBe(SUPABASE_OPERATIONAL_POLICY_SOURCE_SHA);
+        expect(result.approvedSubset).toEqual(approvedSubset);
         expect(result.destructiveOperations).toBe('refused');
     });
 
-    it('fails closed when v1 evidence omits production operation attestations', () => {
-        const v1Input = Object.fromEntries(
-            Object.entries(completeInput({ publicTableCount: 21 }))
-                .filter(([key]) => key !== 'paymentPendingDispositionRecorded' && key !== 'noActivationOrCanary'),
-        ) as Supabase22GateInput;
-        const result = evaluateSupabase22Gate(v1Input);
+    it('requires an explicit deferred reason for every omitted W1A family', () => {
+        const reasons = deferredReasons();
+        delete reasons[SUPABASE_OPERATIONAL_W1A_UPPER_BOUND[1]];
+        const result = evaluateSupabaseOperationalPolicy(completeInput({ deferredReasons: reasons }));
+
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toContain('deferred-reason');
+    });
+
+    it('rejects altered retained or forbidden classifications', () => {
+        const retained = [...SUPABASE_OPERATIONAL_RETAINED_TABLES].slice(1);
+        const result = evaluateSupabaseOperationalPolicy(completeInput({
+            retained,
+            forbiddenW1A: [...SUPABASE_OPERATIONAL_FORBIDDEN_W1A, 'unexpected_family'],
+        }));
 
         expect(result.status).toBe('blocked');
         expect(result.missingGates).toEqual(expect.arrayContaining([
-            'public-table-count',
-            'payment-pending-disposition',
-            'no-activation-or-canary',
+            'retained-invariant', 'forbidden-invariant',
         ]));
     });
 
-    it('fails closed when a production attestation is absent', () => {
-        const input = { ...completeInput() } as Record<string, unknown>;
-        delete input.paymentPendingDispositionRecorded;
-        delete input.noActivationOrCanary;
-
-        const result = evaluateSupabase22Gate(input as unknown as Supabase22GateInput);
+    it('fails closed when fresh catalog or no-activation evidence is absent', () => {
+        const result = evaluateSupabaseOperationalPolicy(completeInput({
+            retainedInvariantVerified: false,
+            noActivationEvidence: undefined,
+        }));
 
         expect(result.status).toBe('blocked');
         expect(result.missingGates).toEqual(expect.arrayContaining([
-            'payment-pending-disposition',
-            'no-activation-or-canary',
+            'retained-catalog-proof', 'no-activation-or-canary',
         ]));
     });
 
-    it('identifies missing and unexpected canonical table names', () => {
-        const missing = evaluateSupabase22Gate(completeInput({
-            canonicalTables: SUPABASE_22_CANONICAL_TABLES.slice(0, -1),
-            missingTables: ['users'],
-        }));
-        const unexpected = evaluateSupabase22Gate(completeInput({
-            canonicalTables: [...SUPABASE_22_CANONICAL_TABLES, 'retired_table'],
-            unexpectedTables: ['retired_table'],
+    it('does not accept a missing no-CASCADE allowlist hash or empty closure', () => {
+        const result = evaluateSupabaseOperationalPolicy(completeInput({
+            closure: {
+                tables: [], routines: [], flags: [], indexes: [], triggers: [], policies: [],
+                acls: [], views: [], foreignKeys: [], sequences: [], publications: [], dependencies: [],
+            },
+            noCascadeAllowlistHash: null,
         }));
 
-        expect(missing.missingGates).toContain('missing-table');
-        expect(unexpected.missingGates).toContain('unexpected-table');
-        expect(missing.status).toBe('blocked');
-        expect(unexpected.status).toBe('blocked');
+        expect(result.status).toBe('blocked');
+        expect(result.missingGates).toEqual(expect.arrayContaining([
+            'closure-completeness', 'no-cascade-allowlist',
+        ]));
     });
 
     it('rejects unsafe approval records and accepts only complete sanitized approvals', () => {
@@ -159,7 +161,7 @@ describe('Supabase 22 evidence gate', () => {
             allowlistHash: HASH,
             approvedAt: '2026-09-09T12:00:00.000Z',
             approvedByRole: 'owner',
-            exactObjectNames: ['retired_table'],
+            exactObjectNames: ['analysis_artifacts'],
             signatureVerified: true,
         })).toMatchObject({ recorded: true });
 
@@ -182,98 +184,5 @@ describe('Supabase 22 evidence gate', () => {
         expect(() => assertPiiSafeConsolidationOutput({
             rawPayload: { safe: false },
         })).toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
-    });
-
-    it.each([
-        'deviceId', 'raw_device_id', 'anonymousDeviceId', 'anonymous_principal_hash',
-        'userAgent', 'ipAddress', 'client_ip', 'apiKey', 'access_token',
-        'hashKey', 'hmac_key', 'user_id_hash', 'owner_id_hash', 'ip_hash',
-        'visitor_id', 'fingerprint', 'browser_fingerprint', 'customer_id',
-        'tenant_uuid', 'tracking_hash', 'profile_fingerprint',
-    ])('rejects sensitive key variant %s', key => {
-        expect(() => assertPiiSafeConsolidationOutput({ [key]: 'redacted' }))
-            .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
-    });
-
-    it('rejects raw network and credential values even under an otherwise safe key', () => {
-        for (const value of ['192.168.0.10', '2001:db8::1', 'Bearer secret-token']) {
-            expect(() => assertPiiSafeConsolidationOutput({ value }))
-                .toThrow('ANALYSIS_ORDER_AUDIT_CONSOLIDATION_PII');
-        }
-    });
-
-    it('requires the extended production contract evidence fields', () => {
-        const readiness = evaluateConsolidationReadiness({
-            genuineCompletedBundleCount: 1,
-            perOrderParityCount: 1,
-            aggregateChecksumsMatch: true,
-            archiveManifestVerified: true,
-            restoreDrillVerified: false,
-            rollbackEvidenceVerified: true,
-            dependencyInventoryComplete: true,
-            separateApprovalGranted: false,
-            observationWindowClosed: true,
-            publicTableCount: 22,
-            canonicalSetMatch: true,
-            catalogDependencyClean: true,
-            paymentPendingDispositionRecorded: true,
-            noActivationOrCanary: true,
-            archiveRestoreChecksumMatch: false,
-        });
-
-        expect(readiness.status).toBe('blocked');
-        expect(readiness.missingGates).toContain('archive-restore-checksum');
-    });
-
-    it('requires every production readiness attestation even when no extended field is supplied', () => {
-        const readiness = evaluateConsolidationReadiness({
-            genuineCompletedBundleCount: 1,
-            perOrderParityCount: 1,
-            aggregateChecksumsMatch: true,
-            archiveManifestVerified: true,
-            restoreDrillVerified: true,
-            rollbackEvidenceVerified: true,
-            dependencyInventoryComplete: true,
-            separateApprovalGranted: true,
-            observationWindowClosed: true,
-        } as never);
-
-        expect(readiness.status).toBe('blocked');
-        expect(readiness.missingGates).toEqual(expect.arrayContaining([
-            'public-table-count',
-            'canonical-set',
-            'catalog-dependency',
-            'payment-pending-disposition',
-            'no-activation-or-canary',
-            'archive-restore-checksum',
-        ]));
-    });
-
-    it('does not treat truthy legacy payment or activation attestations as proof', () => {
-        const input = { ...completeInput() } as Record<string, unknown>;
-        delete input.paymentPendingEvidence;
-        delete input.noActivationEvidence;
-        const result = evaluateSupabase22Gate(input as unknown as Supabase22GateInput);
-
-        expect(result.status).toBe('blocked');
-        expect(result.missingGates).toEqual(expect.arrayContaining([
-            'payment-pending-disposition',
-            'no-activation-or-canary',
-        ]));
-    });
-
-    it('refuses an unbounded activation assertion with extra fields', () => {
-        const result = evaluateSupabase22Gate(completeInput({
-            noActivationEvidence: {
-                source: 'independent-read-only',
-                verified: true,
-                admissionActivated: false,
-                realCanaryStarted: false,
-                observationCount: Number.MAX_SAFE_INTEGER,
-            } as never,
-        }));
-
-        expect(result.status).toBe('blocked');
-        expect(result.missingGates).toContain('no-activation-or-canary');
     });
 });

@@ -1,5 +1,6 @@
 {
   "schemaVersion": "supabase-22-next-retirement-candidates-v1",
+  "historicalDisposition": "retired-non-runnable-exact-22-backfill-references",
   "asOf": "2026-09-10",
   "baseCommit": "860027282efec69b060793fe8d0d07d71728eae7",
   "sourceBoundary": {

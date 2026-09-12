@@ -1,5 +1,7 @@
 # Analysis Canonicalization Implementation Plan
 
+> Historical plan disposition (2026-09-13): this exact-22 multi-family backfill plan is retained for provenance only; its backfill entry point was retired. Do not run commands referencing `scripts/backfill-analysis-canonical.ts`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
 **Goal:** 기존 V2 execution family를 \`analysis_requests\`, \`analysis_preflights\`, \`analysis_results\`, \`analysis_provider_runs\`와 여섯 개의 최소 canonical table로 수렴시키고 parity가 증명된 family만 reader를 전환한다.

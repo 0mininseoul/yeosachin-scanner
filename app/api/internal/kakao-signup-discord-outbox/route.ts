@@ -8,10 +8,6 @@ import {
     deliverEarlybirdPaymentDiscordNotifications,
     reconcileStaleEarlybirdPaymentDiscordClaims,
 } from '@/lib/services/earlybird/payment-discord';
-import {
-    isCanonicalFamilyReadEnabled,
-    shadowReadCanonicalNotificationOutbox,
-} from '@/lib/services/operations/canonical-operations-store';
 
 export const runtime = 'nodejs';
 
@@ -22,9 +18,6 @@ export async function GET(request: Request): Promise<NextResponse> {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    if (isCanonicalFamilyReadEnabled('notification')) {
-        await shadowReadCanonicalNotificationOutbox(10);
-    }
     // The response contains no recipient or Discord information.
     const recovered = await recoverUnstagedKakaoSignupDiscordNotifications();
     const reconciled = await reconcileStaleKakaoSignupDiscordClaims();
