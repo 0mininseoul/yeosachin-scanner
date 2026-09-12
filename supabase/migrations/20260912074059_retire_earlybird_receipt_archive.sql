@@ -41,6 +41,9 @@ $predecessor_guard$;
 
 DO $active_ddl_guard$
 BEGIN
+    -- This is an active-query snapshot only.  The coordinator serializes
+    -- deployment ownership; this regex is not a formal exclusion of all
+    -- future concurrent DDL.
     IF EXISTS (
         SELECT 1
         FROM pg_catalog.pg_stat_activity AS activity
@@ -70,8 +73,10 @@ BEGIN
                           )
                           AND normalized.normalized_query ~* $pattern$(?x)
                               (
-                                  (CREATE OR ALTER|CREATE|ALTER|DROP)
-                                  [[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
+                              (
+                                  CREATE[[:space:]]+OR[[:space:]]+(REPLACE|ALTER)
+                                | CREATE|ALTER|DROP
+                              )[[:space:]]+(FUNCTION|PROCEDURE|ROUTINE)
                                 | (CREATE|ALTER|DROP)[[:space:]]+PUBLICATION
                               )
                           $pattern$
@@ -513,6 +518,39 @@ BEGIN
     END IF;
 END;
 $catalog_guard$;
+
+CREATE TEMP TABLE pg_temp.earlybird_receipt_source_not_null (
+    source_table TEXT PRIMARY KEY,
+    predicate_sql TEXT NOT NULL
+) ON COMMIT DROP;
+
+INSERT INTO pg_temp.earlybird_receipt_source_not_null(source_table, predicate_sql)
+SELECT expected.relation_name,
+       pg_catalog.string_agg(
+           pg_catalog.format('decoded.%I IS NOT NULL', attribute.attname),
+           E' AND ' ORDER BY attribute.attnum
+       )
+FROM pg_temp.earlybird_receipt_expected_oids AS expected
+JOIN pg_catalog.pg_attribute AS attribute
+  ON attribute.attrelid = expected.relation_oid
+WHERE expected.relation_name <> 'maintenance_jobs'
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+  AND attribute.attnotnull
+GROUP BY expected.relation_name;
+
+DO $source_not_null_guard$
+BEGIN
+    IF (
+        SELECT pg_catalog.count(*)
+        FROM pg_temp.earlybird_receipt_source_not_null
+    ) <> 13 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'EARLYBIRD_RECEIPT_CUTOVER_SOURCE_NOT_NULL_CATALOG',
+            ERRCODE = 'P0001';
+    END IF;
+END;
+$source_not_null_guard$;
 
 DO $source_count_guard$
 DECLARE
@@ -1609,7 +1647,7 @@ BEGIN
             OR pg_catalog.jsonb_typeof(job.payload) IS DISTINCT FROM 'object'
             OR pg_catalog.jsonb_typeof(job.payload->'legacy_primary_key') IS DISTINCT FROM 'object'
             OR pg_catalog.jsonb_typeof(job.payload->'legacy_row') IS DISTINCT FROM 'object'
-            OR job.payload->>'schema_version' IS DISTINCT FROM '1'
+            OR job.payload->'schema_version' IS DISTINCT FROM '1'::JSONB
             OR NOT (job.payload->'legacy_primary_key' ?& ARRAY['order_id'])
             OR job.payload->'legacy_primary_key'->>'order_id' IS NULL
             OR pg_catalog.jsonb_typeof(
@@ -1781,7 +1819,8 @@ CREATE TEMP TABLE pg_temp.earlybird_receipt_projection (
     source_table TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     field_sql TEXT NOT NULL,
-    key_sql TEXT NOT NULL
+    key_sql TEXT NOT NULL,
+    not_null_sql TEXT
 ) ON COMMIT DROP;
 
 INSERT INTO pg_temp.earlybird_receipt_projection(source_table, kind, field_sql, key_sql)
@@ -1825,6 +1864,14 @@ VALUES
 ('earlybird_v211_relationship_lineage_failure_rearms', 'rearm',
  'order_id UUID, original_failed_request_id UUID, relationship_failed_request_id UUID, source_preflight_id UUID, rearmed_preflight_id UUID, expected_fulfillment_attempt_count SMALLINT, expected_manual_review_at TIMESTAMPTZ, created_at TIMESTAMPTZ',
  '''order_id'',''original_failed_request_id'',''relationship_failed_request_id'',''source_preflight_id'',''rearmed_preflight_id'',''expected_fulfillment_attempt_count'',''expected_manual_review_at'',''created_at''');
+
+UPDATE pg_temp.earlybird_receipt_projection AS projection
+SET not_null_sql = source_not_null.predicate_sql
+FROM pg_temp.earlybird_receipt_source_not_null AS source_not_null
+WHERE source_not_null.source_table = projection.source_table;
+
+ALTER TABLE pg_temp.earlybird_receipt_projection
+    ALTER COLUMN not_null_sql SET NOT NULL;
 
 CREATE TEMP TABLE pg_temp.earlybird_receipt_routines (
     signature TEXT PRIMARY KEY,
@@ -1905,7 +1952,7 @@ BEGIN
         v_rewritten := v_definition;
 
         FOR v_projection IN
-            SELECT source_table, kind, field_sql, key_sql
+            SELECT source_table, kind, field_sql, key_sql, not_null_sql
             FROM pg_temp.earlybird_receipt_projection
             ORDER BY source_table
         LOOP
@@ -1933,12 +1980,13 @@ CROSS JOIN LATERAL (
       AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
-      AND archive_source.payload->>'schema_version' = '1'
+      AND archive_source.payload->'schema_version' = '1'::JSONB
       AND decoded.order_id IS NOT NULL
       AND archive_source.payload->'legacy_primary_key' =
           pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND (%s)
       AND archive_source.content_hash = pg_catalog.encode(
           extensions.digest(
               convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
@@ -1957,7 +2005,8 @@ CROSS JOIN LATERAL (
       )
 ) AS$from_projection$,
                 v_projection.field_sql, v_projection.kind,
-                v_projection.source_table, v_projection.key_sql
+                v_projection.source_table, v_projection.key_sql,
+                v_projection.not_null_sql
             );
             v_join_prefix := pg_catalog.format($join_projection$
 JOIN LATERAL (
@@ -1970,12 +2019,13 @@ JOIN LATERAL (
       AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
-      AND archive_source.payload->>'schema_version' = '1'
+      AND archive_source.payload->'schema_version' = '1'::JSONB
       AND decoded.order_id IS NOT NULL
       AND archive_source.payload->'legacy_primary_key' =
           pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND (%s)
       AND archive_source.content_hash = pg_catalog.encode(
           extensions.digest(
               convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
@@ -1994,7 +2044,8 @@ JOIN LATERAL (
       )
 ) AS$join_projection$,
                 v_projection.field_sql, v_projection.kind,
-                v_projection.source_table, v_projection.key_sql
+                v_projection.source_table, v_projection.key_sql,
+                v_projection.not_null_sql
             );
             v_unaliased_prefix := pg_catalog.format($unaliased_projection$
 FROM LATERAL (
@@ -2007,12 +2058,13 @@ FROM LATERAL (
       AND archive_source.legacy_pending_user_id IS NULL
       AND archive_source.kind = %L
       AND archive_source.payload->>'legacy_source_table' = %L
-      AND archive_source.payload->>'schema_version' = '1'
+      AND archive_source.payload->'schema_version' = '1'::JSONB
       AND decoded.order_id IS NOT NULL
       AND archive_source.payload->'legacy_primary_key' =
           pg_catalog.jsonb_build_object('order_id', decoded.order_id)
       AND pg_catalog.jsonb_typeof(archive_source.payload->'legacy_row') = 'object'
       AND archive_source.payload->'legacy_row' ?& ARRAY[%s]::TEXT[]
+      AND (%s)
       AND archive_source.content_hash = pg_catalog.encode(
           extensions.digest(
               convert_to(archive_source.payload::TEXT, 'UTF8'), 'sha256'
@@ -2031,7 +2083,8 @@ FROM LATERAL (
       )
 ) AS legacy_receipt_row$unaliased_projection$,
                 v_projection.field_sql, v_projection.kind,
-                v_projection.source_table, v_projection.key_sql
+                v_projection.source_table, v_projection.key_sql,
+                v_projection.not_null_sql
             );
 
             -- Keep the source alias used by the reviewed body.  The archive

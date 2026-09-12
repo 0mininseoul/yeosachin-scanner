@@ -217,6 +217,10 @@ BEGIN
                 OR pg_catalog.jsonb_typeof(payload->'legacy_primary_key'->'order_id') IS DISTINCT FROM 'string'
                 OR payload->'legacy_primary_key'->>'order_id' IS NULL
                 OR pg_catalog.jsonb_typeof(payload->'legacy_row') IS DISTINCT FROM 'object'
+                OR payload->'legacy_primary_key' IS DISTINCT FROM
+                    pg_catalog.jsonb_build_object(
+                        'order_id', payload->'legacy_row'->'order_id'
+                    )
                 OR NOT (payload->'legacy_row' ?& required_fields)
                 OR ((payload->'legacy_row') - required_fields) <> '{}'::JSONB
                 OR pg_catalog.jsonb_typeof(payload->'schema_version') IS DISTINCT FROM 'number'
