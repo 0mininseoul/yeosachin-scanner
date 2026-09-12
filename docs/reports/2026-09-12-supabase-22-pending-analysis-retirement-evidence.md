@@ -2,6 +2,9 @@
 
 Status: READY_FOR_REVIEW_NOT_APPLIED
 
+Implementation commit: `cc751644e0875b957ca6f91a9b5633e9ad3aa0d7`
+(`fix: retain pending archive user cascade`).
+
 No production migration, push, activation, canary, payment-state update, or
 merge was performed. Production evidence was read with the pinned authenticated
 Supabase CLI 2.102.0 through the linked workdir
@@ -22,7 +25,12 @@ The fresh public base/partitioned-table count is 177. The sibling migration is
 the required preceding slice, so this migration asserts 174 before the drop and
 173 after it. The source status remains awaiting_payment in every archived
 row; no payment completion, sale/no-sale, or payment_pending disposition is
-inferred or changed.
+inferred or changed. Before the archive insert, the migration validates the
+reviewed 16-column maintenance_jobs predecessor, then appends nullable
+maintenance_jobs.legacy_pending_user_id UUID with an auth.users(id) ON DELETE
+CASCADE FK. A scoped check requires that field exactly for this succeeded
+pending_analysis archive cohort and ties it to payload.legacy_row.user_id;
+unrelated maintenance rows remain NULL.
 
 ## Source evidence
 
@@ -43,6 +51,8 @@ inferred or changed.
   and status to awaiting_payment/paid/refunded/expired. The source has one
   outgoing user_id -> auth.users(id) ON DELETE CASCADE FK and zero incoming
   FKs.
+- The typed archive reference is derived from source user_id only; it does not
+  rewrite the source row, payload, content_hash, or status.
 
 ## Dependency and access boundary
 
@@ -72,7 +82,9 @@ Each source row becomes one immutable canonical row with:
 - payload.schema_version = 1;
 - explicit archive_state_semantics, no_work_enqueued, and
   payment_state_mutated = false; and
-- content_hash over the complete canonical payload.
+- content_hash over the complete canonical payload; and
+- legacy_pending_user_id = source_row.user_id, backed by a partial non-null
+  index and the auth.users ON DELETE CASCADE FK.
 
 The migration locks both relations in one transaction, rejects changed
 relation/schema/RLS/ACL/dependency evidence, requires the exact 11-row
@@ -80,6 +92,16 @@ awaiting-payment/null-checkout/UTC-window snapshot and full-row hash, rejects
 canonical conflicts, verifies per-row and aggregate parity, then runs only
 DROP TABLE public.pending_analysis without CASCADE. It does not enqueue
 work, update any business row, or mutate payment state.
+
+## Retention and restore lifecycle
+
+The typed FK intentionally preserves the source table's account-deletion
+semantics: deleting an auth.users parent removes only that user's pending
+archive rows. The isolated restore operation requires the exact 11-row archive
+count, aggregate hash, typed references, and parent users; after an authorized
+user deletion it fails closed rather than synthesizing missing rows or
+resurrecting deliberately deleted account data. Unrelated maintenance rows and
+their statuses are outside the scope and remain unchanged.
 
 ## Owned files
 
@@ -90,26 +112,34 @@ work, update any business row, or mutate payment state.
 
 The restore operation requires SET supabase.retirement_isolated = 'true',
 refuses a pre-existing source table, locks the canonical archive, verifies
-succeeded state plus deterministic key/content hashes and the canonical full
-row hash before insert, recreates the typed source shape/indexes/RLS/policies,
-and verifies exact restored full-row parity. It never deletes or rewrites
-canonical rows and requires auth.users in the disposable database.
+succeeded state plus deterministic key/content hashes, the typed FK contract,
+and the canonical full-row hash before insert, recreates the typed source
+shape/indexes/RLS/policies, and verifies exact restored full-row parity. It
+never deletes or rewrites canonical rows and requires auth.users in the
+disposable database.
 
 ## Validation
 
+- The pre-change disposable contract check failed because the typed retention
+  field was absent; the post-change check found the typed FK, scoped parity,
+  and strict restore guards.
 - Narrow disposable PostgreSQL 17 proof passed with synthetic rows. The
-  unmodified committed migration first rejected that fixture with
+  unmodified committed migration first rejected the fixture with
   RETIREMENT_GUARD_SOURCE_EVIDENCE_MISMATCH; a derived stdin-only SQL stream
-  substituted only the reviewed aggregate hash literal with the synthetic
-  fixture hash, leaving all shape/status/count/window/parity guards unchanged.
-  The retained disposable data directory is
-  /private/tmp/pending-retirement-pg.Sx6vqX; its locally started server was
-  stopped after the proof. Results were proof:tables=174 after restore,
-  proof:restored_rows=11,awaiting=11,checkout_refs=0, and
-  proof:archive_rows=11.
-- git diff --check passed, and npx tsc --noEmit passed after installing the
-  existing package-lock dependencies with npm ci --ignore-scripts. Broad
-  tests, build, CI, and production SQL mutation are out of scope.
+  substituted only the reviewed production aggregate hash literal with the
+  fixture's UTC serialization hash, leaving all shape/status/count/window/
+  parity guards unchanged. The retained disposable data directory is
+  /private/tmp/pending-retention-fix-proof.4hCRrL; its local server was stopped
+  after proof. Archive results were 173 public tables after retirement, source
+  absent, 11 archive rows, 11 typed references, a present partial index, and
+  consistent payload hashes. Strict restore returned 11 rows, all
+  awaiting_payment, zero checkout references, and a matching full-row hash.
+- The synthetic account-deletion proof removed exactly one pending archive row
+  and its restored source row, leaving 10 typed archive rows and two unrelated
+  blocked maintenance rows unchanged in payload, hash, and state. A subsequent
+  restore attempt failed closed with RETIREMENT_RESTORE_ARCHIVE_EVIDENCE_MISMATCH.
+- git diff --check passed. No new committed tests, broad test/CI/build/lint
+  runs, typecheck, or production SQL mutation were performed.
 
 ## Coordinator rollout gate
 
@@ -117,5 +147,7 @@ The coordinator must review the exact one-migration allowlist and independently
 run production dry-run/dependency checks before any apply. If accepted, apply
 only this migration after the sibling migration, then verify migration history,
 173 public tables, source absence, 11 canonical rows with unchanged
-awaiting_payment payloads and zero checkout references, and no
-payment_pending mutation.
+awaiting_payment payloads and zero checkout references, the nullable typed FK,
+its ON DELETE CASCADE action, the scoped constraint/index, and no
+payment_pending mutation. Production apply, push, activation, canary, merge,
+and deploy remain out of scope for this commit.
