@@ -10,7 +10,7 @@ Supabase read path: pinned CLI `2.102.0`, `npx --yes supabase@2.102.0 db query -
 
 ## Baseline
 
-The live public catalog reports **152** base/partitioned tables, matching the expected post-W1A count. All 152 have RLS enabled; 117 force RLS. The live catalog also reports 200 foreign-key constraints, 89 user triggers, and three explicit public publication memberships.
+The live catalog reports **152** base/partitioned tables, matching the expected post-W1A count. All 152 have RLS enabled; 117 force RLS. The database-wide aggregate reports 200 foreign-key constraints and 89 non-internal triggers (excluding system triggers); the public-schema-only slice reports 177 foreign-key constraints and 83 non-internal triggers. The catalog also reports three explicit public publication memberships.
 
 The W1A policy and contraction migration versions are present in the remote migration history. The 12 retained tables are all present, and the four out-of-scope payment relation names are absent. No payment state was read or changed.
 
