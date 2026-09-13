@@ -1,0 +1,225 @@
+{
+  "schemaVersion": "supabase-next-contraction-audit-v1",
+  "status": "blocked-no-change",
+  "decision": "no-production-mutation",
+  "observedAt": "2026-09-13T03:45:40Z",
+  "sourceRevision": "cccf369013263abfd91538e6451be3dd6b9dcd9c",
+  "originMainVerified": true,
+  "supabaseCli": {
+    "version": "2.102.0",
+    "invocation": "npx --yes supabase@2.102.0 db query --linked",
+    "isolatedWorkdir": "/private/tmp/yeosachin-predeploy.6QZ9Lr"
+  },
+  "baseline": {
+    "publicBaseTableCount": 152,
+    "expectedPostW1ATableCount": 152,
+    "rlsEnabledPublicTables": 152,
+    "forceRlsPublicTables": 117,
+    "foreignKeyConstraintCount": 200,
+    "userTriggerCount": 89,
+    "publicPublicationMembershipCount": 3,
+    "migrationHistoryRows": 391,
+    "migrationHistoryDistinctVersions": 391,
+    "w1aPolicyMigrationPresent": true,
+    "w1aContractionMigrationPresent": true,
+    "retainedExpectedCount": 12,
+    "retainedPresentCount": 12,
+    "missingRetainedTables": [],
+    "outOfScopePaymentExpectedCount": 4,
+    "outOfScopePaymentPresentCount": 0
+  },
+  "migrationProvenance": {
+    "localMigrationVersionCount": 391,
+    "remoteMigrationVersionCount": 391,
+    "localVersionsPresentRemote": 385,
+    "localVersionsMissingRemote": 6,
+    "remoteVersionsMissingLocal": 6,
+    "localOnlyVersions": [
+      "20260805001619",
+      "20260805014000",
+      "20260805023000",
+      "20260805025000",
+      "20260805050000",
+      "20260813233000"
+    ],
+    "remoteOnlyVersions": [
+      "20260814110000",
+      "20260814111000",
+      "20260823165841",
+      "20260824151600",
+      "20260824152500",
+      "20260824160500"
+    ],
+    "contractionApplicationBlocked": true
+  },
+  "candidateWave": {
+    "id": "analysis-v2-replay-capture-empty-cluster",
+    "scope": "bounded three-table replay-capture cluster; no payment or operator-audit tables",
+    "exactZeroCandidateCount": 3,
+    "approvedDestructiveAllowlist": [],
+    "tables": [
+      {
+        "name": "analysis_v2_replay_capture_audit_events",
+        "exactRows": 0,
+        "rlsEnabled": true,
+        "forceRls": true,
+        "directDependencyEdges": 9,
+        "foreignKeysOut": 1,
+        "foreignKeysIn": 0,
+        "userTriggers": 0,
+        "publicationMemberships": 0,
+        "routineBodyReferences": 3,
+        "viewBodyReferences": 0,
+        "staticRuntimeTableReferenceFiles": 0,
+        "staticAdminRouteReferenceFiles": 0,
+        "disposition": "blocked-database-routine-dependency"
+      },
+      {
+        "name": "analysis_v2_replay_capture_authorizations",
+        "exactRows": 0,
+        "rlsEnabled": true,
+        "forceRls": true,
+        "directDependencyEdges": 125,
+        "foreignKeysOut": 2,
+        "foreignKeysIn": 2,
+        "userTriggers": 0,
+        "publicationMemberships": 0,
+        "routineBodyReferences": 4,
+        "viewBodyReferences": 0,
+        "staticRuntimeTableReferenceFiles": 0,
+        "staticAdminRouteReferenceFiles": 0,
+        "disposition": "blocked-database-routine-and-foreign-key-dependency"
+      },
+      {
+        "name": "analysis_v2_replay_capture_fragments",
+        "exactRows": 0,
+        "rlsEnabled": true,
+        "forceRls": true,
+        "directDependencyEdges": 58,
+        "foreignKeysOut": 1,
+        "foreignKeysIn": 0,
+        "userTriggers": 0,
+        "publicationMemberships": 0,
+        "routineBodyReferences": 1,
+        "viewBodyReferences": 0,
+        "staticRuntimeTableReferenceFiles": 0,
+        "staticAdminRouteReferenceFiles": 0,
+        "disposition": "blocked-database-routine-dependency"
+      }
+    ],
+    "relationAcl": {
+      "publicAllowed": false,
+      "anonAllowed": false,
+      "authenticatedAllowed": false,
+      "serviceRoleAllowed": false
+    },
+    "routineContracts": [
+      {
+        "name": "arm_analysis_v2_replay_capture",
+        "identityArguments": "p_preflight_id uuid, p_expected_policy_hash text, p_expected_context_hash text, p_recipient_key_fingerprint text, p_expected_public_count integer, p_expected_private_count integer, p_expected_fragment_count integer, p_operator_fingerprint text, p_reason_code text",
+        "securityDefiner": true,
+        "searchPathIsEmpty": false,
+        "executePublic": false,
+        "executeAnon": false,
+        "executeAuthenticated": false,
+        "executeServiceRole": true,
+        "staticRuntimeCallerFiles": 0
+      },
+      {
+        "name": "bind_analysis_v2_replay_capture",
+        "identityArguments": "p_capture_id uuid, p_request_id uuid, p_operator_fingerprint text, p_reason_code text",
+        "securityDefiner": true,
+        "searchPathIsEmpty": false,
+        "executePublic": false,
+        "executeAnon": false,
+        "executeAuthenticated": false,
+        "executeServiceRole": true,
+        "staticRuntimeCallerFiles": 0
+      },
+      {
+        "name": "purge_expired_analysis_v2_preflights",
+        "identityArguments": "p_limit integer",
+        "securityDefiner": true,
+        "searchPathIsEmpty": false,
+        "executePublic": false,
+        "executeAnon": false,
+        "executeAuthenticated": false,
+        "executeServiceRole": true,
+        "staticRuntimeCallerFiles": 0
+      },
+      {
+        "name": "read_analysis_v2_replay_capture_source",
+        "identityArguments": "p_target_username text, p_request_id uuid",
+        "securityDefiner": true,
+        "searchPathIsEmpty": false,
+        "executePublic": false,
+        "executeAnon": false,
+        "executeAuthenticated": false,
+        "executeServiceRole": true,
+        "staticRuntimeCallerFiles": 1,
+        "staticRuntimeCallerFilesList": [
+          "lib/services/analysis/replay/replay-supabase-repository.ts"
+        ]
+      },
+      {
+        "name": "register_analysis_v2_replay_capture_fragment",
+        "identityArguments": "p_capture_id uuid, p_write_lease_token uuid, p_opaque_locator_hash text, p_fragment_kind text, p_stage text, p_batch_ordinal integer, p_ordinal integer, p_object_key text, p_ciphertext_sha256 text, p_ciphertext_byte_size integer, p_envelope_version smallint, p_content_commitment text, p_operator_fingerprint text, p_reason_code text",
+        "securityDefiner": true,
+        "searchPathIsEmpty": false,
+        "executePublic": false,
+        "executeAnon": false,
+        "executeAuthenticated": false,
+        "executeServiceRole": true,
+        "staticRuntimeCallerFiles": 0
+      }
+    ],
+    "blockingDependencies": [
+      "purge_expired_analysis_v2_preflights references analysis_v2_replay_capture_authorizations in the deployed database routine body",
+      "arm_analysis_v2_replay_capture and bind_analysis_v2_replay_capture write the authorization and audit-event contracts",
+      "register_analysis_v2_replay_capture_fragment writes the authorization, fragment, and audit-event contracts",
+      "analysis_v2_replay_capture_authorizations has two incoming and two outgoing foreign-key edges",
+      "all five inspected routines are SECURITY DEFINER with a non-empty search_path configuration"
+    ]
+  },
+  "runtimeEvidence": {
+    "candidateTableStaticRuntimeReferenceFiles": 0,
+    "candidateWriterRoutineStaticRuntimeReferenceFiles": 0,
+    "readerRoutineStaticRuntimeReferenceFiles": 1,
+    "readerRoutineStaticRuntimeReferenceFilesList": [
+      "lib/services/analysis/replay/replay-supabase-repository.ts"
+    ],
+    "adminRouteCount": 7,
+    "candidateTableAdminRouteReferenceFiles": 0,
+    "candidateRoutineAdminRouteReferenceFiles": 0,
+    "otherClientBackendRowsAtObservation": 6,
+    "otherActiveBackendRowsAtObservation": 1,
+    "otherClientCandidateKeywordRowsAtObservation": 0,
+    "observationIsNotDrainProof": true
+  },
+  "dashboardDependencies": {
+    "preservedRouteDependencies": [
+      "app/api/admin/order-audit/route.ts -> listAnalysisOrderAuditList -> list_analysis_order_audit_bundles",
+      "app/api/admin/order-audit/[requestId]/route.ts -> loadAnalysisOrderAuditBundle -> load_analysis_order_audit_bundle",
+      "app/api/admin/analysis-observability/route.ts -> analysis_operational_cost_summary and analysis_step_events",
+      "app/api/admin/landing-leads/route.ts -> landing_leads",
+      "app/api/admin/token-usage/route.ts -> gemini_token_usage"
+    ],
+    "candidateWaveRouteHits": 0,
+    "dashboardContractDisposition": "preserve-and-reverify"
+  },
+  "preparedImplementation": {
+    "migration": null,
+    "destructiveAllowlist": [],
+    "rollbackArtifact": null,
+    "rollbackStatus": "not-applicable-no-production-mutation",
+    "reason": "No candidate has both exact-zero data and a clean deployed database dependency closure; migration history also has six local-only and six remote-only versions."
+  },
+  "remainingGates": [
+    "Resolve the exact six-version local/remote migration history divergence in an explicitly reviewed worktree.",
+    "Retire or redirect every deployed routine and foreign-key dependency before reopening this wave.",
+    "Re-run an independent exact object/attribute, ACL, routine, dependency, dashboard, and observation-window audit.",
+    "Only then author a fixed no-CASCADE migration and a separate typed restore artifact with a reviewed allowlist."
+  ],
+  "productionMutation": "none",
+  "rawRowsSecretsOrUserIdsPersisted": false
+}
