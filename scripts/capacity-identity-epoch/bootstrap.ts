@@ -52,6 +52,8 @@ export type ProtectedLiveBootstrapDescriptor = Readonly<{
     vercelDeploymentId: string;
     vercelExpectedOldDeploymentId: string;
     vercelProducerAlias: string;
+    /** Optional owner-session Google token inherited only through the private FD. */
+    googleAccessToken?: string;
     vercelToken: string;
     serviceBodies: Readonly<Record<Role, Readonly<Record<string, unknown>>>>;
     /** Reviewed primary-source descriptors; null means evidence is unavailable. */
@@ -77,7 +79,9 @@ const BOOTSTRAP_KEYS_BASE = [
     'googleProjectId', 'vercelProjectId', 'vercelTeamId', 'vercelDeploymentId',
     'vercelExpectedOldDeploymentId', 'vercelProducerAlias', 'vercelToken', 'serviceBodies', 'zeroWorkEvidence', 'scopeDigest',
 ] as const;
+const BOOTSTRAP_KEYS_WITH_GOOGLE_AUTH = [...BOOTSTRAP_KEYS_BASE.slice(0, -9), 'googleAccessToken', ...BOOTSTRAP_KEYS_BASE.slice(-9)] as const;
 const BOOTSTRAP_KEYS_WITH_SUPABASE_AUTH = [...BOOTSTRAP_KEYS_BASE.slice(0, -1), 'supabaseServiceRoleBearer', 'supabaseApiKey', 'scopeDigest'] as const;
+const BOOTSTRAP_KEYS_WITH_GOOGLE_AND_SUPABASE_AUTH = [...BOOTSTRAP_KEYS_WITH_GOOGLE_AUTH.slice(0, -1), 'supabaseServiceRoleBearer', 'supabaseApiKey', 'scopeDigest'] as const;
 
 function fail(code: 'PROTECTED_INPUT_UNAVAILABLE' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH' | 'EVIDENCE_UNAVAILABLE' | 'JOURNAL_INVALID'): never {
     epochFail(code);
@@ -110,7 +114,10 @@ async function readPrivateJson(fd: number): Promise<unknown> {
 
 export async function loadProtectedLiveBootstrap(fd: number): Promise<ProtectedLiveBootstrapDescriptor> {
     const value = await readPrivateJson(fd);
-    if (!isObject(value) || (!hasExactKeys(value, BOOTSTRAP_KEYS_BASE) && !hasExactKeys(value, BOOTSTRAP_KEYS_WITH_SUPABASE_AUTH))
+    if (!isObject(value) || (!hasExactKeys(value, BOOTSTRAP_KEYS_BASE)
+        && !hasExactKeys(value, BOOTSTRAP_KEYS_WITH_GOOGLE_AUTH)
+        && !hasExactKeys(value, BOOTSTRAP_KEYS_WITH_SUPABASE_AUTH)
+        && !hasExactKeys(value, BOOTSTRAP_KEYS_WITH_GOOGLE_AND_SUPABASE_AUTH))
         || typeof value.packetDigest !== 'string' || !DIGEST.test(value.packetDigest)
         || typeof value.ownerDigest !== 'string' || !DIGEST.test(value.ownerDigest)
         || typeof value.lockNamespace !== 'string' || value.lockNamespace.length === 0 || value.lockNamespace.length > 128
@@ -122,6 +129,7 @@ export async function loadProtectedLiveBootstrap(fd: number): Promise<ProtectedL
         || typeof value.vercelDeploymentId !== 'string' || !RESOURCE_ID.test(value.vercelDeploymentId)
         || typeof value.vercelExpectedOldDeploymentId !== 'string' || !RESOURCE_ID.test(value.vercelExpectedOldDeploymentId)
         || typeof value.vercelProducerAlias !== 'string' || !ALIAS.test(value.vercelProducerAlias)
+        || (value.googleAccessToken !== undefined && (typeof value.googleAccessToken !== 'string' || value.googleAccessToken.length === 0 || value.googleAccessToken.length > 8192 || /[\u0000-\u001f\u007f\s]/.test(value.googleAccessToken)))
         || typeof value.vercelToken !== 'string' || value.vercelToken.length === 0 || value.vercelToken.length > 8192
         || typeof value.scopeDigest !== 'string' || !DIGEST.test(value.scopeDigest)
         || !isObject(value.serviceBodies) || !hasExactKeys(value.serviceBodies, ['preflight', 'paid'])
@@ -402,7 +410,9 @@ export async function buildLiveBootstrap(
         }
     }
     const now = bootstrapOptions.now ?? (() => Date.now());
-    const google = bootstrapOptions.googleTransport ?? createGoogleProtectedTransport();
+    const google = bootstrapOptions.googleTransport ?? (descriptor.googleAccessToken === undefined
+        ? createGoogleProtectedTransport()
+        : createGoogleProtectedTransport({ tokenProvider: async () => descriptor.googleAccessToken! }));
     const vercelTransport = bootstrapOptions.vercelTransport
         ?? createVercelProtectedTransport({ tokenProvider: async () => descriptor.vercelToken });
     const cloudRun = new CloudRunAdapter({ transport: google });
