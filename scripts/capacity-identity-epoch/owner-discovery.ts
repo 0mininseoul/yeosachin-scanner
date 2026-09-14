@@ -348,6 +348,13 @@ export async function readExactVercelProductionEnvValues(input: Readonly<{
         // their decrypted values; only the fixed allowlist crosses this
         // helper's boundary.
         if (!input.allowedKeys.has(item.key)) continue;
+        // Vercel deliberately returns sensitive values as unreadable (the
+        // live API currently represents that as an empty value). Keep the
+        // metadata for safe inventory accounting, but do not treat the
+        // provider's valid hidden-value response as malformed JSON. A caller
+        // that requires the value will fail closed when it resolves its
+        // required selector.
+        if (item.type === 'sensitive' || item.value === undefined) continue;
         if (typeof item.value !== 'string' || item.value.length === 0 || item.value.length > 8192
             || /[\u0000-\u001f\u007f]/.test(item.value)) fail('ADAPTER_RESPONSE_INVALID');
         values[item.key] = item.value;

@@ -4,6 +4,7 @@ import {
     assertSourceBuildMatch,
     collectFullyPaged,
     readExactVercelProductionEnv,
+    readExactVercelProductionEnvValues,
     selectExactResource,
     validateLedgerCoverage,
 } from './owner-discovery';
@@ -59,6 +60,24 @@ describe('owner production discovery boundaries', () => {
         await expect(readExactVercelProductionEnv({ transport: client, projectId: 'fixture-project', teamId: 'fixture-team' }))
             .resolves.toMatchObject({ keys: ['FIRST', 'SECOND'], count: 2 });
         expect(new URL(requests[1]!).searchParams.get('until')).toBe('17');
+    });
+
+    it('keeps valid hidden sensitive values out of the value map', async () => {
+        const transport: ProtectedTransport = {
+            request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => ({
+                status: 200,
+                headers: {},
+                url: request.url,
+                body: JSON.stringify({ envs: [{ key: 'HIDDEN', type: 'sensitive', value: '' }] }),
+            }),
+        };
+        const client = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token' });
+        await expect(readExactVercelProductionEnvValues({
+            transport: client,
+            projectId: 'fixture-project',
+            teamId: 'fixture-team',
+            allowedKeys: new Set(['HIDDEN']),
+        })).resolves.toMatchObject({ count: 1, sensitiveKeys: ['HIDDEN'], values: {} });
     });
 
     it('rejects ambiguous exact selectors and mixed-project inventory', () => {
