@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -67,6 +67,19 @@ describe('owner credential boundary', () => {
 
         const malformed = privateFile(directory, 'malformed.json', { token: '' });
         await expect(loadOwnerAuthBoundary({ linkedMetadataPath: metadataPath, credentialStorePath: malformed })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects owner files reached through a symlinked ancestor directory', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        const actual = join(directory, 'actual');
+        const linked = join(directory, 'linked');
+        mkdirSync(actual);
+        symlinkSync(actual, linked, 'dir');
+        privateFile(actual, 'project.json', { projectId: 'linked-project', orgId: 'linked-team' });
+        const credentialsPath = privateFile(directory, 'auth.json', { token: PROTECTED_TOKEN });
+
+        await expect(loadOwnerAuthBoundary({ linkedMetadataPath: join(linked, 'project.json'), credentialStorePath: credentialsPath }))
+            .rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
     });
 
     it('requires private mode for the Vercel credential store while allowing owner-readable metadata', async () => {

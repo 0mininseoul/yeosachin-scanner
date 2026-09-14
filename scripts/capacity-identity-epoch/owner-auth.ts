@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -51,39 +51,98 @@ function pathValue(value: unknown): asserts value is string {
     if (typeof value !== 'string' || !SAFE_PATH.test(value)) unavailable();
 }
 
-function boundedFile(path: string, expectedUid: number, privacy: 'owner-readable' | 'private' = 'owner-readable'): string {
+/**
+ * Check every owner-controlled directory between a bounded file and the
+ * first trusted system-owned ancestor.  The sticky-bit exception keeps the
+ * normal macOS `/tmp` fixture/working-directory boundary usable while still
+ * rejecting an untrusted writable ancestor that can rename the owner path.
+ */
+function safeOwnerAncestors(path: string, expectedUid: number): void {
+    const absolutePath = resolve(path);
+    let directory = dirname(absolutePath);
+    let ownerDirectorySeen = false;
+    for (;;) {
+        let stat: ReturnType<typeof lstatSync>;
+        try { stat = lstatSync(directory); } catch { unavailable(); }
+        if (!stat.isDirectory()) unavailable();
+        if (stat.uid === expectedUid) {
+            ownerDirectorySeen = true;
+            if ((stat.mode & 0o022) !== 0) unavailable();
+        } else {
+            if (!ownerDirectorySeen || ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0)) unavailable();
+            break;
+        }
+        const parent = dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+    }
+}
+
+function readFdBounded(fd: number, size: number): string {
+    // Read one byte beyond the maximum so a file that grows after fstat is
+    // still rejected without allocating unbounded memory.
+    const buffer = Buffer.alloc(Math.min(MAX_OWNER_FILE_BYTES + 1, Math.max(1, size + 1)));
+    let bytes = 0;
+    while (bytes < buffer.byteLength) {
+        const count = readSync(fd, buffer, bytes, buffer.byteLength - bytes, null);
+        if (count === 0) break;
+        bytes += count;
+    }
+    if (bytes > MAX_OWNER_FILE_BYTES || bytes !== size) unavailable();
+    return buffer.subarray(0, bytes).toString('utf8');
+}
+
+export function readOwnerBoundedFile(
+    path: string,
+    expectedUid: number,
+    privacy: 'owner-readable' | 'private' = 'owner-readable',
+    allowMissing = false,
+): string | undefined {
     pathValue(path);
-    let stat: ReturnType<typeof lstatSync>;
+    if (!Number.isSafeInteger(expectedUid) || expectedUid < 0) unavailable();
+    safeOwnerAncestors(path, expectedUid);
+    let fd: number;
     try {
-        // lstat intentionally rejects symlinked credential paths.  The owner
-        // boundary must be attached to the actual file, not a mutable link.
-        stat = lstatSync(path);
-    } catch {
+        fd = openSync(resolve(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    } catch (error) {
+        if (allowMissing && error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
         unavailable();
     }
-    if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0
-        || (privacy === 'private' && (stat.mode & 0o077) !== 0)) unavailable();
-    if (stat.size < 0 || stat.size > MAX_OWNER_FILE_BYTES) unavailable();
     try {
-        const value = readFileSync(path, 'utf8');
-        if (Buffer.byteLength(value, 'utf8') > MAX_OWNER_FILE_BYTES) unavailable();
-        return value;
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0
+            || (privacy === 'private' && (stat.mode & 0o077) !== 0)) unavailable();
+        if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > MAX_OWNER_FILE_BYTES) unavailable();
+        return readFdBounded(fd, stat.size);
     } catch {
         unavailable();
+    } finally {
+        try { closeSync(fd); } catch { /* best effort; no descriptor crosses the boundary */ }
     }
+}
+
+function boundedFile(path: string, expectedUid: number, privacy: 'owner-readable' | 'private' = 'owner-readable'): string {
+    const value = readOwnerBoundedFile(path, expectedUid, privacy);
+    if (value === undefined) unavailable();
+    return value;
 }
 
 function boundedDirectory(path: string, expectedUid: number): void {
     pathValue(path);
     let stat: ReturnType<typeof lstatSync>;
-    try { stat = lstatSync(path); } catch { unavailable(); }
+    try {
+        stat = lstatSync(path);
+    } catch { unavailable(); }
     if (!stat.isDirectory() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0) unavailable();
 }
 
 function jsonFile(path: string, expectedUid: number): Record<string, unknown> {
     const raw = boundedFile(path, expectedUid);
     let value: unknown;
-    try { value = JSON.parse(raw) as unknown; } catch { unavailable(); }
+    try {
+        rejectDuplicateJsonKeys(raw);
+        value = JSON.parse(raw) as unknown;
+    } catch { unavailable(); }
     if (!isObject(value)) unavailable();
     return value;
 }
@@ -91,7 +150,10 @@ function jsonFile(path: string, expectedUid: number): Record<string, unknown> {
 function privateJsonFile(path: string, expectedUid: number): Record<string, unknown> {
     const raw = boundedFile(path, expectedUid, 'private');
     let value: unknown;
-    try { value = JSON.parse(raw) as unknown; } catch { unavailable(); }
+    try {
+        rejectDuplicateJsonKeys(raw);
+        value = JSON.parse(raw) as unknown;
+    } catch { unavailable(); }
     if (!isObject(value)) unavailable();
     return value;
 }
@@ -363,8 +425,7 @@ function linkedSupabaseProjectRef(workdir: string, expectedUid: number): string 
     boundedDirectory(workdir, expectedUid);
     boundedDirectory(supabaseDirectory, expectedUid);
     boundedDirectory(tempDirectory, expectedUid);
-    const path = join(tempDirectory, 'project-ref');
-    const raw = boundedFile(path, expectedUid);
+    const raw = boundedFile(join(tempDirectory, 'project-ref'), expectedUid);
     if (Buffer.byteLength(raw, 'utf8') > MAX_SUPABASE_PROJECT_REF_BYTES) unavailable();
     const value = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
     if (!SUPABASE_PROJECT_REF.test(value)) unavailable();

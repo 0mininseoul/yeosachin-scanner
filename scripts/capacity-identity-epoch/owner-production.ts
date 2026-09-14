@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -39,6 +39,7 @@ import {
     captureSupabaseServiceRoleKey,
     createOwnerProtectedTransports,
     loadOwnerAuthBoundary,
+    readOwnerBoundedFile,
     type OwnerAuthBoundary,
     type OwnerProtectedTransports,
 } from './owner-auth';
@@ -72,6 +73,7 @@ import { parsePublicReadinessJson } from '../../lib/services/analysis/public-rea
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 import { deriveObservationInputDigests, createProtectedPacket, deriveRetiredIamBindingDigests, type ProtectedPacketInput } from './packet';
 import { evidenceSelectorDigest, LiveEvidenceCollector, type LiveZeroWorkSources } from './live-evidence';
+import { rejectDuplicateJsonKeys } from './packet';
 
 /**
  * The owner adapter is the only production construction path for the
@@ -91,6 +93,9 @@ const SCHEDULER = /^[A-Za-z0-9_-]{1,500}$/;
 const BUCKET = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
 const SUPABASE_ORIGIN = /^https:\/\/[a-z]{20}\.supabase\.co\/$/;
 const SUPABASE_ORIGIN_INPUT = /^https:\/\/[a-z]{20}\.supabase\.co\/?$/;
+const SUPABASE_CLI_VERSION = '2.102.0';
+const SUPABASE_CLI_LINK_TARGET = '../supabase/dist/supabase.js';
+const SUPABASE_CLI_BIN_TARGET = 'dist/supabase.js';
 const IMAGE = /^[^\s\u0000-\u001f\u007f]{1,2048}@sha256:[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SAFE = /^[^\u0000-\u001f\u007f]{1,4096}$/;
@@ -223,8 +228,47 @@ export function resolvePrimaryRepositoryRootForOwner(cwd: string): string {
 export function resolveLocalSupabaseCliPathForOwner(cwd: string): string {
     if (!SAFE.test(cwd)) unavailable();
     const currentWorktree = resolve(cwd);
+    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    if (!Number.isSafeInteger(uid) || uid < 0) unavailable();
+    const nodeModules = join(currentWorktree, 'node_modules');
+    const binDirectory = join(nodeModules, '.bin');
+    const packageDirectory = join(nodeModules, 'supabase');
+    const distributionDirectory = join(packageDirectory, 'dist');
+    ownerDirectory(currentWorktree, uid);
+    ownerDirectory(nodeModules, uid);
+    ownerDirectory(binDirectory, uid);
+    ownerDirectory(packageDirectory, uid);
+    ownerDirectory(distributionDirectory, uid);
     const command = join(currentWorktree, 'node_modules', '.bin', 'supabase');
     if (!SAFE.test(command)) unavailable();
+    let commandStat: ReturnType<typeof lstatSync>;
+    try { commandStat = lstatSync(command); } catch { unavailable(); }
+    if (!commandStat.isSymbolicLink() || commandStat.uid !== uid) unavailable();
+    let linkTarget: string;
+    try { linkTarget = readlinkSync(command); } catch { unavailable(); }
+    if (linkTarget !== SUPABASE_CLI_LINK_TARGET) unavailable();
+
+    const executable = join(distributionDirectory, 'supabase.js');
+    let resolvedCommand: string;
+    let resolvedExecutable: string;
+    try { resolvedCommand = realpathSync(command); } catch { unavailable(); }
+    try { resolvedExecutable = realpathSync(executable); } catch { unavailable(); }
+    if (resolvedCommand !== resolvedExecutable) unavailable();
+    let executableStat: ReturnType<typeof lstatSync>;
+    try { executableStat = lstatSync(executable); } catch { unavailable(); }
+    if (!executableStat.isFile() || executableStat.uid !== uid || (executableStat.mode & 0o022) !== 0
+        || (executableStat.mode & 0o100) === 0) unavailable();
+
+    const packageJsonPath = join(packageDirectory, 'package.json');
+    const packageJson = readOwnerBoundedFile(packageJsonPath, uid);
+    if (packageJson === undefined) unavailable();
+    let packageValue: unknown;
+    try {
+        rejectDuplicateJsonKeys(packageJson);
+        packageValue = JSON.parse(packageJson) as unknown;
+    } catch { unavailable(); }
+    if (!isObject(packageValue) || packageValue.version !== SUPABASE_CLI_VERSION
+        || !isObject(packageValue.bin) || packageValue.bin.supabase !== SUPABASE_CLI_BIN_TARGET) unavailable();
     return command;
 }
 
