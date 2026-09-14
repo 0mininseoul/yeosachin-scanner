@@ -285,10 +285,9 @@ function parseVercelProductionEnvMetadata(value: unknown): VercelProductionEnvMe
 }
 
 function assertExactVercelProductionEnvMetadata(item: VercelProductionEnvMetadata): void {
-    if (item.target.length !== 1 || item.target[0] !== 'production'
+    if (!item.target.includes('production')
         || (item.gitBranch !== undefined && item.gitBranch !== null)
-        || (item.configurationId !== undefined && item.configurationId !== null)
-        || item.type === 'sensitive') fail('DISCOVERY_AMBIGUOUS');
+        || (item.configurationId !== undefined && item.configurationId !== null)) fail('DISCOVERY_AMBIGUOUS');
 }
 
 async function readVercelProductionEnvInventory(input: Readonly<{
@@ -391,8 +390,15 @@ export async function readExactVercelProductionEnvValues(input: Readonly<{
     const items = await readVercelProductionEnvInventory(input);
     const values: Record<string, string> = {};
     const selected = items.filter(item => input.allowedKeys.has(item.key));
-    for (const item of selected) assertExactVercelProductionEnvMetadata(item);
-    for (const item of selected) values[item.key] = await readVercelProductionEnvValue({ ...input, metadata: item });
+    for (const item of selected) {
+        assertExactVercelProductionEnvMetadata(item);
+        // Sensitive variables remain part of the inventory summary, but the
+        // per-ID endpoint must never be called for them. Their missing value
+        // lets a required selector fail closed while optional selectors stay
+        // absent without blocking discovery.
+        if (item.type === 'sensitive') continue;
+        values[item.key] = await readVercelProductionEnvValue({ ...input, metadata: item });
+    }
     const keys = items.map(item => item.key);
     const sensitiveKeys = items.filter(item => item.type === 'sensitive').map(item => item.key);
     return Object.freeze({

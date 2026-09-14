@@ -62,7 +62,7 @@ describe('owner production discovery boundaries', () => {
         expect(new URL(requests[1]!).searchParams.get('until')).toBe('17');
     });
 
-    it('rejects an allowlisted sensitive variable before requesting its value', async () => {
+    it('keeps allowlisted sensitive metadata without requesting or returning its value', async () => {
         const requests: string[] = [];
         const transport: ProtectedTransport = {
             request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
@@ -81,8 +81,43 @@ describe('owner production discovery boundaries', () => {
             projectId: 'fixture-project',
             teamId: 'fixture-team',
             allowedKeys: new Set(['HIDDEN']),
-        })).rejects.toThrow('DISCOVERY_AMBIGUOUS');
+        })).resolves.toMatchObject({ keys: ['HIDDEN'], sensitiveKeys: ['HIDDEN'], count: 1, values: {} });
         expect(requests).toHaveLength(1);
+        expect(new URL(requests[0]!).pathname).toBe('/v9/projects/fixture-project/env');
+    });
+
+    it('accepts a unique production membership across multiple targets', async () => {
+        const requests: string[] = [];
+        const transport: ProtectedTransport = {
+            request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
+                requests.push(request.url);
+                const url = new URL(request.url);
+                if (url.pathname.endsWith('/env')) {
+                    expect(url.searchParams.get('target')).toBe('production');
+                    return {
+                        status: 200,
+                        headers: {},
+                        url: request.url,
+                        body: JSON.stringify({ envs: [{ id: 'env-multi-target', key: 'MULTI_TARGET', type: 'plain', target: ['production', 'preview'], gitBranch: null, configurationId: null }] }),
+                    };
+                }
+                expect(url.pathname).toBe('/v1/projects/fixture-project/env/env-multi-target');
+                return {
+                    status: 200,
+                    headers: {},
+                    url: request.url,
+                    body: JSON.stringify({ id: 'env-multi-target', key: 'MULTI_TARGET', type: 'plain', target: ['production', 'preview'], gitBranch: null, configurationId: null, value: 'multi-target-value' }),
+                };
+            },
+        };
+        const client = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token' });
+        await expect(readExactVercelProductionEnvValues({
+            transport: client,
+            projectId: 'fixture-project',
+            teamId: 'fixture-team',
+            allowedKeys: new Set(['MULTI_TARGET']),
+        })).resolves.toMatchObject({ values: { MULTI_TARGET: 'multi-target-value' }, count: 1 });
+        expect(requests).toHaveLength(2);
     });
 
     it('uses inventory metadata to fetch only allowlisted values by id', async () => {
@@ -158,7 +193,6 @@ describe('owner production discovery boundaries', () => {
     });
 
     it.each([
-        ['multiple targets', { target: ['production', 'preview'] }],
         ['branch scoped', { target: ['production'], gitBranch: 'feature' }],
         ['shared configuration', { target: ['production'], configurationId: 'shared' }],
     ])('rejects %s allowlisted inventory metadata', async (_case, override) => {
