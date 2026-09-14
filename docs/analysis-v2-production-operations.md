@@ -194,11 +194,16 @@ read-only/review boundary:
 If the service-role environment value is marked sensitive and cannot be
 retrieved from Vercel, the authenticated linked Supabase CLI is allowed only as
 an owner credential conduit for the zero-work read. The linked
-`supabase/.temp/project-ref` file is read from the owner-controlled primary
-workdir resolved from Git's common dir and must exactly match the configured
-Supabase origin; the origin remains the sole project selector. Pass that primary
-workdir as `--workdir`, while resolving the local pinned executable from the current
-clean implementation/ops worktree's `node_modules/.bin/supabase`. Invoke the CLI directly
+`supabase/.temp/project-ref` file is read from the owner-controlled canonical
+worktree at `<primary>/.worktrees/final-main-20260725`, where `<primary>` is
+derived from the current worktree's Git common dir. The candidate must have the
+same owner and pass `git -C <candidate> rev-parse --git-common-dir` equality
+against the current worktree; the resolver returns its real path and does not
+scan history or other worktrees. The ref must exactly match the configured
+Supabase origin, which remains the sole project selector. Pass that real owner
+workdir as `--workdir`, while resolving the local pinned executable from the
+current clean implementation/ops worktree's `node_modules/.bin/supabase`; verify
+the installed CLI reports exactly `2.102.0` before invoking it. Invoke the CLI directly
 with `projects api-keys --output json`, using
 `shell: false`, a fixed non-dotenv environment, bounded timeout/output, and
 discarded stderr; do not pass `--project-ref` or `--reveal`. Parse only the

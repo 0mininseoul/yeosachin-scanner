@@ -9,11 +9,13 @@ import {
     loadOwnerAuthBoundary,
     parseSupabaseServiceRoleKey,
     scrubOwnerError,
+    supabaseProjectRefFromOrigin,
     type GoogleTokenChild,
 } from './owner-auth';
 
 const PROTECTED_TOKEN = 'fixture-vercel-secret-value';
 const GOOGLE_TOKEN = 'fixture-google-secret-value';
+const verifyLocalCliVersion = (_command: string, _cwd: string): void => undefined;
 
 function privateFile(directory: string, name: string, value: unknown): string {
     const path = join(directory, name);
@@ -223,11 +225,17 @@ describe('owner credential boundary', () => {
         };
         let capturedArgs: readonly string[] = [];
         let capturedCommand: string | undefined;
+        let verifiedCommand: string | undefined;
+        let verifiedWorkdir: string | undefined;
         let capturedOptions: Record<string, unknown> | undefined;
         const key = await captureSupabaseServiceRoleKey({
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: primary,
             command: join(implementation, 'node_modules', '.bin', 'supabase'),
+            verifyCliVersion: (command, cwd) => {
+                verifiedCommand = command;
+                verifiedWorkdir = cwd;
+            },
             spawn: (command, args, options) => {
                 capturedCommand = command;
                 capturedArgs = args;
@@ -237,11 +245,41 @@ describe('owner credential boundary', () => {
             timeoutMs: 1_000,
         });
         expect(key).toBe('fixture-service-role-key');
+        expect(verifiedCommand).toBe(join(implementation, 'node_modules', '.bin', 'supabase'));
+        expect(verifiedWorkdir).toBe(primary);
         expect(capturedCommand).toBe(join(implementation, 'node_modules', '.bin', 'supabase'));
         expect(capturedCommand).not.toBe(join(primary, 'node_modules', '.bin', 'supabase'));
         expect(capturedArgs).toEqual(['--workdir', primary, 'projects', 'api-keys', '--output', 'json']);
         expect(capturedOptions).toMatchObject({ cwd: primary, shell: false, env: { LANG: 'C', NODE_ENV: 'production' } });
         expect(capturedOptions?.env).not.toHaveProperty('SUPABASE_SERVICE_ROLE_KEY');
+    });
+
+    it('fails closed when the local Supabase CLI version is not exact without exposing output', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(directory, 'supabase', '.temp', 'project-ref'), 'abcdefghijklmnopqrst\n', { mode: 0o600 });
+        let spawned = false;
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            command: 'supabase',
+            verifyCliVersion: () => { throw new Error(PROTECTED_TOKEN); },
+            spawn: () => { spawned = true; throw new Error('must not spawn'); },
+        })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            command: 'supabase',
+            verifyCliVersion: () => { throw new Error(PROTECTED_TOKEN); },
+            spawn: () => { throw new Error('must not spawn'); },
+        })).rejects.not.toThrow(PROTECTED_TOKEN);
+        expect(spawned).toBe(false);
+    });
+
+    it('accepts only lowercase-letter Supabase refs of exactly twenty characters', () => {
+        expect(supabaseProjectRefFromOrigin('https://abcdefghijklmnopqrst.supabase.co/')).toBe('abcdefghijklmnopqrst');
+        expect(() => supabaseProjectRefFromOrigin('https://abcdefghijklmnopqrs1.supabase.co/')).toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(() => supabaseProjectRefFromOrigin('https://ABCDEFGHIJKLMNOPQRST.supabase.co/')).toThrow('OWNER_AUTH_UNAVAILABLE');
     });
 
     it('rejects a Supabase origin that cannot produce the exact CLI project ref', async () => {
@@ -288,6 +326,7 @@ describe('owner credential boundary', () => {
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: directory,
             command: 'supabase',
+            verifyCliVersion: verifyLocalCliVersion,
             spawn: () => oversized,
             timeoutMs: 1_000,
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
@@ -303,6 +342,7 @@ describe('owner credential boundary', () => {
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: directory,
             command: 'supabase',
+            verifyCliVersion: verifyLocalCliVersion,
             spawn: () => hanging,
             timeoutMs: 10,
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');

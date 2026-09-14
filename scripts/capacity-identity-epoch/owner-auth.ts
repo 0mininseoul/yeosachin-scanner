@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from 'node:fs';
-import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
+import { execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
@@ -15,6 +15,8 @@ const MAX_OWNER_FILE_BYTES = 64 * 1024;
 const MAX_TOKEN_BYTES = 8 * 1024;
 const MAX_SUPABASE_OUTPUT_BYTES = 64 * 1024;
 const MAX_SUPABASE_PROJECT_REF_BYTES = 128;
+const MAX_SUPABASE_VERSION_BYTES = 128;
+const SUPABASE_CLI_VERSION = '2.102.0';
 const SAFE_PATH = /^[^\u0000-\u001f\u007f]{1,4096}$/;
 const SAFE_TEXT = /^[^\u0000-\u001f\u007f]{0,65536}$/;
 const SAFE_TOKEN = /^[^\u0000-\u001f\u007f\s]{1,8192}$/;
@@ -22,7 +24,7 @@ const SAFE_VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SAFE_VERCEL_NAME = /^[^\u0000-\u001f\u007f]{1,256}$/;
 const SAFE_REPO_DIRECTORY = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 const SAFE_SUPABASE_ROW_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
-const SUPABASE_PROJECT_REF = /^[a-z0-9]{20}$/;
+const SUPABASE_PROJECT_REF = /^[a-z]{20}$/;
 const SUPABASE_ROW_TYPES = new Set(['legacy', 'publishable', 'secret']);
 const SUPABASE_ROW_BASE_KEYS = Object.freeze(['api_key', 'description', 'hash', 'id', 'name', 'prefix', 'type']);
 const SUPABASE_ROW_EXTENDED_KEYS = Object.freeze([
@@ -193,6 +195,31 @@ function safeSpawnCommand(value: string): boolean {
     return /^[A-Za-z0-9._/-]{1,256}$/.test(value) && !value.includes('..');
 }
 
+function verifySupabaseCliVersion(command: string, cwd: string): void {
+    let raw: string;
+    try {
+        raw = execFileSync(command, ['--version'], {
+            cwd,
+            env: {
+                PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin',
+                HOME: homedir(),
+                LANG: 'C',
+                NODE_ENV: 'production',
+                NO_COLOR: '1',
+            },
+            shell: false,
+            stdio: ['ignore', 'pipe', 'ignore'],
+            encoding: 'utf8',
+            timeout: 5_000,
+            maxBuffer: MAX_SUPABASE_VERSION_BYTES,
+        }) as string;
+    } catch {
+        unavailable();
+    }
+    if (Buffer.byteLength(raw, 'utf8') > MAX_SUPABASE_VERSION_BYTES
+        || (raw !== SUPABASE_CLI_VERSION && raw !== `${SUPABASE_CLI_VERSION}\n`)) unavailable();
+}
+
 /**
  * Capture exactly one gcloud access-token line.  stdout/stderr are consumed
  * in private memory and are never interpolated into an Error or output.
@@ -308,6 +335,8 @@ export type CaptureSupabaseServiceRoleKeyOptions = Readonly<{
     command: string;
     /** Defaults to the invoking uid; test seams may provide a fixture owner. */
     uid?: number;
+    /** Test seam for the local CLI version check; production executes `--version`. */
+    verifyCliVersion?: (command: string, cwd: string) => void;
     /** Test seam; production uses node's spawn with private pipes. */
     spawn?: (command: string, args: readonly string[], options: SpawnOptions) => GoogleTokenChild;
     timeoutMs?: number;
@@ -316,13 +345,16 @@ export type CaptureSupabaseServiceRoleKeyOptions = Readonly<{
 /** Extract the project ref from the exact production origin without fallback selectors. */
 export function supabaseProjectRefFromOrigin(origin: string): string {
     if (typeof origin !== 'string' || origin.length > 2048) unavailable();
+    const rawMatch = /^https:\/\/([a-z]{20})\.supabase\.co\/?$/.exec(origin);
+    if (rawMatch === null) unavailable();
     let parsed: URL;
     try { parsed = new URL(origin); } catch { unavailable(); }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
         || parsed.pathname !== '/' || parsed.search || parsed.hash) unavailable();
-    const match = /^([a-z0-9]{20})\.supabase\.co$/.exec(parsed.hostname);
+    const match = /^([a-z]{20})\.supabase\.co$/.exec(parsed.hostname);
     if (match === null) unavailable();
-    return match[1]!;
+    if (match[1] !== rawMatch[1]) unavailable();
+    return rawMatch[1]!;
 }
 
 function linkedSupabaseProjectRef(workdir: string, expectedUid: number): string {
@@ -352,6 +384,11 @@ export async function captureSupabaseServiceRoleKey(options: CaptureSupabaseServ
     if (!Number.isSafeInteger(uid) || uid < 0 || linkedSupabaseProjectRef(options.workdir, uid) !== projectRef) unavailable();
     const command = options.command;
     if (!safeSpawnCommand(command)) unavailable();
+    try {
+        (options.verifyCliVersion ?? verifySupabaseCliVersion)(command, options.workdir);
+    } catch {
+        unavailable();
+    }
     const timeoutMs = options.timeoutMs ?? 15_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) unavailable();
     const spawn = options.spawn ?? ((name, args, spawnOptions) => {

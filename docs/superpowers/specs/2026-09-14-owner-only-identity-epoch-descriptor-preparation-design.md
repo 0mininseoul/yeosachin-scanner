@@ -95,11 +95,16 @@ stdout/stderr는 부모의 private pipe로 캡처하고 그대로 전달하거�
 Supabase zero-work ledger 조회에 필요한 service-role credential이 Vercel에서
 `sensitive`로 표시되어 irretrievable이면, 이 경우에 한해 authenticated linked
 Supabase CLI를 owner credential conduit로 사용할 수 있다. linked
-`supabase/.temp/project-ref` 파일은 Git common-dir에서 확인한 owner-controlled
-primary workdir에서 읽고 configured Supabase origin에서 유도한 정확한 project ref와
-일치해야 하며, CLI는 그 primary workdir를 `--workdir`로 사용한다. local pinned
-executable은 현재 clean implementation/ops worktree의 `node_modules/.bin/supabase`에서
-가져와 primary workdir와 분리한다. CLI는 direct `spawn`(`shell: false`)하고, 고정된
+`supabase/.temp/project-ref` 파일은 현재 worktree의 Git common-dir에서 유도한
+`<primary>/.worktrees/final-main-20260725` canonical owner worktree에서 읽는다.
+후보 directory의 owner가 현재 user와 같고 `git -C <candidate> rev-parse
+--git-common-dir`가 current worktree와 정확히 같은 common-dir를 반환해야 하며,
+resolver는 real path만 반환하고 history나 다른 worktree를 scan하지 않는다.
+configured Supabase origin에서 유도한 정확한 project ref와 일치해야 하며, CLI는
+그 real owner workdir를 `--workdir`로 사용한다. local pinned executable은 현재
+clean implementation/ops worktree의 `node_modules/.bin/supabase`에서 가져와
+owner workdir와 분리하고, installed CLI version이 정확히 `2.102.0`인지 확인한다.
+CLI는 direct `spawn`(`shell: false`)하고, 고정된
 non-dotenv environment와 timeout/output cap을 사용하며 stderr를 폐기한다. 호출은
 `projects api-keys --output json`으로 제한하고 `--project-ref`, `--reveal`을 사용하지
 않는다. 응답은 관측된 7-field base 또는 10-field extended exact row contract의

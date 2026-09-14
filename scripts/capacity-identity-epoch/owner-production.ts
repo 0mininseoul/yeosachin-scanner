@@ -1,4 +1,4 @@
-import { lstatSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -89,7 +89,8 @@ const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const QUEUE = /^[A-Za-z0-9-]{1,100}$/;
 const SCHEDULER = /^[A-Za-z0-9_-]{1,500}$/;
 const BUCKET = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
-const SUPABASE_ORIGIN = /^https:\/\/[a-z0-9]{20}\.supabase\.co\/$/;
+const SUPABASE_ORIGIN = /^https:\/\/[a-z]{20}\.supabase\.co\/$/;
+const SUPABASE_ORIGIN_INPUT = /^https:\/\/[a-z]{20}\.supabase\.co\/?$/;
 const IMAGE = /^[^\s\u0000-\u001f\u007f]{1,2048}@sha256:[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SAFE = /^[^\u0000-\u001f\u007f]{1,4096}$/;
@@ -168,13 +169,7 @@ function ownerDirectory(path: string, expectedUid: number): string {
     return path;
 }
 
-/**
- * Resolve the primary worktree from Git's common directory.  A linked
- * worktree's own root is intentionally not used for the Supabase project-ref:
- * its `.git` file can point at the shared primary repository metadata while
- * its local files are otherwise isolated.
- */
-function primaryRepositoryRoot(cwd: string, expectedUid: number): string {
+function gitCommonDirectory(cwd: string): string {
     let raw: string;
     try {
         raw = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
@@ -192,9 +187,29 @@ function primaryRepositoryRoot(cwd: string, expectedUid: number): string {
     if (commonDirRaw.length === 0 || commonDirRaw.includes('\n') || commonDirRaw.includes('\r') || !SAFE.test(commonDirRaw)) unavailable();
     const commonDir = resolve(commonDirRaw);
     if (commonDir !== commonDirRaw || !commonDir.endsWith('/.git')) unavailable();
+    return commonDir;
+}
+
+/**
+ * Resolve the fixed owner Supabase workdir from Git's common directory. A
+ * linked worktree's own root is intentionally not used for the project-ref:
+ * the owner workdir is the canonical `.worktrees/final-main-20260725`
+ * worktree, and it must belong to the same repository as the current one.
+ */
+function primaryRepositoryRoot(cwd: string, expectedUid: number): string {
+    const commonDir = gitCommonDirectory(cwd);
     ownerDirectory(dirname(commonDir), expectedUid);
     ownerDirectory(commonDir, expectedUid);
-    return dirname(commonDir);
+    const primary = dirname(commonDir);
+    const worktreesDirectory = join(primary, '.worktrees');
+    ownerDirectory(worktreesDirectory, expectedUid);
+    const candidate = join(worktreesDirectory, 'final-main-20260725');
+    ownerDirectory(candidate, expectedUid);
+    let realCandidate: string;
+    try { realCandidate = realpathSync(candidate); } catch { unavailable(); }
+    ownerDirectory(realCandidate, expectedUid);
+    if (gitCommonDirectory(realCandidate) !== commonDir) unavailable();
+    return realCandidate;
 }
 
 export function resolvePrimaryRepositoryRootForOwner(cwd: string): string {
@@ -1074,7 +1089,8 @@ function makeSupabaseOrigin(env: Env): string {
         try { parsed = new URL(value); } catch { fail('PROJECT_MISMATCH'); }
         const origin = `${parsed.origin}/`;
         if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
-            || parsed.pathname !== '/' || parsed.search || parsed.hash || !SUPABASE_ORIGIN.test(origin)) fail('PROJECT_MISMATCH');
+            || parsed.pathname !== '/' || parsed.search || parsed.hash
+            || !SUPABASE_ORIGIN_INPUT.test(value) || !SUPABASE_ORIGIN.test(origin)) fail('PROJECT_MISMATCH');
         return origin;
     };
     const origin = configured(next ?? server!);
