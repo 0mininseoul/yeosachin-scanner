@@ -145,6 +145,7 @@ function parseHttpsOrigin(value: unknown): string {
 }
 
 function parseService(resource: string, body: Record<string, unknown>): CloudRunServiceObservation {
+    if (body.apiVersion !== 'serving.knative.dev/v1' || body.kind !== 'Service') fail('ADAPTER_RESPONSE_INVALID');
     const { project, location, service } = parseResource(resource);
     const metadata = object(body.metadata);
     const spec = object(body.spec);
@@ -327,12 +328,13 @@ export class CloudRunAdapter {
     }>): Promise<CloudRunServiceObservation> {
         const leaseCheck = requireLeaseCheck(options.leaseCheck, { operation: options.operation, resource: options.resource });
         await leaseCheck();
+        const body = object(options.body);
+        if (body.apiVersion !== 'serving.knative.dev/v1' || body.kind !== 'Service') fail('ADAPTER_REQUEST_INVALID');
         const before = await this.getService(options.resource);
         if (!DECIMAL.test(options.expectedGeneration)) fail('ADAPTER_REQUEST_INVALID');
         if (before.generation !== options.expectedGeneration) fail('OBSERVATION_RACE');
         const parsed = parseResource(options.resource);
         const path = this.servicePath(parsed.project, parsed.service);
-        const body = object(options.body);
         const metadata = object(body.metadata ?? {});
         const requestBody = { ...body, metadata: { ...metadata, resourceVersion: before.resourceVersion } };
         // Fence immediately before the actual mutation.  The check above

@@ -163,6 +163,8 @@ function reviewedBodies(packet: CapacityEpochPacket): Record<Role, Readonly<Reco
         const template = runtimeSpec(runtime, image, revision).template as Record<string, unknown>;
         const templateSpec = template.spec as Record<string, unknown>;
         return [role, {
+            apiVersion: 'serving.knative.dev/v1',
+            kind: 'Service',
             metadata: { name: runtime.service, generation: 1, resourceVersion: 'rv-1', labels: {}, annotations: {} },
             spec: {
                 template: {
@@ -205,6 +207,8 @@ function serviceWire(runtime: ProtectedRuntimeInput, revision: string, image: st
     const spec = runtimeSpec(runtime, image, revision);
     const wireTraffic = traffic.map(entry => ({ revisionName: entry.revisionName, percent: entry.percent, tag: null }));
     return {
+        apiVersion: 'serving.knative.dev/v1',
+        kind: 'Service',
         metadata: { generation, resourceVersion: `rv-${generation}` },
         spec: { ...spec, traffic: wireTraffic },
         status: {
@@ -452,6 +456,7 @@ export class FakeProvider implements ProtectedTransport {
                 const spec = body.spec as Record<string, unknown>;
                 const traffic = (spec.traffic ?? []) as Array<{ revisionName: string; percent: number; tag?: string | null }>;
                 service.body = {
+                    apiVersion: 'serving.knative.dev/v1', kind: 'Service',
                     metadata: { generation, resourceVersion: `rv-${generation}` }, spec,
                     status: { ...(service.body.status as Record<string, unknown>), observedGeneration: generation, latestCreatedRevisionName: (spec.template as Record<string, unknown>).metadata ? ((spec.template as Record<string, unknown>).metadata as Record<string, unknown>).name : service.revision, latestReadyRevisionName: (spec.template as Record<string, unknown>).metadata ? ((spec.template as Record<string, unknown>).metadata as Record<string, unknown>).name : service.revision, traffic },
                 };
@@ -740,7 +745,7 @@ function createHarness(options: HarnessOptions = {}) {
         const revision = revisionName(packet, role);
         const oldRevision = packet.oldManifest.source[role].oldRevision;
         const image = `asia-northeast3-docker.pkg.dev/${runtime.project}/workers/${role}@sha256:${'b'.repeat(64)}`;
-        return [role, { metadata: { generation: 1 }, spec: { ...runtimeSpec(runtime, image, revision), traffic: [{ revisionName: oldRevision, percent: 100, tag: null }, { revisionName: revision, percent: 0, tag: null }] } }];
+        return [role, { apiVersion: 'serving.knative.dev/v1', kind: 'Service', metadata: { generation: 1 }, spec: { ...runtimeSpec(runtime, image, revision), traffic: [{ revisionName: oldRevision, percent: 100, tag: null }, { revisionName: revision, percent: 0, tag: null }] } }];
     })) as unknown as Record<Role, Readonly<Record<string, unknown>>>;
     const sourceObservation = async ({ role, phase, revision }: { role: Role; phase: 'old' | 'desired'; revision: string; runtime: ProtectedRuntimeInput }) => {
         const record = provider.readSource(role, phase, revision);

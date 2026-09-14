@@ -183,6 +183,42 @@ malformed receiver routes, GCS journal, Cloud Run, IAM, Scheduler, retention,
 and readiness resources; this repository intentionally does not discover or
 invent any of those protected values.
 
+### Owner-only identity epoch preparation
+
+The supported preparation CLI reads the linked owner session and exact
+production selectors in memory. It does not source dotenv, pull production
+environment values to a file, accept protected resource values in argv, or
+include credentials in normal output. Run each command as a separate
+read-only/review boundary:
+
+~~~text
+node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare inspect
+node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare apply --approved-digest DIGEST
+node --import tsx scripts/prepare-capacity-identity-epoch.ts epoch inspect
+node --import tsx scripts/prepare-capacity-identity-epoch.ts epoch apply --approved-digest DIGEST --through VERIFIED
+~~~
+
+`prepare inspect` emits only `proposalDigest`, `discoveryDigest`, and
+reuse/missing/pause counts. `prepare apply` re-reads the same graph before any
+mutation, creates only missing keyless service accounts and pauses only the
+enabled recovery schedulers, then reads each mutation back; it never creates
+keys or changes IAM, retention, queues, gates, or activation. A stale digest,
+ambiguous resource, missing evidence, or failed read-back is a stop.
+
+After a scheduler pause, `QUIESCENCE_PENDING` is expected until the independent
+pause provenance, last-attempt window, and configured grace period mature. Do
+not resume or compensate the scheduler; rerun `prepare inspect` only after the
+window has elapsed, then rerun `epoch inspect`. `epoch inspect` requires two
+fresh matching read-only passes and emits only safe packet/bootstrap/scope/
+identity-graph digests; approve that exact `DIGEST` for `epoch apply`.
+
+`epoch apply` is permanently bounded to the existing `check`, coordinator
+`apply --through VERIFIED`, and independent verifier sequence. Stop only at
+`VERIFIED_OK`; no activation, gate-open, queue/scheduler resume, provider or
+user work, or real `0_min._.00` canary is part of this path. If any command
+fails, retain the fixed error code, discard protected values, and begin again
+with a fresh read-only inspect after confirming the closed-state preconditions.
+
 ### Ordinary mutation identity-epoch bridge (local candidate)
 
 The seven reviewed ordinary mutation entry points use the same generation-fenced

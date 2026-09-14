@@ -61,7 +61,12 @@ export type EpochErrorCode =
     | 'ADAPTER_TIMEOUT'
     | 'ADAPTER_REDIRECT'
     | 'ADAPTER_NOT_ALLOWED'
-    | 'PROVIDER_NETWORK_FORBIDDEN';
+    | 'PROVIDER_NETWORK_FORBIDDEN'
+    | 'OWNER_AUTH_UNAVAILABLE'
+    | 'DISCOVERY_AMBIGUOUS'
+    | 'PROPOSAL_STALE'
+    | 'QUIESCENCE_PENDING'
+    | 'PROTECTED_PIPE_FAILED';
 
 /** Errors contain only an allowlisted code, never provider input or raw errors. */
 export class EpochError extends Error {

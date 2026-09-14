@@ -125,6 +125,8 @@ function reviewedServiceBodies(packet: ReturnType<typeof createFixturePacket>): 
             }),
         ];
         return [role, {
+            apiVersion: 'serving.knative.dev/v1',
+            kind: 'Service',
             metadata: { name: runtime.service, generation: 1, resourceVersion: packet.protectedObservations.old.runtime[role].resourceVersion, labels: {}, annotations: {} },
             spec: {
                 template: {
