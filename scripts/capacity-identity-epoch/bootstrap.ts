@@ -254,7 +254,8 @@ export function validateServiceBodies(
     for (const role of ['preflight', 'paid'] as const) {
         const runtime = packet.protectedInputs.desired.runtime[role];
         const body = serviceBodies[role];
-        if (!isObject(body) || !hasExactKeys(body, ['metadata', 'spec'])) fail('PROTECTED_INPUT_UNAVAILABLE');
+        if (!isObject(body) || !hasExactKeys(body, ['apiVersion', 'kind', 'metadata', 'spec'])
+            || body.apiVersion !== 'serving.knative.dev/v1' || body.kind !== 'Service') fail('PROTECTED_INPUT_UNAVAILABLE');
         const metadata = body.metadata;
         const spec = body.spec;
         if (!isObject(metadata) || !exactKeys(metadata, ['name', 'generation', 'resourceVersion', 'labels', 'annotations'])

@@ -34,12 +34,25 @@ function fail(code: 'PAGINATION_INCOMPLETE' | 'DISCOVERY_AMBIGUOUS' | 'PROJECT_M
     epochFail(code);
 }
 
+export type DiscoveryPageToken = string | number | null | undefined;
+
 export type DiscoveryPage<T> = Readonly<{
     items: readonly T[];
-    nextPageToken?: string;
+    nextPageToken?: DiscoveryPageToken;
 }>;
 
 export type PagedReader<T> = (pageToken?: string) => Promise<DiscoveryPage<T>>;
+
+/** Normalize provider continuation cursors without treating numeric zero as absent. */
+export function normalizePageToken(value: unknown): string | undefined {
+    if (value === undefined || value === null || value === '') return undefined;
+    if (typeof value === 'number') {
+        if (Number.isSafeInteger(value) && value >= 0) return String(value);
+        fail('PAGINATION_INCOMPLETE');
+    }
+    if (typeof value !== 'string' || !PAGE_TOKEN.test(value)) fail('PAGINATION_INCOMPLETE');
+    return value;
+}
 
 /** Read every page, rejecting truncation, loops, and malformed tokens. */
 export async function collectFullyPaged<T>(options: Readonly<{
@@ -56,9 +69,9 @@ export async function collectFullyPaged<T>(options: Readonly<{
         try { current = await options.readPage(token); } catch { fail('PAGINATION_INCOMPLETE'); }
         if (!isObject(current) || !Array.isArray(current.items)) fail('PAGINATION_INCOMPLETE');
         result.push(...current.items);
-        const next = current.nextPageToken;
-        if (next === undefined || next === '') return result;
-        if (typeof next !== 'string' || !PAGE_TOKEN.test(next) || seenTokens.has(next)) fail('PAGINATION_INCOMPLETE');
+        const next = normalizePageToken(current.nextPageToken);
+        if (next === undefined) return result;
+        if (seenTokens.has(next)) fail('PAGINATION_INCOMPLETE');
         seenTokens.add(next);
         token = next;
     }
@@ -111,7 +124,7 @@ export type OwnerDiscoveryPass = Readonly<{
     identityGraph: IdentityGraphObservation;
     /** Existing deterministic policy result for this pass. */
     identitySelection?: IdentitySelection;
-    /** Null is allowed only for a prepare/epoch inspect that cannot prove evidence. */
+    /** Prepare discovery may report missing evidence; descriptor approval rejects null. */
     zeroWorkSources: LiveZeroWorkSources | null;
     /** Exact SHA relationships obtained from source/build/runtime records. */
     sourceBuild: readonly Readonly<{ sourceSha: string; buildSourceSha: string; runtimeSourceSha: string }>[];
@@ -269,9 +282,7 @@ export async function readExactVercelProductionEnv(input: Readonly<{
             if (!isObject(value) || !Array.isArray(value.envs)) fail('ADAPTER_RESPONSE_INVALID');
             const pagination = value.pagination;
             if (pagination !== undefined && pagination !== null && !isObject(pagination)) fail('ADAPTER_RESPONSE_INVALID');
-            const nextValue = isObject(pagination) ? pagination.next : undefined;
-            if (nextValue !== undefined && nextValue !== null && typeof nextValue !== 'string') fail('PAGINATION_INCOMPLETE');
-            const nextPageToken = typeof nextValue === 'string' ? nextValue : undefined;
+            const nextPageToken = normalizePageToken(isObject(pagination) ? pagination.next : undefined);
             return { items: value.envs, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
         },
     });
@@ -318,9 +329,7 @@ export async function readExactVercelProductionEnvValues(input: Readonly<{
             if (!isObject(value) || !Array.isArray(value.envs)) fail('ADAPTER_RESPONSE_INVALID');
             const pagination = value.pagination;
             if (pagination !== undefined && pagination !== null && !isObject(pagination)) fail('ADAPTER_RESPONSE_INVALID');
-            const nextValue = isObject(pagination) ? pagination.next : undefined;
-            if (nextValue !== undefined && nextValue !== null && typeof nextValue !== 'string') fail('PAGINATION_INCOMPLETE');
-            const nextPageToken = typeof nextValue === 'string' ? nextValue : undefined;
+            const nextPageToken = normalizePageToken(isObject(pagination) ? pagination.next : undefined);
             return { items: value.envs, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
         },
     });

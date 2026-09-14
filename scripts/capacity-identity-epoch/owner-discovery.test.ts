@@ -3,10 +3,12 @@ import {
     assertSameProject,
     assertSourceBuildMatch,
     collectFullyPaged,
+    readExactVercelProductionEnv,
     selectExactResource,
     validateLedgerCoverage,
 } from './owner-discovery';
 import { EpochError } from './contracts';
+import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from './platform';
 
 const PROJECT = 'fixture-project';
 
@@ -22,6 +24,41 @@ describe('owner production discovery boundaries', () => {
             maxPages: 2,
             readPage: async token => ({ items: [token ?? 'first'], nextPageToken: token === undefined ? 'next' : 'last' }),
         })).rejects.toThrow('PAGINATION_INCOMPLETE');
+    });
+
+    it('normalizes null and numeric continuation cursors before reading the next page', async () => {
+        const tokens: Array<string | undefined> = [];
+        await expect(collectFullyPaged({
+            readPage: async token => {
+                tokens.push(token);
+                return token === undefined
+                    ? { items: ['first'], nextPageToken: 17 }
+                    : { items: ['second'], nextPageToken: null };
+            },
+        })).resolves.toEqual(['first', 'second']);
+        expect(tokens).toEqual([undefined, '17']);
+    });
+
+    it('normalizes Vercel environment cursors before issuing the next request', async () => {
+        const requests: string[] = [];
+        const transport: ProtectedTransport = {
+            request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
+                requests.push(request.url);
+                const until = new URL(request.url).searchParams.get('until');
+                return {
+                    status: 200,
+                    headers: {},
+                    url: request.url,
+                    body: JSON.stringify(until === null
+                        ? { envs: [{ key: 'FIRST' }], pagination: { next: 17 } }
+                        : { envs: [{ key: 'SECOND' }], pagination: { next: null } }),
+                };
+            },
+        };
+        const client = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token' });
+        await expect(readExactVercelProductionEnv({ transport: client, projectId: 'fixture-project', teamId: 'fixture-team' }))
+            .resolves.toMatchObject({ keys: ['FIRST', 'SECOND'], count: 2 });
+        expect(new URL(requests[1]!).searchParams.get('until')).toBe('17');
     });
 
     it('rejects ambiguous exact selectors and mixed-project inventory', () => {

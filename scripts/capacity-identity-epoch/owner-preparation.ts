@@ -271,6 +271,17 @@ export function selectDesiredIdentityGraph(observation: IdentityGraphObservation
     const missingAccounts: MissingIdentity[] = [];
     const actions: PreparationAction[] = [];
 
+    // Recovery schedulers are the first mutable boundary. Pause every
+    // enabled scheduler before any account-create action can run.
+    if (observation.schedulerStates !== undefined && observation.schedulerResources !== undefined) {
+        for (const role of ROLES) {
+            if (observation.schedulerStates[role] === 'ENABLED') {
+                const resource = observation.schedulerResources[role];
+                actions.push({ kind: 'scheduler.pause', role, resource });
+            }
+        }
+    }
+
     for (const slot of SLOTS) {
         const oldIdentity = observation.slots[slot];
         const requested = observation.desiredSlots?.[slot] ?? oldIdentity;
@@ -305,14 +316,6 @@ export function selectDesiredIdentityGraph(observation: IdentityGraphObservation
         || desiredIds.includes(observation.build.identity)) conflict();
     for (const item of missingAccounts) assertPreparationAction(actions.find(action => action.kind === 'account.create' && action.slot === item.slot));
 
-    if (observation.schedulerStates !== undefined && observation.schedulerResources !== undefined) {
-        for (const role of ROLES) {
-            if (observation.schedulerStates[role] === 'ENABLED') {
-                const resource = observation.schedulerResources[role];
-                actions.push({ kind: 'scheduler.pause', role, resource });
-            }
-        }
-    }
     for (const action of actions) assertPreparationAction(action);
 
     const desired: DesiredIdentityGraph = Object.freeze({

@@ -40,6 +40,8 @@ function descriptors(packet = createFixturePacket()): OwnerDescriptors {
         const plan = packet.desiredManifest.source[role].revisionPlan;
         const revision = `${plan.prefix}${packet.desiredManifest.source[role].desiredRevisionId ?? `${packet.desiredManifest.source[role].desiredSha.slice(0, 12)}${plan.suffix}`}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
         return [role, {
+            apiVersion: 'serving.knative.dev/v1',
+            kind: 'Service',
             metadata: { name: runtime.service, generation: 1, resourceVersion: packet.protectedObservations.old.runtime[role].resourceVersion, labels: {}, annotations: {} },
             spec: { template: { metadata: { name: revision, labels: {}, annotations: {
                 'autoscaling.knative.dev/maxScale': String(runtime.settings.maxInstances),
@@ -179,4 +181,26 @@ describe('owner inherited-FD bridge', () => {
         })).rejects.toThrow('PROTECTED_PIPE_FAILED');
         expect(received).toHaveLength(1);
     }, 2_000);
+
+    it('terminates a completed active child again from the bridge finally boundary', async () => {
+        const value = descriptors();
+        const received: Array<Readonly<{ args: readonly string[]; env: Readonly<Record<string, string>>; packet: string; bootstrap: string; writes: number }>> = [];
+        const killed: NodeJS.Signals[] = [];
+        const spawn = fakeSpawn([{ stage: 'check', stdout: 'unexpected\n' }], received);
+        const trackedSpawn: OwnerFdBridgeSpawn = (command, args, options) => {
+            const child = spawn(command, args, options);
+            const kill = child.kill.bind(child);
+            child.kill = (signal?: NodeJS.Signals): boolean => {
+                killed.push(signal ?? 'SIGTERM');
+                return kill(signal);
+            };
+            return child;
+        };
+        await expect(runOwnerEpochThroughVerified({
+            packet: value.packet,
+            bootstrap: value.bootstrap,
+            options: { spawn: trackedSpawn },
+        })).rejects.toThrow('PROTECTED_PIPE_FAILED');
+        expect(killed).toContain('SIGTERM');
+    });
 });

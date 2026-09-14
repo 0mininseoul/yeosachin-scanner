@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -31,6 +31,26 @@ describe('owner credential boundary', () => {
         expect(auth.vercelTeamId).toBe('linked-team');
         expect(await auth.vercelTokenProvider()).toBe(PROTECTED_TOKEN);
         expect(Object.keys(auth).sort()).toEqual(['googleTokenProvider', 'vercelProjectId', 'vercelTeamId', 'vercelTokenProvider']);
+    });
+
+    it('selects the exact current worktree project from an installed Vercel repo link', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        const vercelDirectory = join(directory, '.vercel');
+        const worktree = join(directory, 'packages', 'scanner');
+        mkdirSync(vercelDirectory, { recursive: true });
+        mkdirSync(worktree, { recursive: true });
+        const metadataPath = privateFile(vercelDirectory, 'repo.json', {
+            remoteName: 'origin',
+            projects: [
+                { id: 'other-project', name: 'other', directory: 'packages/other', orgId: 'other-team' },
+                { id: 'current-project', name: 'current', directory: 'packages/scanner', orgId: 'current-team' },
+            ],
+        });
+        const credentialsPath = privateFile(directory, 'auth.json', { token: PROTECTED_TOKEN });
+        const auth = await loadOwnerAuthBoundary({ linkedMetadataPath: metadataPath, credentialStorePath: credentialsPath, cwd: worktree });
+
+        expect(auth.vercelProjectId).toBe('current-project');
+        expect(auth.vercelTeamId).toBe('current-team');
     });
 
     it('maps owner uid, permission, and malformed credential failures to one fixed code', async () => {

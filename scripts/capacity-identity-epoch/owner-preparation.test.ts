@@ -142,7 +142,7 @@ describe('owner identity preparation policy', () => {
             },
         });
         expect(ALLOWED_PREPARATION_ACTION_KINDS).toEqual(['account.create', 'scheduler.pause']);
-        expect(result.actions.map(action => action.kind)).toEqual(['account.create', 'scheduler.pause']);
+        expect(result.actions.map(action => action.kind)).toEqual(['scheduler.pause', 'account.create']);
         expect(() => selectDesiredIdentityGraph({
             ...base,
             schedulerStates: { preflight: 'ENABLED', paid: 'ENABLED' },

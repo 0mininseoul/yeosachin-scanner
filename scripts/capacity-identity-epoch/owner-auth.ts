@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
+import { basename, dirname, relative, resolve } from 'node:path';
 import {
     AuthenticatedProtectedTransport,
     createGoogleProtectedTransport,
@@ -13,6 +14,8 @@ const MAX_TOKEN_BYTES = 8 * 1024;
 const SAFE_PATH = /^[^\u0000-\u001f\u007f]{1,4096}$/;
 const SAFE_TOKEN = /^[^\u0000-\u001f\u007f\s]{1,8192}$/;
 const SAFE_VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const SAFE_VERCEL_NAME = /^[^\u0000-\u001f\u007f]{1,256}$/;
+const SAFE_REPO_DIRECTORY = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
 function unavailable(): never {
     epochFail('OWNER_AUTH_UNAVAILABLE');
@@ -62,11 +65,67 @@ function currentUid(): number {
     return uid;
 }
 
-function parseLinkedMetadata(value: Record<string, unknown>): Readonly<{ projectId: string; teamId: string }> {
-    if (!hasExactKeys(value, ['projectId', 'orgId'])
-        || typeof value.projectId !== 'string' || !SAFE_VERCEL_ID.test(value.projectId)
-        || typeof value.orgId !== 'string' || !SAFE_VERCEL_ID.test(value.orgId)) unavailable();
-    return { projectId: value.projectId, teamId: value.orgId };
+function normalizedRepoDirectory(value: unknown): string {
+    if (value === '.') return '.';
+    if (typeof value !== 'string' || value.length === 0 || value.startsWith('/') || value.includes('\\')
+        || !SAFE_REPO_DIRECTORY.test(value)) unavailable();
+    const segments = value.split('/');
+    if (segments.some(segment => segment === '.' || segment === '..')) unavailable();
+    return segments.join('/');
+}
+
+function parseRepoLink(value: Record<string, unknown>, metadataPath: string, cwd: string): Readonly<{ projectId: string; teamId: string }> {
+    const keys = Object.keys(value).sort();
+    if (!keys.every(key => ['orgId', 'projects', 'remoteName'].includes(key))
+        || !hasExactKeys(value, value.orgId === undefined ? ['projects', 'remoteName'] : ['orgId', 'projects', 'remoteName'])
+        || typeof value.remoteName !== 'string' || !SAFE_VERCEL_NAME.test(value.remoteName)
+        || !Array.isArray(value.projects) || value.projects.length === 0) unavailable();
+    const topLevelOrgId = value.orgId;
+    if (topLevelOrgId !== undefined && (typeof topLevelOrgId !== 'string' || !SAFE_VERCEL_ID.test(topLevelOrgId))) unavailable();
+    const projects = value.projects.map(project => {
+        if (!isObject(project)
+            || !Object.keys(project).every(key => ['directory', 'id', 'name', 'orgId'].includes(key))
+            || !['directory', 'id', 'name'].every(key => Object.prototype.hasOwnProperty.call(project, key))
+            || typeof project.id !== 'string' || !SAFE_VERCEL_ID.test(project.id)
+            || typeof project.name !== 'string' || !SAFE_VERCEL_NAME.test(project.name)
+            || (project.orgId !== undefined && (typeof project.orgId !== 'string' || !SAFE_VERCEL_ID.test(project.orgId)))) unavailable();
+        return {
+            id: project.id,
+            directory: normalizedRepoDirectory(project.directory),
+            orgId: project.orgId as string | undefined,
+        };
+    });
+    if (new Set(projects.map(project => project.id)).size !== projects.length) unavailable();
+    const repoRoot = resolve(dirname(dirname(metadataPath)));
+    const current = resolve(cwd);
+    const relativePath = relative(repoRoot, current);
+    if (relativePath === '..' || relativePath.startsWith('../') || relativePath.startsWith('..\\')) unavailable();
+    const currentDirectory = relativePath === '' ? '.' : relativePath.split('\\').join('/');
+    const matches = projects.filter(project => project.directory === '.'
+        || currentDirectory === project.directory
+        || currentDirectory.startsWith(`${project.directory}/`));
+    if (matches.length === 0) unavailable();
+    const mostSpecificLength = Math.max(...matches.map(project => project.directory === '.' ? 0 : project.directory.split('/').length));
+    const mostSpecific = matches.filter(project => (project.directory === '.' ? 0 : project.directory.split('/').length) === mostSpecificLength);
+    if (mostSpecific.length !== 1) unavailable();
+    const selected = mostSpecific[0]!;
+    const teamId = selected.orgId ?? topLevelOrgId;
+    if (typeof teamId !== 'string' || !SAFE_VERCEL_ID.test(teamId)) unavailable();
+    return { projectId: selected.id, teamId };
+}
+
+function parseLinkedMetadata(value: Record<string, unknown>, metadataPath?: string, cwd = process.cwd()): Readonly<{ projectId: string; teamId: string }> {
+    if (Object.keys(value).every(key => ['orgId', 'projectId', 'projectName'].includes(key))
+        && Object.prototype.hasOwnProperty.call(value, 'projectId')
+        && Object.prototype.hasOwnProperty.call(value, 'orgId')
+        && typeof value.projectId === 'string' && SAFE_VERCEL_ID.test(value.projectId)
+        && typeof value.orgId === 'string' && SAFE_VERCEL_ID.test(value.orgId)
+        && (value.projectName === undefined || (typeof value.projectName === 'string' && SAFE_VERCEL_NAME.test(value.projectName)))) {
+        return { projectId: value.projectId, teamId: value.orgId };
+    }
+    if (metadataPath === undefined || basename(metadataPath) !== 'repo.json' || basename(dirname(metadataPath)) !== '.vercel') unavailable();
+    pathValue(cwd);
+    return parseRepoLink(value, metadataPath, cwd);
 }
 
 function parseVercelToken(value: Record<string, unknown>): string {
@@ -171,6 +230,8 @@ export async function captureGoogleAccessToken(options: CaptureGoogleAccessToken
 export type OwnerAuthBoundaryOptions = Readonly<{
     linkedMetadataPath: string;
     credentialStorePath: string;
+    /** Current worktree path used to resolve an installed Vercel repo link. */
+    cwd?: string;
     /** Defaults to the invoking uid; useful only for provider-free tests. */
     uid?: number;
     googleToken?: CaptureGoogleAccessTokenOptions;
@@ -191,7 +252,7 @@ export type OwnerAuthBoundary = Readonly<{
 export async function loadOwnerAuthBoundary(options: OwnerAuthBoundaryOptions): Promise<OwnerAuthBoundary> {
     const uid = options.uid ?? currentUid();
     if (!Number.isSafeInteger(uid) || uid < 0) unavailable();
-    const metadata = parseLinkedMetadata(jsonFile(options.linkedMetadataPath, uid));
+    const metadata = parseLinkedMetadata(jsonFile(options.linkedMetadataPath, uid), options.linkedMetadataPath, options.cwd);
     const vercelToken = parseVercelToken(jsonFile(options.credentialStorePath, uid));
     const googleOptions = options.googleToken ?? {};
     const auth: OwnerAuthBoundary = {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalDigest, EpochError, type CapacityEpochPacket, type Role } from './contracts';
 import { createFixturePacket } from './fixtures';
+import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from './live-evidence';
 import {
     assembleOwnerDescriptors,
     buildTwoPassDescriptorProposal,
@@ -22,6 +23,8 @@ function serviceBodies(packet: CapacityEpochPacket): Record<Role, Record<string,
             }),
         ];
         return [role, {
+            apiVersion: 'serving.knative.dev/v1',
+            kind: 'Service',
             metadata: { name: runtime.service, generation: 1, resourceVersion: packet.protectedObservations.old.runtime[role].resourceVersion, labels: {}, annotations: {} },
             spec: {
                 template: {
@@ -46,6 +49,42 @@ function input(packet: CapacityEpochPacket): OwnerDescriptorAssemblyInput {
         vercelToken: 'fixture-vercel-token',
         serviceBodies: serviceBodies(packet),
         zeroWorkEvidence: null,
+    };
+}
+
+function evidence(packet: CapacityEpochPacket): LiveZeroWorkSources {
+    const project = packet.providerScope.googleProjectId;
+    const origin = 'https://supabase.example.invalid/';
+    const supabase = (source: string, table: string, columns: readonly string[]): SupabaseLedgerSource => {
+        const selector = { kind: 'supabase' as const, source, origin, table, columns, eventTimeColumn: 'created_at', lookbackMs: 60_000 };
+        return { ...selector, selectorDigest: evidenceSelectorDigest({ ...selector, selectorDigest: '' }) };
+    };
+    const taskSelector = {
+        kind: 'cloud-logging' as const,
+        source: 'fixture-task-audit',
+        project,
+        logName: `projects/${project}/logs/fixture-task-audit`,
+        resourceType: 'cloud_tasks_queue' as const,
+        correlation: 'fixture-task-audit',
+        queueResources: [packet.protectedInputs.desired.queues.preflight.resource, packet.protectedInputs.desired.queues.paid.resource].sort(),
+        sinkName: 'fixture-task-audit-sink',
+        bucketResource: `projects/${project}/locations/global/buckets/fixture-task-audit`,
+        lookbackMs: 60_000,
+    };
+    return {
+        providerLedger: supabase('supabase:public.analysis_provider_cost_ledger', 'analysis_provider_cost_ledger', ['run_id', 'request_id', 'operation_key', 'status', 'created_at']),
+        billingLedger: supabase('supabase:public.analysis_revenue_cost_operations', 'analysis_revenue_cost_operations', ['request_id', 'owner_kind', 'owner_key_hash', 'operation_kind', 'status', 'created_at']),
+        taskAudit: { ...taskSelector, selectorDigest: evidenceSelectorDigest({ ...taskSelector, selectorDigest: '' }) },
+        receiverLog: supabase('supabase:public.analysis_step_events', 'analysis_step_events', ['id', 'request_id', 'step', 'event_type', 'created_at']),
+    };
+}
+
+function inputWithEvidence(packet: CapacityEpochPacket): OwnerDescriptorAssemblyInput {
+    return {
+        ...input(packet),
+        zeroWorkEvidence: evidence(packet),
+        supabaseServiceRoleBearer: 'fixture-supabase-token',
+        supabaseApiKey: 'fixture-supabase-token',
     };
 }
 
@@ -85,7 +124,7 @@ describe('owner packet/bootstrap descriptor assembly', () => {
         const packet = createFixturePacket();
         let reads = 0;
         const stable = await buildTwoPassDescriptorProposal({
-            readPass: async () => { reads += 1; return input(packet); },
+            readPass: async () => { reads += 1; return inputWithEvidence(packet); },
         });
         expect(reads).toBe(2);
         expect(stable.first.proposalDigest).toBe(stable.second.proposalDigest);
@@ -97,11 +136,18 @@ describe('owner packet/bootstrap descriptor assembly', () => {
                 driftReads += 1;
                 const current = createFixturePacket();
                 if (driftReads === 2) {
-                    return { ...input(current), ownerDigest: canonicalDigest('drift-owner') };
+                    return { ...inputWithEvidence(current), ownerDigest: canonicalDigest('drift-owner') };
                 }
-                return input(current);
+                return inputWithEvidence(current);
             },
         })).rejects.toThrow('PROPOSAL_STALE');
+    });
+
+    it('fails closed before epoch inspect approval when zero-work evidence is unavailable', async () => {
+        const packet = createFixturePacket();
+        await expect(buildTwoPassDescriptorProposal({
+            readPass: async () => input(packet),
+        })).rejects.toThrow('EVIDENCE_UNAVAILABLE');
     });
 
     it('serializes protected descriptors only for the in-memory pipe boundary', () => {

@@ -124,6 +124,8 @@ const noLease = adapterAuthority.check;
 
 function runService(generation = '2', traffic = [{ revisionName: 'preflight-revision', percent: 0 }]) {
     return {
+        apiVersion: 'serving.knative.dev/v1',
+        kind: 'Service',
         metadata: { generation: Number(generation), resourceVersion: `rv-${generation}` },
         spec: {
             template: { metadata: { name: 'preflight-revision', annotations: { 'autoscaling.knative.dev/maxScale': '2' } },
@@ -190,6 +192,22 @@ describe('protected platform adapters', () => {
         });
         expect(observed.generation).toBe('2');
         expect(observed.resourceVersion).toBe('rv-2');
+    });
+
+    it('rejects a Cloud Run v1 PUT body without apiVersion and kind before mutation', async () => {
+        let puts = 0;
+        const service = runService('2');
+        const invalidBody = { ...runService('3') } as Record<string, unknown>;
+        delete invalidBody.apiVersion;
+        delete invalidBody.kind;
+        const fake = new FakeTransport(request => {
+            if (request.method === 'PUT') puts += 1;
+            return response(request, 200, service);
+        });
+        await expect(new CloudRunAdapter({ transport: authenticated(fake) }).applyService({
+            resource: serviceResource, expectedGeneration: '2', body: invalidBody, operation: 'cloud-run.stage', leaseCheck: noLease,
+        })).rejects.toThrow('ADAPTER_REQUEST_INVALID');
+        expect(puts).toBe(0);
     });
 
     it('rejects extra raw Cloud Run env-entry keys before promotion PUT', async () => {

@@ -227,8 +227,10 @@ export async function buildTwoPassDescriptorProposal(options: Readonly<{
     let secondInput: OwnerDescriptorAssemblyInput;
     try {
         firstInput = await options.readPass();
+        if (firstInput.zeroWorkEvidence === null) fail('EVIDENCE_UNAVAILABLE');
         const first = assembleOwnerDescriptors(firstInput);
         secondInput = await options.readPass();
+        if (secondInput.zeroWorkEvidence === null) fail('EVIDENCE_UNAVAILABLE');
         const second = assembleOwnerDescriptors(secondInput);
         if (first.proposalDigest !== second.proposalDigest
             || first.packetDigest !== second.packetDigest

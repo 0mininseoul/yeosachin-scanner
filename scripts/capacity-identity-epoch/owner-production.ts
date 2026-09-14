@@ -1,6 +1,6 @@
 import { lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
     canonicalDigest,
     canonicalIamBindingDigests,
@@ -42,6 +42,7 @@ import {
 } from './owner-auth';
 import {
     collectFullyPaged,
+    normalizePageToken,
     readExactVercelProductionEnvValues,
     type ExactVercelProductionEnvValues,
 } from './owner-discovery';
@@ -63,11 +64,12 @@ import {
     type QueueObservation,
     type SchedulerObservation,
 } from './work-planes';
-import { FetchProtectedTransport, type AuthenticatedProtectedTransport } from './platform';
+import { AuthenticatedProtectedTransport, FetchProtectedTransport } from './platform';
+import { CloudBuildAdapter } from './cloud-build';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 import { deriveObservationInputDigests, createProtectedPacket, deriveRetiredIamBindingDigests, type ProtectedPacketInput } from './packet';
-import { evidenceSelectorDigest, type LiveZeroWorkSources } from './live-evidence';
+import { evidenceSelectorDigest, LiveEvidenceCollector, type LiveZeroWorkSources } from './live-evidence';
 
 /**
  * The owner adapter is the only production construction path for the
@@ -266,9 +268,34 @@ function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSe
     return [...projects][0]!;
 }
 
-function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string }> {
+function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string }> {
     if (!SAFE.test(cwd)) unavailable();
-    const linkedMetadataPath = resolve(cwd, '.vercel', 'project.json');
+    const currentWorktree = resolve(cwd);
+    let linkedMetadataPath: string | undefined;
+    for (let directory = currentWorktree;; directory = dirname(directory)) {
+        const projectPath = join(directory, '.vercel', 'project.json');
+        const repoPath = join(directory, '.vercel', 'repo.json');
+        try {
+            if (lstatSync(projectPath).isFile()) {
+                linkedMetadataPath = projectPath;
+                break;
+            }
+        } catch { /* try the repository link below */ }
+        try {
+            if (lstatSync(repoPath).isFile()) {
+                linkedMetadataPath = repoPath;
+                break;
+            }
+        } catch { /* continue to the next worktree ancestor */ }
+        const parent = dirname(directory);
+        if (parent === directory) break;
+        try {
+            if (lstatSync(join(directory, '.git')).isFile() || lstatSync(join(directory, '.git')).isDirectory()) break;
+        } catch { /* a repository root marker is optional for test seams */ }
+    }
+    // Keep the legacy path as the failure target when no link is present; the
+    // owner boundary still performs the strict lstat/uid/mode validation.
+    linkedMetadataPath ??= resolve(currentWorktree, '.vercel', 'project.json');
     const candidates = [
         join(homedir(), '.local', 'share', 'com.vercel.cli', 'auth.json'),
         join(homedir(), 'Library', 'Application Support', 'com.vercel.cli', 'auth.json'),
@@ -278,7 +305,7 @@ function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath
         try { return lstatSync(candidate).isFile(); } catch { return false; }
     });
     if (existing.length !== 1) unavailable();
-    return { linkedMetadataPath, credentialStorePath: existing[0]! };
+    return { linkedMetadataPath, credentialStorePath: existing[0]!, cwd: currentWorktree };
 }
 
 async function readProductionEnv(transport: AuthenticatedProtectedTransport, auth: OwnerAuthBoundary): Promise<ExactVercelProductionEnvValues> {
@@ -316,9 +343,8 @@ async function readVercelDeployments(transport: AuthenticatedProtectedTransport,
             const body = object(value);
             if (!Array.isArray(body.deployments)) fail('ADAPTER_RESPONSE_INVALID');
             const pagination = object(body.pagination ?? {});
-            const next = pagination.next;
-            if (next !== undefined && typeof next !== 'string') fail('PAGINATION_INCOMPLETE');
-            return { items: body.deployments, ...(typeof next === 'string' && next.length > 0 ? { nextPageToken: next } : {}) };
+            const next = normalizePageToken(pagination.next);
+            return { items: body.deployments, ...(next === undefined ? {} : { nextPageToken: next }) };
         },
     });
     return rows.map(value => {
@@ -1329,6 +1355,8 @@ function buildServiceBody(role: Role, live: RoleLive, desiredRuntime: ProtectedR
         }),
     ];
     const body = {
+        apiVersion: 'serving.knative.dev/v1',
+        kind: 'Service',
         metadata: { name: live.runtime.service, generation: Number(live.runtime.generation), resourceVersion: live.runtime.resourceVersion, labels: {}, annotations: {} },
         spec: {
             template: {
@@ -1589,6 +1617,54 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
     return Object.freeze({ packet, serviceBodies, identityGraph: desiredGraph, zeroWorkEvidence });
 }
 
+/**
+ * Epoch inspection must prove the selected zero-work sources are live before
+ * a descriptor can be approved. This is deliberately a read-only collector
+ * pass over the exact sink/table selectors that will be inherited later.
+ */
+async function assertOwnerZeroWorkCoverage(pass: OwnerPass, built: Readonly<{
+    packet: ReturnType<typeof createProtectedPacket>;
+    zeroWorkEvidence: LiveZeroWorkSources;
+}>, nowMs: number, supabaseServiceRoleBearer: string): Promise<void> {
+    const hosts = new Set<string>();
+    for (const source of Object.values(built.zeroWorkEvidence)) {
+        if (source.kind !== 'supabase') continue;
+        let origin: URL;
+        try { origin = new URL(source.origin); } catch { fail('EVIDENCE_UNAVAILABLE'); }
+        if (origin.protocol !== 'https:' || origin.username || origin.password || origin.port
+            || origin.pathname !== '/' || origin.search || origin.hash) fail('EVIDENCE_UNAVAILABLE');
+        hosts.add(origin.hostname);
+    }
+    if (hosts.size === 0) fail('EVIDENCE_UNAVAILABLE');
+    const supabase = new AuthenticatedProtectedTransport({
+        transport: new FetchProtectedTransport(),
+        tokenProvider: async () => supabaseServiceRoleBearer,
+        additionalAllowedHosts: hosts,
+    });
+    const cloudBuild = new CloudBuildAdapter({
+        transport: pass.transports.google,
+        builds: { old: built.packet.protectedInputs.old.build, desired: built.packet.protectedInputs.desired.build },
+        runtimes: { old: built.packet.protectedInputs.old.runtime, desired: built.packet.protectedInputs.desired.runtime },
+    });
+    const evidence = new LiveEvidenceCollector({
+        cloudBuild,
+        loggingTransport: pass.transports.google,
+        tasksTransport: pass.transports.google,
+        supabaseTransport: supabase,
+        supabaseApiKey: supabaseServiceRoleBearer,
+        sources: built.zeroWorkEvidence,
+        receiverTokenProvider: async () => pass.auth.googleTokenProvider(),
+        now: () => nowMs,
+    });
+    try {
+        await evidence.zeroWorkBaseline({ nowMs });
+    } catch {
+        // A descriptor is never approved from a selector-only claim. Provider
+        // errors and incomplete coverage are intentionally indistinguishable.
+        fail('EVIDENCE_UNAVAILABLE');
+    }
+}
+
 function oldGraphToDesired(graph: IdentityGraphObservation): DesiredIdentityGraph {
     return Object.freeze({ project: graph.project, build: graph.build, slots: graph.slots });
 }
@@ -1601,9 +1677,10 @@ async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number): Promise<
         vercelTeamId: pass.auth.vercelTeamId,
         alias: pass.alias,
     });
+    const supabaseServiceRoleBearer = required(pass.env, 'SUPABASE_SERVICE_ROLE_KEY');
+    await assertOwnerZeroWorkCoverage(pass, built, nowMs, supabaseServiceRoleBearer);
     const vercelToken = await pass.auth.vercelTokenProvider();
     const googleAccessToken = await pass.auth.googleTokenProvider();
-    const supabaseServiceRoleBearer = required(pass.env, 'SUPABASE_SERVICE_ROLE_KEY');
     return Object.freeze({
         packet: built.packet,
         ownerDigest,

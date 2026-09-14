@@ -114,7 +114,40 @@ describe('owner preparation inspect/apply operator', () => {
         });
         const inspection = await operator.inspect();
         await expect(operator.apply(inspection.summary.discoveryDigest)).rejects.toThrow('QUIESCENCE_PENDING');
-        expect(calls).toEqual(['account.create:preflight.runtime', 'scheduler.pause:preflight']);
+        expect(calls).toEqual(['scheduler.pause:preflight', 'account.create:preflight.runtime']);
+    });
+
+    it('pauses enabled recovery schedulers before account creation and stops on a partial pause failure', async () => {
+        const base = observation();
+        const current: PreparationObservation = {
+            ...base,
+            identityGraph: {
+                ...base.identityGraph,
+                desiredSlots: { 'preflight.runtime': deterministicIdentityForSlot(PROJECT, 'preflight.runtime') },
+            },
+            schedulers: {
+                preflight: { ...base.schedulers.preflight, state: 'ENABLED', pauseEpochMs: 0 },
+                paid: { ...base.schedulers.paid, state: 'ENABLED', pauseEpochMs: 0 },
+            },
+        };
+        const calls: string[] = [];
+        const operator = new OwnerPreparationOperator({
+            discover: async () => current,
+            mutate: {
+                createAccount: async input => { calls.push(`account.create:${input.slot}`); },
+                readAccount: async input => ({ identity: input.identity, enabled: true, userManagedKeyCount: 0, attachedSlots: [] }),
+                pauseScheduler: async input => {
+                    calls.push(`scheduler.pause:${input.role}`);
+                    if (input.role === 'paid') throw new Error('pause failed');
+                },
+                readScheduler: async input => ({ ...input, state: 'PAUSED', pauseEpochMs: 99_000, lastAttemptMs: null }),
+            },
+            now: () => 100_000,
+            quiescence: { timeoutMs: 60_000, graceMs: 5_000 },
+        });
+        const inspection = await operator.inspect();
+        await expect(operator.apply(inspection.summary.discoveryDigest)).rejects.toThrow(EpochError);
+        expect(calls).toEqual(['scheduler.pause:preflight', 'scheduler.pause:paid']);
     });
 
     it('keeps the next mutation closed when an account create crashes', async () => {

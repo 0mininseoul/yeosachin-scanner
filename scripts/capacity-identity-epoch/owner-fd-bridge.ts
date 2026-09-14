@@ -190,7 +190,7 @@ async function terminateBounded(child: ChildProcess): Promise<void> {
 async function runStage(
     stage: Stage,
     input: OwnerFdBridgeInput,
-    options: Readonly<{ timeoutMs: number; environment: Readonly<Record<string, string>> }>,
+    options: Readonly<{ timeoutMs: number; environment: Readonly<Record<string, string>>; setActiveChild: (child: ChildProcess | undefined) => void }>,
 ): Promise<StageResult> {
     const spawn = input.options?.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, args, spawnOptions));
     const command = input.options?.nodePath ?? process.execPath;
@@ -209,58 +209,61 @@ async function runStage(
     } catch {
         bridgeFail();
     }
+    options.setActiveChild(child);
 
-    const packetPipe = child.stdio[PACKET_FD];
-    const bootstrapPipe = child.stdio[BOOTSTRAP_FD];
-    if (!packetPipe || typeof packetPipe === 'string' || !bootstrapPipe || typeof bootstrapPipe === 'string'
-        || !('write' in packetPipe) || !('write' in bootstrapPipe)) bridgeFail();
-    const stdout = captureOutput(child.stdout);
-    const stderr = captureOutput(child.stderr);
-    const close = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>>(resolve => {
-        let settled = false;
-        const finish = (result: Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>): void => {
-            if (settled) return;
-            settled = true;
-            resolve(result);
-        };
-        child.once('error', () => finish({ code: null, signal: null, error: true }));
-        child.once('close', (code, signal) => finish({ code, signal, error: false }));
-    });
-
-    const packetRaw = serializeProtectedDescriptor(input.packet);
-    const bootstrapRaw = serializeProtectedDescriptor(input.bootstrap);
     try {
-        await Promise.all([
-            waitForPipeFinish(packetPipe as Writable, packetRaw),
-            waitForPipeFinish(bootstrapPipe as Writable, bootstrapRaw),
-        ]);
-    } catch {
-        await terminateBounded(child);
-        bridgeFail();
-    }
 
-    let timedOut = false;
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<void>(resolve => {
-        timeoutHandle = setTimeout(() => {
-            timedOut = true;
-            resolve();
-        }, options.timeoutMs);
-    });
-    const result = await Promise.race([close, timeout]).finally(() => {
-        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-    });
-    if (timedOut) {
+        const packetPipe = child.stdio[PACKET_FD];
+        const bootstrapPipe = child.stdio[BOOTSTRAP_FD];
+        if (!packetPipe || typeof packetPipe === 'string' || !bootstrapPipe || typeof bootstrapPipe === 'string'
+            || !('write' in packetPipe) || !('write' in bootstrapPipe)) bridgeFail();
+        const stdout = captureOutput(child.stdout);
+        const stderr = captureOutput(child.stderr);
+        const close = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>>(resolve => {
+            let settled = false;
+            const finish = (result: Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>): void => {
+                if (settled) return;
+                settled = true;
+                resolve(result);
+            };
+            child.once('error', () => finish({ code: null, signal: null, error: true }));
+            child.once('close', (code, signal) => finish({ code, signal, error: false }));
+        });
+
+        const packetRaw = serializeProtectedDescriptor(input.packet);
+        const bootstrapRaw = serializeProtectedDescriptor(input.bootstrap);
+        try {
+            await Promise.all([
+                waitForPipeFinish(packetPipe as Writable, packetRaw),
+                waitForPipeFinish(bootstrapPipe as Writable, bootstrapRaw),
+            ]);
+        } catch {
+            bridgeFail();
+        }
+
+        let timedOut = false;
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<void>(resolve => {
+            timeoutHandle = setTimeout(() => {
+                timedOut = true;
+                resolve();
+            }, options.timeoutMs);
+        });
+        const result = await Promise.race([close, timeout]).finally(() => {
+            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+        });
+        if (timedOut) bridgeFail();
+        const childResult = result as Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>;
+        if (stdout.exceeded() || stderr.exceeded()) bridgeFail();
+        if (childResult.error || childResult.signal !== null || childResult.code !== 0 || !expectedOutput(stage, stdout.text())) {
+            const known = allowedErrorCode(stderr.text());
+            fail(known ?? 'PROTECTED_PIPE_FAILED');
+        }
+        return Object.freeze({ stage, code: 0, stdout: stage === 'check' ? 'CHECK_OK' : stage === 'verify' ? 'VERIFIED_OK' : '' });
+    } finally {
         await terminateBounded(child);
-        bridgeFail();
+        options.setActiveChild(undefined);
     }
-    const childResult = result as Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>;
-    if (stdout.exceeded() || stderr.exceeded()) bridgeFail();
-    if (childResult.error || childResult.signal !== null || childResult.code !== 0 || !expectedOutput(stage, stdout.text())) {
-        const known = allowedErrorCode(stderr.text());
-        fail(known ?? 'PROTECTED_PIPE_FAILED');
-    }
-    return Object.freeze({ stage, code: 0, stdout: stage === 'check' ? 'CHECK_OK' : stage === 'verify' ? 'VERIFIED_OK' : '' });
 }
 
 /**
@@ -271,15 +274,37 @@ export async function runOwnerEpochThroughVerified(input: OwnerFdBridgeInput): P
     validateDescriptorPair(input.packet, input.bootstrap);
     const options = validateOptions(input.options ?? {});
     const stages: Stage[] = [];
-    for (const stage of ['check', 'apply', 'verify'] as const) {
-        await runStage(stage, input, options);
-        stages.push(stage);
+    let activeChild: ChildProcess | undefined;
+    let parentSignal: NodeJS.Signals | undefined;
+    const onParentSignal = (signal: NodeJS.Signals) => (): void => {
+        parentSignal = signal;
+        if (activeChild !== undefined) safeKill(activeChild, 'SIGTERM');
+    };
+    const onSigterm = onParentSignal('SIGTERM');
+    const onSigint = onParentSignal('SIGINT');
+    const onSighup = onParentSignal('SIGHUP');
+    process.on('SIGTERM', onSigterm);
+    process.on('SIGINT', onSigint);
+    process.on('SIGHUP', onSighup);
+    try {
+        for (const stage of ['check', 'apply', 'verify'] as const) {
+            if (parentSignal !== undefined) bridgeFail();
+            await runStage(stage, input, { ...options, setActiveChild: child => { activeChild = child; } });
+            if (parentSignal !== undefined) bridgeFail();
+            stages.push(stage);
+        }
+        return Object.freeze({
+            status: 'VERIFIED_OK',
+            stages: Object.freeze(stages),
+            packetDigest: canonicalDigest(input.packet),
+        });
+    } finally {
+        if (activeChild !== undefined) await terminateBounded(activeChild);
+        activeChild = undefined;
+        process.off('SIGTERM', onSigterm);
+        process.off('SIGINT', onSigint);
+        process.off('SIGHUP', onSighup);
     }
-    return Object.freeze({
-        status: 'VERIFIED_OK',
-        stages: Object.freeze(stages),
-        packetDigest: canonicalDigest(input.packet),
-    });
 }
 
 export const runOwnerEpoch = runOwnerEpochThroughVerified;
