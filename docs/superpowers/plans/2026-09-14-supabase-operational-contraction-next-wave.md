@@ -2,174 +2,172 @@
 
 > For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Resolve the current migration-provenance blocker and identify only the smallest evidence-proven Supabase contraction subset while preserving service contracts and data.
+**Goal:** Resolve the six-version migration provenance split, then identify only an
+independently proven minimal Supabase contraction subset while preserving service contracts,
+data, and migration history.
 
-**Architecture:** Reuse `supabase-operational-policy-v1` and existing read-only collectors. Approve zero or more exact families from fresh caller/dependency evidence; only a fixed no-CASCADE migration with resolved provenance may reach an isolated coordinator gate. The former exact-22 target is retired.
+**Architecture:** Provenance source-package recovery is a prerequisite and is separate from
+any DDL. The first executable task obtains exact source for all six remote-only versions;
+the next task proves the six local-only files are not pending desired behavior. Only after
+independent review may the active directory be contracted locally, followed by exact parity
+and zero-pending dry-run gates before any separately reviewed contraction DDL.
 
-**Tech Stack:** Supabase CLI `2.102.0`, PostgreSQL catalog queries, existing TypeScript evidence/verifier scripts, and focused contract/type checks only when future code changes require them.
+**Tech Stack:** Supabase CLI `2.102.0`, PostgreSQL catalog queries, existing TypeScript
+evidence/verifier scripts, and focused contract/type checks only for a future code change.
 
 ---
 
-## Current baseline and hard blockers
+## Boundary and baseline
 
-The dated reports on `origin/main` record **152 public base/partitioned tables
-after W1A**, six local-only and six remote-only migration versions, and **two
-unresolved remote-only rows**. The three-table `analysis_v2_replay_capture`
-cluster is empty but blocked by deployed routine/FK dependencies and is not an
-approved drop target. These are report-derived context, not fresh approval
-evidence or a desired table count.
+The reports on `origin/main` are context only: 152 public base/partitioned tables after
+W1A, six local-only versions, and six remote-only versions. The three-table
+`analysis_v2_replay_capture` cluster remains blocked by deployed routine/FK dependencies;
+no table count or empty result authorizes deletion.
 
-This planning task performs no Supabase read, repair, migration, DDL/DML,
-`db push`, payment mutation, test, CI, or deployment. No arbitrary 22-table
-target, new sink/schema/table, or data-preservation shortcut is allowed.
+This docs packet performs no Supabase read, migration repair, replay, non-dry
+`db push`, DDL/DML, payment mutation, test, CI, or deployment. It must never mutate remote
+migration history. If any source, equivalence, parity, or dependency proof fails, finish
+`BLOCKED_NO_CHANGE`.
 
 ## Files and worker split
 
 - Read: `docs/reports/2026-09-13-supabase-next-contraction-audit.md`
 - Read: `docs/reports/2026-09-13-supabase-migration-provenance-reconciliation.md`
 - Read: `docs/superpowers/specs/2026-09-13-supabase-operational-simplification-design.md`
-- Read: `lib/services/operations/supabase-22-evidence.ts`
-- Read: `scripts/generate-supabase-22-retirement-inventory.ts`
-- Read: `scripts/verify-supabase-22-catalog.ts`
-- Read: `lib/services/analysis/replay/replay-supabase-repository.ts`
-- Modify only after all gates pass: existing callers/evidence files, one exact
-  migration, and its existing-style verifier/restore artifact if needed.
-- Never modify historical migrations, retained/payment/operator contracts,
+- Read: existing evidence/verifier scripts and their focused tests.
+- Future implementation may modify only reviewed migration source/evidence artifacts;
+  never modify historical migration contents, retained/payment/operator contracts,
   `app/page.tsx`, `.playwright-mcp/`, `AGENTS.md`, or the protected migration.
+- [ ] Use a fresh independent reviewer for source recovery, local-only disposition,
+  active-directory changes, and any later DDL allowlist.
 
-- [ ] Dispatch implementation to a fresh visible Orca Codex `gpt-5.6-luna`,
-  effort `max`, only after provenance and fresh evidence permit an edit.
-- [ ] Dispatch independent review to a different fresh visible Orca Codex
-  `gpt-5.6-luna`, effort `max`; it approves no unresolved provenance or broad
-  allowlist.
+## Task 1: First executable task — recover all six remote-only source packages
 
-## Task 1: Freeze provenance without repair
+**Files:** source-package recovery workspace only; no active migration or remote-history mutation.
 
-- [ ] Fetch and prove the source:
+The remote-only versions are exactly:
 
-  ```sh
-  git fetch origin main --prune
-  git status --short --branch
-  git rev-parse origin/main
-  git diff --name-only origin/main...HEAD
-  ```
+| Version/name | Required source recovery |
+| --- | --- |
+| `20260814110000_rearm_concierge_snapshot_conflict_execution` | Reconstruct exact SQL from authenticated remote statement array. |
+| `20260814111000_reopen_concierge_snapshot_cleanup_intent` | Reconstruct exact SQL from authenticated remote statement array. |
+| `20260823165841_add_incident_gender_review_correction` | Recover exact file from identified non-main commit `9fc65c76`. |
+| `20260824151600_publish_incident_reviewed_result_copy` | Recover exact file from identified non-main commit `9042120d`. |
+| `20260824152500_normalize_incident_reviewed_copy_subjects` | Recover exact file from identified non-main commit `6bdb5149`. |
+| `20260824160500_publish_incident_media_reviewed_result_copy` | Recover exact file from identified non-main commit `0c52c100`. |
 
-- [ ] From the canonical owner worktree and linked authenticated CLI, run only:
+- [ ] Before any catalog or DDL task, an owner obtains the four non-main blobs and the
+  two authenticated remote statement arrays in memory or an isolated temporary source
+  workspace. Do not use an unauthenticated export, guessed placeholder, later routine
+  body, or local-only file as source.
+- [ ] For every version, reconstruct canonical SQL using the recorded Supabase
+  statement-array separator and blank-separator-line rules, without any other whitespace
+  normalization. Verify statement count, canonical character length, remote hash, local
+  SHA-256, and canonical byte/text equivalence. A mismatch, malformed array, truncated
+  statement, or unresolved source is `BLOCKED_NO_CHANGE`.
+- [ ] Do not commit raw query output, statement-array JSON, provider response envelopes,
+  credentials, project references, or protected resource values. Record only version,
+  source disposition, statement count/length, and opaque hashes in the sanitized review
+  record.
+- [ ] Independent owner review approves all six exact source packages together. Four are
+  `NON_MAIN_EXACT_SOURCE`; two are `REMOTE_STATEMENT_ARRAY_EXACT_SOURCE`. No file
+  enters the active migration directory before that review.
 
-  ```sh
-  npx --yes supabase@2.102.0 --version
-  npx --yes supabase@2.102.0 migration list --linked
-  ```
+## Task 2: Prove all six local-only files are not pending desired behavior
 
-  Do not source dotenv files, print credentials/project references/raw rows, use
-  a connector, or read machine manifests into the report.
-- [ ] Compare local/remote version sets and bounded statement hashes. Require
-  owner-reviewed exact source plus current routine body/ACL/constraint/
-  dependency proof for both unresolved remote-only rows. Four non-main exact
-  source matches remain provenance artifacts; do not import them automatically.
-- [ ] If either row remains unresolved, record `BLOCKED_NO_CHANGE` and stop. Do
-  not run `migration repair`, `supabase db push`, or
-  `supabase db push --include-all`, add guessed migrations, or replay SQL.
+**Files:** read-only local files, current remote catalog/routine/constraint/ACL/schema evidence.
 
-## Task 2: Collect fresh diagnostic contraction evidence
+The local-only set is exactly:
 
-**Files:** existing evidence/verifier scripts only; no production mutation.
+- `20260805001619_remove_server_inventory_gate.sql`
+- `20260805014000_skip_paid_relationship_precheck_for_selfhosted_auth.sql`
+- `20260805023000_skip_paid_target_prechecks_for_selfhosted_auth.sql`
+- `20260805025000_allow_selfhosted_auth_relationship_source_status.sql`
+- `20260805050000_remove_paid_server_inventory_gate.sql`
+- `20260813233000_allow_anonymous_preflight_slot_validator_exec.sql`
 
-- [ ] Run the existing inventory with protected owner variables and bounded,
-  sanitized output:
+- [ ] For each file, map every object/behavior it would create or alter to the current
+  authenticated remote state and repository/deployed callers. Prove current routine body,
+  signature, `SECURITY DEFINER`, `search_path`, ACL/grants, constraints, schemas/tables,
+  indexes/views, triggers/policies, publications, and `pg_depend` edges are already
+  equivalent to the migration's desired behavior.
+- [ ] Check application, recovery, admin, operator, scheduled, and deployed database
+  callers independently. Do not classify a file redundant from row counts, a “legacy”
+  label, a substring, or a static source scan alone.
+- [ ] Record one disposition and opaque hash per local-only file:
+  `LOCAL_ONLY_REDUNDANT_CURRENT_STATE` only when the full routine/constraint/ACL/schema/
+  dependency equivalence is proven; otherwise `BLOCKED_NO_CHANGE`. Keep the original
+  content available in Git history.
 
-  ```sh
-  node --import tsx scripts/generate-supabase-22-retirement-inventory.ts --project-ref "$SUPABASE_PROJECT_REF" --cli-path "$SUPABASE_CLI_PATH"
-  node --import tsx scripts/verify-supabase-22-catalog.ts --report-only --project-ref "$SUPABASE_PROJECT_REF"
-  ```
+## Task 3: Reviewed local source-package contraction, still no remote mutation
 
-  The inventory/verifier remains diagnostic and blocked; exit status `1` from
-  the catalog verifier is expected when readiness is incomplete. Never pass
-  destructive flags or a caller-supplied readiness boolean.
-- [ ] In one fresh window, verify exact source callers, deployed routine
-  signatures/`SECURITY DEFINER`/`search_path`/ACL, RLS/force-RLS, FK/view/
-  sequence/publication/trigger/`pg_depend`, flags/config, operator-audit
-  independence, typed read-only `payment_pending` counts/checksum, and old
-  revision drain. Zero rows or point-in-time activity alone is insufficient.
-- [ ] Start `approvedSubset` empty. The replay-capture cluster may become a
-  target only if every deployed writer/cleanup dependency and repository caller
-  is independently removed or redirected without changing replay behavior.
-  Otherwise keep it deferred. Never select by prefix, row count, “legacy” label,
-  or an arbitrary table count.
+- [ ] After Task 1 and Task 2 independent review, restore the six exact remote-only files
+  into the active migration directory using their reviewed filenames/content.
+- [ ] Only in the same reviewed local change, remove the six
+  `LOCAL_ONLY_REDUNDANT_CURRENT_STATE` files from the active migration directory.
+  Record each of the six remote and six local source hashes, source type, and disposition
+  in a sanitized reconciliation manifest; the removed content remains recoverable in Git history.
+- [ ] Do not run `migration repair`, replay SQL, non-dry `db push`, or any remote
+  migration-history operation. If the reviewed source or local-only equivalence is not
+  complete, leave the active directory unchanged and report `BLOCKED_NO_CHANGE`.
 
-## Task 3: Conditional minimal implementation and manifest
+## Task 4: Correct linked CLI invocation and exact history parity
 
-**Files:**
+Use the canonical linked owner workdir for project selection. The Supabase CLI global
+`--workdir` option precedes the subcommand; do not pass a protected project reference in
+argv when the linked owner workdir is available.
 
-- Modify only if Task 2 proves a safe caller change:
-  `lib/services/analysis/replay/replay-supabase-repository.ts` and existing
-  evidence/policy/verifier files
-- Create only after provenance/closure approval: one exact migration and its
-  checked-in verifier/restore artifact
-
-- [ ] Map every application, recovery, admin, and deployed DB caller before
-  editing. If the replay repository still needs the source, leave it unchanged
-  and keep the family blocked.
-- [ ] Preserve analysis execution, provider, payment, recovery, operator-audit,
-  account-deletion, shared-hash, and `payment_pending` contracts/data. Do not
-  create a replacement schema/table/sink or edit old migration history.
-- [ ] Freeze a non-empty exact manifest/hash only after fresh evidence proves
-  target object signatures, ACL/RLS, dependencies, source callers, retained
-  objects, migration provenance, and an isolated restore/rollback operation.
-  Empty/shape-only closure and table-count assertions never authorize DDL.
-- [ ] If code/SQL changes, run only affected existing contract/PGlite tests and:
-
-  ```sh
-  npx tsc --noEmit --pretty false
-  git diff --check
-  ```
-
-  No full suite or CI unless the future code change demonstrates a need.
-
-## Task 4: Isolated coordinator migration gate
-
-- [ ] Require resolved provenance, same-window fresh evidence, zero active
-  callers, retained-contract parity, independent review, a clean fetched
-  `origin/main`, and exactly one reviewed migration. Any unresolved row or
-  mixed/dirty history stops before authoring/apply.
-- [ ] In a bounded temporary Supabase workdir from fetched `origin/main`, copy
-  only the reviewed migration and linked metadata. Verify no unrelated pending
-  migration or protected-file change.
-- [ ] Dry-run and inspect history:
+- [ ] Resolve `OWNER_WORKDIR` to the canonical linked owner workdir and invoke the pinned
+  CLI only in this form:
 
   ```sh
-  npx --yes supabase@2.102.0 db push --workdir "$ROLLOUT_CLI_WORKDIR" --linked --dry-run
-  npx --yes supabase@2.102.0 migration list --workdir "$ROLLOUT_CLI_WORKDIR" --linked
+  npx --yes supabase@2.102.0 --workdir "$OWNER_WORKDIR" migration list --linked
   ```
 
-  Expected: exactly the reviewed allowlist. Never use `--include-all`.
-- [ ] After coordinator approval only, apply once:
+  Require the returned remote/local version sets to be exactly equal, with 391 distinct
+  versions expected only as a report-context cross-check, not as a guessed target.
+- [ ] Any future inventory/verifier wrapper that currently accepts an explicit project
+  selector must gain a workdir-only path that derives the linked ref from
+  `$OWNER_WORKDIR/supabase/.temp/project-ref` and invokes the pinned CLI with
+  `--workdir` before its subcommand. Do not expose the ref in argv, logs, reports, or
+  ordinary files; never pass an explicit project selector when the canonical linked
+  workdir can be used.
+- [ ] In an isolated temporary rollout workdir containing only fetched
+  `origin/main`, linked metadata, and the six reviewed remote source files (with the six
+  local-only files removed), run the read-only dry-run with the same argument placement:
 
   ```sh
-  npx --yes supabase@2.102.0 db push --workdir "$ROLLOUT_CLI_WORKDIR" --linked
+  npx --yes supabase@2.102.0 --workdir "$ROLLOUT_CLI_WORKDIR" db push --linked --dry-run
+  npx --yes supabase@2.102.0 --workdir "$ROLLOUT_CLI_WORKDIR" migration list --linked
   ```
 
-  If it appears hung, inspect remote history/catalog read-only before terminating
-  or retrying; never repeat based only on a local timeout.
-- [ ] Run the checked-in post-apply verifier and stop at
-  `VERIFIED_PRODUCTION_EVIDENCE`. No activation, payment-state mutation,
-  provider work, queue/gate change, or real `0_min._.00` canary.
+  Require zero pending migrations and exact version-set parity. Never use
+  `--include-all`; never run the non-dry command in this plan.
 
-## Stop, rollback, and acceptance
+## Task 5: Separate later contraction DDL gate
 
-- [ ] Stop on migration-history mismatch, active caller, dependency/ACL/RLS drift,
-  unexpected object/row/checksum change, extra dry-run file, or missing restore.
-- [ ] Before apply, rollback is no-op. After a committed migration, use only the
-  reviewed isolated restore/rollback operation; never invent a compensating
-  migration or use `CASCADE`.
-- [ ] Acceptance records the 152-table baseline and six-by-six provenance split
-  as context, keeps two unresolved rows fail-closed, approves only a literal
-  evidence-proven subset (possibly empty), preserves contracts/data, and emits
-  only sanitized evidence.
-- [ ] Git status contains only approved files; no `payment_pending`, schema,
-  migration history, landing copy, or protected path is changed unexpectedly.
+- [ ] Only after exact `migration list --linked` parity, zero-pending dry-run, fresh
+  object/dependency evidence, retained-contract parity, independent review, and a literal
+  no-CASCADE allowlist may a separately approved future task consider contraction DDL.
+  The allowlist may be empty; no arbitrary 22-table target is valid.
+- [ ] The later DDL task must use a bounded isolated workdir and the same linked CLI
+  argument placement, then verify object/ACL/RLS/dependency/restore evidence. This plan
+  does not execute DDL, replay SQL, repair history, or push.
+- [ ] Any mismatch in source bytes, statement count/length/hash, canonical equivalence,
+  routine/constraint/ACL/schema/dependency state, version set, dry-run, restore, or caller
+  proof is `BLOCKED_NO_CHANGE`.
 
-Self-review: report blockers, exact CLI/allowlist gates, no arbitrary 22 target,
-retained-contract boundary, rollback, independent review, and the terminal
-`VERIFIED_PRODUCTION_EVIDENCE` stop are all covered without restating the full
-operational-simplification design.
+## Acceptance and self-review
+
+- [ ] All six remote-only source packages have owner-reviewed exact provenance: four from
+  the named non-main commits and two reconstructed from authenticated statement arrays.
+- [ ] All six local-only files are independently proven redundant against current
+  routine/constraint/ACL/schema/dependency behavior, with hashes/dispositions recorded and
+  original content retained in Git history.
+- [ ] The active directory changes happen only after review; remote migration history is
+  untouched, and no repair, replay, non-dry push, payment-state mutation, or data change
+  occurs.
+- [ ] Linked CLI `--workdir` placement is correct; project-ref argv is avoided; isolated
+  workdir and exact allowlist safety remain intact.
+- [ ] Before any later contraction DDL, `migration list --linked` is exact and the
+  isolated `db push --linked --dry-run` has zero pending migrations.

@@ -85,11 +85,29 @@ discarded or retained only in protected memory.
 
 ### 2. Binding inspection
 
-`prepare inspect` performs a fresh read-only discovery. It must prove exact
-Vercel, Cloud Run, queue, scheduler, IAM, ledger, TaskActivityLog, journal, and
-lock bindings before it can produce a proposal. If any binding is missing or
-ambiguous, it returns `EVIDENCE_UNAVAILABLE` or the approved fixed discovery
-error and stops before mutation.
+The owner-only CLI has two separate pre-prepare commands, in this order:
+`unblock inspect` (read-only) followed, only after independent approval, by
+`unblock apply --approved-digest DIGEST` (digest-gated mutation). Only after a
+successful unblock read-back may the existing `prepare inspect` and
+`prepare apply --approved-digest DIGEST` run. The unblock commands are not a
+`prepare` subcommand and neither command may call the other phase to construct
+its digest; this removes the circular interface.
+
+`unblock inspect` uses only surviving exact production anchors and performs
+forward and reverse cross-plane checks for Vercel deployment/readiness, Cloud
+Run service/revision/build, queue target, recovery/retention scheduler,
+TaskActivityLog/pause provenance, fixed Supabase ledgers, and GCS journal/lock.
+It accepts only one complete graph, keeps protected values in owner memory,
+and emits a safe digest plus counts. Missing, duplicate, mixed-scope, partial,
+or non-unique evidence returns `DISCOVERY_AMBIGUOUS` or
+`EVIDENCE_UNAVAILABLE`; it never guesses or chooses a first/substring match.
+
+`prepare inspect` performs its existing fresh read-only preparation discovery
+only after selectors are complete. It must prove exact Vercel, Cloud Run,
+queue, scheduler, IAM, ledger, TaskActivityLog, journal, and lock bindings
+before it can produce a proposal. If any binding is missing or ambiguous, it
+returns `EVIDENCE_UNAVAILABLE` or the approved fixed discovery error and stops
+before mutation.
 
 The collector must not create a queue, scheduler, log sink, logging exclusion,
 table, view, schema, migration, or synthetic task to make a source appear
@@ -98,25 +116,37 @@ below; `prepare inspect` itself remains read-only.
 
 ### 2.1 Exact existing-resource unblock gate
 
-The implementation plan adds a pre-epoch owner-only `prepare unblock` operation
-inside the existing CLI boundary. It is not an activation, resume, canary, or
-general configuration command. Its complete invocation is:
+The implementation plan adds a pre-prepare owner-only `unblock` pair inside the
+existing CLI boundary. It is not an activation, resume, canary, or general
+configuration command. The complete invocations are:
 
 ```text
-node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare unblock --approved-digest "$UNBLOCK_DIGEST"
+node --import tsx scripts/prepare-capacity-identity-epoch.ts unblock inspect
+node --import tsx scripts/prepare-capacity-identity-epoch.ts unblock apply --approved-digest "$UNBLOCK_DIGEST"
 ```
 
 `$UNBLOCK_DIGEST` is the safe digest emitted by the immediately preceding
-`prepare inspect` and independently approved; it is not a protected descriptor.
-The operation re-reads the live before-state and refuses a stale digest before
-any mutation. Its mutation allowlist contains exactly two classes:
+`unblock inspect` and independently approved; it is not a protected descriptor.
+The apply operation re-reads the live before-state and refuses a stale digest
+before any mutation. Its mutation allowlist contains exactly two classes:
 
-1. Bind each missing selector field to the one already-existing production
-   resource proven by the approved exact selector/resource/project/scope
-   agreement. No selector is chosen by substring, first match, guessed name,
+1. Bind each missing, non-secret selector field to the one already-existing
+   production resource proven by the approved exact selector/resource/project/
+   scope agreement. Existing non-empty fields are cross-checks and cannot be
+   overwritten. No selector is chosen by substring, first match, guessed name,
    or fallback inventory.
 2. Set `stackdriverLoggingConfig.samplingRatio` to `1.0` on exactly the two
    packet-fixed existing paused queues, and on no other queue or logging object.
+
+The Vercel create shape is exactly one production environment create per
+missing allowlisted field: `POST /v10/projects/{vercelProjectId}/env?teamId={vercelTeamId}`
+(with the authenticated team query required by the linked project), body
+`{key, value, type: "plain", target: ["production"]}`. The Google Cloud Tasks shape is exactly two
+`PATCH /v2/{queueResource}?updateMask=stackdriverLoggingConfig.samplingRatio`
+requests with body
+`{"stackdriverLoggingConfig":{"samplingRatio":1.0}}`. Read every created
+environment row and both complete queue objects back; no other field/resource
+may change.
 
 Before the operation, the owner records only a safe before-state digest,
 allowlisted field count, exact queue count (`2`), and the intended after-state
@@ -124,14 +154,17 @@ policy. A separate visible reviewer approves those facts and the rollback
 digest. The operator then performs the mutation through the existing
 authenticated control-plane transport, reads every selector and queue back,
 and requires the after-state digest to match the reviewed policy with no extra
-field drift.
+field drift. Protected values remain in memory and never appear in the digest
+summary, argv, output, or report.
 
 If read-back fails, an unexpected field changes, either queue is not still the
-exact paused queue, or the after-state digest differs, the operator restores
-the recorded before-state bindings and sampling values. Rollback is bounded to
-those exact fields; it does not create/delete a resource, change a sink/schema,
-resume a queue, open a gate, or compensate another mutation. A rollback failure
-is a terminal stop requiring owner review, not a reason to retry blindly.
+exact paused queue, or the after-state digest differs, the operator deletes only
+the environment rows created by this invocation and restores the two recorded
+sampling values using the same exact two-queue update mask. Rollback is bounded
+to those created rows and exact fields; it does not delete a pre-existing row,
+create/delete another resource, change a sink/schema, resume a queue, open a
+gate, or compensate another mutation. A rollback failure is a terminal stop
+requiring owner review, not a reason to retry blindly.
 
 After a successful read-back, discard the old evidence and begin a fresh
 baseline-to-verification window. The new window must observe the updated exact

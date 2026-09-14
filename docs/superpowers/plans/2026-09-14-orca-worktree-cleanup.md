@@ -2,7 +2,7 @@
 
 > For agentic workers: REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Remove only Orca-managed worktrees proven clean, inactive, and fully merged into fetched `origin/main`, preserving all canonical, dirty, user-owned, active, report-source, and protected paths.
+**Goal:** Remove only Orca-managed worktrees proven clean, inactive, and fully merged into fetched `origin/main`, preserving all canonical, dirty, user-owned, active, sole-source-evidence, and protected paths.
 
 **Architecture:** Build a complete Git/Orca candidate matrix, apply clean+merged+not-preserved predicates, obtain independent review, then remove one candidate at a time with `orca worktree rm` without `--force`; re-audit after every removal.
 
@@ -17,7 +17,8 @@ This planning task removes nothing. Always preserve:
 - canonical main `.worktrees/final-main-20260725`;
 - current `cormorant`, its coordinator/root resources, and this task worktree;
 - Desktop/main and every path containing `.playwright-mcp/`;
-- all dirty/untracked/user-owned or report-source worktrees;
+- all dirty/untracked/user-owned worktrees, and any worktree that is still the sole
+  source of needed evidence;
 - any path with a live terminal, active/reclaimable/retained worker, owner-retained
   resource, uncovered host, or ambiguous ownership;
 - all non-ancestor/unmerged worktrees; and
@@ -26,6 +27,14 @@ This planning task removes nothing. Always preserve:
 
 `docs/investigations/worktree-cleanup-audit-20260906.md` is context only. It does
 not authorize removal of registrations created or changed afterward.
+
+Report-source preservation is a fresh dependency decision, not an unconditional
+class. In the same audit window, enumerate each artifact's consumers and prove
+whether an equivalent artifact is already on fetched `origin/main` or another
+retained path. Preserve a worktree only while it remains the sole source of
+needed evidence; a merged clean worktree whose artifact is already on
+`origin/main` and that has no unique/untracked content or active resources may
+be removed.
 
 ## Files and worker split
 
@@ -100,13 +109,14 @@ not authorize removal of registrations created or changed afterward.
 ## Task 3: Classify and independently review
 
 - [ ] Mark canonical main, cormorant, current task, Desktop/main,
-  `.playwright-mcp/`, dirty/user-owned, active/resource-attached, report-source,
-  uncovered, non-ancestor, and protected-uncertain paths as `PRESERVE`.
+  `.playwright-mcp/`, dirty/user-owned, active/resource-attached, sole-source
+  evidence, uncovered, non-ancestor, and protected-uncertain paths as `PRESERVE`.
 - [ ] Candidate allowlist is the intersection of: Orca-managed, complete host
   coverage, clean including untracked files, `HEAD` ancestor of fresh
-  `origin/main`, inactive, non-anchor, non-user-owned, no report-source role,
-  and protected-file hash match. It may be empty; age/branch absence alone is
-  never enough.
+  `origin/main`, inactive, non-anchor, non-user-owned, no unique/untracked
+  artifact or sole-source-evidence dependency, artifact already represented on
+  `origin/main`, and protected-file hash match. It may be empty; age/branch
+  absence alone is never enough.
 - [ ] Independent reviewer reruns the registration, host-coverage, status,
   ancestry, protected-hash, terminal, worker, and resource checks. Any
   disagreement removes a candidate from the allowlist and preserves it.
@@ -137,13 +147,15 @@ not authorize removal of registrations created or changed afterward.
   ```
 
   Confirm canonical main, cormorant, current task, Desktop/main, protected
-  paths, dirty/user-owned paths, and report sources remain present/unchanged.
+  paths, dirty/user-owned paths, and every still-sole-source evidence path
+  remain present/unchanged; recompute the dependency rule after each removal.
 
 ## Stop conditions and acceptance
 
 - [ ] Any unknown host/owner/resource state, dirty/untracked file, live/retained
-  resource, report-source marker, protected mismatch, or non-ancestor HEAD is a
-  preserve decision, not a cleanup error.
+  resource, sole-source evidence dependency, unresolved artifact dependency,
+  protected mismatch, or non-ancestor HEAD is a preserve decision, not a
+  cleanup error.
 - [ ] Every removed path was independently proven clean, inactive, fully merged,
   non-anchor, and safe in the same audit window, and was removed only by Orca
   without `--force`.
@@ -153,7 +165,7 @@ not authorize removal of registrations created or changed afterward.
   reason codes, removed HEAD hashes, and fetched `origin/main`; no raw contents,
   manifests, credentials, cookies, IDs, or process arguments.
 
-Self-review: complete host coverage, canonical/cormorant/user/protected
-preservation, three predicates, independent review, Orca-only removal, and
-post-removal verification are explicit; no direct destructive Git/shell path is
-available.
+Self-review: complete host coverage, canonical/cormorant/user/protected and
+sole-source-evidence preservation, fresh dependency proof, three predicates,
+independent review, Orca-only removal, and post-removal verification are
+explicit; no direct destructive Git/shell path is available.
