@@ -197,7 +197,23 @@ written in this plan.
 - [ ] Approve only safe digests/counts. Any finding requires correction and another review
   before a production call.
 
-## Task 5: Run the unblock pair
+## Task 5: Amend the runbook before any unblock mutation
+
+**Files (future implementation task, not this docs-only packet):**
+
+- Modify: `docs/analysis-v2-production-operations.md`
+
+- [ ] Before running `unblock apply`, amend the runbook's current logging-change
+  prohibition only for this reviewed prospective exception: exactly the two existing
+  canonical PAUSED queues, only `stackdriverLoggingConfig.samplingRatio`, target `1.0`,
+  with owner digest, independent approval, exact read-back, and rollback limited to
+  created env rows plus the two prior sampling values.
+- [ ] Document `unblock inspect` and
+  `unblock apply --approved-digest` before the existing `prepare inspect/apply`
+  commands, including the single-graph and memory-only boundary. Do not broaden the
+  prohibition for any other logging configuration or resource.
+
+## Task 6: Run the unblock pair
 
 **Files:** existing owner CLI; production mutation only after Task 4 approval.
 
@@ -225,7 +241,7 @@ written in this plan.
   Discard the pre-mutation observation before starting a fresh baseline-to-verification
   window.
 
-## Task 6: Existing preparation, only after unblock
+## Task 7: Existing preparation, only after unblock
 
 - [ ] Run the existing read-only preparation command after successful unblock read-back:
 
@@ -243,7 +259,7 @@ written in this plan.
   `QUIESCENCE_PENDING`; wait outside the process and begin another fresh inspect. Do not
   resume or compensate automatically.
 
-## Task 7: Fresh epoch evidence and terminal boundary
+## Task 8: Fresh epoch evidence and terminal boundary
 
 - [ ] Run `epoch inspect` twice with new authenticated clients. Require equal packet,
   bootstrap, scope, identity-graph, source/build/runtime/readiness, fixed-ledger,
@@ -261,23 +277,6 @@ written in this plan.
 - [ ] Verify safe terminal facts: public gates closed, both queues paused/empty, recovery
   schedulers paused/aged with provenance, and retention enabled. Stop here; no activation,
   gate-open, queue/scheduler resume, provider/user work, or real `0_min._.00` canary.
-
-## Task 8: Future runbook amendment
-
-**Files (future implementation task, not this docs-only packet):**
-
-- Modify: `docs/analysis-v2-production-operations.md`
-
-- [ ] Amend the runbook's current logging-change prohibition only for this reviewed
-  prospective exception: exactly the two existing canonical PAUSED queues, only
-  `stackdriverLoggingConfig.samplingRatio`, target `1.0`, with owner digest,
-  independent approval, exact read-back, and rollback limited to created env rows plus
-  the two prior sampling values.
-- [ ] Document `unblock inspect` and
-  `unblock apply --approved-digest` before the existing `prepare inspect/apply`
-  commands, including the single-graph and memory-only boundary. Do not broaden the
-  prohibition for any other logging configuration or resource, and do not edit the
-  runbook in this docs-only correction unless one consistency line in the plan is needed.
 
 ## Stop and acceptance
 
