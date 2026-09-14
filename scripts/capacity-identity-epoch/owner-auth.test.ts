@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
     captureGoogleAccessToken,
+    captureSupabaseServiceRoleKey,
     createOwnerProtectedTransports,
     loadOwnerAuthBoundary,
+    parseSupabaseServiceRoleKey,
     scrubOwnerError,
     type GoogleTokenChild,
 } from './owner-auth';
@@ -98,5 +100,188 @@ describe('owner credential boundary', () => {
         await expect(transports.supabase?.preflight()).resolves.toBeUndefined();
         expect(JSON.stringify({ transports })).not.toContain(PROTECTED_TOKEN);
         expect(JSON.stringify({ transports })).not.toContain(GOOGLE_TOKEN);
+    });
+
+    it('parses exactly one service-role key from the linked Supabase CLI response', () => {
+        expect(parseSupabaseServiceRoleKey(JSON.stringify([
+            {
+                name: 'anon',
+                api_key: 'fixture-anon-key',
+                id: 'anon',
+                type: 'legacy',
+                hash: 'fixture-anon-hash',
+                prefix: 'anon',
+                description: 'Legacy anon API key',
+            },
+            {
+                name: 'service_role',
+                api_key: 'fixture-service-role-key',
+                id: 'service_role',
+                type: 'legacy',
+                hash: 'fixture-service-role-hash',
+                prefix: 'service',
+                description: 'Legacy service role API key',
+            },
+            {
+                id: 'fixture-publishable-id',
+                name: 'default',
+                type: 'publishable',
+                api_key: 'fixture-publishable-key',
+                description: null,
+                secret_jwt_template: null,
+                hash: 'fixture-publishable-hash',
+                prefix: 'sb_publishable',
+                inserted_at: '2000-01-01T00:00:00Z',
+                updated_at: '2000-01-01T00:00:00Z',
+            },
+            {
+                id: 'fixture-secret-id',
+                name: 'default',
+                type: 'secret',
+                api_key: null,
+                description: null,
+                secret_jwt_template: { role: 'service_role' },
+                hash: 'fixture-secret-hash',
+                prefix: 'sb_secret',
+                inserted_at: '2000-01-01T00:00:00Z',
+                updated_at: '2000-01-01T00:00:00Z',
+            },
+        ]))).toBe('fixture-service-role-key');
+        expect(() => parseSupabaseServiceRoleKey(JSON.stringify([
+            {
+                name: 'service_role',
+                api_key: 'first-key',
+                id: 'service_role',
+                type: 'legacy',
+                hash: 'fixture-first-hash',
+                prefix: 'service',
+                description: null,
+            },
+            {
+                name: 'service_role',
+                api_key: 'second-key',
+                id: 'service_role-2',
+                type: 'legacy',
+                hash: 'fixture-second-hash',
+                prefix: 'service',
+                description: null,
+            },
+        ]))).toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(() => parseSupabaseServiceRoleKey(JSON.stringify([
+            {
+                name: 'service_role',
+                api_key: 'key',
+                id: 'service_role',
+                type: 'legacy',
+                hash: 'fixture-hash',
+                prefix: 'service',
+                description: null,
+                extra: 'unexpected',
+            },
+        ]))).toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('captures the linked Supabase CLI privately with an origin-bound project ref', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
+        const projectRefPath = join(directory, 'supabase', '.temp', 'project-ref');
+        writeFileSync(projectRefPath, 'abcdefghijklmnopqrst\n', { mode: 0o600 });
+        chmodSync(projectRefPath, 0o600);
+        const child: GoogleTokenChild = {
+            stdout: { on: (_event, handler) => {
+                handler(Buffer.from(JSON.stringify([{
+                    name: 'service_role',
+                    api_key: 'fixture-service-role-key',
+                    id: 'service_role',
+                    type: 'legacy',
+                    hash: 'fixture-service-role-hash',
+                    prefix: 'service',
+                    description: null,
+                }])));
+                handler();
+                return child.stdout;
+            } },
+            stderr: { on: (_event, handler) => { handler(Buffer.from('private-cli-diagnostic')); handler(); return child.stderr; } },
+            once: (event, handler) => { if (event === 'close') queueMicrotask(() => handler(0, null)); return child; },
+            kill: () => true,
+        };
+        let capturedArgs: readonly string[] = [];
+        let capturedOptions: Record<string, unknown> | undefined;
+        const key = await captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            command: 'supabase',
+            spawn: (_command, args, options) => {
+                capturedArgs = args;
+                capturedOptions = options as Record<string, unknown>;
+                return child;
+            },
+            timeoutMs: 1_000,
+        });
+        expect(key).toBe('fixture-service-role-key');
+        expect(capturedArgs).toEqual(['--workdir', directory, 'projects', 'api-keys', '--output', 'json']);
+        expect(capturedOptions).toMatchObject({ cwd: directory, shell: false, env: { LANG: 'C', NODE_ENV: 'production' } });
+        expect(capturedOptions?.env).not.toHaveProperty('SUPABASE_SERVICE_ROLE_KEY');
+    });
+
+    it('rejects a Supabase origin that cannot produce the exact CLI project ref', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(directory, 'supabase', '.temp', 'project-ref'), 'abcdefghijklmnopqrst\n', { mode: 0o600 });
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://wrong.example/',
+            workdir: directory,
+            spawn: () => { throw new Error('must not spawn'); },
+        })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects a linked project ref that differs from the configured origin before spawning', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(directory, 'supabase', '.temp', 'project-ref'), 'zyxwvutsrqponmlkjihg\n', { mode: 0o600 });
+        let spawned = false;
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            spawn: () => { spawned = true; throw new Error('must not spawn'); },
+        })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(spawned).toBe(false);
+    });
+
+    it('caps Supabase CLI output and bounds a child that never closes', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(directory, 'supabase', '.temp', 'project-ref'), 'abcdefghijklmnopqrst\n', { mode: 0o600 });
+        let killed = false;
+        const oversized: GoogleTokenChild = {
+            stdout: { on: (event, handler) => {
+                if (event === 'data') handler(Buffer.alloc(64 * 1024 + 1, 'x'));
+                return oversized.stdout;
+            } },
+            stderr: { on: () => oversized.stderr },
+            once: (event, handler) => { if (event === 'close') queueMicrotask(() => handler(0, null)); return oversized; },
+            kill: () => { killed = true; return true; },
+        };
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            spawn: () => oversized,
+            timeoutMs: 1_000,
+        })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(killed).toBe(true);
+
+        const hanging: GoogleTokenChild = {
+            stdout: { on: () => hanging.stdout },
+            stderr: { on: () => hanging.stderr },
+            once: () => hanging,
+            kill: () => { killed = true; return true; },
+        };
+        await expect(captureSupabaseServiceRoleKey({
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: directory,
+            spawn: () => hanging,
+            timeoutMs: 10,
+        })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(killed).toBe(true);
     });
 });

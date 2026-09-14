@@ -163,6 +163,73 @@ describe('owner production discovery boundaries', () => {
         expect(requests.some(url => new URL(url).searchParams.get('decrypt') === 'true')).toBe(false);
     });
 
+    it.each([
+        ['type', { id: 'env-unsupported-type', key: 'UNSUPPORTED_TYPE', type: 'secret', target: ['production'], gitBranch: null, configurationId: null }],
+        ['target', { id: 'env-unsupported-target', key: 'UNSUPPORTED_TARGET', type: 'plain', target: ['production', 'custom'], gitBranch: null, configurationId: null }],
+    ])('rejects an unsupported env %s before issuing a per-ID request', async (_case, metadata) => {
+        let valueRequests = 0;
+        const transport: ProtectedTransport = {
+            request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
+                const url = new URL(request.url);
+                if (url.pathname.endsWith('/env')) {
+                    return {
+                        status: 200,
+                        headers: {},
+                        url: request.url,
+                        body: JSON.stringify({ envs: [metadata] }),
+                    };
+                }
+                valueRequests += 1;
+                return {
+                    status: 200,
+                    headers: {},
+                    url: request.url,
+                    body: JSON.stringify({ id: 'env-unsupported', key: 'UNSUPPORTED', type: 'secret', target: ['production'], value: 'unexpected' }),
+                };
+            },
+        };
+        const client = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token' });
+        await expect(readExactVercelProductionEnvValues({
+            transport: client,
+            projectId: 'fixture-project',
+            teamId: 'fixture-team',
+            allowedKeys: new Set([metadata.key]),
+        })).rejects.toThrow('ADAPTER_RESPONSE_INVALID');
+        expect(valueRequests).toBe(0);
+    });
+
+    it('accepts the official single-value response with optional id and scalar target', async () => {
+        const requests: string[] = [];
+        const transport: ProtectedTransport = {
+            request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
+                requests.push(request.url);
+                const url = new URL(request.url);
+                if (url.pathname.endsWith('/env')) {
+                    return {
+                        status: 200,
+                        headers: {},
+                        url: request.url,
+                        body: JSON.stringify({ envs: [{ id: 'env-single', key: 'SINGLE', type: 'plain', target: ['production'], gitBranch: null, configurationId: null }] }),
+                    };
+                }
+                return {
+                    status: 200,
+                    headers: {},
+                    url: request.url,
+                    body: JSON.stringify({ key: 'SINGLE', type: 'plain', target: 'production', value: 'single-value' }),
+                };
+            },
+        };
+        const client = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token' });
+        await expect(readExactVercelProductionEnvValues({
+            transport: client,
+            projectId: 'fixture-project',
+            teamId: 'fixture-team',
+            allowedKeys: new Set(['SINGLE']),
+        })).resolves.toMatchObject({ values: { SINGLE: 'single-value' } });
+        expect(requests).toHaveLength(2);
+    });
+
     it('rejects duplicate inventory keys or ids before any value request', async () => {
         let valueRequests = 0;
         const transport: ProtectedTransport = {

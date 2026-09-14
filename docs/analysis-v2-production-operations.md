@@ -191,6 +191,20 @@ environment values to a file, accept protected resource values in argv, or
 include credentials in normal output. Run each command as a separate
 read-only/review boundary:
 
+If the service-role environment value is marked sensitive and cannot be
+retrieved from Vercel, the authenticated linked Supabase CLI is allowed only as
+an owner credential conduit for the zero-work read. The linked
+`supabase/.temp/project-ref` file is read from the owner-controlled primary
+workdir resolved from Git's common dir and must exactly match the configured
+Supabase origin; the origin remains the sole project selector. Invoke the local pinned
+CLI directly with `--workdir` and `projects api-keys --output json`, using
+`shell: false`, a fixed non-dotenv environment, bounded timeout/output, and
+discarded stderr; do not pass `--project-ref` or `--reveal`. Parse only the
+bounded top-level array whose rows use the observed 7-field base or 10-field
+extended exact contract, select exactly one legacy `service_role` row with a bounded non-whitespace `api_key`, and keep the raw
+response/credential within the protected in-memory/FD boundary rather than
+normal output, files, logs, or independent serialization.
+
 ~~~text
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare inspect
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare apply --approved-digest DIGEST

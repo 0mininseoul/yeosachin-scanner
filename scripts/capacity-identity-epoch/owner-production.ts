@@ -1,4 +1,5 @@
 import { lstatSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
@@ -35,6 +36,7 @@ import {
     type RuntimeSettings,
 } from './contracts';
 import {
+    captureSupabaseServiceRoleKey,
     createOwnerProtectedTransports,
     loadOwnerAuthBoundary,
     type OwnerAuthBoundary,
@@ -87,11 +89,24 @@ const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const QUEUE = /^[A-Za-z0-9-]{1,100}$/;
 const SCHEDULER = /^[A-Za-z0-9_-]{1,500}$/;
 const BUCKET = /^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/;
+const SUPABASE_ORIGIN = /^https:\/\/[a-z0-9]{20}\.supabase\.co\/$/;
 const IMAGE = /^[^\s\u0000-\u001f\u007f]{1,2048}@sha256:[0-9a-f]{64}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SAFE = /^[^\u0000-\u001f\u007f]{1,4096}$/;
 const MAX_PAGES = 100;
 const QUIESCENCE = Object.freeze({ timeoutMs: 60_000, graceMs: 5_000 });
+const MAX_GIT_OUTPUT_BYTES = 8 * 1024;
+const GIT_ENV = Object.freeze({
+    PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin',
+    LANG: 'C',
+    LC_ALL: 'C',
+    NODE_ENV: 'production',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_TERMINAL_PROMPT: '0',
+});
 
 const ENV_KEYS = Object.freeze(new Set([
     'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET',
@@ -143,6 +158,50 @@ function optional(env: Env, key: string): string | undefined {
     if (value === undefined) return undefined;
     if (value.length === 0 || value.length > 8192 || !SAFE.test(value)) fail('EVIDENCE_UNAVAILABLE');
     return value;
+}
+
+function ownerDirectory(path: string, expectedUid: number): string {
+    if (!SAFE.test(path)) unavailable();
+    let stat: ReturnType<typeof lstatSync>;
+    try { stat = lstatSync(path); } catch { unavailable(); }
+    if (!stat.isDirectory() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0) unavailable();
+    return path;
+}
+
+/**
+ * Resolve the primary worktree from Git's common directory.  A linked
+ * worktree's own root is intentionally not used for the Supabase project-ref:
+ * its `.git` file can point at the shared primary repository metadata while
+ * its local files are otherwise isolated.
+ */
+function primaryRepositoryRoot(cwd: string, expectedUid: number): string {
+    let raw: string;
+    try {
+        raw = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+            cwd,
+            env: { ...GIT_ENV },
+            shell: false,
+            stdio: ['ignore', 'pipe', 'ignore'],
+            encoding: 'utf8',
+            timeout: 5_000,
+            maxBuffer: MAX_GIT_OUTPUT_BYTES,
+        }) as string;
+    } catch { unavailable(); }
+    if (!raw.endsWith('\n')) unavailable();
+    const commonDirRaw = raw.slice(0, -1);
+    if (commonDirRaw.length === 0 || commonDirRaw.includes('\n') || commonDirRaw.includes('\r') || !SAFE.test(commonDirRaw)) unavailable();
+    const commonDir = resolve(commonDirRaw);
+    if (commonDir !== commonDirRaw || !commonDir.endsWith('/.git')) unavailable();
+    ownerDirectory(dirname(commonDir), expectedUid);
+    ownerDirectory(commonDir, expectedUid);
+    return dirname(commonDir);
+}
+
+export function resolvePrimaryRepositoryRootForOwner(cwd: string): string {
+    if (!SAFE.test(cwd)) unavailable();
+    const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
+    if (!Number.isSafeInteger(uid) || uid < 0) unavailable();
+    return primaryRepositoryRoot(resolve(cwd), uid);
 }
 
 function project(value: string): string {
@@ -231,35 +290,74 @@ function readRoleSelector(env: Env, role: Role): Readonly<{
     location: string;
     cloudRunRegion: string;
     service: string;
-    queue: string;
+    queue?: string;
     recoveryJob: string;
     maintenanceLocation: string;
 }> {
     const names = envForRole(role);
+    const queue = role === 'paid' ? optional(env, names.queue) : required(env, names.queue);
     const result = {
         project: project(required(env, names.project)),
         location: required(env, names.location),
         cloudRunRegion: required(env, names.cloudRunRegion),
         service: required(env, names.service),
-        queue: required(env, names.queue),
         recoveryJob: required(env, names.recoveryJob),
         maintenanceLocation: required(env, names.maintenanceLocation),
+        ...(queue === undefined ? {} : { queue }),
     };
-    if (!LOCATION.test(result.location) || !LOCATION.test(result.cloudRunRegion) || !SERVICE.test(result.service) || !QUEUE.test(result.queue)
+    if (!LOCATION.test(result.location) || !LOCATION.test(result.cloudRunRegion) || !SERVICE.test(result.service)
         || !SCHEDULER.test(result.recoveryJob) || !LOCATION.test(result.maintenanceLocation)) fail('ADAPTER_REQUEST_INVALID');
+    if (result.queue !== undefined && !QUEUE.test(result.queue)) fail('ADAPTER_REQUEST_INVALID');
     return result;
 }
 
-function roleResource(role: Role, selector: ReturnType<typeof readRoleSelector>): Readonly<{
+type RoleSelector = ReturnType<typeof readRoleSelector>;
+type BoundRoleSelector = RoleSelector & Readonly<{ queue: string }>;
+
+function serviceResource(selector: RoleSelector): string {
+    return `projects/${selector.project}/locations/${selector.cloudRunRegion}/services/${selector.service}`;
+}
+
+function schedulerResource(role: Role, selector: RoleSelector): string {
+    return `projects/${selector.project}/locations/${selector.maintenanceLocation}/jobs/${selector.recoveryJob}`;
+}
+
+function roleResource(role: Role, selector: BoundRoleSelector): Readonly<{
     service: string;
     queue: string;
     scheduler: string;
 }> {
     return {
-        service: `projects/${selector.project}/locations/${selector.cloudRunRegion}/services/${selector.service}`,
+        service: serviceResource(selector),
         queue: `projects/${selector.project}/locations/${selector.location}/queues/${selector.queue}`,
-        scheduler: `projects/${selector.project}/locations/${selector.maintenanceLocation}/jobs/${selector.recoveryJob}`,
+        scheduler: schedulerResource(role, selector),
     };
+}
+
+/**
+ * Resolve the queue only after the exact project/region/service Cloud Run
+ * observation has been authenticated. Any readable Vercel queue selector is
+ * a cross-check, never an authority for selecting the resource.
+ */
+export function resolveRoleSelectorFromCloudRun(input: Readonly<{
+    role: Role;
+    selector: RoleSelector;
+    runtime: Readonly<Pick<CloudRunServiceObservation, 'resource' | 'project' | 'location' | 'service' | 'environment'>>;
+}>): BoundRoleSelector {
+    const prefix = input.role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
+    const runtimeProject = input.runtime.environment[`${prefix}_PROJECT`];
+    const runtimeLocation = input.runtime.environment[`${prefix}_LOCATION`];
+    const runtimeQueue = input.runtime.environment[`${prefix}_QUEUE`];
+    if ((input.role !== 'paid' && input.selector.queue === undefined)
+        || input.runtime.resource !== serviceResource(input.selector)
+        || input.runtime.project !== input.selector.project
+        || input.runtime.location !== input.selector.cloudRunRegion
+        || input.runtime.service !== input.selector.service
+        || runtimeProject !== input.selector.project
+        || runtimeLocation !== input.selector.location
+        || typeof runtimeQueue !== 'string' || !QUEUE.test(runtimeQueue)
+        || (input.selector.queue !== undefined && input.selector.queue !== runtimeQueue)) fail('CAPABILITY_BINDING_MISMATCH');
+    return Object.freeze({ ...input.selector, queue: runtimeQueue });
 }
 
 function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSelector>>): string {
@@ -268,7 +366,7 @@ function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSe
     return [...projects][0]!;
 }
 
-function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string }> {
+function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string; supabaseWorkdir: string }> {
     if (!SAFE.test(cwd)) unavailable();
     const currentWorktree = resolve(cwd);
     let linkedMetadataPath: string | undefined;
@@ -305,7 +403,13 @@ function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath
         try { return lstatSync(candidate).isFile(); } catch { return false; }
     });
     if (existing.length !== 1) unavailable();
-    return { linkedMetadataPath, credentialStorePath: existing[0]!, cwd: currentWorktree };
+    const primaryRoot = resolvePrimaryRepositoryRootForOwner(currentWorktree);
+    return {
+        linkedMetadataPath,
+        credentialStorePath: existing[0]!,
+        cwd: currentWorktree,
+        supabaseWorkdir: primaryRoot,
+    };
 }
 
 async function readProductionEnv(transport: AuthenticatedProtectedTransport, auth: OwnerAuthBoundary): Promise<ExactVercelProductionEnvValues> {
@@ -558,7 +662,7 @@ function assertSameBuild(left: BuildRecord, right: BuildRecord): void {
     if (canonicalDigest(left.input) !== canonicalDigest(right.input)) fail('SOURCE_INVALID');
 }
 
-function runtimeEnvironment(old: CloudRunServiceObservation, role: Role, selector: ReturnType<typeof readRoleSelector>, desired: Readonly<Record<string, ProtectedIdentity>>, schedulerTarget: Readonly<{ audience: string }>, queueTarget: Readonly<{ url: string; audience: string }>): Readonly<Record<string, string>> {
+function runtimeEnvironment(old: CloudRunServiceObservation, role: Role, selector: BoundRoleSelector, desired: Readonly<Record<string, ProtectedIdentity>>, schedulerTarget: Readonly<{ audience: string }>, queueTarget: Readonly<{ url: string; audience: string }>): Readonly<Record<string, string>> {
     if (old.environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED !== 'true') fail('SOURCE_INVALID');
     const env = { ...old.environment };
     const prefix = role === 'preflight' ? 'PREFLIGHT_TASKS' : 'ANALYSIS_V2_TASKS';
@@ -736,7 +840,7 @@ function pauseProvenanceReader(google: AuthenticatedProtectedTransport, env: Env
     };
 }
 
-function queueInput(role: Role, selector: ReturnType<typeof readRoleSelector>, runtime: CloudRunServiceObservation, raw: Record<string, unknown>, caller: ProtectedIdentity): ProtectedQueueInput {
+function queueInput(role: Role, selector: BoundRoleSelector, runtime: CloudRunServiceObservation, raw: Record<string, unknown>, caller: ProtectedIdentity): ProtectedQueueInput {
     const target = roleTargetFromEnvironment(runtime.environment, role);
     const expectedCaller = role === 'preflight' ? runtime.environment.PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL : runtime.environment.ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL;
     if (expectedCaller !== caller.identity) fail('CAPABILITY_BINDING_MISMATCH');
@@ -749,8 +853,8 @@ function queueInput(role: Role, selector: ReturnType<typeof readRoleSelector>, r
     };
 }
 
-function schedulerInput(role: Role, selector: ReturnType<typeof readRoleSelector>, raw: Record<string, unknown>, maintenance: ProtectedIdentity): ProtectedSchedulerInput {
-    const resource = roleResource(role, selector).scheduler;
+function schedulerInput(role: Role, selector: RoleSelector, raw: Record<string, unknown>, maintenance: ProtectedIdentity): ProtectedSchedulerInput {
+    const resource = schedulerResource(role, selector);
     const target = recoveryTargetFromWire(raw, selector.project);
     if (target.identity.identity !== maintenance.identity) fail('CAPABILITY_BINDING_MISMATCH');
     const state = raw.state;
@@ -788,7 +892,7 @@ function member(identityValue: ProtectedIdentity): string {
 
 type RoleLive = Readonly<{
     role: Role;
-    selector: ReturnType<typeof readRoleSelector>;
+    selector: BoundRoleSelector;
     resources: ReturnType<typeof roleResource>;
     runtime: CloudRunServiceObservation;
     revision: CloudRunRevisionObservation;
@@ -806,6 +910,7 @@ type RoleLive = Readonly<{
 
 type OwnerPass = Readonly<{
     env: Env;
+    supabaseServiceRoleSensitive: boolean;
     auth: OwnerAuthBoundary;
     transports: OwnerProtectedTransports;
     project: string;
@@ -823,7 +928,7 @@ type OwnerPass = Readonly<{
 async function buildRoleLive(input: Readonly<{
     role: Role;
     env: Env;
-    selector: ReturnType<typeof readRoleSelector>;
+    selector: RoleSelector;
     google: AuthenticatedProtectedTransport;
     workPlanes: WorkPlaneClient;
     iamAdapter: IamAdapter;
@@ -831,11 +936,12 @@ async function buildRoleLive(input: Readonly<{
     desiredSourceSha: string;
     desiredImage: string;
 }>, buildsByLocation: Readonly<Record<string, readonly BuildRecord[]>>): Promise<RoleLive> {
-    const resources = roleResource(input.role, input.selector);
     const cloudRun = new CloudRunAdapter({ transport: input.google });
-    const runtime = await cloudRun.getService(resources.service);
+    const runtime = await cloudRun.getService(serviceResource(input.selector));
     if (runtime.project !== input.selector.project || runtime.location !== input.selector.cloudRunRegion || runtime.service !== input.selector.service
         || runtime.latestReadyRevision === null || !runtime.ready || runtime.observedGeneration !== runtime.generation || !IMAGE.test(runtime.image)) fail('SOURCE_INVALID');
+    const selector = resolveRoleSelectorFromCloudRun({ role: input.role, selector: input.selector, runtime });
+    const resources = roleResource(input.role, selector);
     const revision = await cloudRun.observeRevision(runtime.project, runtime.location, runtime.latestReadyRevision);
     if (!revision.ready || revision.identity.identity !== runtime.identity.identity || revision.image !== runtime.image
         || revision.runtimeDigest !== runtime.runtimeDigest || revision.buildDigest !== runtime.buildDigest) fail('SOURCE_INVALID');
@@ -852,8 +958,8 @@ async function buildRoleLive(input: Readonly<{
     const queueCaller = queueRaw.httpTarget && isObject(queueRaw.httpTarget) && isObject(queueRaw.httpTarget.oidcToken)
         ? queueRaw.httpTarget.oidcToken.serviceAccountEmail : undefined;
     if (typeof queueCaller !== 'string') fail('ADAPTER_RESPONSE_INVALID');
-    const caller = identity(queueCaller, input.selector.project);
-    const queueInputValue = queueInput(input.role, input.selector, runtime, queueRaw, caller);
+    const caller = identity(queueCaller, selector.project);
+    const queueInputValue = queueInput(input.role, selector, runtime, queueRaw, caller);
     const queueObservation = await input.workPlanes.observeQueue(queueInputValue);
     // Cloud Tasks does not expose a fixed worker URL on the queue resource;
     // its HTTP target is carried by each task. The queue-level OIDC tuple and
@@ -863,21 +969,21 @@ async function buildRoleLive(input: Readonly<{
         || queueObservation.target.audience !== queueInputValue.target.audience
         || canonicalDigest(queueObservation.target.callerIdentity) !== canonicalDigest(queueInputValue.target.callerIdentity)) fail('CAPABILITY_BINDING_MISMATCH');
     const schedulerRaw = await readSchedulerWire(input.google, resources.scheduler);
-    const schedulerTarget = recoveryTargetFromWire(schedulerRaw, input.selector.project);
+    const schedulerTarget = recoveryTargetFromWire(schedulerRaw, selector.project);
     const expectedMaintenance = maintenanceTargetFromEnvironment(runtime.environment, input.role);
     if (schedulerTarget.identity.identity !== expectedMaintenance.identity.identity
         || schedulerTarget.audience !== expectedMaintenance.audience) fail('CAPABILITY_BINDING_MISMATCH');
-    const schedulerInputValue = schedulerInput(input.role, input.selector, schedulerRaw, expectedMaintenance.identity);
+    const schedulerInputValue = schedulerInput(input.role, selector, schedulerRaw, expectedMaintenance.identity);
     const schedulerObservation = await input.workPlanes.observeScheduler(schedulerInputValue);
-    const retentionResource = `projects/${input.selector.project}/locations/${input.selector.maintenanceLocation}/jobs/${required(input.env, 'ANALYSIS_V2_RETENTION_SCHEDULER_JOB')}`;
-    const retentionInputValue: ProtectedRetentionInput = { resource: retentionResource, project: input.selector.project, location: input.selector.maintenanceLocation, enabled: true, configuration: { enabled: true } };
+    const retentionResource = `projects/${selector.project}/locations/${selector.maintenanceLocation}/jobs/${required(input.env, 'ANALYSIS_V2_RETENTION_SCHEDULER_JOB')}`;
+    const retentionInputValue: ProtectedRetentionInput = { resource: retentionResource, project: selector.project, location: selector.maintenanceLocation, enabled: true, configuration: { enabled: true } };
     const retention = await input.workPlanes.observeRetention(retentionInputValue);
     if (!retention.enabled) fail('EVIDENCE_UNAVAILABLE');
     const iam = {
-        run: await input.iamAdapter.getPolicy({ kind: 'run', resource: resources.service, project: input.selector.project }),
-        maintenance: await input.iamAdapter.getPolicy({ kind: 'maintenance', resource: resources.service, project: input.selector.project }),
-        queue: await input.iamAdapter.getPolicy({ kind: 'queue', resource: resources.queue, project: input.selector.project }),
-        taskCaller: await input.iamAdapter.getPolicy({ kind: 'taskCaller', resource: serviceAccountResource(input.selector.project, caller.identity), project: input.selector.project }),
+        run: await input.iamAdapter.getPolicy({ kind: 'run', resource: resources.service, project: selector.project }),
+        maintenance: await input.iamAdapter.getPolicy({ kind: 'maintenance', resource: resources.service, project: selector.project }),
+        queue: await input.iamAdapter.getPolicy({ kind: 'queue', resource: resources.queue, project: selector.project }),
+        taskCaller: await input.iamAdapter.getPolicy({ kind: 'taskCaller', resource: serviceAccountResource(selector.project, caller.identity), project: selector.project }),
     };
     if (canonicalDigest(iam.run.bindings) !== canonicalDigest(iam.maintenance.bindings) || iam.run.etag !== iam.maintenance.etag) fail('RESOURCE_INVALID');
     const buildRecords = Object.values(buildsByLocation).flat();
@@ -885,10 +991,10 @@ async function buildRoleLive(input: Readonly<{
     const oldBuild = selectBuild(buildRecords, input.oldSourceSha, runtime.image);
     const desiredBuild = selectBuild(buildRecords, input.desiredSourceSha, input.desiredImage);
     return {
-        role: input.role, selector: input.selector, resources, runtime, revision, queueInput: queueInputValue, queueObservation,
+        role: input.role, selector, resources, runtime, revision, queueInput: queueInputValue, queueObservation,
         schedulerInput: { ...schedulerInputValue, state: schedulerObservation.state, pauseEpochMs: schedulerObservation.pauseEpochMs, lastAttemptMs: schedulerObservation.lastAttemptMs }, schedulerObservation, retentionInput: retentionInputValue, iam,
         oldBuild, desiredBuild, desiredImage: input.desiredImage,
-        slots: identitySlots(input.role, runtime, queueObservation, schedulerObservation, input.selector),
+        slots: identitySlots(input.role, runtime, queueObservation, schedulerObservation, selector),
     };
 }
 
@@ -953,9 +1059,17 @@ function makeSupabaseOrigin(env: Env): string {
     const next = optional(env, 'NEXT_PUBLIC_SUPABASE_URL');
     const server = optional(env, 'SUPABASE_URL');
     if (next === undefined && server === undefined) fail('EVIDENCE_UNAVAILABLE');
-    const origin = originUrl(next ?? server!);
-    if (next !== undefined && server !== undefined && originUrl(server) !== origin) fail('PROJECT_MISMATCH');
-    return `${origin}/`;
+    const configured = (value: string): string => {
+        let parsed: URL;
+        try { parsed = new URL(value); } catch { fail('PROJECT_MISMATCH'); }
+        const origin = `${parsed.origin}/`;
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
+            || parsed.pathname !== '/' || parsed.search || parsed.hash || !SUPABASE_ORIGIN.test(origin)) fail('PROJECT_MISMATCH');
+        return origin;
+    };
+    const origin = configured(next ?? server!);
+    if (next !== undefined && server !== undefined && configured(server) !== origin) fail('PROJECT_MISMATCH');
+    return origin;
 }
 
 function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLive>, nowMs: number): LiveZeroWorkSources {
@@ -1034,7 +1148,8 @@ function assertRoleIamIdentityIsolation(roles: RoleMap<RoleLive>): void {
 }
 
 async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtectedTransports, now: () => number): Promise<OwnerPass> {
-    const env = envMap(await readProductionEnv(transports.vercel, auth));
+    const productionEnv = await readProductionEnv(transports.vercel, auth);
+    const env = envMap(productionEnv);
     const selectors = Object.fromEntries(ROLES.map(role => [role, readRoleSelector(env, role)])) as RoleMap<ReturnType<typeof readRoleSelector>>;
     const projectId = requireProjectAgreement(selectors);
     if (auth.vercelProjectId.length === 0 || auth.vercelTeamId.length === 0) unavailable();
@@ -1077,7 +1192,9 @@ async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtected
     const bucket = required(env, 'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET');
     if (!BUCKET.test(bucket)) fail('ADAPTER_REQUEST_INVALID');
     return Object.freeze({
-        env, auth, transports, project: projectId, accounts, roles, oldReadiness, desiredReadiness,
+        env,
+        supabaseServiceRoleSensitive: productionEnv.sensitiveKeys.includes('SUPABASE_SERVICE_ROLE_KEY'),
+        auth, transports, project: projectId, accounts, roles, oldReadiness, desiredReadiness,
         oldDeployment, desiredDeployment: desired, alias, bucket,
         supabaseOrigin: makeSupabaseOrigin(env),
     });
@@ -1669,7 +1786,7 @@ function oldGraphToDesired(graph: IdentityGraphObservation): DesiredIdentityGrap
     return Object.freeze({ project: graph.project, build: graph.build, slots: graph.slots });
 }
 
-async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number): Promise<OwnerDescriptorAssemblyInput> {
+async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number, supabaseWorkdir: string): Promise<OwnerDescriptorAssemblyInput> {
     const built = await buildOwnerPacket(pass, nowMs);
     const ownerDigest = canonicalDigest({
         project: pass.project,
@@ -1677,7 +1794,12 @@ async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number): Promise<
         vercelTeamId: pass.auth.vercelTeamId,
         alias: pass.alias,
     });
-    const supabaseServiceRoleBearer = required(pass.env, 'SUPABASE_SERVICE_ROLE_KEY');
+    const supabaseServiceRoleBearer = pass.env.SUPABASE_SERVICE_ROLE_KEY ?? (pass.supabaseServiceRoleSensitive
+        ? await captureSupabaseServiceRoleKey({
+            origin: pass.supabaseOrigin,
+            workdir: supabaseWorkdir,
+        })
+        : unavailable());
     await assertOwnerZeroWorkCoverage(pass, built, nowMs, supabaseServiceRoleBearer);
     const vercelToken = await pass.auth.vercelTokenProvider();
     const googleAccessToken = await pass.auth.googleTokenProvider();
@@ -1728,7 +1850,7 @@ async function createKeylessAccount(google: AuthenticatedProtectedTransport, inp
 
 async function pauseRecoveryScheduler(google: AuthenticatedProtectedTransport, env: Env, role: Role, resource: string): Promise<void> {
     const selector = readRoleSelector(env, role);
-    const expected = roleResource(role, selector).scheduler;
+    const expected = schedulerResource(role, selector);
     if (resource !== expected) fail('CAPABILITY_BINDING_MISMATCH');
     const before = await readSchedulerWire(google, resource);
     if (before.state !== 'ENABLED') fail('OBSERVATION_RACE');
@@ -1738,7 +1860,7 @@ async function pauseRecoveryScheduler(google: AuthenticatedProtectedTransport, e
 
 async function readPreparationScheduler(google: AuthenticatedProtectedTransport, env: Env, now: () => number, role: Role, resource: string): Promise<PreparationObservation['schedulers'][Role]> {
     const selector = readRoleSelector(env, role);
-    const expected = roleResource(role, selector).scheduler;
+    const expected = schedulerResource(role, selector);
     if (resource !== expected) fail('CAPABILITY_BINDING_MISMATCH');
     const raw = await readSchedulerWire(google, resource);
     const maintenance = identityFromWire(raw, selector.project);
@@ -1778,6 +1900,6 @@ export async function createOwnerProductionCliDependencies(options: Readonly<{
         },
     };
     const preparation = new OwnerPreparationOperator({ discover, mutate, now, quiescence: QUIESCENCE });
-    const readDescriptorPass = async (): Promise<OwnerDescriptorAssemblyInput> => readOwnerDescriptorPass(await readPass(), now());
+    const readDescriptorPass = async (): Promise<OwnerDescriptorAssemblyInput> => readOwnerDescriptorPass(await readPass(), now(), paths.supabaseWorkdir);
     return Object.freeze({ ownerAuth, preparation, readDescriptorPass });
 }

@@ -211,8 +211,17 @@ async function runStage(
     }
     options.setActiveChild(child);
 
-    try {
+    let timedOut = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>(resolve => {
+        timeoutHandle = setTimeout(() => {
+            timedOut = true;
+            safeKill(child, 'SIGTERM');
+            resolve();
+        }, options.timeoutMs);
+    });
 
+    try {
         const packetPipe = child.stdio[PACKET_FD];
         const bootstrapPipe = child.stdio[BOOTSTRAP_FD];
         if (!packetPipe || typeof packetPipe === 'string' || !bootstrapPipe || typeof bootstrapPipe === 'string'
@@ -234,24 +243,14 @@ async function runStage(
         const bootstrapRaw = serializeProtectedDescriptor(input.bootstrap);
         try {
             await Promise.all([
-                waitForPipeFinish(packetPipe as Writable, packetRaw),
-                waitForPipeFinish(bootstrapPipe as Writable, bootstrapRaw),
+                Promise.race([waitForPipeFinish(packetPipe as Writable, packetRaw), timeout]),
+                Promise.race([waitForPipeFinish(bootstrapPipe as Writable, bootstrapRaw), timeout]),
             ]);
         } catch {
             bridgeFail();
         }
-
-        let timedOut = false;
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timeout = new Promise<void>(resolve => {
-            timeoutHandle = setTimeout(() => {
-                timedOut = true;
-                resolve();
-            }, options.timeoutMs);
-        });
-        const result = await Promise.race([close, timeout]).finally(() => {
-            if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-        });
+        if (timedOut) bridgeFail();
+        const result = await Promise.race([close, timeout]);
         if (timedOut) bridgeFail();
         const childResult = result as Readonly<{ code: number | null; signal: NodeJS.Signals | null; error: boolean }>;
         if (stdout.exceeded() || stderr.exceeded()) bridgeFail();
@@ -261,6 +260,7 @@ async function runStage(
         }
         return Object.freeze({ stage, code: 0, stdout: stage === 'check' ? 'CHECK_OK' : stage === 'verify' ? 'VERIFIED_OK' : '' });
     } finally {
+        if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
         await terminateBounded(child);
         options.setActiveChild(undefined);
     }

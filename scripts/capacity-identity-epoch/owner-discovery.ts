@@ -29,6 +29,8 @@ const PAGE_TOKEN = /^[^\u0000-\u001f\u007f]{1,2048}$/;
 const SOURCE_SHA = /^[0-9a-f]{40}$/;
 const VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const VERCEL_ENV_KEY = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+const VERCEL_ENV_TYPES = new Set(['plain', 'encrypted', 'sensitive']);
+const VERCEL_ENV_TARGETS = new Set(['production', 'preview', 'development']);
 const VERCEL_HOSTS = new Set(['api.vercel.com']);
 
 function fail(code: 'PAGINATION_INCOMPLETE' | 'DISCOVERY_AMBIGUOUS' | 'PROJECT_MISMATCH' | 'EVIDENCE_UNAVAILABLE' | 'SOURCE_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH'): never {
@@ -67,7 +69,12 @@ export async function collectFullyPaged<T>(options: Readonly<{
     let token: string | undefined;
     for (let page = 0; page < maxPages; page += 1) {
         let current: DiscoveryPage<T>;
-        try { current = await options.readPage(token); } catch { fail('PAGINATION_INCOMPLETE'); }
+        try {
+            current = await options.readPage(token);
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('PAGINATION_INCOMPLETE');
+        }
         if (!isObject(current) || !Array.isArray(current.items)) fail('PAGINATION_INCOMPLETE');
         result.push(...current.items);
         const next = normalizePageToken(current.nextPageToken);
@@ -255,10 +262,16 @@ export type ExactVercelProductionEnvValues = ExactVercelProductionEnv & Readonly
     values: Readonly<Record<string, string>>;
 }>;
 
+type VercelEnvType = 'plain' | 'encrypted' | 'sensitive';
+
+function isVercelEnvType(value: unknown): value is VercelEnvType {
+    return typeof value === 'string' && VERCEL_ENV_TYPES.has(value);
+}
+
 type VercelProductionEnvMetadata = Readonly<{
     id: string;
     key: string;
-    type: string;
+    type: VercelEnvType;
     target: readonly string[];
     gitBranch?: string | null;
     configurationId?: string | null;
@@ -268,8 +281,10 @@ function parseVercelProductionEnvMetadata(value: unknown): VercelProductionEnvMe
     if (!isObject(value)
         || typeof value.id !== 'string' || !VERCEL_ID.test(value.id)
         || typeof value.key !== 'string' || !VERCEL_ENV_KEY.test(value.key)
-        || typeof value.type !== 'string' || value.type.length === 0
-        || !Array.isArray(value.target) || !value.target.every(target => typeof target === 'string')) {
+        || !isVercelEnvType(value.type)
+        || !Array.isArray(value.target) || !value.target.every(target => typeof target === 'string')
+        || value.target.length === 0 || new Set(value.target).size !== value.target.length
+        || value.target.some(target => !VERCEL_ENV_TARGETS.has(target))) {
         fail('ADAPTER_RESPONSE_INVALID');
     }
     if (value.gitBranch !== undefined && value.gitBranch !== null && typeof value.gitBranch !== 'string') fail('ADAPTER_RESPONSE_INVALID');
@@ -347,12 +362,23 @@ async function readVercelProductionEnvValue(input: Readonly<{
         allowedQueryKeys: ['teamId'],
         acceptedStatuses: [200],
     });
-    const item = parseVercelProductionEnvMetadata(value);
-    if (item.id !== input.metadata.id || item.key !== input.metadata.key || item.type !== input.metadata.type) fail('DISCOVERY_AMBIGUOUS');
-    assertExactVercelProductionEnvMetadata(item);
-    if (!isObject(value) || typeof value.value !== 'string' || value.value.length === 0 || value.value.length > 8192
+    if (!isObject(value)
+        || (value.id !== undefined && (typeof value.id !== 'string' || value.id !== input.metadata.id))
+        || value.key !== input.metadata.key
+        || value.type !== input.metadata.type
+        || (value.target !== undefined && !validProductionTarget(value.target))
+        || (value.gitBranch !== undefined && value.gitBranch !== null)
+        || (value.configurationId !== undefined && value.configurationId !== null)
+        || typeof value.value !== 'string' || value.value.length === 0 || value.value.length > 8192
         || /[\u0000-\u001f\u007f]/.test(value.value)) fail('ADAPTER_RESPONSE_INVALID');
     return value.value;
+}
+
+function validProductionTarget(value: unknown): boolean {
+    if (typeof value === 'string') return value === 'production';
+    if (!Array.isArray(value) || value.length === 0 || new Set(value).size !== value.length
+        || !value.every(target => typeof target === 'string' && VERCEL_ENV_TARGETS.has(target))) return false;
+    return value.includes('production');
 }
 
 /**
