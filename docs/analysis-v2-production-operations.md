@@ -196,8 +196,10 @@ retrieved from Vercel, the authenticated linked Supabase CLI is allowed only as
 an owner credential conduit for the zero-work read. The linked
 `supabase/.temp/project-ref` file is read from the owner-controlled primary
 workdir resolved from Git's common dir and must exactly match the configured
-Supabase origin; the origin remains the sole project selector. Invoke the local pinned
-CLI directly with `--workdir` and `projects api-keys --output json`, using
+Supabase origin; the origin remains the sole project selector. Pass that primary
+workdir as `--workdir`, while resolving the local pinned executable from the current
+clean implementation/ops worktree's `node_modules/.bin/supabase`. Invoke the CLI directly
+with `projects api-keys --output json`, using
 `shell: false`, a fixed non-dotenv environment, bounded timeout/output, and
 discarded stderr; do not pass `--project-ref` or `--reveal`. Parse only the
 bounded top-level array whose rows use the observed 7-field base or 10-field

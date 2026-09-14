@@ -97,8 +97,9 @@ Supabase zero-work ledger 조회에 필요한 service-role credential이 Vercel�
 Supabase CLI를 owner credential conduit로 사용할 수 있다. linked
 `supabase/.temp/project-ref` 파일은 Git common-dir에서 확인한 owner-controlled
 primary workdir에서 읽고 configured Supabase origin에서 유도한 정확한 project ref와
-일치해야 하며, CLI는 그 linked workdir를 `--workdir`로 사용한다.
-CLI는 local pinned executable을 direct `spawn`(`shell: false`)하고, 고정된
+일치해야 하며, CLI는 그 primary workdir를 `--workdir`로 사용한다. local pinned
+executable은 현재 clean implementation/ops worktree의 `node_modules/.bin/supabase`에서
+가져와 primary workdir와 분리한다. CLI는 direct `spawn`(`shell: false`)하고, 고정된
 non-dotenv environment와 timeout/output cap을 사용하며 stderr를 폐기한다. 호출은
 `projects api-keys --output json`으로 제한하고 `--project-ref`, `--reveal`을 사용하지
 않는다. 응답은 관측된 7-field base 또는 10-field extended exact row contract의

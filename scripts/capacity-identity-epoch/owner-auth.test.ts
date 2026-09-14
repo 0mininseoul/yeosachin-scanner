@@ -67,6 +67,21 @@ describe('owner credential boundary', () => {
         await expect(loadOwnerAuthBoundary({ linkedMetadataPath: metadataPath, credentialStorePath: malformed })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
     });
 
+    it('requires private mode for the Vercel credential store while allowing owner-readable metadata', async () => {
+        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
+        const metadataPath = privateFile(directory, 'project.json', { projectId: 'linked-project', orgId: 'linked-team' });
+        chmodSync(metadataPath, 0o644);
+        const credentialsPath = privateFile(directory, 'auth.json', { token: PROTECTED_TOKEN });
+        chmodSync(credentialsPath, 0o644);
+
+        await expect(loadOwnerAuthBoundary({ linkedMetadataPath: metadataPath, credentialStorePath: credentialsPath }))
+            .rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+
+        chmodSync(credentialsPath, 0o600);
+        await expect(loadOwnerAuthBoundary({ linkedMetadataPath: metadataPath, credentialStorePath: credentialsPath }))
+            .resolves.toBeDefined();
+    });
+
     it('captures gcloud stdout/stderr privately and never includes protected output in fixed errors', async () => {
         const child: GoogleTokenChild = {
             stdout: { on: (_event, handler) => { handler(Buffer.from(`${GOOGLE_TOKEN}\n`)); handler(); return child.stdout; } },
@@ -182,9 +197,10 @@ describe('owner credential boundary', () => {
     });
 
     it('captures the linked Supabase CLI privately with an origin-bound project ref', async () => {
-        const directory = mkdtempSync(join(tmpdir(), 'owner-auth-'));
-        mkdirSync(join(directory, 'supabase', '.temp'), { recursive: true });
-        const projectRefPath = join(directory, 'supabase', '.temp', 'project-ref');
+        const primary = mkdtempSync(join(tmpdir(), 'owner-auth-primary-'));
+        const implementation = mkdtempSync(join(tmpdir(), 'owner-auth-implementation-'));
+        mkdirSync(join(primary, 'supabase', '.temp'), { recursive: true });
+        const projectRefPath = join(primary, 'supabase', '.temp', 'project-ref');
         writeFileSync(projectRefPath, 'abcdefghijklmnopqrst\n', { mode: 0o600 });
         chmodSync(projectRefPath, 0o600);
         const child: GoogleTokenChild = {
@@ -206,12 +222,14 @@ describe('owner credential boundary', () => {
             kill: () => true,
         };
         let capturedArgs: readonly string[] = [];
+        let capturedCommand: string | undefined;
         let capturedOptions: Record<string, unknown> | undefined;
         const key = await captureSupabaseServiceRoleKey({
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
-            workdir: directory,
-            command: 'supabase',
-            spawn: (_command, args, options) => {
+            workdir: primary,
+            command: join(implementation, 'node_modules', '.bin', 'supabase'),
+            spawn: (command, args, options) => {
+                capturedCommand = command;
                 capturedArgs = args;
                 capturedOptions = options as Record<string, unknown>;
                 return child;
@@ -219,8 +237,10 @@ describe('owner credential boundary', () => {
             timeoutMs: 1_000,
         });
         expect(key).toBe('fixture-service-role-key');
-        expect(capturedArgs).toEqual(['--workdir', directory, 'projects', 'api-keys', '--output', 'json']);
-        expect(capturedOptions).toMatchObject({ cwd: directory, shell: false, env: { LANG: 'C', NODE_ENV: 'production' } });
+        expect(capturedCommand).toBe(join(implementation, 'node_modules', '.bin', 'supabase'));
+        expect(capturedCommand).not.toBe(join(primary, 'node_modules', '.bin', 'supabase'));
+        expect(capturedArgs).toEqual(['--workdir', primary, 'projects', 'api-keys', '--output', 'json']);
+        expect(capturedOptions).toMatchObject({ cwd: primary, shell: false, env: { LANG: 'C', NODE_ENV: 'production' } });
         expect(capturedOptions?.env).not.toHaveProperty('SUPABASE_SERVICE_ROLE_KEY');
     });
 
@@ -231,6 +251,7 @@ describe('owner credential boundary', () => {
         await expect(captureSupabaseServiceRoleKey({
             origin: 'https://wrong.example/',
             workdir: directory,
+            command: 'supabase',
             spawn: () => { throw new Error('must not spawn'); },
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
     });
@@ -243,6 +264,7 @@ describe('owner credential boundary', () => {
         await expect(captureSupabaseServiceRoleKey({
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: directory,
+            command: 'supabase',
             spawn: () => { spawned = true; throw new Error('must not spawn'); },
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
         expect(spawned).toBe(false);
@@ -265,6 +287,7 @@ describe('owner credential boundary', () => {
         await expect(captureSupabaseServiceRoleKey({
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: directory,
+            command: 'supabase',
             spawn: () => oversized,
             timeoutMs: 1_000,
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
@@ -279,6 +302,7 @@ describe('owner credential boundary', () => {
         await expect(captureSupabaseServiceRoleKey({
             origin: 'https://abcdefghijklmnopqrst.supabase.co/',
             workdir: directory,
+            command: 'supabase',
             spawn: () => hanging,
             timeoutMs: 10,
         })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');

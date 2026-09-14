@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolvePrimaryRepositoryRootForOwner, resolveRoleSelectorFromCloudRun } from './owner-production';
+import { resolveLocalSupabaseCliPathForOwner, resolvePrimaryRepositoryRootForOwner, resolveRoleSelectorFromCloudRun } from './owner-production';
 
 function runGit(cwd: string, args: readonly string[]): void {
     execFileSync('git', [...args], {
@@ -40,6 +40,8 @@ describe('owner production queue selector boundary', () => {
         runGit(primary, ['worktree', 'add', '--quiet', '--detach', linked, 'HEAD']);
 
         expect(resolvePrimaryRepositoryRootForOwner(linked)).toBe(realpathSync(primary));
+        expect(resolveLocalSupabaseCliPathForOwner(linked)).toBe(join(linked, 'node_modules', '.bin', 'supabase'));
+        expect(resolveLocalSupabaseCliPathForOwner(linked)).not.toBe(join(primary, 'node_modules', '.bin', 'supabase'));
     });
 
     it('derives a missing queue only from the exact bound Cloud Run service environment', () => {

@@ -204,6 +204,15 @@ export function resolvePrimaryRepositoryRootForOwner(cwd: string): string {
     return primaryRepositoryRoot(resolve(cwd), uid);
 }
 
+/** Resolve the pinned Supabase executable from the current worktree only. */
+export function resolveLocalSupabaseCliPathForOwner(cwd: string): string {
+    if (!SAFE.test(cwd)) unavailable();
+    const currentWorktree = resolve(cwd);
+    const command = join(currentWorktree, 'node_modules', '.bin', 'supabase');
+    if (!SAFE.test(command)) unavailable();
+    return command;
+}
+
 function project(value: string): string {
     if (!PROJECT_ID_PATTERN.test(value)) fail('PROJECT_MISMATCH');
     return value;
@@ -366,7 +375,7 @@ function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSe
     return [...projects][0]!;
 }
 
-function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string; supabaseWorkdir: string }> {
+function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string; supabaseWorkdir: string; supabaseCliPath: string }> {
     if (!SAFE.test(cwd)) unavailable();
     const currentWorktree = resolve(cwd);
     let linkedMetadataPath: string | undefined;
@@ -409,6 +418,7 @@ function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath
         credentialStorePath: existing[0]!,
         cwd: currentWorktree,
         supabaseWorkdir: primaryRoot,
+        supabaseCliPath: resolveLocalSupabaseCliPathForOwner(currentWorktree),
     };
 }
 
@@ -1786,7 +1796,7 @@ function oldGraphToDesired(graph: IdentityGraphObservation): DesiredIdentityGrap
     return Object.freeze({ project: graph.project, build: graph.build, slots: graph.slots });
 }
 
-async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number, supabaseWorkdir: string): Promise<OwnerDescriptorAssemblyInput> {
+async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number, supabaseWorkdir: string, supabaseCliPath: string): Promise<OwnerDescriptorAssemblyInput> {
     const built = await buildOwnerPacket(pass, nowMs);
     const ownerDigest = canonicalDigest({
         project: pass.project,
@@ -1798,6 +1808,7 @@ async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number, supabaseW
         ? await captureSupabaseServiceRoleKey({
             origin: pass.supabaseOrigin,
             workdir: supabaseWorkdir,
+            command: supabaseCliPath,
         })
         : unavailable());
     await assertOwnerZeroWorkCoverage(pass, built, nowMs, supabaseServiceRoleBearer);
@@ -1900,6 +1911,6 @@ export async function createOwnerProductionCliDependencies(options: Readonly<{
         },
     };
     const preparation = new OwnerPreparationOperator({ discover, mutate, now, quiescence: QUIESCENCE });
-    const readDescriptorPass = async (): Promise<OwnerDescriptorAssemblyInput> => readOwnerDescriptorPass(await readPass(), now(), paths.supabaseWorkdir);
+    const readDescriptorPass = async (): Promise<OwnerDescriptorAssemblyInput> => readOwnerDescriptorPass(await readPass(), now(), paths.supabaseWorkdir, paths.supabaseCliPath);
     return Object.freeze({ ownerAuth, preparation, readDescriptorPass });
 }

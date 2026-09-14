@@ -49,7 +49,7 @@ function pathValue(value: unknown): asserts value is string {
     if (typeof value !== 'string' || !SAFE_PATH.test(value)) unavailable();
 }
 
-function boundedFile(path: string, expectedUid: number): string {
+function boundedFile(path: string, expectedUid: number, privacy: 'owner-readable' | 'private' = 'owner-readable'): string {
     pathValue(path);
     let stat: ReturnType<typeof lstatSync>;
     try {
@@ -59,7 +59,8 @@ function boundedFile(path: string, expectedUid: number): string {
     } catch {
         unavailable();
     }
-    if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0) unavailable();
+    if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0
+        || (privacy === 'private' && (stat.mode & 0o077) !== 0)) unavailable();
     if (stat.size < 0 || stat.size > MAX_OWNER_FILE_BYTES) unavailable();
     try {
         const value = readFileSync(path, 'utf8');
@@ -79,6 +80,14 @@ function boundedDirectory(path: string, expectedUid: number): void {
 
 function jsonFile(path: string, expectedUid: number): Record<string, unknown> {
     const raw = boundedFile(path, expectedUid);
+    let value: unknown;
+    try { value = JSON.parse(raw) as unknown; } catch { unavailable(); }
+    if (!isObject(value)) unavailable();
+    return value;
+}
+
+function privateJsonFile(path: string, expectedUid: number): Record<string, unknown> {
+    const raw = boundedFile(path, expectedUid, 'private');
     let value: unknown;
     try { value = JSON.parse(raw) as unknown; } catch { unavailable(); }
     if (!isObject(value)) unavailable();
@@ -295,9 +304,10 @@ export type CaptureSupabaseServiceRoleKeyOptions = Readonly<{
     origin: string;
     /** Existing linked worktree used by the authenticated Supabase CLI. */
     workdir: string;
+    /** Pinned CLI executable from the current implementation/ops worktree. */
+    command: string;
     /** Defaults to the invoking uid; test seams may provide a fixture owner. */
     uid?: number;
-    command?: string;
     /** Test seam; production uses node's spawn with private pipes. */
     spawn?: (command: string, args: readonly string[], options: SpawnOptions) => GoogleTokenChild;
     timeoutMs?: number;
@@ -340,7 +350,7 @@ export async function captureSupabaseServiceRoleKey(options: CaptureSupabaseServ
     if (typeof options.workdir !== 'string' || !options.workdir.startsWith('/') || !SAFE_PATH.test(options.workdir)) unavailable();
     const uid = options.uid ?? currentUid();
     if (!Number.isSafeInteger(uid) || uid < 0 || linkedSupabaseProjectRef(options.workdir, uid) !== projectRef) unavailable();
-    const command = options.command ?? join(options.workdir, 'node_modules', '.bin', 'supabase');
+    const command = options.command;
     if (!safeSpawnCommand(command)) unavailable();
     const timeoutMs = options.timeoutMs ?? 15_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) unavailable();
@@ -443,7 +453,7 @@ export async function loadOwnerAuthBoundary(options: OwnerAuthBoundaryOptions): 
     const uid = options.uid ?? currentUid();
     if (!Number.isSafeInteger(uid) || uid < 0) unavailable();
     const metadata = parseLinkedMetadata(jsonFile(options.linkedMetadataPath, uid), options.linkedMetadataPath, options.cwd);
-    const vercelToken = parseVercelToken(jsonFile(options.credentialStorePath, uid));
+    const vercelToken = parseVercelToken(privateJsonFile(options.credentialStorePath, uid));
     const googleOptions = options.googleToken ?? {};
     const auth: OwnerAuthBoundary = {
         vercelProjectId: metadata.projectId,
