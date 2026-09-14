@@ -28,6 +28,9 @@ const DEFAULT_MAX_PAGES = 100;
 const PAGE_TOKEN = /^[^\u0000-\u001f\u007f]{1,2048}$/;
 const SOURCE_SHA = /^[0-9a-f]{40}$/;
 const VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const VERCEL_ENV_KEY = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
+const VERCEL_ENV_TYPES = new Set(['plain', 'encrypted', 'sensitive']);
+const VERCEL_ENV_TARGETS = new Set(['production', 'preview', 'development']);
 const VERCEL_HOSTS = new Set(['api.vercel.com']);
 
 function fail(code: 'PAGINATION_INCOMPLETE' | 'DISCOVERY_AMBIGUOUS' | 'PROJECT_MISMATCH' | 'EVIDENCE_UNAVAILABLE' | 'SOURCE_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'ADAPTER_REQUEST_INVALID' | 'CAPABILITY_BINDING_MISMATCH'): never {
@@ -66,7 +69,12 @@ export async function collectFullyPaged<T>(options: Readonly<{
     let token: string | undefined;
     for (let page = 0; page < maxPages; page += 1) {
         let current: DiscoveryPage<T>;
-        try { current = await options.readPage(token); } catch { fail('PAGINATION_INCOMPLETE'); }
+        try {
+            current = await options.readPage(token);
+        } catch (error) {
+            if (error instanceof EpochError) throw error;
+            fail('PAGINATION_INCOMPLETE');
+        }
         if (!isObject(current) || !Array.isArray(current.items)) fail('PAGINATION_INCOMPLETE');
         result.push(...current.items);
         const next = normalizePageToken(current.nextPageToken);
@@ -254,16 +262,54 @@ export type ExactVercelProductionEnvValues = ExactVercelProductionEnv & Readonly
     values: Readonly<Record<string, string>>;
 }>;
 
-/**
- * Read the linked production environment without decrypting or returning
- * values. This helper is intentionally separate from packet assembly so a
- * production env response cannot become an accidental log payload.
- */
-export async function readExactVercelProductionEnv(input: Readonly<{
+type VercelEnvType = 'plain' | 'encrypted' | 'sensitive';
+
+function isVercelEnvType(value: unknown): value is VercelEnvType {
+    return typeof value === 'string' && VERCEL_ENV_TYPES.has(value);
+}
+
+type VercelProductionEnvMetadata = Readonly<{
+    id: string;
+    key: string;
+    type: VercelEnvType;
+    target: readonly string[];
+    gitBranch?: string | null;
+    configurationId?: string | null;
+}>;
+
+function parseVercelProductionEnvMetadata(value: unknown): VercelProductionEnvMetadata {
+    if (!isObject(value)
+        || typeof value.id !== 'string' || !VERCEL_ID.test(value.id)
+        || typeof value.key !== 'string' || !VERCEL_ENV_KEY.test(value.key)
+        || !isVercelEnvType(value.type)
+        || !Array.isArray(value.target) || !value.target.every(target => typeof target === 'string')
+        || value.target.length === 0 || new Set(value.target).size !== value.target.length
+        || value.target.some(target => !VERCEL_ENV_TARGETS.has(target))) {
+        fail('ADAPTER_RESPONSE_INVALID');
+    }
+    if (value.gitBranch !== undefined && value.gitBranch !== null && typeof value.gitBranch !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+    if (value.configurationId !== undefined && value.configurationId !== null && typeof value.configurationId !== 'string') fail('ADAPTER_RESPONSE_INVALID');
+    return {
+        id: value.id,
+        key: value.key,
+        type: value.type,
+        target: Object.freeze([...value.target]),
+        ...(value.gitBranch === undefined ? {} : { gitBranch: value.gitBranch }),
+        ...(value.configurationId === undefined ? {} : { configurationId: value.configurationId }),
+    };
+}
+
+function assertExactVercelProductionEnvMetadata(item: VercelProductionEnvMetadata): void {
+    if (!item.target.includes('production')
+        || (item.gitBranch !== undefined && item.gitBranch !== null)
+        || (item.configurationId !== undefined && item.configurationId !== null)) fail('DISCOVERY_AMBIGUOUS');
+}
+
+async function readVercelProductionEnvInventory(input: Readonly<{
     transport: AuthenticatedProtectedTransport;
     projectId: string;
     teamId: string;
-}>): Promise<ExactVercelProductionEnv> {
+}>): Promise<readonly VercelProductionEnvMetadata[]> {
     if (!VERCEL_ID.test(input.projectId) || !VERCEL_ID.test(input.teamId)) fail('ADAPTER_REQUEST_INVALID');
     const path = `/v9/projects/${encodeURIComponent(input.projectId)}/env`;
     const items = await collectFullyPaged({
@@ -283,18 +329,71 @@ export async function readExactVercelProductionEnv(input: Readonly<{
             const pagination = value.pagination;
             if (pagination !== undefined && pagination !== null && !isObject(pagination)) fail('ADAPTER_RESPONSE_INVALID');
             const nextPageToken = normalizePageToken(isObject(pagination) ? pagination.next : undefined);
-            return { items: value.envs, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
+            // Keep only non-secret inventory metadata after parsing the provider
+            // response. In particular, never carry the list response's value
+            // field into the owner adapter.
+            const metadata = value.envs.map(parseVercelProductionEnvMetadata);
+            return { items: metadata, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
         },
     });
-    const keys: string[] = [];
-    const sensitiveKeys: string[] = [];
+    const keys = new Set<string>();
+    const ids = new Set<string>();
     for (const item of items) {
-        if (!isObject(item) || typeof item.key !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(item.key)) fail('ADAPTER_RESPONSE_INVALID');
-        keys.push(item.key);
-        if (item.type === 'sensitive' || item.value === undefined) sensitiveKeys.push(item.key);
+        if (keys.has(item.key) || ids.has(item.id)) fail('DISCOVERY_AMBIGUOUS');
+        keys.add(item.key);
+        ids.add(item.id);
     }
-    const unique = new Set(keys);
-    if (unique.size !== keys.length) fail('DISCOVERY_AMBIGUOUS');
+    return items;
+}
+
+async function readVercelProductionEnvValue(input: Readonly<{
+    transport: AuthenticatedProtectedTransport;
+    projectId: string;
+    teamId: string;
+    metadata: VercelProductionEnvMetadata;
+}>): Promise<string> {
+    const path = `/v1/projects/${encodeURIComponent(input.projectId)}/env/${encodeURIComponent(input.metadata.id)}`;
+    const { value } = await input.transport.json({
+        method: 'GET',
+        url: `https://api.vercel.com${path}?${new URLSearchParams({ teamId: input.teamId }).toString()}`,
+        allowedHosts: VERCEL_HOSTS,
+        allowedPath: candidate => candidate === path,
+        allowedMethods: ['GET'],
+        allowedQueryKeys: ['teamId'],
+        acceptedStatuses: [200],
+    });
+    if (!isObject(value)
+        || (value.id !== undefined && (typeof value.id !== 'string' || value.id !== input.metadata.id))
+        || value.key !== input.metadata.key
+        || value.type !== input.metadata.type
+        || (value.target !== undefined && !validProductionTarget(value.target))
+        || (value.gitBranch !== undefined && value.gitBranch !== null)
+        || (value.configurationId !== undefined && value.configurationId !== null)
+        || typeof value.value !== 'string' || value.value.length === 0 || value.value.length > 8192
+        || /[\u0000-\u001f\u007f]/.test(value.value)) fail('ADAPTER_RESPONSE_INVALID');
+    return value.value;
+}
+
+function validProductionTarget(value: unknown): boolean {
+    if (typeof value === 'string') return value === 'production';
+    if (!Array.isArray(value) || value.length === 0 || new Set(value).size !== value.length
+        || !value.every(target => typeof target === 'string' && VERCEL_ENV_TARGETS.has(target))) return false;
+    return value.includes('production');
+}
+
+/**
+ * Read the linked production environment without decrypting or returning
+ * values. This helper is intentionally separate from packet assembly so a
+ * production env response cannot become an accidental log payload.
+ */
+export async function readExactVercelProductionEnv(input: Readonly<{
+    transport: AuthenticatedProtectedTransport;
+    projectId: string;
+    teamId: string;
+}>): Promise<ExactVercelProductionEnv> {
+    const items = await readVercelProductionEnvInventory(input);
+    const keys = items.map(item => item.key);
+    const sensitiveKeys = items.filter(item => item.type === 'sensitive').map(item => item.key);
     return Object.freeze({ keys: Object.freeze([...keys].sort()), sensitiveKeys: Object.freeze([...sensitiveKeys].sort()), count: keys.length });
 }
 
@@ -311,47 +410,23 @@ export async function readExactVercelProductionEnvValues(input: Readonly<{
     allowedKeys: ReadonlySet<string>;
 }>): Promise<ExactVercelProductionEnvValues> {
     if (!(input.allowedKeys instanceof Set) || input.allowedKeys.size === 0) fail('ADAPTER_REQUEST_INVALID');
-    if (!VERCEL_ID.test(input.projectId) || !VERCEL_ID.test(input.teamId)) fail('ADAPTER_REQUEST_INVALID');
-    const path = `/v9/projects/${encodeURIComponent(input.projectId)}/env`;
-    const items = await collectFullyPaged({
-        readPage: async (pageToken) => {
-            const query = new URLSearchParams({ teamId: input.teamId, target: 'production', decrypt: 'true', limit: '100' });
-            if (pageToken !== undefined) query.set('until', pageToken);
-            const { value } = await input.transport.json({
-                method: 'GET',
-                url: `https://api.vercel.com${path}?${query.toString()}`,
-                allowedHosts: VERCEL_HOSTS,
-                allowedPath: candidate => candidate === path,
-                allowedMethods: ['GET'],
-                allowedQueryKeys: pageToken === undefined ? ['decrypt', 'limit', 'target', 'teamId'] : ['decrypt', 'limit', 'target', 'teamId', 'until'],
-                acceptedStatuses: [200],
-            });
-            if (!isObject(value) || !Array.isArray(value.envs)) fail('ADAPTER_RESPONSE_INVALID');
-            const pagination = value.pagination;
-            if (pagination !== undefined && pagination !== null && !isObject(pagination)) fail('ADAPTER_RESPONSE_INVALID');
-            const nextPageToken = normalizePageToken(isObject(pagination) ? pagination.next : undefined);
-            return { items: value.envs, ...(nextPageToken === undefined ? {} : { nextPageToken }) };
-        },
-    });
-    const values: Record<string, string> = {};
-    const seenKeys = new Set<string>();
-    const keys: string[] = [];
-    const sensitiveKeys: string[] = [];
-    for (const item of items) {
-        if (!isObject(item) || typeof item.key !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(item.key)) fail('ADAPTER_RESPONSE_INVALID');
-        if (seenKeys.has(item.key)) fail('DISCOVERY_AMBIGUOUS');
-        seenKeys.add(item.key);
-        keys.push(item.key);
-        if (item.type === 'sensitive') sensitiveKeys.push(item.key);
-        // Production projects contain application variables outside this
-        // preparation contract. Ignore those entries without ever retaining
-        // their decrypted values; only the fixed allowlist crosses this
-        // helper's boundary.
-        if (!input.allowedKeys.has(item.key)) continue;
-        if (typeof item.value !== 'string' || item.value.length === 0 || item.value.length > 8192
-            || /[\u0000-\u001f\u007f]/.test(item.value)) fail('ADAPTER_RESPONSE_INVALID');
-        values[item.key] = item.value;
+    for (const key of input.allowedKeys) {
+        if (typeof key !== 'string' || !VERCEL_ENV_KEY.test(key)) fail('ADAPTER_REQUEST_INVALID');
     }
+    const items = await readVercelProductionEnvInventory(input);
+    const values: Record<string, string> = {};
+    const selected = items.filter(item => input.allowedKeys.has(item.key));
+    for (const item of selected) {
+        assertExactVercelProductionEnvMetadata(item);
+        // Sensitive variables remain part of the inventory summary, but the
+        // per-ID endpoint must never be called for them. Their missing value
+        // lets a required selector fail closed while optional selectors stay
+        // absent without blocking discovery.
+        if (item.type === 'sensitive') continue;
+        values[item.key] = await readVercelProductionEnvValue({ ...input, metadata: item });
+    }
+    const keys = items.map(item => item.key);
+    const sensitiveKeys = items.filter(item => item.type === 'sensitive').map(item => item.key);
     return Object.freeze({
         keys: Object.freeze([...keys].sort()),
         sensitiveKeys: Object.freeze([...sensitiveKeys].sort()),

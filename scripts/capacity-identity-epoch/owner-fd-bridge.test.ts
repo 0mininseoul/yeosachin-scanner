@@ -24,6 +24,7 @@ type FakeStage = Readonly<{
     stdout?: string;
     stderr?: string;
     close?: boolean;
+    stallPipes?: boolean;
 }>;
 
 function descriptors(packet = createFixturePacket()): OwnerDescriptors {
@@ -94,6 +95,10 @@ function fakeSpawn(stages: FakeStage[], received: Array<Readonly<{ args: readonl
         bootstrap.write = ((chunk: unknown, ...rest: unknown[]) => { writes += 1; return bootstrapWrite(chunk as never, ...(rest as never[])); }) as never;
         packet.on('data', chunk => { packetRaw += String(chunk); });
         bootstrap.on('data', chunk => { bootstrapRaw += String(chunk); });
+        if (behavior.stallPipes) {
+            packet.end = (() => packet) as never;
+            bootstrap.end = (() => bootstrap) as never;
+        }
         const finish = (): void => {
             received.push({ args: [...args], env: (options.env ?? {}) as Readonly<Record<string, string>>, packet: packetRaw, bootstrap: bootstrapRaw, writes });
             if (behavior.close === false) return;
@@ -180,6 +185,17 @@ describe('owner inherited-FD bridge', () => {
             options: { spawn: fakeSpawn([{ stage: 'check', close: false }], received), timeoutMs: 10 },
         })).rejects.toThrow('PROTECTED_PIPE_FAILED');
         expect(received).toHaveLength(1);
+    }, 2_000);
+
+    it('bounds descriptor pipe writes before a child can finish', async () => {
+        const value = descriptors();
+        const received: Array<Readonly<{ args: readonly string[]; env: Readonly<Record<string, string>>; packet: string; bootstrap: string; writes: number }>> = [];
+        await expect(runOwnerEpochThroughVerified({
+            packet: value.packet,
+            bootstrap: value.bootstrap,
+            options: { spawn: fakeSpawn([{ stage: 'check', stallPipes: true }], received), timeoutMs: 10 },
+        })).rejects.toThrow('PROTECTED_PIPE_FAILED');
+        expect(received).toHaveLength(0);
     }, 2_000);
 
     it('terminates a completed active child again from the bridge finally boundary', async () => {

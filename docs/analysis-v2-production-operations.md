@@ -191,6 +191,28 @@ environment values to a file, accept protected resource values in argv, or
 include credentials in normal output. Run each command as a separate
 read-only/review boundary:
 
+If the service-role environment value is marked sensitive and cannot be
+retrieved from Vercel, the authenticated linked Supabase CLI is allowed only as
+an owner credential conduit for the zero-work read. The linked
+`supabase/.temp/project-ref` is read from the owner-controlled canonical
+worktree at `<primary>/.worktrees/final-main-20260725`, where `<primary>` is
+derived from the current worktree's Git common dir. The candidate must have the
+same owner and pass `git -C <candidate>
+rev-parse --git-common-dir` equality against the current worktree; the resolver
+returns its real path and does not scan history or other worktrees. The selected
+ref must exactly match the configured Supabase origin, which remains the sole
+project selector. Pass that real owner workdir as `--workdir`, while resolving
+the local pinned executable from the current clean implementation/ops worktree's
+`node_modules/.bin/supabase`; verify the installed CLI reports exactly `2.102.0`
+before invoking it. Invoke the CLI directly
+with `projects api-keys --output json`, using
+`shell: false`, a fixed non-dotenv environment, bounded timeout/output, and
+discarded stderr; do not pass `--project-ref` or `--reveal`. Parse only the
+bounded top-level array whose rows use the observed 7-field base or 10-field
+extended exact contract, select exactly one legacy `service_role` row with a bounded non-whitespace `api_key`, and keep the raw
+response/credential within the protected in-memory/FD boundary rather than
+normal output, files, logs, or independent serialization.
+
 ~~~text
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare inspect
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare apply --approved-digest DIGEST

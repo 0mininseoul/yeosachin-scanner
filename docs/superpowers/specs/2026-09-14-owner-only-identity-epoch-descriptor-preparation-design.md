@@ -92,10 +92,29 @@ production mutation 위험은 없지만 승인된 `VERIFIED` 목표를 달성하
 메모리에서만 provider API 요청에 사용한다. CLI child process가 필요한 경우
 stdout/stderr는 부모의 private pipe로 캡처하고 그대로 전달하거나 출력하지 않는다.
 
-Supabase zero-work ledger 조회에는 Vercel production env에서 메모리로 얻은 기존
-service-role credential만 사용한다. Supabase CLI가 연결되어 있더라도 프로젝트나
-credential의 대체 추론 경로로 사용하지 않는다. Vercel, GCP, Supabase scope가 packet
-전체에서 하나의 정확한 운영 경계로 일치하지 않으면 중단한다.
+Supabase zero-work ledger 조회에 필요한 service-role credential이 Vercel에서
+`sensitive`로 표시되어 irretrievable이면, 이 경우에 한해 authenticated linked
+Supabase CLI를 owner credential conduit로 사용할 수 있다. linked
+`supabase/.temp/project-ref` 파일은 현재 worktree의 Git common-dir에서 유도한
+`<primary>/.worktrees/final-main-20260725` canonical owner worktree에서 읽는다.
+후보 directory의 owner가 현재 user와 같고 `git -C <candidate> rev-parse
+--git-common-dir`가 current worktree와 정확히 같은 common-dir를 반환해야 하며,
+resolver는 real path만 반환하고 history나 다른 worktree를 scan하지 않는다.
+configured Supabase origin에서 유도한 정확한 project ref와 일치해야 하며, CLI는
+그 real owner workdir를 `--workdir`로 사용한다. local pinned executable은 현재
+clean implementation/ops worktree의 `node_modules/.bin/supabase`에서 가져와
+owner workdir와 분리하고, installed CLI version이 정확히 `2.102.0`인지 확인한다.
+CLI는 direct `spawn`(`shell: false`)하고, 고정된
+non-dotenv environment와 timeout/output cap을 사용하며 stderr를 폐기한다. 호출은
+`projects api-keys --output json`으로 제한하고 `--project-ref`, `--reveal`을 사용하지
+않는다. 응답은 관측된 7-field base 또는 10-field extended exact row contract의
+bounded top-level array로만 파싱해 정확히 하나의 legacy `service_role` row와 bounded
+non-whitespace `api_key`를 선택한다. CLI는
+credential을 선택하는 conduit일 뿐 project selector가 아니며, configured origin이
+유일한 project binding이다. 원문 응답과 credential은 정상 출력, 일반 파일, 로그 또는
+독립 serialization으로 내보내지 않고 기존 protected in-memory/FD 경계 안에서만
+사용한다. Vercel, GCP, Supabase scope가 packet 전체에서 하나의 정확한 운영 경계로
+일치하지 않으면 중단한다.
 
 ### 5.2 허용된 discovery
 

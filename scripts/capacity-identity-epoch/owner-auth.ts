@@ -1,6 +1,7 @@
-import { lstatSync, readFileSync } from 'node:fs';
-import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
-import { basename, dirname, relative, resolve } from 'node:path';
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
+import { execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process';
+import { homedir } from 'node:os';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
     AuthenticatedProtectedTransport,
     createGoogleProtectedTransport,
@@ -8,14 +9,30 @@ import {
     type ProtectedTokenProvider,
 } from './platform';
 import { EpochError, epochFail, hasExactKeys, isObject, PROJECT_ID_PATTERN } from './contracts';
+import { rejectDuplicateJsonKeys } from './packet';
 
 const MAX_OWNER_FILE_BYTES = 64 * 1024;
 const MAX_TOKEN_BYTES = 8 * 1024;
+const MAX_SUPABASE_OUTPUT_BYTES = 64 * 1024;
+const MAX_SUPABASE_PROJECT_REF_BYTES = 128;
+const MAX_SUPABASE_VERSION_BYTES = 128;
+const SUPABASE_CLI_VERSION = '2.102.0';
 const SAFE_PATH = /^[^\u0000-\u001f\u007f]{1,4096}$/;
+const SAFE_TEXT = /^[^\u0000-\u001f\u007f]{0,65536}$/;
 const SAFE_TOKEN = /^[^\u0000-\u001f\u007f\s]{1,8192}$/;
 const SAFE_VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SAFE_VERCEL_NAME = /^[^\u0000-\u001f\u007f]{1,256}$/;
 const SAFE_REPO_DIRECTORY = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const SAFE_SUPABASE_ROW_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+const SUPABASE_PROJECT_REF = /^[a-z]{20}$/;
+const SUPABASE_ROW_TYPES = new Set(['legacy', 'publishable', 'secret']);
+const SUPABASE_ROW_BASE_KEYS = Object.freeze(['api_key', 'description', 'hash', 'id', 'name', 'prefix', 'type']);
+const SUPABASE_ROW_EXTENDED_KEYS = Object.freeze([
+    ...SUPABASE_ROW_BASE_KEYS,
+    'inserted_at',
+    'secret_jwt_template',
+    'updated_at',
+]);
 
 function unavailable(): never {
     epochFail('OWNER_AUTH_UNAVAILABLE');
@@ -25,35 +42,118 @@ function safeToken(value: unknown): value is string {
     return typeof value === 'string' && value.length > 0 && value.length <= MAX_TOKEN_BYTES && SAFE_TOKEN.test(value);
 }
 
+function safeText(value: unknown, maxBytes = MAX_OWNER_FILE_BYTES): value is string {
+    return typeof value === 'string' && value.length <= maxBytes && Buffer.byteLength(value, 'utf8') <= maxBytes
+        && SAFE_TEXT.test(value);
+}
+
 function pathValue(value: unknown): asserts value is string {
     if (typeof value !== 'string' || !SAFE_PATH.test(value)) unavailable();
 }
 
-function boundedFile(path: string, expectedUid: number): string {
+/**
+ * Check every owner-controlled directory between a bounded file and the
+ * first trusted system-owned ancestor.  The sticky-bit exception keeps the
+ * normal macOS `/tmp` fixture/working-directory boundary usable while still
+ * rejecting an untrusted writable ancestor that can rename the owner path.
+ */
+function safeOwnerAncestors(path: string, expectedUid: number): void {
+    const absolutePath = resolve(path);
+    let directory = dirname(absolutePath);
+    let ownerDirectorySeen = false;
+    for (;;) {
+        let stat: ReturnType<typeof lstatSync>;
+        try { stat = lstatSync(directory); } catch { unavailable(); }
+        if (!stat.isDirectory()) unavailable();
+        if (stat.uid === expectedUid) {
+            ownerDirectorySeen = true;
+            if ((stat.mode & 0o022) !== 0) unavailable();
+        } else {
+            if (!ownerDirectorySeen || ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0)) unavailable();
+            break;
+        }
+        const parent = dirname(directory);
+        if (parent === directory) break;
+        directory = parent;
+    }
+}
+
+function readFdBounded(fd: number, size: number): string {
+    // Read one byte beyond the maximum so a file that grows after fstat is
+    // still rejected without allocating unbounded memory.
+    const buffer = Buffer.alloc(Math.min(MAX_OWNER_FILE_BYTES + 1, Math.max(1, size + 1)));
+    let bytes = 0;
+    while (bytes < buffer.byteLength) {
+        const count = readSync(fd, buffer, bytes, buffer.byteLength - bytes, null);
+        if (count === 0) break;
+        bytes += count;
+    }
+    if (bytes > MAX_OWNER_FILE_BYTES || bytes !== size) unavailable();
+    return buffer.subarray(0, bytes).toString('utf8');
+}
+
+export function readOwnerBoundedFile(
+    path: string,
+    expectedUid: number,
+    privacy: 'owner-readable' | 'private' = 'owner-readable',
+    allowMissing = false,
+): string | undefined {
+    pathValue(path);
+    if (!Number.isSafeInteger(expectedUid) || expectedUid < 0) unavailable();
+    safeOwnerAncestors(path, expectedUid);
+    let fd: number;
+    try {
+        fd = openSync(resolve(path), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    } catch (error) {
+        if (allowMissing && error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
+        unavailable();
+    }
+    try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0
+            || (privacy === 'private' && (stat.mode & 0o077) !== 0)) unavailable();
+        if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > MAX_OWNER_FILE_BYTES) unavailable();
+        return readFdBounded(fd, stat.size);
+    } catch {
+        unavailable();
+    } finally {
+        try { closeSync(fd); } catch { /* best effort; no descriptor crosses the boundary */ }
+    }
+}
+
+function boundedFile(path: string, expectedUid: number, privacy: 'owner-readable' | 'private' = 'owner-readable'): string {
+    const value = readOwnerBoundedFile(path, expectedUid, privacy);
+    if (value === undefined) unavailable();
+    return value;
+}
+
+function boundedDirectory(path: string, expectedUid: number): void {
     pathValue(path);
     let stat: ReturnType<typeof lstatSync>;
     try {
-        // lstat intentionally rejects symlinked credential paths.  The owner
-        // boundary must be attached to the actual file, not a mutable link.
         stat = lstatSync(path);
-    } catch {
-        unavailable();
-    }
-    if (!stat.isFile() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0) unavailable();
-    if (stat.size < 0 || stat.size > MAX_OWNER_FILE_BYTES) unavailable();
-    try {
-        const value = readFileSync(path, 'utf8');
-        if (Buffer.byteLength(value, 'utf8') > MAX_OWNER_FILE_BYTES) unavailable();
-        return value;
-    } catch {
-        unavailable();
-    }
+    } catch { unavailable(); }
+    if (!stat.isDirectory() || stat.uid !== expectedUid || (stat.mode & 0o022) !== 0) unavailable();
 }
 
 function jsonFile(path: string, expectedUid: number): Record<string, unknown> {
     const raw = boundedFile(path, expectedUid);
     let value: unknown;
-    try { value = JSON.parse(raw) as unknown; } catch { unavailable(); }
+    try {
+        rejectDuplicateJsonKeys(raw);
+        value = JSON.parse(raw) as unknown;
+    } catch { unavailable(); }
+    if (!isObject(value)) unavailable();
+    return value;
+}
+
+function privateJsonFile(path: string, expectedUid: number): Record<string, unknown> {
+    const raw = boundedFile(path, expectedUid, 'private');
+    let value: unknown;
+    try {
+        rejectDuplicateJsonKeys(raw);
+        value = JSON.parse(raw) as unknown;
+    } catch { unavailable(); }
     if (!isObject(value)) unavailable();
     return value;
 }
@@ -157,6 +257,31 @@ function safeSpawnCommand(value: string): boolean {
     return /^[A-Za-z0-9._/-]{1,256}$/.test(value) && !value.includes('..');
 }
 
+function verifySupabaseCliVersion(command: string, cwd: string): void {
+    let raw: string;
+    try {
+        raw = execFileSync(command, ['--version'], {
+            cwd,
+            env: {
+                PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin',
+                HOME: homedir(),
+                LANG: 'C',
+                NODE_ENV: 'production',
+                NO_COLOR: '1',
+            },
+            shell: false,
+            stdio: ['ignore', 'pipe', 'ignore'],
+            encoding: 'utf8',
+            timeout: 5_000,
+            maxBuffer: MAX_SUPABASE_VERSION_BYTES,
+        }) as string;
+    } catch {
+        unavailable();
+    }
+    if (Buffer.byteLength(raw, 'utf8') > MAX_SUPABASE_VERSION_BYTES
+        || (raw !== SUPABASE_CLI_VERSION && raw !== `${SUPABASE_CLI_VERSION}\n`)) unavailable();
+}
+
 /**
  * Capture exactly one gcloud access-token line.  stdout/stderr are consumed
  * in private memory and are never interpolated into an Error or output.
@@ -227,6 +352,179 @@ export async function captureGoogleAccessToken(options: CaptureGoogleAccessToken
     });
 }
 
+/**
+ * Parse only the one legacy elevated key required by the read-only evidence
+ * pass. The CLI response is deliberately not exposed as a structured value.
+ */
+export function parseSupabaseServiceRoleKey(raw: string): string {
+    if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') > MAX_SUPABASE_OUTPUT_BYTES) unavailable();
+    let value: unknown;
+    try {
+        rejectDuplicateJsonKeys(raw);
+        value = JSON.parse(raw) as unknown;
+    } catch {
+        unavailable();
+    }
+    if (!Array.isArray(value)) unavailable();
+    const rows = value.map(item => {
+        if (!isObject(item)) unavailable();
+        const extended = hasExactKeys(item, SUPABASE_ROW_EXTENDED_KEYS);
+        if (!extended && !hasExactKeys(item, SUPABASE_ROW_BASE_KEYS)) unavailable();
+        if (typeof item.name !== 'string' || !SAFE_SUPABASE_ROW_NAME.test(item.name)
+            || typeof item.type !== 'string' || !SUPABASE_ROW_TYPES.has(item.type)
+            || (item.api_key !== null && !safeToken(item.api_key))
+            || (item.id !== null && !safeText(item.id, 256))
+            || (item.prefix !== null && !safeText(item.prefix, 256))
+            || (item.description !== null && !safeText(item.description, 8192))
+            || (item.hash !== null && !safeText(item.hash, 8192))) unavailable();
+        if (extended && ((item.secret_jwt_template !== null && !isObject(item.secret_jwt_template))
+            || (item.inserted_at !== null && !safeText(item.inserted_at, 128))
+            || (item.updated_at !== null && !safeText(item.updated_at, 128)))) unavailable();
+        return { name: item.name, type: item.type, api_key: item.api_key };
+    });
+    const matches = rows.filter(item => item.name === 'service_role');
+    if (matches.length !== 1 || matches[0]!.type !== 'legacy' || !safeToken(matches[0]!.api_key)) unavailable();
+    const key = matches[0]!.api_key;
+    return key;
+}
+
+export type CaptureSupabaseServiceRoleKeyOptions = Readonly<{
+    /** The configured production Supabase origin; its ref is the only selector accepted. */
+    origin: string;
+    /** Existing linked worktree used by the authenticated Supabase CLI. */
+    workdir: string;
+    /** Pinned CLI executable from the current implementation/ops worktree. */
+    command: string;
+    /** Defaults to the invoking uid; test seams may provide a fixture owner. */
+    uid?: number;
+    /** Test seam for the local CLI version check; production executes `--version`. */
+    verifyCliVersion?: (command: string, cwd: string) => void;
+    /** Test seam; production uses node's spawn with private pipes. */
+    spawn?: (command: string, args: readonly string[], options: SpawnOptions) => GoogleTokenChild;
+    timeoutMs?: number;
+}>;
+
+/** Extract the project ref from the exact production origin without fallback selectors. */
+export function supabaseProjectRefFromOrigin(origin: string): string {
+    if (typeof origin !== 'string' || origin.length > 2048) unavailable();
+    const rawMatch = /^https:\/\/([a-z]{20})\.supabase\.co\/?$/.exec(origin);
+    if (rawMatch === null) unavailable();
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch { unavailable(); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
+        || parsed.pathname !== '/' || parsed.search || parsed.hash) unavailable();
+    const match = /^([a-z]{20})\.supabase\.co$/.exec(parsed.hostname);
+    if (match === null) unavailable();
+    if (match[1] !== rawMatch[1]) unavailable();
+    return rawMatch[1]!;
+}
+
+function linkedSupabaseProjectRef(workdir: string, expectedUid: number): string {
+    const supabaseDirectory = join(workdir, 'supabase');
+    const tempDirectory = join(supabaseDirectory, '.temp');
+    boundedDirectory(workdir, expectedUid);
+    boundedDirectory(supabaseDirectory, expectedUid);
+    boundedDirectory(tempDirectory, expectedUid);
+    const raw = boundedFile(join(tempDirectory, 'project-ref'), expectedUid);
+    if (Buffer.byteLength(raw, 'utf8') > MAX_SUPABASE_PROJECT_REF_BYTES) unavailable();
+    const value = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+    if (!SUPABASE_PROJECT_REF.test(value)) unavailable();
+    return value;
+}
+
+/**
+ * Capture one service-role key from the already-authenticated Supabase CLI.
+ * Child output is consumed in private memory, with a fixed environment and a
+ * bounded timeout; neither stderr nor malformed provider output crosses this
+ * boundary.
+ */
+export async function captureSupabaseServiceRoleKey(options: CaptureSupabaseServiceRoleKeyOptions): Promise<string> {
+    const projectRef = supabaseProjectRefFromOrigin(options.origin);
+    if (typeof options.workdir !== 'string' || !options.workdir.startsWith('/') || !SAFE_PATH.test(options.workdir)) unavailable();
+    const uid = options.uid ?? currentUid();
+    if (!Number.isSafeInteger(uid) || uid < 0 || linkedSupabaseProjectRef(options.workdir, uid) !== projectRef) unavailable();
+    const command = options.command;
+    if (!safeSpawnCommand(command)) unavailable();
+    try {
+        (options.verifyCliVersion ?? verifySupabaseCliVersion)(command, options.workdir);
+    } catch {
+        unavailable();
+    }
+    const timeoutMs = options.timeoutMs ?? 15_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 120_000) unavailable();
+    const spawn = options.spawn ?? ((name, args, spawnOptions) => {
+        const child = nodeSpawn(name, [...args], spawnOptions);
+        if (!child.stdout || !child.stderr) unavailable();
+        return child as unknown as GoogleTokenChild;
+    });
+    let child: GoogleTokenChild;
+    try {
+        // The CLI reads its existing owner login from its own credential store.
+        // No ambient environment (including dotenv-derived secrets) crosses
+        // into this child process.
+        child = spawn(command, ['--workdir', options.workdir, 'projects', 'api-keys', '--output', 'json'], {
+            cwd: options.workdir,
+            stdio: ['ignore', 'pipe', 'pipe'],
+            shell: false,
+            env: {
+                PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin',
+                HOME: homedir(),
+                LANG: 'C',
+                NODE_ENV: 'production',
+                NO_COLOR: '1',
+            },
+        });
+    } catch {
+        unavailable();
+    }
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const collectStdout = (chunk?: Buffer | string): void => {
+        if (chunk === undefined) return;
+        const value = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+        stdoutBytes += value.byteLength;
+        if (stdoutBytes <= MAX_SUPABASE_OUTPUT_BYTES) stdout.push(value);
+        else {
+            try { child.kill('SIGKILL'); } catch { /* best effort */ }
+        }
+    };
+    const discard = (): void => undefined;
+    child.stdout.on('data', collectStdout);
+    child.stdout.on('end', discard);
+    child.stdout.on('error', discard);
+    child.stderr.on('data', discard);
+    child.stderr.on('end', discard);
+    child.stderr.on('error', discard);
+    return await new Promise<string>((resolve, reject) => {
+        const finish = (error?: EpochError): void => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            if (error) {
+                reject(error);
+                return;
+            }
+            if (stdoutBytes > MAX_SUPABASE_OUTPUT_BYTES) {
+                reject(new EpochError('OWNER_AUTH_UNAVAILABLE'));
+                return;
+            }
+            try {
+                resolve(parseSupabaseServiceRoleKey(Buffer.concat(stdout).toString('utf8')));
+            } catch {
+                reject(new EpochError('OWNER_AUTH_UNAVAILABLE'));
+            }
+        };
+        timer = setTimeout(() => {
+            try { child.kill('SIGKILL'); } catch { /* best effort */ }
+            finish(new EpochError('OWNER_AUTH_UNAVAILABLE'));
+        }, timeoutMs);
+        child.once('error', () => finish(new EpochError('OWNER_AUTH_UNAVAILABLE')));
+        child.once('close', (code) => finish(code === 0 ? undefined : new EpochError('OWNER_AUTH_UNAVAILABLE')));
+    });
+}
+
 export type OwnerAuthBoundaryOptions = Readonly<{
     linkedMetadataPath: string;
     credentialStorePath: string;
@@ -253,7 +551,7 @@ export async function loadOwnerAuthBoundary(options: OwnerAuthBoundaryOptions): 
     const uid = options.uid ?? currentUid();
     if (!Number.isSafeInteger(uid) || uid < 0) unavailable();
     const metadata = parseLinkedMetadata(jsonFile(options.linkedMetadataPath, uid), options.linkedMetadataPath, options.cwd);
-    const vercelToken = parseVercelToken(jsonFile(options.credentialStorePath, uid));
+    const vercelToken = parseVercelToken(privateJsonFile(options.credentialStorePath, uid));
     const googleOptions = options.googleToken ?? {};
     const auth: OwnerAuthBoundary = {
         vercelProjectId: metadata.projectId,
