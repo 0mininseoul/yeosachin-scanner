@@ -579,6 +579,28 @@ describe('coordinated epoch protected packet', () => {
         expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
     });
 
+    it('accepts absent OFF role gates while rejecting absent ON gates and enabled other-role gates', () => {
+        const value = mutablePacket();
+        delete value.protectedInputs.desired.runtime.preflight.environment.ANALYSIS_V2_TASKS_ENABLED;
+        delete value.protectedInputs.desired.runtime.paid.environment.PREFLIGHT_TASKS_ENABLED;
+        delete value.protectedInputs.desired.runtime.paid.environment.PREFLIGHT_TASKS_RECOVERY_ENABLED;
+        synchronizeDesiredRuntimeProof(value, 'preflight');
+        synchronizeDesiredRuntimeProof(value, 'paid');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).not.toThrow();
+
+        delete value.protectedInputs.desired.runtime.preflight.environment.PREFLIGHT_TASKS_ENABLED;
+        synchronizeDesiredRuntimeProof(value, 'preflight');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+
+        const wrongRole = mutablePacket();
+        wrongRole.protectedInputs.desired.runtime.paid.environment.PREFLIGHT_TASKS_ENABLED = 'true';
+        synchronizeDesiredRuntimeProof(wrongRole, 'paid');
+        wrongRole.observationInputs = deriveObservationInputDigests(wrongRole);
+        expect(() => createProtectedPacket(wrongRole)).toThrow('SOURCE_INVALID');
+    });
+
     it('rejects an old readiness proof that is not ready and closed', () => {
         const value = mutablePacket();
         value.protectedObservations.old.readiness.ready = false;

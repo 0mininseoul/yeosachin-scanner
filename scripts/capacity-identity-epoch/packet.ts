@@ -431,7 +431,11 @@ function validateDesiredInitialRuntimeContract(
         ANALYSIS_V2_RECOVERY_ENABLED: role === 'paid' ? 'true' : 'false',
     };
     for (const [key, expected] of Object.entries(expectedGates)) {
-        if (expectedEnvironment[key] !== expected || runtime.environment[key] !== expected) epochFail('SOURCE_INVALID');
+        // The task and execution gate readers default absent flags to OFF.
+        // Required ON flags must still be explicitly present and true.
+        const observed = runtime.environment[key] ?? 'false';
+        const reviewed = expectedEnvironment[key] ?? 'false';
+        if (reviewed !== expected || observed !== expected) epochFail('SOURCE_INVALID');
     }
     if (expectedEnvironment.ANALYSIS_WORKLOAD_ROLE !== role
         || runtime.environment.ANALYSIS_WORKLOAD_ROLE !== role

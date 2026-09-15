@@ -8,6 +8,7 @@ import {
     assertCloudRunTargetOrigin,
     assertOwnerDesiredDeployment,
     mergeOwnerResourceSelectorOverrides,
+    ownerZeroWorkLookbackMs,
     parseOwnerDesiredDeploymentSelector,
     parseOwnerResourceSelectorOverrides,
     parseVercelDeploymentDetail,
@@ -468,6 +469,22 @@ describe('owner production queue selector boundary', () => {
 
 
 describe('owner recovery pause audit', () => {
+    it('keeps consecutive evidence selectors stable while covering the full pause and attempt window', () => {
+        const earliest = Date.parse('2026-09-14T12:00:00Z');
+        const first = Date.parse('2026-09-16T03:30:00Z');
+        const second = first + 10 * 60_000;
+        const firstLookback = ownerZeroWorkLookbackMs(first, earliest);
+        const secondLookback = ownerZeroWorkLookbackMs(second, earliest);
+        expect(firstLookback).toBe(secondLookback);
+        expect(second - secondLookback).toBeLessThanOrEqual(earliest - 65_000);
+
+        const later = second + 86_400_000;
+        const expanded = ownerZeroWorkLookbackMs(later, earliest);
+        expect(expanded).toBeGreaterThan(secondLookback);
+        expect(later - expanded).toBeLessThanOrEqual(earliest - 65_000);
+        expect(() => ownerZeroWorkLookbackMs(first, first + 1)).toThrow('EVIDENCE_UNAVAILABLE');
+    });
+
     it('follows empty pages and binds a successful pause to the exact recovery job', async () => {
         const project = 'fixture-project';
         const resources = ['preflight', 'paid'].map(role => `projects/${project}/locations/asia-northeast3/jobs/${role}`);

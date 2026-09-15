@@ -1332,12 +1332,24 @@ function makeSupabaseOrigin(env: Env): string {
     return origin;
 }
 
+export function ownerZeroWorkLookbackMs(nowMs: number, earliestMs: number): number {
+    if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(earliestMs)
+        || earliestMs < 0 || earliestMs > nowMs) fail('EVIDENCE_UNAVAILABLE');
+    // This is a selector duration, not an observation timestamp. Round up so
+    // successive fresh passes share a plan while retaining the full pause
+    // and last-attempt window. Actual observation times remain unrounded.
+    const dayMs = 86_400_000;
+    const requiredMs = nowMs - earliestMs + QUIESCENCE.timeoutMs + QUIESCENCE.graceMs;
+    const lookbackMs = Math.ceil(requiredMs / dayMs) * dayMs;
+    if (!Number.isSafeInteger(lookbackMs) || lookbackMs <= 0) fail('EVIDENCE_UNAVAILABLE');
+    return lookbackMs;
+}
+
 function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLive>, nowMs: number, desiredGraph: DesiredIdentityGraph): LiveZeroWorkSources {
     const minPause = Math.min(...ROLES.map(role => roles[role].schedulerObservation.pauseEpochMs));
     const lastAttempts = ROLES.map(role => roles[role].schedulerObservation.lastAttemptMs).filter((value): value is number => value !== null);
     const earliest = Math.min(minPause, ...(lastAttempts.length === 0 ? [nowMs] : lastAttempts));
-    const lookbackMs = Math.max(60_000, nowMs - earliest + QUIESCENCE.timeoutMs + QUIESCENCE.graceMs);
-    if (!Number.isSafeInteger(lookbackMs) || lookbackMs <= 0) fail('EVIDENCE_UNAVAILABLE');
+    const lookbackMs = ownerZeroWorkLookbackMs(nowMs, earliest);
     const origin = makeSupabaseOrigin(env);
     const supabase = (source: string, table: string, columns: readonly string[]) => {
         const selector = { kind: 'supabase' as const, source, origin, table, columns, eventTimeColumn: 'created_at', lookbackMs, selectorDigest: '' };
