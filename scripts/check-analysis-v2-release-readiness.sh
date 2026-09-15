@@ -295,8 +295,7 @@ jq -e --arg expected_sha "$expected_sha" \
   --arg expected_resource "$ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE" \
   --argjson expected_analysis_gate "$ANALYSIS_CAPACITY_EXPECTED_ANALYSIS_V2_ADMISSION_ENABLED" \
   --argjson expected_paid_gate "$ANALYSIS_CAPACITY_EXPECTED_EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED" '
-  (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-  and .schemaVersion == "analysis-public-freeze-readiness-v3"
+  .schemaVersion == "analysis-public-freeze-readiness-v3"
   and .ready == true
   and (.stage == "initial" or .stage == "expanded")
   and .freezeMode == "drain-and-block"

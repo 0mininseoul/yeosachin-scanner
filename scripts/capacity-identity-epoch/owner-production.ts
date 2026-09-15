@@ -62,6 +62,8 @@ import { OwnerPreparationOperator, type PreparationMutator, type PreparationObse
 import type { OwnerDescriptorAssemblyInput } from './owner-descriptors';
 import type { OwnerFdBridgeOptions } from './owner-fd-bridge';
 import { CloudRunAdapter, type CloudRunRevisionObservation, type CloudRunServiceObservation } from './cloud-run';
+import { createSchedulerPauseProvenanceReader } from './scheduler-pause-evidence';
+import { createOwnerReadinessTransport } from './vercel-readiness';
 import { IamAdapter } from './iam';
 import {
     WorkPlaneClient,
@@ -69,14 +71,21 @@ import {
     type QueueObservation,
     type SchedulerObservation,
 } from './work-planes';
-import { AuthenticatedProtectedTransport, FetchProtectedTransport } from './platform';
+import { AuthenticatedProtectedTransport, FetchProtectedTransport, type ProtectedTransport } from './platform';
 import { CloudBuildAdapter, observedBuildMetadataDigest } from './cloud-build';
 import { createStorageSourceVerifier, normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
+import {
+    enqueuerIdentityFingerprint,
+    PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+} from '../../lib/services/analysis/legacy-analysis-public-readiness';
 import { deriveObservationInputDigests, createProtectedPacket, deriveRetiredIamBindingDigests, type ProtectedPacketInput } from './packet';
 import { evidenceSelectorDigest, LiveEvidenceCollector, type LiveZeroWorkSources } from './live-evidence';
 import { rejectDuplicateJsonKeys } from './packet';
+import { createFrozenGateReader } from './vercel-readiness';
+import { VercelAdapter } from './vercel';
 
 /**
  * The owner adapter is the only production construction path for the
@@ -88,7 +97,6 @@ import { rejectDuplicateJsonKeys } from './packet';
 const VERCEL_HOSTS = new Set(['api.vercel.com']);
 const VERCEL_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ACCOUNT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
-const INVENTORY_ACCOUNT = /^[a-z0-9][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
 const SERVICE = /^[a-z][a-z0-9-]{0,62}$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const QUEUE = /^[A-Za-z0-9-]{1,100}$/;
@@ -131,9 +139,11 @@ const ENV_KEYS = Object.freeze(new Set([
     'ANALYSIS_CAPACITY_SCHEDULER_AUDIT_CORRELATION',
     'VERCEL_PRODUCER_ALIAS',
     'PREFLIGHT_TASKS_PROJECT', 'PREFLIGHT_TASKS_LOCATION', 'PREFLIGHT_TASKS_QUEUE',
+    'PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
     'PREFLIGHT_TASKS_CLOUD_RUN_SERVICE', 'PREFLIGHT_TASKS_CLOUD_RUN_REGION',
     'PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB', 'PREFLIGHT_TASKS_MAINTENANCE_LOCATION',
     'ANALYSIS_V2_TASKS_PROJECT', 'ANALYSIS_V2_TASKS_LOCATION', 'ANALYSIS_V2_TASKS_QUEUE',
+    'ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
     'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE', 'ANALYSIS_V2_TASKS_CLOUD_RUN_REGION',
     'ANALYSIS_V2_RECOVERY_SCHEDULER_JOB', 'ANALYSIS_V2_MAINTENANCE_LOCATION',
     'ANALYSIS_V2_RETENTION_SCHEDULER_JOB',
@@ -141,8 +151,19 @@ const ENV_KEYS = Object.freeze(new Set([
     'NEXT_PUBLIC_SUPABASE_ANON_KEY',
 ]) as ReadonlySet<string>);
 
+const SUPABASE_ENV_KEYS = new Set([
+    'NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+]);
+// Overrides are a test/owner-session seam only. Keep the allowlist derived
+// from the existing production reader and explicitly exclude every Supabase
+// value, including the service-role credential.
+const RESOURCE_SELECTOR_OVERRIDE_KEYS = new Set([...ENV_KEYS].filter(key => !SUPABASE_ENV_KEYS.has(key)));
+
 type Env = Readonly<Record<string, string>>;
 type RoleMap<T> = Readonly<Record<Role, T>>;
+
+export type OwnerResourceSelectorOverrides = Readonly<Record<string, string>>;
+export type OwnerDesiredDeploymentSelector = Readonly<{ id: string; sourceSha: string }>;
 
 function fail(code: Parameters<typeof epochFail>[0]): never {
     epochFail(code);
@@ -168,6 +189,34 @@ function optional(env: Env, key: string): string | undefined {
     if (value === undefined) return undefined;
     if (value.length === 0 || value.length > 8192 || !SAFE.test(value)) fail('EVIDENCE_UNAVAILABLE');
     return value;
+}
+
+/** Validate the narrow, non-credential in-memory selector override seam. */
+export function parseOwnerResourceSelectorOverrides(value: unknown): OwnerResourceSelectorOverrides {
+    if (value === undefined) return Object.freeze({});
+    if (!isObject(value)) fail('ADAPTER_REQUEST_INVALID');
+    const result: Record<string, string> = {};
+    for (const [key, override] of Object.entries(value)) {
+        if (!RESOURCE_SELECTOR_OVERRIDE_KEYS.has(key)
+            || typeof override !== 'string' || override.length === 0 || !SAFE.test(override)) fail('ADAPTER_REQUEST_INVALID');
+        result[key] = override;
+    }
+    return Object.freeze(result);
+}
+
+/** Merge only missing selector values; a readable production value wins. */
+export function mergeOwnerResourceSelectorOverrides(
+    productionEnv: Readonly<{ values: Readonly<Record<string, string>> }>,
+    value: unknown,
+): Env {
+    const overrides = parseOwnerResourceSelectorOverrides(value);
+    const result: Record<string, string> = { ...productionEnv.values };
+    for (const [key, override] of Object.entries(overrides)) {
+        const readable = productionEnv.values[key];
+        if (readable !== undefined && readable !== override) fail('CAPABILITY_BINDING_MISMATCH');
+        result[key] = override;
+    }
+    return Object.freeze(result);
 }
 
 function ownerDirectory(path: string, expectedUid: number): string {
@@ -494,9 +543,11 @@ async function readProductionEnv(transport: AuthenticatedProtectedTransport, aut
     });
 }
 
-function envMap(value: ExactVercelProductionEnvValues): Env {
-    return Object.freeze({ ...value.values });
-}
+type VercelDeploymentInventoryRecord = Readonly<{
+    id: string;
+    readyState: string;
+    createdAt: number;
+}>;
 
 type DeploymentRecord = Readonly<{
     id: string;
@@ -506,7 +557,22 @@ type DeploymentRecord = Readonly<{
     sourceSha: string;
 }>;
 
-async function readVercelDeployments(transport: AuthenticatedProtectedTransport, projectId: string, teamId: string): Promise<readonly DeploymentRecord[]> {
+/**
+ * The v6 endpoint is an inventory source only. Its rows are intentionally
+ * parsed without URL or Git fields; immutable source proof comes from the
+ * exact v13 detail read for the selected deployment.
+ */
+export function parseVercelDeploymentInventory(value: unknown): VercelDeploymentInventoryRecord {
+    const deployment = object(value);
+    const id = deployment.uid ?? deployment.id;
+    const readyState = deployment.readyState;
+    const createdAt = deployment.createdAt;
+    if (typeof id !== 'string' || !VERCEL_ID.test(id) || typeof readyState !== 'string'
+        || typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt < 0) fail('ADAPTER_RESPONSE_INVALID');
+    return { id, readyState, createdAt };
+}
+
+export async function readVercelDeployments(transport: AuthenticatedProtectedTransport, projectId: string, teamId: string): Promise<readonly VercelDeploymentInventoryRecord[]> {
     const path = '/v6/deployments';
     const rows = await collectFullyPaged({
         readPage: async (until) => {
@@ -524,22 +590,15 @@ async function readVercelDeployments(transport: AuthenticatedProtectedTransport,
             return { items: body.deployments, ...(next === undefined ? {} : { nextPageToken: next }) };
         },
     });
-    return rows.map(value => {
-        const deployment = object(value);
-        const id = deployment.uid ?? deployment.id;
-        const readyState = deployment.readyState;
-        const createdAt = deployment.createdAt;
-        const url = deployment.url;
-        const gitSource = object(deployment.gitSource ?? {});
-        const sourceSha = gitSource.sha;
-        if (typeof id !== 'string' || !VERCEL_ID.test(id) || typeof readyState !== 'string'
-            || typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt < 0
-            || typeof url !== 'string' || typeof sourceSha !== 'string' || !SHA.test(sourceSha)) fail('ADAPTER_RESPONSE_INVALID');
-        return { id, readyState, createdAt, origin: originUrl(`https://${url}`), sourceSha };
-    });
+    return Object.freeze(rows.map(parseVercelDeploymentInventory));
 }
 
-function selectDeployment(rows: readonly DeploymentRecord[], oldId: string): DeploymentRecord {
+/*
+ * Keep the existing bounded inventory selection rule in this compatibility
+ * seam. A reviewed exact desired deployment/SHA selector is a separate
+ * integration change; this function must not infer one from detail metadata.
+ */
+export function selectDeployment(rows: readonly VercelDeploymentInventoryRecord[], oldId: string): VercelDeploymentInventoryRecord {
     const candidates = rows.filter(row => row.readyState === 'READY' && row.id !== oldId);
     if (candidates.length === 0) fail('DISCOVERY_AMBIGUOUS');
     const max = Math.max(...candidates.map(row => row.createdAt));
@@ -559,29 +618,54 @@ async function readCurrentAlias(transport: AuthenticatedProtectedTransport, alia
     return row.deploymentId;
 }
 
-async function readVercelDeployment(transport: AuthenticatedProtectedTransport, projectId: string, teamId: string, deploymentId: string): Promise<DeploymentRecord> {
-    const path = `/v13/deployments/${encodeURIComponent(deploymentId)}`;
-    const { value } = await transport.json({
-        method: 'GET', url: `https://api.vercel.com${path}?withGitRepoInfo=true&teamId=${encodeURIComponent(teamId)}`,
-        allowedHosts: VERCEL_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: ['teamId', 'withGitRepoInfo'], acceptedStatuses: [200],
-    });
+/** Parse only the exact v13 deployment detail, including native Git SHA proof. */
+export function parseVercelDeploymentDetail(value: unknown, projectId: string, teamId: string, deploymentId: string): DeploymentRecord {
     const row = object(value);
     const projectValue = object(row.project);
     const teamValue = object(row.team);
     const gitSource = object(row.gitSource ?? {});
     const url = row.url;
+    const createdAt = row.createdAt;
+    if (createdAt !== undefined && (typeof createdAt !== 'number' || !Number.isSafeInteger(createdAt) || createdAt < 0)) fail('ADAPTER_RESPONSE_INVALID');
     if (row.id !== deploymentId || projectValue.id !== projectId || teamValue.id !== teamId || row.readyState !== 'READY'
         || typeof url !== 'string' || typeof gitSource.sha !== 'string' || !SHA.test(gitSource.sha)) fail('ADAPTER_RESPONSE_INVALID');
-    return { id: deploymentId, readyState: 'READY', createdAt: typeof row.createdAt === 'number' ? row.createdAt : 0, origin: originUrl(`https://${url}`), sourceSha: gitSource.sha };
+    return { id: deploymentId, readyState: 'READY', createdAt: typeof createdAt === 'number' ? createdAt : 0, origin: originUrl(`https://${url}`), sourceSha: gitSource.sha };
 }
 
-async function readPublicReadiness(url: string, expectedSourceSha: string, publicTransport: FetchProtectedTransport): Promise<Readonly<{ dto: LegacyPublicReadiness; contract: ReadinessContract }>> {
+export function parseOwnerDesiredDeploymentSelector(value: unknown): OwnerDesiredDeploymentSelector | undefined {
+    if (value === undefined) return undefined;
+    if (!isObject(value)
+        || !Object.keys(value).every(key => key === 'id' || key === 'sourceSha')
+        || typeof value.id !== 'string' || !VERCEL_ID.test(value.id)
+        || typeof value.sourceSha !== 'string' || !SHA.test(value.sourceSha)) fail('ADAPTER_REQUEST_INVALID');
+    return Object.freeze({ id: value.id, sourceSha: value.sourceSha });
+}
+
+/** Bind an explicit desired selector to the native Vercel detail response. */
+export function assertOwnerDesiredDeployment(
+    expected: OwnerDesiredDeploymentSelector,
+    observed: DeploymentRecord,
+): DeploymentRecord {
+    if (observed.id !== expected.id || observed.sourceSha !== expected.sourceSha) fail('SOURCE_INVALID');
+    return observed;
+}
+
+export async function readVercelDeployment(transport: AuthenticatedProtectedTransport, projectId: string, teamId: string, deploymentId: string): Promise<DeploymentRecord> {
+    const path = `/v13/deployments/${encodeURIComponent(deploymentId)}`;
+    const { value } = await transport.json({
+        method: 'GET', url: `https://api.vercel.com${path}?withGitRepoInfo=true&teamId=${encodeURIComponent(teamId)}`,
+        allowedHosts: VERCEL_HOSTS, allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: ['teamId', 'withGitRepoInfo'], acceptedStatuses: [200],
+    });
+    return parseVercelDeploymentDetail(value, projectId, teamId, deploymentId);
+}
+
+async function readPublicReadiness(url: string, expectedSourceSha: string, publicTransport: ProtectedTransport): Promise<Readonly<{ dto: LegacyPublicReadiness; contract: ReadinessContract }>> {
     let parsed: URL;
     try { parsed = new URL(url); } catch { fail('ADAPTER_REQUEST_INVALID'); }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash || parsed.pathname !== '/api/analysis/capacity/readiness') fail('ADAPTER_NOT_ALLOWED');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15_000);
-    let response: Awaited<ReturnType<FetchProtectedTransport['request']>>;
+    let response: Awaited<ReturnType<ProtectedTransport['request']>>;
     try {
         response = await publicTransport.request({ method: 'GET', url: parsed.toString(), headers: { accept: 'application/json' } }, controller.signal);
     } catch (error) {
@@ -883,53 +967,14 @@ function validateAuditSelectors(env: Env, prefix: 'TASK' | 'SCHEDULER'): Readonl
     return { logName, sinkName, bucketResource, correlation };
 }
 
-function pauseProvenanceReader(google: AuthenticatedProtectedTransport, env: Env, now: () => number): (input: Readonly<{ resource: string; project: string; location: string; signal?: AbortSignal }>) => Promise<PauseProvenance> {
+function pauseProvenanceReader(google: AuthenticatedProtectedTransport, env: Env, now: () => number) {
     const selectors = validateAuditSelectors(env, 'SCHEDULER');
-    return async input => {
-        if (!PROJECT_ID_PATTERN.test(input.project) || !LOCATION.test(input.location) || !SAFE.test(input.resource)) fail('ADAPTER_REQUEST_INVALID');
-        const path = '/v2/entries:list';
-        const pages = await collectFullyPaged({
-            readPage: async pageToken => {
-                const body: Record<string, unknown> = {
-                    resourceNames: [`projects/${input.project}`],
-                    filter: `logName="${selectors.logName}" AND protoPayload.methodName="google.cloud.scheduler.v1.CloudScheduler.PauseJob" AND protoPayload.resourceName="${input.resource}"`,
-                    orderBy: 'timestamp desc',
-                    pageSize: 1000,
-                    ...(pageToken === undefined ? {} : { pageToken }),
-                };
-                const { value } = await google.json({
-                    method: 'POST', url: `https://logging.googleapis.com${path}`, allowedHosts: new Set(['logging.googleapis.com']), allowedPath: candidate => candidate === path, allowedMethods: ['POST'], allowedQueryKeys: [], body, acceptedStatuses: [200],
-                });
-                const result = object(value);
-                if (!Array.isArray(result.entries)) fail('ADAPTER_RESPONSE_INVALID');
-                const next = result.nextPageToken;
-                if (next !== undefined && typeof next !== 'string') fail('PAGINATION_INCOMPLETE');
-                return { items: result.entries, ...(typeof next === 'string' && next.length > 0 ? { nextPageToken: next } : {}) };
-            },
-        });
-        const candidates = pages.map(value => object(value)).map(entry => {
-            const proto = object(entry.protoPayload ?? {});
-            const timestamp = parseTimestamp(entry.timestamp ?? entry.receiveTimestamp);
-            if (timestamp === null || proto.methodName !== 'google.cloud.scheduler.v1.CloudScheduler.PauseJob' || proto.resourceName !== input.resource) return null;
-            return timestamp;
-        }).filter((value): value is number => value !== null);
-        if (candidates.length === 0) fail('EVIDENCE_UNAVAILABLE');
-        const latest = Math.max(...candidates);
-        if (!Number.isSafeInteger(latest) || latest <= 0) fail('EVIDENCE_UNAVAILABLE');
-        if (candidates.filter(value => value === latest).length !== 1) fail('DISCOVERY_AMBIGUOUS');
-        const observedAtMs = now();
-        if (!Number.isSafeInteger(observedAtMs) || observedAtMs < latest) fail('EVIDENCE_UNAVAILABLE');
-        const evidence = Object.freeze({ resource: input.resource, operation: 'PAUSE' as const, timestamp: new Date(latest).toISOString(), correlation: selectors.correlation, sinkName: selectors.sinkName, bucketResource: selectors.bucketResource });
-        return Object.freeze({
-            resource: input.resource,
-            pauseEpochMs: latest,
-            observedAtMs,
-            source: `cloud-logging:${selectors.logName}`,
-            evidence,
-            evidenceDigest: canonicalDigest(evidence),
-            complete: true as const,
-        });
-    };
+    const project = readRoleSelector(env, 'preflight').project;
+    if (selectors.logName !== `projects/${project}/logs/cloudaudit.googleapis.com%2Factivity`
+        || selectors.sinkName !== '_Required'
+        || selectors.bucketResource !== `projects/${project}/locations/global/buckets/_Required`) fail('EVIDENCE_UNAVAILABLE');
+    return createSchedulerPauseProvenanceReader({ transport: google, project,
+        resources: ROLES.map(role => schedulerResource(role, readRoleSelector(env, role))), now });
 }
 
 function queueInput(role: Role, selector: BoundRoleSelector, runtime: CloudRunServiceObservation, raw: Record<string, unknown>, caller: ProtectedIdentity): ProtectedQueueInput {
@@ -954,17 +999,88 @@ function schedulerInput(role: Role, selector: RoleSelector, raw: Record<string, 
     return { resource, project: selector.project, location: selector.maintenanceLocation, target, configuration: schedulerConfigurationFromWire(raw), state, pauseEpochMs: state === 'PAUSED' ? 1 : 0, lastAttemptMs: parseTimestamp(raw.lastAttemptTime) };
 }
 
-function identitySlots(role: Role, runtime: CloudRunServiceObservation, queue: QueueObservation, scheduler: SchedulerObservation, selector: ReturnType<typeof readRoleSelector>): Readonly<Record<`${Role}.${'task-caller' | 'enqueuer' | 'runtime' | 'maintenance'}`, ProtectedIdentity>> {
-    const caller = queue.target?.callerIdentity;
+function readinessEnqueuerFingerprint(
+    readiness: LegacyPublicReadiness,
+    role: Role,
+): string | null | undefined {
+    return role === 'preflight'
+        ? readiness.preflightEnqueuerIdentityFingerprint
+        : readiness.paidEnqueuerIdentityFingerprint;
+}
+
+function readinessEnqueuerVersion(role: Role): string {
+    return role === 'preflight'
+        ? PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION
+        : PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION;
+}
+
+function requiredEnqueuerReadinessFingerprint(
+    readiness: LegacyPublicReadiness,
+    role: Role,
+): string {
+    const version = role === 'preflight'
+        ? readiness.preflightEnqueuerIdentityFingerprintVersion
+        : readiness.paidEnqueuerIdentityFingerprintVersion;
+    const fingerprint = readinessEnqueuerFingerprint(readiness, role);
+    if (version !== readinessEnqueuerVersion(role)
+        || typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)) fail('READINESS_INVALID');
+    return fingerprint;
+}
+
+function assertEnqueuerReadinessHashes(
+    readiness: LegacyPublicReadiness,
+    graph: Readonly<{ slots: Readonly<Record<string, ProtectedIdentity>> }>,
+): void {
+    for (const role of ROLES) {
+        const fingerprint = requiredEnqueuerReadinessFingerprint(readiness, role);
+        const selected = graph.slots[`${role}.enqueuer`];
+        if (!selected || enqueuerIdentityFingerprint(role, selected.identity) !== fingerprint) fail('READINESS_INVALID');
+    }
+}
+
+export function identitySlots(
+    role: Role,
+    runtime: CloudRunServiceObservation,
+    queue: QueueObservation,
+    scheduler: SchedulerObservation,
+    selector: ReturnType<typeof readRoleSelector>,
+    env: Env,
+    expectedEnqueuerFingerprint?: string | null,
+): Readonly<Record<`${Role}.${'task-caller' | 'enqueuer' | 'runtime' | 'maintenance'}`, ProtectedIdentity>> {
+    const callerKey = role === 'preflight' ? 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL' : 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL';
+    const caller = queue.target?.callerIdentity ?? (queue.target === null && queue.httpTargetPresent === false
+        ? identity(required(runtime.environment, callerKey), selector.project) : undefined);
     if (!caller) fail('RESOURCE_INVALID');
     const runtimeIdentity = runtime.identity;
     const maintenance = scheduler.target.identity;
     const enqueuerKey = role === 'preflight' ? 'PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL' : 'ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL';
-    const configured = runtime.environment[enqueuerKey];
-    if (!configured) fail('EVIDENCE_UNAVAILABLE');
+    const configured = expectedEnqueuerFingerprint === undefined || expectedEnqueuerFingerprint === null
+        ? required(env, enqueuerKey)
+        : env[enqueuerKey];
+    const runtimeConfigured = runtime.environment[enqueuerKey];
+    if (runtime.secretReferences?.[enqueuerKey] !== undefined) fail('CAPABILITY_BINDING_MISMATCH');
+    const candidates = new Map<string, ProtectedIdentity>();
+    for (const value of [configured, runtimeConfigured, caller.identity]) {
+        if (value === undefined) continue;
+        const candidate = identity(value, selector.project);
+        candidates.set(candidate.identity, candidate);
+    }
+    let selected: ProtectedIdentity | undefined;
+    if (expectedEnqueuerFingerprint === undefined || expectedEnqueuerFingerprint === null) {
+        // Historical readiness payloads predate the digest. Preserve the
+        // existing exact project-env binding for old-only preparation, while
+        // still requiring agreement whenever the runtime exposes the slot.
+        if (runtimeConfigured !== undefined && runtimeConfigured !== configured) fail('CAPABILITY_BINDING_MISMATCH');
+        selected = candidates.get(configured);
+    } else {
+        const matching = [...candidates.values()].filter(candidate => enqueuerIdentityFingerprint(role, candidate.identity) === expectedEnqueuerFingerprint);
+        if (matching.length !== 1) fail('CAPABILITY_BINDING_MISMATCH');
+        selected = matching[0];
+    }
+    if (!selected) fail('CAPABILITY_BINDING_MISMATCH');
     return {
         [`${role}.task-caller`]: caller,
-        [`${role}.enqueuer`]: identity(configured, selector.project),
+        [`${role}.enqueuer`]: selected,
         [`${role}.runtime`]: runtimeIdentity,
         [`${role}.maintenance`]: maintenance,
     } as Readonly<Record<`${Role}.${'task-caller' | 'enqueuer' | 'runtime' | 'maintenance'}`, ProtectedIdentity>>;
@@ -995,12 +1111,15 @@ type RoleLive = Readonly<{
     retentionInput: ProtectedRetentionInput;
     iam: Readonly<{ run: ProtectedIamPolicySnapshot; queue: ProtectedIamPolicySnapshot; taskCaller: ProtectedIamPolicySnapshot; maintenance: ProtectedIamPolicySnapshot }>;
     oldBuild: BuildRecord;
-    desiredBuild: BuildRecord;
-    desiredImage: string;
     slots: Readonly<Record<string, ProtectedIdentity>>;
 }>;
 
-type OwnerPass = Readonly<{
+type FullRoleLive = RoleLive & Readonly<{
+    desiredBuild: BuildRecord;
+    desiredImage: string;
+}>;
+
+type OwnerOldPass = Readonly<{
     env: Env;
     supabaseServiceRoleSensitive: boolean;
     auth: OwnerAuthBoundary;
@@ -1010,27 +1129,53 @@ type OwnerPass = Readonly<{
     accounts: readonly IdentityAccountObservation[];
     roles: RoleMap<RoleLive>;
     oldReadiness: Readonly<{ dto: LegacyPublicReadiness; contract: ReadinessContract }>;
-    desiredReadiness: Readonly<{ dto: LegacyPublicReadiness; contract: ReadinessContract }>;
     oldDeployment: DeploymentRecord;
-    desiredDeployment: DeploymentRecord;
     alias: string;
     bucket: string;
     supabaseOrigin: string;
 }>;
 
+type OwnerPass = Omit<OwnerOldPass, 'roles'> & Readonly<{
+    roles: RoleMap<FullRoleLive>;
+    desiredReadiness: Readonly<{ dto: LegacyPublicReadiness; contract: ReadinessContract }>;
+    desiredDeployment: DeploymentRecord;
+}>;
+
+type OwnerOldDiscovery = Readonly<{
+    pass: OwnerOldPass;
+    buildsByLocation: Readonly<Record<string, readonly BuildCandidate[]>>;
+}>;
+
+type OwnerReadOptions = Readonly<{
+    cwd: string;
+    resourceSelectorOverrides: OwnerResourceSelectorOverrides;
+    desiredDeployment?: OwnerDesiredDeploymentSelector;
+    publicReadinessTransport?: ProtectedTransport;
+}>;
+
+export function assertCloudRunTargetOrigin(
+    runtime: Readonly<Pick<CloudRunServiceObservation, 'url'>>,
+    targetUrl: string,
+    providerUrls: readonly string[],
+): void {
+    const target = targetOrigin(targetUrl, 'RESOURCE_INVALID');
+    const observed = [runtime.url, ...providerUrls].map(value => targetOrigin(value, 'RESOURCE_INVALID'));
+    if (!observed.includes(target)) fail('RESOURCE_INVALID');
+}
+
 async function buildRoleLive(input: Readonly<{
     role: Role;
     env: Env;
+    enqueuerFingerprint?: string | null;
     selector: RoleSelector;
     google: AuthenticatedProtectedTransport;
     workPlanes: WorkPlaneClient;
     iamAdapter: IamAdapter;
-    desiredSourceSha: string;
-    desiredImage: string;
     storageSourceVerifier: StorageSourceVerifier;
-}>, buildsByLocation: Readonly<Record<string, readonly BuildCandidate[]>>): Promise<RoleLive> {
+    }>, buildsByLocation: Readonly<Record<string, readonly BuildCandidate[]>>): Promise<RoleLive> {
     const cloudRun = new CloudRunAdapter({ transport: input.google });
     const runtime = await cloudRun.getService(serviceResource(input.selector));
+    const runtimeUrls = await cloudRun.getServiceUrls(runtime.resource);
     if (runtime.project !== input.selector.project || runtime.location !== input.selector.cloudRunRegion || runtime.service !== input.selector.service
         || runtime.latestReadyRevision === null || !runtime.ready || runtime.observedGeneration !== runtime.generation || !IMAGE.test(runtime.image)) fail('SOURCE_INVALID');
     const selector = resolveRoleSelectorFromCloudRun({ role: input.role, selector: input.selector, runtime });
@@ -1047,17 +1192,18 @@ async function buildRoleLive(input: Readonly<{
         || new Set(sourceCandidates).size !== 1) fail('SOURCE_INVALID');
     const oldSourceSha = sourceCandidates[0] as string;
     const runtimeTarget = roleTargetFromEnvironment(runtime.environment, input.role);
-    let runtimeTargetParsed: URL;
-    try { runtimeTargetParsed = new URL(runtimeTarget.url); } catch { fail('RESOURCE_INVALID'); }
-    if (runtimeTargetParsed.origin !== runtime.url) fail('RESOURCE_INVALID');
+    assertCloudRunTargetOrigin(runtime, runtimeTarget.url, runtimeUrls);
     const runtimeIdentityKey = input.role === 'preflight' ? 'PREFLIGHT_TASKS_RUNTIME_SERVICE_ACCOUNT_EMAIL' : 'ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL';
     const configuredRuntimeIdentity = runtime.environment[runtimeIdentityKey];
     if (configuredRuntimeIdentity !== undefined && configuredRuntimeIdentity !== runtime.identity.identity) fail('CAPABILITY_BINDING_MISMATCH');
     const queueRaw = await readQueueWire(input.google, resources.queue);
     const state = queueRaw.state;
     if (state !== 'PAUSED' && state !== 'RUNNING') fail('ADAPTER_RESPONSE_INVALID');
-    const queueCaller = queueRaw.httpTarget && isObject(queueRaw.httpTarget) && isObject(queueRaw.httpTarget.oidcToken)
-        ? queueRaw.httpTarget.oidcToken.serviceAccountEmail : undefined;
+    const callerKey = input.role === 'preflight' ? 'PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL' : 'ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL';
+    const queueCaller = queueRaw.httpTarget === undefined && queueRaw.appEngineHttpTarget === undefined
+        ? runtime.environment[callerKey]
+        : isObject(queueRaw.httpTarget) && isObject(queueRaw.httpTarget.oidcToken)
+            ? queueRaw.httpTarget.oidcToken.serviceAccountEmail : undefined;
     if (typeof queueCaller !== 'string') fail('ADAPTER_RESPONSE_INVALID');
     const caller = identity(queueCaller, selector.project);
     const queueInputValue = queueInput(input.role, selector, runtime, queueRaw, caller);
@@ -1066,9 +1212,9 @@ async function buildRoleLive(input: Readonly<{
     // its HTTP target is carried by each task. The queue-level OIDC tuple and
     // URI-override wire shape are still live facts and must agree with the
     // exact selector used to build the packet.
-    if (queueObservation.target === null
-        || queueObservation.target.audience !== queueInputValue.target.audience
-        || canonicalDigest(queueObservation.target.callerIdentity) !== canonicalDigest(queueInputValue.target.callerIdentity)) fail('CAPABILITY_BINDING_MISMATCH');
+    if (queueObservation.target === null ? queueObservation.httpTargetPresent || queueRaw.httpTarget !== undefined
+        : queueObservation.target.audience !== queueInputValue.target.audience
+            || canonicalDigest(queueObservation.target.callerIdentity) !== canonicalDigest(queueInputValue.target.callerIdentity)) fail('CAPABILITY_BINDING_MISMATCH');
     const schedulerRaw = await readSchedulerWire(input.google, resources.scheduler);
     const schedulerTarget = recoveryTargetFromWire(schedulerRaw, selector.project);
     const expectedMaintenance = maintenanceTargetFromEnvironment(runtime.environment, input.role);
@@ -1090,13 +1236,24 @@ async function buildRoleLive(input: Readonly<{
     const buildRecords = Object.values(buildsByLocation).flat();
     if (buildRecords.length === 0) fail('EVIDENCE_UNAVAILABLE');
     const oldBuild = await resolveOwnerBuildForImage(buildRecords, oldSourceSha, runtime.image, selector.project, input.storageSourceVerifier);
-    const desiredBuild = await resolveOwnerBuildForImage(buildRecords, input.desiredSourceSha, input.desiredImage, selector.project, input.storageSourceVerifier);
     return {
         role: input.role, selector, resources, runtime, revision, queueInput: queueInputValue, queueObservation,
         schedulerInput: { ...schedulerInputValue, state: schedulerObservation.state, pauseEpochMs: schedulerObservation.pauseEpochMs, lastAttemptMs: schedulerObservation.lastAttemptMs }, schedulerObservation, retentionInput: retentionInputValue, iam,
-        oldBuild, desiredBuild, desiredImage: input.desiredImage,
-        slots: identitySlots(input.role, runtime, queueObservation, schedulerObservation, selector),
+        oldBuild,
+        slots: identitySlots(input.role, runtime, queueObservation, schedulerObservation, selector, input.env, input.enqueuerFingerprint),
     };
+}
+
+async function attachDesiredBuild(
+    live: RoleLive,
+    desiredSourceSha: string,
+    desiredImage: string,
+    buildsByLocation: Readonly<Record<string, readonly BuildCandidate[]>>,
+    storageSourceVerifier: StorageSourceVerifier,
+): Promise<FullRoleLive> {
+    const buildRecords = Object.values(buildsByLocation).flat();
+    const desiredBuild = await resolveOwnerBuildForImage(buildRecords, desiredSourceSha, desiredImage, live.selector.project, storageSourceVerifier);
+    return Object.freeze({ ...live, desiredBuild, desiredImage });
 }
 
 function identityFromWire(raw: Record<string, unknown>, projectId: string): ProtectedIdentity {
@@ -1131,9 +1288,10 @@ async function readServiceAccounts(google: AuthenticatedProtectedTransport, proj
     for (const value of rows) {
         const account = object(value);
         const email = account.email;
-        if (typeof email !== 'string' || !INVENTORY_ACCOUNT.test(email)) fail('ADAPTER_RESPONSE_INVALID');
-        const accountProject = INVENTORY_ACCOUNT.exec(email)![1]!;
-        if (accountProject !== projectId) fail('PROJECT_MISMATCH');
+        if (typeof email !== 'string' || email.length > 256
+            || !/^[a-z0-9][a-z0-9.-]*@[a-z0-9.-]+\.gserviceaccount\.com$/.test(email)
+            || account.name !== `projects/${projectId}/serviceAccounts/${email}`) fail('ADAPTER_RESPONSE_INVALID');
+        if (account.projectId !== projectId) fail('PROJECT_MISMATCH');
         // The IAM inventory also contains provider-managed/default accounts
         // whose local IDs may begin with a digit. They are not candidates for
         // this identity graph, so validate their project and then discard
@@ -1174,8 +1332,7 @@ function makeSupabaseOrigin(env: Env): string {
     return origin;
 }
 
-function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLive>, nowMs: number): LiveZeroWorkSources {
-    const taskAudit = validateAuditSelectors(env, 'TASK');
+function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLive>, nowMs: number, desiredGraph: DesiredIdentityGraph): LiveZeroWorkSources {
     const minPause = Math.min(...ROLES.map(role => roles[role].schedulerObservation.pauseEpochMs));
     const lastAttempts = ROLES.map(role => roles[role].schedulerObservation.lastAttemptMs).filter((value): value is number => value !== null);
     const earliest = Math.min(minPause, ...(lastAttempts.length === 0 ? [nowMs] : lastAttempts));
@@ -1188,15 +1345,11 @@ function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLi
     };
     const queueResources = ROLES.map(role => roles[role].queueInput.resource).sort();
     const taskSource = {
-        kind: 'cloud-logging' as const,
-        source: `cloud-logging:${taskAudit.logName}`,
+        kind: 'paused-queue-conservation' as const,
+        source: 'cloud-tasks:paused-queue-conservation-v1' as const,
         project: projectId,
-        logName: taskAudit.logName,
-        resourceType: 'cloud_tasks_queue' as const,
-        correlation: taskAudit.correlation,
         queueResources,
-        sinkName: taskAudit.sinkName,
-        bucketResource: taskAudit.bucketResource,
+        controlledIdentities: [...new Set([...Object.values(mapOldSlots(roles)), ...Object.values(desiredGraph.slots)].map(value => value.identity))].sort(),
         lookbackMs,
         selectorDigest: '',
     };
@@ -1228,38 +1381,101 @@ function accountGraph(pass: Readonly<{ project: string; roles: RoleMap<RoleLive>
     };
 }
 
-async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtectedTransports, now: () => number, storageSourceVerifier: StorageSourceVerifier): Promise<OwnerPass> {
+async function readOwnerOldPass(
+    auth: OwnerAuthBoundary,
+    transports: OwnerProtectedTransports,
+    now: () => number,
+    storageSourceVerifier: StorageSourceVerifier,
+    resourceSelectorOverrides: OwnerResourceSelectorOverrides,
+    publicReadinessTransport?: ProtectedTransport,
+): Promise<OwnerOldDiscovery> {
     const productionEnv = await readProductionEnv(transports.vercel, auth);
-    const env = envMap(productionEnv);
+    const env = mergeOwnerResourceSelectorOverrides(productionEnv, resourceSelectorOverrides);
     const selectors = Object.fromEntries(ROLES.map(role => [role, readRoleSelector(env, role)])) as RoleMap<ReturnType<typeof readRoleSelector>>;
     const projectId = requireProjectAgreement(selectors);
     if (auth.vercelProjectId.length === 0 || auth.vercelTeamId.length === 0) unavailable();
     const alias = required(env, 'VERCEL_PRODUCER_ALIAS');
     if (!/^[A-Za-z0-9.-]{1,253}$/.test(alias)) fail('ADAPTER_REQUEST_INVALID');
-    const deployments = await readVercelDeployments(transports.vercel, auth.vercelProjectId, auth.vercelTeamId);
     const oldId = await readCurrentAlias(transports.vercel, alias, auth.vercelProjectId, auth.vercelTeamId);
     const oldDeployment = await readVercelDeployment(transports.vercel, auth.vercelProjectId, auth.vercelTeamId, oldId);
-    const desiredDeployment = selectDeployment(deployments, oldDeployment.id);
-    const desired = await readVercelDeployment(transports.vercel, auth.vercelProjectId, auth.vercelTeamId, desiredDeployment.id);
-    const publicTransport = new FetchProtectedTransport(65_536);
+    const publicTransport = publicReadinessTransport ?? new FetchProtectedTransport(65_536);
     const oldReadiness = await readPublicReadiness(`https://${alias}/api/analysis/capacity/readiness`, oldDeployment.sourceSha, publicTransport);
-    const desiredReadiness = await readPublicReadiness(`${desired.origin}/api/analysis/capacity/readiness`, desired.sourceSha, publicTransport);
-    if (oldReadiness.contract.legacyTargetResource !== desiredReadiness.contract.legacyTargetResource) fail('READINESS_INVALID');
-    if (oldReadiness.contract.schemaVersion !== desiredReadiness.contract.schemaVersion) fail('READINESS_INVALID');
     const google = transports.google;
     const pauseProvenance = pauseProvenanceReader(google, env, now);
-    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance, now });
+    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance, now, pauseProvenanceTimeoutMs: 60_000 });
     const iamAdapter = new IamAdapter({ transport: google });
     const locations = new Set(['global', ...ROLES.flatMap(role => [selectors[role].location, selectors[role].cloudRunRegion, selectors[role].maintenanceLocation])]);
     const buildsByLocation: Record<string, readonly BuildCandidate[]> = {};
     for (const location of locations) buildsByLocation[location] = await readBuilds(google, projectId, location);
-    const allBuilds = Object.values(buildsByLocation).flat();
-    const desiredArtifact = await selectUniqueBuildForSource(allBuilds, desired.sourceSha, env.ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE, projectId, storageSourceVerifier);
     const roleValues = await Promise.all(ROLES.map(role => buildRoleLive({
-        role, env, selector: selectors[role], google, workPlanes, iamAdapter, storageSourceVerifier,
-        desiredSourceSha: desired.sourceSha, desiredImage: desiredArtifact.image,
+        role,
+        env,
+        enqueuerFingerprint: readinessEnqueuerFingerprint(oldReadiness.dto, role),
+        selector: selectors[role],
+        google,
+        workPlanes,
+        iamAdapter,
+        storageSourceVerifier,
     }, buildsByLocation)));
     const roles = Object.fromEntries(roleValues.map(value => [value.role, value])) as RoleMap<RoleLive>;
+    const buildOld = roles.preflight.oldBuild;
+    if (canonicalDigest(buildOld.input.identity) !== canonicalDigest(roles.paid.oldBuild.input.identity)) fail('SOURCE_INVALID');
+    const slots = mapOldSlots(roles);
+    const accounts = await readServiceAccounts(google, projectId, slots);
+    const bucket = required(env, 'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET');
+    if (!BUCKET.test(bucket)) fail('ADAPTER_REQUEST_INVALID');
+    const pass: OwnerOldPass = Object.freeze({
+        env,
+        supabaseServiceRoleSensitive: productionEnv.sensitiveKeys.includes('SUPABASE_SERVICE_ROLE_KEY'),
+        auth, transports, storageSourceVerifier, project: projectId, accounts, roles, oldReadiness,
+        oldDeployment, alias, bucket,
+        supabaseOrigin: makeSupabaseOrigin(env),
+    });
+    return Object.freeze({ pass, buildsByLocation: Object.freeze({ ...buildsByLocation }) });
+}
+
+async function readOwnerPass(
+    auth: OwnerAuthBoundary,
+    transports: OwnerProtectedTransports,
+    now: () => number,
+    storageSourceVerifier: StorageSourceVerifier,
+    options: OwnerReadOptions,
+): Promise<OwnerPass> {
+    const oldPublicTransport = options.publicReadinessTransport ?? new FetchProtectedTransport(65_536);
+    const old = await readOwnerOldPass(auth, transports, now, storageSourceVerifier, options.resourceSelectorOverrides, oldPublicTransport);
+    const { pass: oldPass, buildsByLocation } = old;
+    const oldDeployment = oldPass.oldDeployment;
+    let desired: DeploymentRecord;
+    if (options.desiredDeployment !== undefined) {
+        if (options.desiredDeployment.id === oldDeployment.id) fail('DISCOVERY_AMBIGUOUS');
+        desired = assertOwnerDesiredDeployment(options.desiredDeployment,
+            await readVercelDeployment(transports.vercel, auth.vercelProjectId, auth.vercelTeamId, options.desiredDeployment.id));
+    } else {
+        const deployments = await readVercelDeployments(transports.vercel, auth.vercelProjectId, auth.vercelTeamId);
+        const desiredCandidate = selectDeployment(deployments, oldDeployment.id);
+        desired = await readVercelDeployment(transports.vercel, auth.vercelProjectId, auth.vercelTeamId, desiredCandidate.id);
+    }
+    const desiredPublicTransport = options.publicReadinessTransport ?? createOwnerReadinessTransport({
+        transport: transports.vercel,
+        projectId: auth.vercelProjectId,
+        teamId: auth.vercelTeamId,
+        deploymentIds: [oldDeployment.id, desired.id],
+        publicReadinessOrigin: `https://${oldPass.alias}`,
+        cwd: options.cwd,
+    });
+    const desiredReadiness = await readPublicReadiness(`${desired.origin}/api/analysis/capacity/readiness`, desired.sourceSha, desiredPublicTransport);
+    if (oldPass.oldReadiness.contract.legacyTargetResource !== desiredReadiness.contract.legacyTargetResource) fail('READINESS_INVALID');
+    if (oldPass.oldReadiness.contract.schemaVersion !== desiredReadiness.contract.schemaVersion) fail('READINESS_INVALID');
+    for (const role of ROLES) {
+        requiredEnqueuerReadinessFingerprint(oldPass.oldReadiness.dto, role);
+        requiredEnqueuerReadinessFingerprint(desiredReadiness.dto, role);
+    }
+    const allBuilds = Object.values(buildsByLocation).flat();
+    const desiredArtifact = await selectUniqueBuildForSource(allBuilds, desired.sourceSha, oldPass.env.ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE, oldPass.project, storageSourceVerifier);
+    const roleValues = await Promise.all(ROLES.map(role => attachDesiredBuild(
+        oldPass.roles[role], desired.sourceSha, desiredArtifact.image, buildsByLocation, storageSourceVerifier,
+    )));
+    const roles = Object.fromEntries(roleValues.map(value => [value.role, value])) as RoleMap<FullRoleLive>;
     const buildOld = roles.preflight.oldBuild;
     const buildDesired = roles.preflight.desiredBuild;
     if (canonicalDigest(buildOld.input.identity) !== canonicalDigest(roles.paid.oldBuild.input.identity)) fail('SOURCE_INVALID');
@@ -1267,16 +1483,11 @@ async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtected
     for (const role of ROLES) {
         if (roles[role].desiredBuild.input.sourceSha !== desired.sourceSha) fail('SOURCE_INVALID');
     }
-    const slots = mapOldSlots(roles);
-    const accounts = await readServiceAccounts(google, projectId, slots);
-    const bucket = required(env, 'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET');
-    if (!BUCKET.test(bucket)) fail('ADAPTER_REQUEST_INVALID');
     return Object.freeze({
-        env,
-        supabaseServiceRoleSensitive: productionEnv.sensitiveKeys.includes('SUPABASE_SERVICE_ROLE_KEY'),
-        auth, transports, storageSourceVerifier, project: projectId, accounts, roles, oldReadiness, desiredReadiness,
-        oldDeployment, desiredDeployment: desired, alias, bucket,
-        supabaseOrigin: makeSupabaseOrigin(env),
+        ...oldPass,
+        roles,
+        desiredReadiness,
+        desiredDeployment: desired,
     });
 }
 
@@ -1284,7 +1495,7 @@ function roleSlotsForGraph(graph: DesiredIdentityGraph): Readonly<Record<(typeof
     return graph.slots;
 }
 
-function buildDesiredRuntime(role: Role, live: RoleLive, graph: DesiredIdentityGraph): ProtectedRuntimeInput {
+function buildDesiredRuntime(role: Role, live: FullRoleLive, graph: DesiredIdentityGraph): ProtectedRuntimeInput {
     const queueTarget = live.queueInput.target;
     const schedulerTarget = live.schedulerInput.target;
     const environment = runtimeEnvironment(live.runtime, role, live.selector, graph.slots, schedulerTarget, queueTarget);
@@ -1298,7 +1509,7 @@ function buildDesiredRuntime(role: Role, live: RoleLive, graph: DesiredIdentityG
         environment,
         secretReferences: live.runtime.secretReferences,
         settings: live.runtime.settings,
-        target: live.queueInput.target,
+        target: { url: live.queueInput.target.url, audience: live.queueInput.target.audience },
         noTraffic: true,
         providerAdmissionEnabled: true,
     };
@@ -1315,7 +1526,7 @@ function buildOldRuntime(role: Role, live: RoleLive, sourceSha: string): Protect
         environment: live.runtime.environment,
         secretReferences: live.runtime.secretReferences,
         settings: live.runtime.settings,
-        target: live.queueInput.target,
+        target: { url: live.queueInput.target.url, audience: live.queueInput.target.audience },
         noTraffic: live.runtime.noTraffic,
         providerAdmissionEnabled: live.runtime.environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED === 'true',
     };
@@ -1580,7 +1791,7 @@ function buildServiceBody(role: Role, live: RoleLive, desiredRuntime: ProtectedR
     return body;
 }
 
-function preparationObservation(pass: OwnerPass): PreparationObservation {
+function preparationObservation(pass: OwnerOldPass): PreparationObservation {
     const graph = accountGraph(pass);
     const queues = Object.fromEntries(ROLES.map(role => {
         const observation = pass.roles[role].queueObservation;
@@ -1740,9 +1951,11 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
     if (oldSourceSha !== pass.oldDeployment.sourceSha || desiredSourceSha !== pass.desiredDeployment.sourceSha
         || pass.oldReadiness.contract.legacyTargetResource !== pass.desiredReadiness.contract.legacyTargetResource) fail('SOURCE_INVALID');
     const oldGraph = accountGraph(pass);
+    assertEnqueuerReadinessHashes(pass.oldReadiness.dto, oldGraph);
     const selection = selectDesiredIdentityGraph(oldGraph);
     if (selection.actions.length !== 0 || selection.missingAccounts.length !== 0) fail('EVIDENCE_UNAVAILABLE');
     const desiredGraph = selection.desired;
+    assertEnqueuerReadinessHashes(pass.desiredReadiness.dto, desiredGraph);
     const oldInputs = buildOldPlatform(pass);
     const desiredInputs = await buildDesiredPlatform(pass, desiredGraph, desiredSourceSha);
     const sourceContracts = Object.fromEntries(ROLES.map(role => [role, sourceContract(
@@ -1757,7 +1970,7 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
     const desiredManifestBase = buildManifest(pass, 'desired', desiredGraph, desiredInputs, pass.desiredReadiness.contract, sourceContracts, { preflight: [], paid: [] });
     const retired = deriveRetiredIamBindingDigests(oldManifest, desiredManifestBase, oldInputs);
     const desiredManifest = buildManifest(pass, 'desired', desiredGraph, desiredInputs, pass.desiredReadiness.contract, sourceContracts, retired);
-    const zeroWorkEvidence = buildZeroWorkSources(pass.env, pass.project, pass.roles, nowMs);
+    const zeroWorkEvidence = buildZeroWorkSources(pass.env, pass.project, pass.roles, nowMs, desiredGraph);
     const oldObservationsValue = oldObservations(pass, oldInputs, pass.oldReadiness);
     const desiredObservationsValue = desiredObservations(
         pass,
@@ -1848,8 +2061,11 @@ async function assertOwnerZeroWorkCoverage(pass: OwnerPass, built: Readonly<{
         supabaseTransport: supabase,
         supabaseApiKey: supabaseServiceRoleBearer,
         sources: built.zeroWorkEvidence,
+        frozenGates: createFrozenGateReader(built.packet, new VercelAdapter({
+            transport: pass.transports.vercel, publicReadinessOrigin: `https://${pass.alias}`,
+        })),
         receiverTokenProvider: async () => pass.auth.googleTokenProvider(),
-        now: () => nowMs,
+        now: () => Date.now(),
     });
     try {
         await evidence.zeroWorkBaseline({ nowMs });
@@ -1898,11 +2114,21 @@ async function readOwnerDescriptorPass(pass: OwnerPass, nowMs: number, supabaseW
 async function readAccountObservation(google: AuthenticatedProtectedTransport, expected: ProtectedIdentity): Promise<IdentityAccountObservation> {
     const resource = serviceAccountResource(expected.project, expected.identity);
     const path = `/v1/${resource}`;
-    const { value } = await google.json({ method: 'GET', url: `https://iam.googleapis.com${path}`, allowedHosts: new Set(['iam.googleapis.com']), allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: [], acceptedStatuses: [200] });
-    const account = object(value);
+    // IAM account and key-list indexes can become visible separately after
+    // create. Retry exact reads only; never repeat the account mutation.
+    const readIndexed = async (readPath: string): Promise<unknown> => {
+        for (let attempt = 0; attempt < 24; attempt += 1) {
+            const result = await google.json({ method: 'GET', url: `https://iam.googleapis.com${readPath}`, allowedHosts: new Set(['iam.googleapis.com']), allowedPath: candidate => candidate === readPath, allowedMethods: ['GET'], allowedQueryKeys: [], acceptedStatuses: [200, 404] });
+            if (result.response.status === 200) return result.value;
+            if (attempt === 23) fail('EVIDENCE_UNAVAILABLE');
+            await new Promise(resolve => setTimeout(resolve, 2_000));
+        }
+        fail('EVIDENCE_UNAVAILABLE');
+    };
+    const account = object(await readIndexed(path));
     if (account.email !== expected.identity || (account.disabled !== undefined && typeof account.disabled !== 'boolean')) fail('OBSERVATION_RACE');
     const keyPath = `${path}/keys`;
-    const { value: keyValue } = await google.json({ method: 'GET', url: `https://iam.googleapis.com${keyPath}`, allowedHosts: new Set(['iam.googleapis.com']), allowedPath: candidate => candidate === keyPath, allowedMethods: ['GET'], allowedQueryKeys: [], acceptedStatuses: [200] });
+    const keyValue = await readIndexed(keyPath);
     const keyBody = object(keyValue);
     if (keyBody.keys !== undefined && !Array.isArray(keyBody.keys)) fail('ADAPTER_RESPONSE_INVALID');
     const keys = (keyBody.keys ?? []).map(item => object(item));
@@ -1944,7 +2170,7 @@ async function readPreparationScheduler(google: AuthenticatedProtectedTransport,
     const raw = await readSchedulerWire(google, resource);
     const maintenance = identityFromWire(raw, selector.project);
     const input = schedulerInput(role, selector, raw, maintenance);
-    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance: pauseProvenanceReader(google, env, now), now });
+    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance: pauseProvenanceReader(google, env, now), now, pauseProvenanceTimeoutMs: 60_000 });
     const observation = await workPlanes.observeScheduler(input);
     return Object.freeze({ resource: observation.resource, state: observation.state, pauseEpochMs: observation.pauseEpochMs, lastAttemptMs: observation.lastAttemptMs });
 }
@@ -1956,10 +2182,27 @@ export type OwnerProductionCliDependencies = Readonly<{
     bridgeOptions?: OwnerFdBridgeOptions;
 }>;
 
-export async function createOwnerProductionCliDependencies(options: Readonly<{
+export type OwnerProductionCliOptions = Readonly<{
     cwd?: string;
     now?: () => number;
-}> = {}): Promise<OwnerProductionCliDependencies> {
+    /** Canonical in-memory selector seam; never persisted as production env. */
+    resourceSelectorOverrides?: OwnerResourceSelectorOverrides;
+    /** Exact desired deployment and native Vercel Git SHA for full descriptor reads. */
+    desiredDeployment?: OwnerDesiredDeploymentSelector;
+    /** In-memory seam for the old/desired public readiness reads. */
+    publicReadinessTransport?: ProtectedTransport;
+}>;
+
+function factoryResourceSelectorOverrides(options: OwnerProductionCliOptions): OwnerResourceSelectorOverrides {
+    return parseOwnerResourceSelectorOverrides(options.resourceSelectorOverrides);
+}
+
+export async function createOwnerProductionCliDependencies(options: OwnerProductionCliOptions = {}): Promise<OwnerProductionCliDependencies> {
+    // Validate all caller-provided seams before touching owner credentials or
+    // the filesystem. Overrides remain in memory and are merged only after
+    // the authenticated production environment has been read.
+    const resourceSelectorOverrides = factoryResourceSelectorOverrides(options);
+    const desiredDeployment = parseOwnerDesiredDeploymentSelector(options.desiredDeployment);
     const paths = localCredentialPath(options.cwd ?? process.cwd());
     const ownerAuth = await loadOwnerAuthBoundary(paths);
     const transports = createOwnerProtectedTransports({
@@ -1971,14 +2214,26 @@ export async function createOwnerProductionCliDependencies(options: Readonly<{
         repoCwd: options.cwd ?? process.cwd(),
         tokenProvider: ownerAuth.googleTokenProvider,
     });
-    const readPass = async (): Promise<OwnerPass> => readOwnerPass(ownerAuth, transports, now, storageSourceVerifier);
-    const discover = async (): Promise<PreparationObservation> => preparationObservation(await readPass());
+    const readOldPass = async (): Promise<OwnerOldPass> => (await readOwnerOldPass(
+        ownerAuth, transports, now, storageSourceVerifier, resourceSelectorOverrides, options.publicReadinessTransport,
+    )).pass;
+    const readPass = async (): Promise<OwnerPass> => readOwnerPass(ownerAuth, transports, now, storageSourceVerifier, {
+        cwd: paths.cwd,
+        resourceSelectorOverrides,
+        publicReadinessTransport: options.publicReadinessTransport,
+        ...(desiredDeployment === undefined ? {} : { desiredDeployment }),
+    });
+    const discover = async (): Promise<PreparationObservation> => preparationObservation(await readOldPass());
+    const readEffectiveEnv = async (): Promise<Env> => {
+        const productionEnv = await readProductionEnv(transports.vercel, ownerAuth);
+        return mergeOwnerResourceSelectorOverrides(productionEnv, resourceSelectorOverrides);
+    };
     const mutate: PreparationMutator = {
         createAccount: input => createKeylessAccount(transports.google, input),
         readAccount: input => readAccountObservation(transports.google, input.identity),
-        pauseScheduler: async input => pauseRecoveryScheduler(transports.google, envMap(await readProductionEnv(transports.vercel, ownerAuth)), input.role, input.resource),
+        pauseScheduler: async input => pauseRecoveryScheduler(transports.google, await readEffectiveEnv(), input.role, input.resource),
         readScheduler: async input => {
-            const env = envMap(await readProductionEnv(transports.vercel, ownerAuth));
+            const env = await readEffectiveEnv();
             return readPreparationScheduler(transports.google, env, now, input.role, input.resource);
         },
     };

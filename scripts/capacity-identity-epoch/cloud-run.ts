@@ -64,6 +64,66 @@ function trafficProjection(value: readonly CloudRunTraffic[]): readonly CloudRun
     return [...value].sort((left, right) => `${left.revisionName ?? ''}:${left.tag ?? ''}`.localeCompare(`${right.revisionName ?? ''}:${right.tag ?? ''}`));
 }
 
+/** Overlay the reviewed epoch fields on the CAS-bound live service. */
+export function stagedServiceBody(before: CloudRunServiceObservation, reviewed: Record<string, unknown>): Record<string, unknown> {
+    const oldMetadata = object(before.raw.metadata);
+    const metadata = object(reviewed.metadata);
+    const oldSpec = object(before.raw.spec);
+    const spec = object(reviewed.spec);
+    const oldTemplate = object(oldSpec.template);
+    const template = object(spec.template);
+    const oldTemplateMetadata = object(oldTemplate.metadata ?? {});
+    const templateMetadata = object(template.metadata ?? {});
+    const oldTemplateSpec = object(oldTemplate.spec);
+    const templateSpec = object(template.spec);
+    if (!Array.isArray(oldTemplateSpec.containers) || oldTemplateSpec.containers.length !== 1
+        || !Array.isArray(templateSpec.containers) || templateSpec.containers.length !== 1) fail('ADAPTER_REQUEST_INVALID');
+    const sourceSha = object(templateMetadata.annotations ?? {})['capacity.identity-epoch/source-sha'];
+    const labels = (old: unknown, next: unknown): Record<string, unknown> => {
+        const result = { ...object(old ?? {}), ...object(next ?? {}) };
+        if (typeof sourceSha === 'string' && result['analysis-v2-source-commit'] !== undefined) result['analysis-v2-source-commit'] = sourceSha;
+        return result;
+    };
+    // Preserve ingress/scaling/build-update/custom controls without replaying
+    // the provider's response-only identity, operation, and URL fields.
+    const serviceAnnotations = Object.fromEntries(Object.entries(object(oldMetadata.annotations ?? {})).filter(([key]) =>
+        key !== 'serving.knative.dev/creator' && key !== 'serving.knative.dev/lastModifier'
+        && key !== 'run.googleapis.com/operation-id' && key !== 'run.googleapis.com/ingress-status'
+        && key !== 'run.googleapis.com/urls'));
+    return {
+        apiVersion: reviewed.apiVersion, kind: reviewed.kind,
+        metadata: { ...metadata, labels: labels(oldMetadata.labels, metadata.labels),
+            annotations: { ...serviceAnnotations, ...object(metadata.annotations ?? {}) } },
+        spec: { ...oldSpec, ...spec, template: {
+            metadata: { ...oldTemplateMetadata, ...templateMetadata,
+                labels: labels(oldTemplateMetadata.labels, templateMetadata.labels),
+                annotations: { ...object(oldTemplateMetadata.annotations ?? {}), ...object(templateMetadata.annotations ?? {}) } },
+            spec: { ...oldTemplateSpec, ...templateSpec,
+                containers: [{ ...object(oldTemplateSpec.containers[0]), ...object(templateSpec.containers[0]) }] },
+        } },
+    };
+}
+
+function normalizedServiceSpec(value: Record<string, unknown>): Record<string, unknown> {
+    const spec = structuredClone(value);
+    const template = object(spec.template);
+    const metadata = object(template.metadata ?? {});
+    for (const key of ['labels', 'annotations']) {
+        if (metadata[key] !== undefined && Object.keys(object(metadata[key])).length === 0) delete metadata[key];
+    }
+    template.metadata = metadata;
+    if (!Array.isArray(spec.traffic)) fail('ADAPTER_RESPONSE_INVALID');
+    // Cloud Run omits null tags and zero-percent untagged routes. Neither
+    // changes the serving revision; the independent status read checks that.
+    spec.traffic = spec.traffic.map(entry => {
+        const item = { ...object(entry) };
+        if (item.tag === null) delete item.tag;
+        return item;
+    }).filter(entry => entry.percent !== 0 || entry.tag !== undefined)
+        .sort((left, right) => canonicalDigest(left).localeCompare(canonicalDigest(right)));
+    return spec;
+}
+
 export type CloudRunTraffic = Readonly<{ revisionName: string | null; percent: number; tag: string | null }>;
 
 export type CloudRunServiceObservation = Readonly<{
@@ -142,6 +202,16 @@ function parseHttpsOrigin(value: unknown): string {
     try { parsed = new URL(value); } catch { fail('ADAPTER_RESPONSE_INVALID'); }
     if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/') fail('ADAPTER_RESPONSE_INVALID');
     return parsed.toString();
+}
+
+/**
+ * Cloud Run v2 publishes every serving URL as output-only `urls[]`.  The
+ * resource name is checked against the exact request so these URLs cannot be
+ * supplied by annotations or another service in the same project.
+ */
+function parseServiceUrls(resource: string, body: Record<string, unknown>): readonly string[] {
+    if (body.name !== resource || !Array.isArray(body.urls) || body.urls.length === 0) fail('ADAPTER_RESPONSE_INVALID');
+    return Object.freeze([...new Set(body.urls.map(parseHttpsOrigin))]);
 }
 
 function parseService(resource: string, body: Record<string, unknown>): CloudRunServiceObservation {
@@ -296,6 +366,20 @@ export class CloudRunAdapter {
         return parseService(resource, object(value));
     }
 
+    /** Independent v2 output-only serving URL read for target-origin binding. */
+    async getServiceUrls(resource: string): Promise<readonly string[]> {
+        const parsed = parseResource(resource);
+        const path = `/v2/projects/${encodeURIComponent(parsed.project)}/locations/${encodeURIComponent(parsed.location)}/services/${encodeURIComponent(parsed.service)}`;
+        const { value } = await this.transport.json({
+            method: 'GET', url: `https://run.googleapis.com${path}`,
+            allowedHosts: new Set(['run.googleapis.com']), allowedPath: candidate => candidate === path, allowedMethods: ['GET'],
+            allowedQueryKeys: [], acceptedStatuses: [200],
+        });
+        // Parse the request-derived path before trusting output fields; the
+        // v2 response name must still equal the exact service resource.
+        return parseServiceUrls(resource, object(value));
+    }
+
     async getRevision(project: string, location: string, revision: string): Promise<Record<string, unknown>> {
         assertProject(project);
         if (!LOCATION.test(location) || !REVISION.test(revision) || revision === 'latest') fail('RESOURCE_INVALID');
@@ -335,8 +419,10 @@ export class CloudRunAdapter {
         if (before.generation !== options.expectedGeneration) fail('OBSERVATION_RACE');
         const parsed = parseResource(options.resource);
         const path = this.servicePath(parsed.project, parsed.service);
-        const metadata = object(body.metadata ?? {});
-        const requestBody = { ...body, metadata: { ...metadata, resourceVersion: before.resourceVersion } };
+        const mutationBody = options.operation === 'cloud-run.stage' ? stagedServiceBody(before, body) : body;
+        const metadata = object(mutationBody.metadata ?? {});
+        const requestBody = { ...mutationBody, metadata: { ...metadata, resourceVersion: before.resourceVersion },
+            spec: normalizedServiceSpec(object(mutationBody.spec)) };
         // Fence immediately before the actual mutation.  The check above
         // protects the read; this one closes the read/modify/write gap.
         await leaseCheck();
@@ -345,7 +431,7 @@ export class CloudRunAdapter {
             allowedHosts: new Set([`${parsed.location}-run.googleapis.com`]), allowedPath: candidate => candidate === path, allowedMethods: ['PUT'],
             allowedQueryKeys: [], body: requestBody, acceptedStatuses: [200], beforeDispatch: leaseCheck,
         });
-        const requestedSpec = object(body.spec);
+        const requestedSpec = object(requestBody.spec);
         return this.waitForServicePostcondition(options.resource, requestedSpec, leaseCheck);
     }
 
@@ -359,7 +445,7 @@ export class CloudRunAdapter {
             await leaseCheck();
             const after = await this.getService(resource);
             const observedSpec = object(after.raw.spec);
-            const exactPostcondition = canonicalDigest(observedSpec) === canonicalDigest(requestedSpec);
+            const exactPostcondition = canonicalDigest(normalizedServiceSpec(observedSpec)) === canonicalDigest(normalizedServiceSpec(requestedSpec));
             if (after.observedGeneration === after.generation && after.ready && exactPostcondition) return after;
             const status = object(after.raw.status);
             if (Array.isArray(status.conditions) && status.conditions.some(condition => isObject(condition) && condition.type === 'Ready' && condition.status === 'False')) fail('OBSERVATION_RACE');

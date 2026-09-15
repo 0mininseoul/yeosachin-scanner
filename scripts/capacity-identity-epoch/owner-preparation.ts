@@ -160,8 +160,8 @@ function validateObservation(observation: IdentityGraphObservation): Map<string,
         prior.push(slot);
         slotIdentityCounts.set(value.identity, prior);
     }
-    // Shared or cross-slot old accounts are never silently split.
-    if ([...slotIdentityCounts.values()].some(slots => slots.length !== 1)) conflict();
+    // A shared old identity is a migration input. Every affected slot must
+    // receive a separate identity in the reviewed preparation proposal.
     if (SLOTS.some(slot => observation.slots[slot].identity === observation.build.identity)) conflict();
 
     if (!Array.isArray(observation.accounts)) identityError();
@@ -185,7 +185,9 @@ function validateObservation(observation: IdentityGraphObservation): Map<string,
         // A graph entry without a corresponding account is incomplete old
         // evidence. It must not be treated as a clean account ready for reuse.
         if (!account) conflict();
-        if (account.attachedSlots.length !== 1 || account.attachedSlots[0] !== slot) conflict();
+        const expectedSlots = slotIdentityCounts.get(expected.identity)!;
+        if (account.attachedSlots.length !== expectedSlots.length
+            || expectedSlots.some(expectedSlot => !account.attachedSlots.includes(expectedSlot))) conflict();
         if (!account.enabled || account.userManagedKeyCount !== 0) conflict();
     }
 
@@ -284,12 +286,14 @@ export function selectDesiredIdentityGraph(observation: IdentityGraphObservation
 
     for (const slot of SLOTS) {
         const oldIdentity = observation.slots[slot];
-        const requested = observation.desiredSlots?.[slot] ?? oldIdentity;
-        assertIdentity(requested, observation.project);
         const current = accounts.get(oldIdentity.identity);
-        // validateObservation already proved this is exact same-slot,
-        // enabled, keyless, and conflict-free.
-        if (requested.identity === oldIdentity.identity && current) {
+        const reusable = current?.attachedSlots.length === 1 && current.attachedSlots[0] === slot;
+        const requested = observation.desiredSlots?.[slot]
+            ?? (reusable ? oldIdentity : deterministicIdentityForSlot(observation.project, slot));
+        assertIdentity(requested, observation.project);
+        // Shared old identities are never retained in any desired slot.
+        if (requested.identity === oldIdentity.identity && !reusable) conflict();
+        if (requested.identity === oldIdentity.identity && current && reusable) {
             desiredSlots[slot] = current.identity;
             reusedSlots.push(slot);
             continue;

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
     getLegacyAnalysisPublicReadiness,
+    PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
     PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+    PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
     PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+    enqueuerIdentityFingerprint,
 } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
 const sourceSha = '0123456789abcdef0123456789abcdef01234567';
@@ -18,9 +21,11 @@ const validEnvironment = {
     VERCEL_GIT_COMMIT_SHA: sourceSha,
     ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE: 'vercel:production:analysis-v1',
     PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'preflight-task@example-project.iam.gserviceaccount.com',
+    PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'preflight-enqueuer@example-project.iam.gserviceaccount.com',
     PREFLIGHT_TASKS_TARGET_URL: 'https://preflight.example.com/api/analysis/preflight/worker',
     PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://preflight.example.com',
     ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'PAID-TASK@example-project.iam.gserviceaccount.com',
+    ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'paid-enqueuer@example-project.iam.gserviceaccount.com',
     ANALYSIS_V2_TASKS_TARGET_URL: 'https://Paid.Example.com:443/api/analysis/v2/worker',
     ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://PAID.example.com:443/',
     EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: 'false',
@@ -37,9 +42,11 @@ describe('public freeze readiness observation', () => {
             VERCEL_GIT_COMMIT_SHA: sourceSha,
             ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE: 'vercel:production:analysis-v1',
             PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'preflight-task@example-project.iam.gserviceaccount.com',
+            PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'preflight-enqueuer@example-project.iam.gserviceaccount.com',
             PREFLIGHT_TASKS_TARGET_URL: 'https://preflight.example.com/api/analysis/preflight/worker',
             PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://preflight.example.com',
             ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL: 'PAID-TASK@example-project.iam.gserviceaccount.com',
+            ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL: 'paid-enqueuer@example-project.iam.gserviceaccount.com',
             ANALYSIS_V2_TASKS_TARGET_URL: 'https://Paid.Example.com:443/api/analysis/v2/worker',
             ANALYSIS_V2_TASKS_OIDC_AUDIENCE: 'https://PAID.example.com:443/',
         });
@@ -50,11 +57,22 @@ describe('public freeze readiness observation', () => {
             .toBe(PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION);
         expect(result.preflightProducerConfigFingerprint).toBe(expectedPreflightFingerprint);
         expect(result.preflightProducerConfigReady).toBe(true);
+        expect(result.preflightEnqueuerIdentityFingerprintVersion)
+            .toBe(PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION);
+        expect(result.preflightEnqueuerIdentityFingerprint).toBe(enqueuerIdentityFingerprint(
+            'preflight', 'preflight-enqueuer@example-project.iam.gserviceaccount.com',
+        ));
         expect(result.paidProducerConfigFingerprintVersion).toBe(PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION);
         expect(result.paidProducerConfigFingerprint).toBe(expectedPaidFingerprint);
         expect(result.paidProducerConfigReady).toBe(true);
+        expect(result.paidEnqueuerIdentityFingerprintVersion)
+            .toBe(PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION);
+        expect(result.paidEnqueuerIdentityFingerprint).toBe(enqueuerIdentityFingerprint(
+            'paid', 'paid-enqueuer@example-project.iam.gserviceaccount.com',
+        ));
         expect(result.analysisV2AdmissionEnabled).toBe(false);
         expect(result.earlybirdWebhookAutoAdmissionEnabled).toBe(false);
+        expect(result.testEntitlementsEnabled).toBe(false);
         expect(JSON.stringify(result)).not.toContain('PAID-TASK@example-project');
         expect(JSON.stringify(result)).not.toContain('Paid.Example.com');
         expect(JSON.stringify(result)).not.toContain('PAID.example.com');
@@ -69,8 +87,13 @@ describe('public freeze readiness observation', () => {
             'preflightProducerConfigFingerprintVersion',
             'preflightProducerConfigFingerprint', 'preflightProducerConfigReady',
             'paidProducerConfigFingerprintVersion',
-            'paidProducerConfigFingerprint', 'paidProducerConfigReady', 'routes',
+            'paidProducerConfigFingerprint', 'paidProducerConfigReady',
+            'routes',
             'analysisV2AdmissionEnabled', 'earlybirdWebhookAutoAdmissionEnabled',
+            'preflightEnqueuerIdentityFingerprintVersion',
+            'preflightEnqueuerIdentityFingerprint',
+            'paidEnqueuerIdentityFingerprintVersion',
+            'paidEnqueuerIdentityFingerprint', 'testEntitlementsEnabled',
         ]);
     });
 
@@ -90,8 +113,11 @@ describe('public freeze readiness observation', () => {
             expect(result.ready).toBe(true);
             expect(result.analysisV2AdmissionEnabled).toBe(publicGate);
             expect(result.earlybirdWebhookAutoAdmissionEnabled).toBe(paidGate);
-            expect(Object.keys(result).slice(-2)).toEqual([
-                'analysisV2AdmissionEnabled', 'earlybirdWebhookAutoAdmissionEnabled',
+            expect(Object.keys(result).slice(-5)).toEqual([
+                'preflightEnqueuerIdentityFingerprintVersion',
+                'preflightEnqueuerIdentityFingerprint',
+                'paidEnqueuerIdentityFingerprintVersion',
+                'paidEnqueuerIdentityFingerprint', 'testEntitlementsEnabled',
             ]);
         });
 

@@ -11,7 +11,9 @@ import {
 import { CloudRunAdapter } from '../../../../scripts/capacity-identity-epoch/cloud-run';
 import { IamAdapter } from '../../../../scripts/capacity-identity-epoch/iam';
 import { WorkPlaneClient } from '../../../../scripts/capacity-identity-epoch/work-planes';
+import { readPausedQueueEvidence } from '../../../../scripts/capacity-identity-epoch/paused-queue-evidence';
 import { VercelAdapter } from '../../../../scripts/capacity-identity-epoch/vercel';
+import { createOwnerReadinessTransport } from '../../../../scripts/capacity-identity-epoch/vercel-readiness';
 import { issueLeaseCheck } from '../../../../scripts/capacity-identity-epoch/lease-capability';
 import { createFixturePacket } from '../../../../scripts/capacity-identity-epoch/fixtures';
 import { EpochJournal, type JournalStorage } from '../../../../scripts/capacity-identity-epoch/journal';
@@ -36,6 +38,50 @@ function authenticated(fake: ProtectedTransport, token = 'fixture-token'): Authe
 function response(request: ProtectedHttpRequest, status: number, value: unknown): ProtectedHttpResponse {
     return { status, headers: { 'content-type': 'application/json' }, body: JSON.stringify(value), url: request.url };
 }
+
+describe('owner protected deployment readiness', () => {
+    function fixture(overrides: Record<string, unknown> = {}) {
+        const api = new FakeTransport(request => response(request, 200, {
+            id: 'dpl-desired', project: { id: 'project-fixture' }, team: { id: 'team-fixture' },
+            readyState: 'READY', url: 'desired-fixture.vercel.app', gitSource: { sha: 'a'.repeat(40) }, ...overrides,
+        }));
+        const direct = new FakeTransport(request => response(request, 200, { public: true }));
+        const runCli = vi.fn(async () => '{"ready":true}\n200');
+        const transport = createOwnerReadinessTransport({ transport: authenticated(api), projectId: 'project-fixture',
+            teamId: 'team-fixture', deploymentIds: ['dpl-desired'], publicReadinessOrigin: 'https://public.example.invalid',
+            publicTransport: direct, runCli });
+        const request = { method: 'GET' as const, url: 'https://desired-fixture.vercel.app/api/analysis/capacity/readiness', headers: { accept: 'application/json' } };
+        return { transport, request, api, direct, runCli };
+    }
+
+    it('keeps public evidence unauthenticated and binds protected requests to exact deployment detail', async () => {
+        const f = fixture();
+        const publicRequest = { ...f.request, url: 'https://public.example.invalid/api/analysis/capacity/readiness' };
+        await f.transport.request(publicRequest);
+        expect(f.direct.requests).toEqual([publicRequest]);
+        expect(f.runCli).not.toHaveBeenCalled();
+        expect(await f.transport.request(f.request)).toMatchObject({ status: 200, body: '{"ready":true}', url: f.request.url });
+        expect(f.runCli).toHaveBeenCalledWith('dpl-desired', undefined);
+    });
+
+    it('rejects another project, unbound origin, methods, paths, credentials, and redirects', async () => {
+        const wrongProject = fixture({ project: { id: 'another-project' } });
+        await expect(wrongProject.transport.request(wrongProject.request)).rejects.toMatchObject({ code: 'ADAPTER_RESPONSE_INVALID' });
+        expect(wrongProject.runCli).not.toHaveBeenCalled();
+        const f = fixture();
+        for (const request of [
+            { ...f.request, url: f.request.url.replace('desired-fixture', 'unbound') },
+            { ...f.request, method: 'POST' as const },
+            { ...f.request, url: f.request.url.replace('/readiness', '/activate') },
+            { ...f.request, headers: { authorization: 'fixture-secret' } },
+        ]) await expect(f.transport.request(request)).rejects.toMatchObject({ code: 'ADAPTER_NOT_ALLOWED' });
+        expect(f.runCli).not.toHaveBeenCalled();
+        f.runCli.mockResolvedValueOnce('redirect\n302');
+        await expect(f.transport.request(f.request)).rejects.toMatchObject({ code: 'ADAPTER_REDIRECT' });
+        f.runCli.mockResolvedValueOnce('invalid');
+        await expect(f.transport.request(f.request)).rejects.toMatchObject({ code: 'ADAPTER_RESPONSE_INVALID' });
+    });
+});
 
 async function durableProbeAuthority(ownerDigest = 'b'.repeat(64), options: Readonly<{ now?: { value: number }; leaseMs?: number }> = {}, operation = 'probe.malformed', resource = serviceResource) {
     const packet = createFixturePacket();
@@ -1072,5 +1118,133 @@ describe('protected platform adapters', () => {
 
     it('does not expose protected response values through parse failures', () => {
         expect(() => parseProtectedObject('{"fixtureProtected":"value"}')).not.toThrow();
+    });
+});
+
+describe('bounded paused queue causal evidence', () => {
+    const evidenceProject = 'evidence-project';
+    const evidenceLocation = 'asia-northeast3';
+    const evidenceQueues = [
+        'projects/' + evidenceProject + '/locations/' + evidenceLocation + '/queues/preflight',
+        'projects/' + evidenceProject + '/locations/' + evidenceLocation + '/queues/paid',
+    ] as const;
+    const evidenceApps = [
+        'preflight-old@' + evidenceProject + '.iam.gserviceaccount.com',
+        'preflight-desired@' + evidenceProject + '.iam.gserviceaccount.com',
+        'paid-old@' + evidenceProject + '.iam.gserviceaccount.com',
+        'paid-desired@' + evidenceProject + '.iam.gserviceaccount.com',
+    ] as const;
+    const evidenceNow = 1_000_000;
+    const evidenceStart = evidenceNow - 60_000;
+
+    type EvidenceFixtureOptions = Readonly<{
+        taskPages?: Readonly<Record<string, readonly (readonly unknown[])[]>>;
+        onRequest?: (request: ProtectedHttpRequest) => void;
+    }>;
+
+    function queueWire(resource: string) {
+        return {
+            name: resource,
+            state: 'PAUSED',
+            purgeTime: '2026-09-16T00:00:00.000Z',
+            rateLimits: { maxConcurrentDispatches: 2 },
+            retryConfig: { maxAttempts: 3 },
+            stackdriverLoggingConfig: { samplingRatio: 1 },
+            httpTarget: { uri: 'https://worker.example.invalid' },
+        };
+    }
+
+    function fixture(options: EvidenceFixtureOptions = {}) {
+        const taskPages = options.taskPages ?? Object.fromEntries(evidenceQueues.map(queue => [queue, [[]]]));
+        const pageIndexes = new Map<string, number>();
+        const fake = new FakeTransport(request => {
+            options.onRequest?.(request);
+            const url = new URL(request.url);
+            if (url.hostname === 'cloudtasks.googleapis.com') {
+                const queue = evidenceQueues.find(candidate => url.pathname === '/v2/' + candidate);
+                if (request.method === 'GET' && queue) return response(request, 200, queueWire(queue));
+                const taskQueue = evidenceQueues.find(candidate => url.pathname === '/v2/' + candidate + '/tasks');
+                if (request.method === 'GET' && taskQueue) {
+                    const pages = taskPages[taskQueue] ?? [[]];
+                    const index = url.searchParams.has('pageToken') ? 1 : 0;
+                    pageIndexes.set(taskQueue, index);
+                    const tasks = pages[index] ?? [];
+                    const nextPageToken = index + 1 < pages.length ? 'next' : '';
+                    return response(request, 200, { tasks, ...(nextPageToken === '' ? {} : { nextPageToken }) });
+                }
+            }
+            throw new Error('unexpected fixture request ' + request.method + ' ' + request.url);
+        });
+        const transport = new AuthenticatedProtectedTransport({
+            transport: fake,
+            tokenProvider: async () => 'fixture-token',
+            timeoutMs: 2_000,
+        });
+        return { fake, transport, pageIndexes };
+    }
+
+    function input(transport: AuthenticatedProtectedTransport, leaseCheck: () => Promise<void> = async () => undefined) {
+        return {
+            project: evidenceProject,
+            queueResources: evidenceQueues,
+            controlledIdentities: evidenceApps,
+            transport,
+            leaseCheck,
+            now: () => evidenceNow,
+            intervalStartMs: evidenceStart,
+        } as const;
+    }
+
+    it('returns empty paused queue evidence with stable safe digests', async () => {
+        const f = fixture();
+        const result = await readPausedQueueEvidence(input(f.transport));
+        expect(result.queues).toHaveLength(2);
+        expect(result.queues.every(queue => queue.state === 'PAUSED' && queue.taskCount === 0 && queue.complete)).toBe(true);
+        expect(result.queues.every(queue => queue.purgeTime === '2026-09-16T00:00:00.000Z')).toBe(true);
+        expect(result.observedAtMs).toBe(evidenceNow);
+        expect(result.scope.model).toBe('cooperative-reviewed-workload-conservation');
+        expect(result.scope.projectWideMutationAbsence).toBe('not-claimed');
+        expect(result.cloudLoggingCompleteness).toBe(false);
+        expect(result).not.toHaveProperty('iam');
+        expect(result.snapshotDigest).toMatch(/^[0-9a-f]{64}$/);
+        expect(JSON.stringify(result)).not.toContain('/tasks/');
+        const taskRequests = f.fake.requests.filter(request => request.url.includes('/tasks?'));
+        expect(taskRequests).toHaveLength(2);
+        expect(taskRequests.every(request => new URL(request.url).searchParams.get('responseView') === 'BASIC')).toBe(true);
+        expect(f.fake.requests.some(request => request.url.includes('cloudresourcemanager.googleapis.com'))).toBe(false);
+        expect(f.fake.requests.some(request => request.url.includes('iam.googleapis.com'))).toBe(false);
+    });
+
+    it('rejects any nonempty queue without exposing task names', async () => {
+        const f = fixture({
+            taskPages: { [evidenceQueues[0]]: [[{ name: evidenceQueues[0] + '/tasks/secret' }]], [evidenceQueues[1]]: [[]] },
+        });
+        await expect(readPausedQueueEvidence(input(f.transport))).rejects.toThrow('QUEUE_NOT_EMPTY');
+    });
+
+    it('fully paginates BASIC task pages before returning evidence', async () => {
+        const f = fixture({
+            taskPages: { [evidenceQueues[0]]: [[], []], [evidenceQueues[1]]: [[]] },
+        });
+        const result = await readPausedQueueEvidence(input(f.transport));
+        const taskRequests = f.fake.requests.filter(request => request.url.includes('/tasks?'));
+        expect(taskRequests).toHaveLength(3);
+        expect(taskRequests.some(request => new URL(request.url).searchParams.get('pageToken') === 'next')).toBe(true);
+        expect(result.queues.every(queue => queue.taskCount === 0 && queue.complete)).toBe(true);
+    });
+
+    it('fails closed when the lease is lost after a task page read', async () => {
+        let taskPagesRead = 0;
+        const f = fixture({
+            taskPages: { [evidenceQueues[0]]: [[], []], [evidenceQueues[1]]: [[]] },
+            onRequest: request => {
+                if (request.url.includes('/tasks?')) taskPagesRead += 1;
+            },
+        });
+        const leaseCheck = async () => {
+            if (taskPagesRead >= 1) throw new EpochError('LOCK_LOST');
+        };
+        await expect(readPausedQueueEvidence(input(f.transport, leaseCheck))).rejects.toThrow('LOCK_LOST');
+        expect(taskPagesRead).toBe(1);
     });
 });

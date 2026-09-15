@@ -41,6 +41,28 @@ function graph(overrides: Partial<{
 }
 
 describe('owner identity preparation policy', () => {
+    it('replaces every accurately observed shared old slot without reusing the shared identity', () => {
+        const base = graph();
+        const affected = ['preflight.task-caller', 'paid.task-caller'] as const;
+        const shared = base.slots[affected[0]];
+        const observed: IdentityGraphObservation = {
+            ...base,
+            slots: { ...base.slots, [affected[1]]: shared },
+            accounts: [...base.accounts.filter(account => !affected.some(slot => account.identity.identity === base.slots[slot].identity)),
+                { identity: shared, enabled: true, userManagedKeyCount: 0, attachedSlots: [...affected] }],
+        };
+        const result = selectDesiredIdentityGraph(observed);
+        expect(result.actions.map(action => action.kind)).toEqual(['account.create', 'account.create']);
+        expect(result.reusedSlots).toHaveLength(6);
+        expect(Object.values(result.desired.slots).map(value => value.identity)).not.toContain(shared.identity);
+        for (const slot of affected) expect(result.desired.slots[slot]).toEqual(deterministicIdentityForSlot(PROJECT, slot));
+        const resumed = selectDesiredIdentityGraph({ ...observed, accounts: [...observed.accounts,
+            ...result.missingAccounts.map(item => ({ identity: item.identity, enabled: true, userManagedKeyCount: 0, attachedSlots: [] }))] });
+        expect(resumed.actions).toEqual([]);
+        expect(resumed.desired).toEqual(result.desired);
+        expect(() => selectDesiredIdentityGraph({ ...observed, desiredSlots: { [affected[0]]: shared } })).toThrow('IDENTITY_CONFLICT');
+    });
+
     it('reuses only an exact same-slot account and reports deterministic missing accounts', () => {
         const observed = graph();
         const result = selectDesiredIdentityGraph(observed);

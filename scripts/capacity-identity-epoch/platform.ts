@@ -34,6 +34,7 @@ const CONTROL_PLANE_HOSTS = new Set([
     'cloudscheduler.googleapis.com',
     'cloudtasks.googleapis.com',
     'iam.googleapis.com',
+    'iamcredentials.googleapis.com',
     'logging.googleapis.com',
     'run.googleapis.com',
 ]);
@@ -356,22 +357,75 @@ export type ReceiverTokenProvider = (input: Readonly<{
     callerIdentity: string;
 }>) => Promise<string>;
 
-/** Mint a real Google ID token for the reviewed receiver audience. */
-export function createGoogleReceiverTokenProvider(options: Readonly<{ auth?: GoogleAuth }> = {}): ReceiverTokenProvider {
-    const auth = options.auth ?? new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-    return async ({ audience }) => {
-        let parsed: URL;
-        try { parsed = new URL(audience); } catch { fail('ADAPTER_REQUEST_INVALID'); }
-        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.pathname !== '/' || parsed.search || parsed.hash) fail('ADAPTER_REQUEST_INVALID');
-        try {
-            const client = await auth.getIdTokenClient(parsed.origin);
-            const token = await client.idTokenProvider.fetchIdToken(parsed.origin);
-            assertBoundedString(token, 8192);
-            return token;
-        } catch (error) {
-            if (error instanceof EpochError) throw error;
-            fail('ADAPTER_REQUEST_INVALID');
-        }
+export type ReviewedReceiverTokenBinding = Readonly<{
+    project: string;
+    audience: string;
+    callerIdentity: string;
+}>;
+
+const RECEIVER_BINDING_COUNT = 2;
+const SERVICE_ACCOUNT_EMAIL = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@([a-z][a-z0-9-]{4,28}[a-z0-9])\.iam\.gserviceaccount\.com$/;
+
+function receiverAudience(value: unknown): string {
+    assertBoundedString(value, 2_048);
+    let parsed: URL;
+    try { parsed = new URL(value); } catch { fail('ADAPTER_REQUEST_INVALID'); }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port
+        || parsed.pathname !== '/' || parsed.search || parsed.hash) fail('ADAPTER_REQUEST_INVALID');
+    return value;
+}
+
+function receiverCallerIdentity(value: unknown): { identity: string; project: string } {
+    assertBoundedString(value, 320);
+    const match = value.match(SERVICE_ACCOUNT_EMAIL);
+    if (!match) fail('ADAPTER_REQUEST_INVALID');
+    return { identity: value, project: match[1]! };
+}
+
+function receiverBindingKey(audience: string, callerIdentity: string): string {
+    return `${callerIdentity}\n${audience}`;
+}
+
+/** Mint a real Google ID token through IAMCredentials for reviewed bindings. */
+export function createGoogleReceiverTokenProvider(options: Readonly<{
+    transport: AuthenticatedProtectedTransport;
+    reviewedBindings: readonly ReviewedReceiverTokenBinding[];
+}>): ReceiverTokenProvider {
+    if (!options || typeof options.transport?.json !== 'function'
+        || !Array.isArray(options.reviewedBindings) || options.reviewedBindings.length !== RECEIVER_BINDING_COUNT) {
+        fail('CAPABILITY_BINDING_MISMATCH');
+    }
+    const reviewed = new Set<string>();
+    let reviewedProject: string | undefined;
+    for (const binding of options.reviewedBindings) {
+        if (!isObject(binding)) fail('CAPABILITY_BINDING_MISMATCH');
+        const caller = receiverCallerIdentity(binding.callerIdentity);
+        if (caller.project !== binding.project) fail('CAPABILITY_BINDING_MISMATCH');
+        if (reviewedProject === undefined) reviewedProject = binding.project;
+        else if (reviewedProject !== binding.project) fail('CAPABILITY_BINDING_MISMATCH');
+        const audience = receiverAudience(binding.audience);
+        const key = receiverBindingKey(audience, caller.identity);
+        reviewed.add(key);
+    }
+    return async ({ audience: requestedAudience, callerIdentity: requestedCallerIdentity }) => {
+        const audience = receiverAudience(requestedAudience);
+        const caller = receiverCallerIdentity(requestedCallerIdentity);
+        if (!reviewed.has(receiverBindingKey(audience, caller.identity))) epochFail('CAPABILITY_BINDING_MISMATCH');
+        const path = `/v1/projects/-/serviceAccounts/${caller.identity}:generateIdToken`;
+        const { value } = await options.transport.json({
+            method: 'POST',
+            url: `https://iamcredentials.googleapis.com${path}`,
+            allowedHosts: new Set(['iamcredentials.googleapis.com']),
+            allowedPath: candidate => candidate === path,
+            allowedMethods: ['POST'],
+            allowedQueryKeys: [],
+            body: { audience, includeEmail: true },
+            acceptedStatuses: [200],
+        });
+        if (!isObject(value) || Object.keys(value).sort().join(',') !== 'token') fail('ADAPTER_RESPONSE_INVALID');
+        const token = value.token;
+        assertBoundedString(token, 8_192);
+        return token;
     };
 }
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalDigest, EpochError } from '../../../../scripts/capacity-identity-epoch/contracts';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from '../../../../scripts/capacity-identity-epoch/platform';
-import { evidenceSelectorDigest, LiveEvidenceCollector, validateLiveZeroWorkSources, type CloudLoggingEvidenceSource, type LiveZeroWorkSources, type SupabaseLedgerSource } from '../../../../scripts/capacity-identity-epoch/live-evidence';
+import { readIdleAdmissionEvidence } from '../../../../scripts/capacity-identity-epoch/idle-admission-evidence';
+import { evidenceSelectorDigest, LiveEvidenceCollector, validateLiveZeroWorkSources, type CloudLoggingEvidenceSource, type LiveZeroWorkSources, type PausedQueueEvidenceSource, type SupabaseLedgerSource } from '../../../../scripts/capacity-identity-epoch/live-evidence';
 
 const PROJECT = 'example-project';
 const QUEUE = `projects/${PROJECT}/locations/asia-northeast3/queues/fixture`;
@@ -391,3 +392,236 @@ function collectorWithSupabase(supabase: SupabaseTransport, google: LoggingTrans
         supabaseTransport: supabaseAuthenticated, supabaseApiKey: SUPABASE_API_KEY, sources: sourceSet, receiverTokenProvider: async () => 'fixture-token', now: () => NOW + 1_000,
     });
 }
+
+const IDLE_SUPABASE_ORIGIN = 'https://abcdefghijklmnopqrst.supabase.co/';
+const IDLE_PROJECT_RESOURCE = 'projects/123456789012345';
+const IDLE_IDENTITIES = [
+    `preflight-caller@${PROJECT}.iam.gserviceaccount.com`,
+    `preflight-enqueuer@${PROJECT}.iam.gserviceaccount.com`,
+    `preflight-runtime@${PROJECT}.iam.gserviceaccount.com`,
+    `preflight-maintenance@${PROJECT}.iam.gserviceaccount.com`,
+    `paid-caller@${PROJECT}.iam.gserviceaccount.com`,
+    `paid-enqueuer@${PROJECT}.iam.gserviceaccount.com`,
+    `paid-runtime@${PROJECT}.iam.gserviceaccount.com`,
+    `paid-maintenance@${PROJECT}.iam.gserviceaccount.com`,
+] as const;
+
+const IDLE_SOURCE = (() => {
+    const base = {
+        kind: 'paused-queue-conservation' as const,
+        source: 'cloud-tasks:paused-queue-conservation-v1' as const,
+        project: PROJECT,
+        queueResources: SOURCE.queueResources!,
+        controlledIdentities: IDLE_IDENTITIES,
+        lookbackMs: 60_000,
+        selectorDigest: '0'.repeat(64),
+    } satisfies PausedQueueEvidenceSource;
+    return { ...base, selectorDigest: evidenceSelectorDigest(base) } satisfies PausedQueueEvidenceSource;
+})();
+
+const IDLE_LEDGER_SOURCES = (() => {
+    const ledger = (source: SupabaseLedgerSource): SupabaseLedgerSource => {
+        const base = { ...source, origin: IDLE_SUPABASE_ORIGIN, selectorDigest: '0'.repeat(64) };
+        return { ...base, selectorDigest: evidenceSelectorDigest(base as SupabaseLedgerSource) };
+    };
+    return {
+        providerLedger: ledger(SEMANTIC_LEDGER_SOURCES.providerLedger),
+        billingLedger: ledger(SEMANTIC_LEDGER_SOURCES.billingLedger),
+        taskAudit: IDLE_SOURCE,
+        receiverLog: ledger(SEMANTIC_LEDGER_SOURCES.receiverLog),
+    } satisfies LiveZeroWorkSources;
+})();
+
+type IdleQueryState = Readonly<{ now: () => number; nonzeroChanges: { value: boolean }; queries: string[] }>;
+
+function idleAdmissionQuery(state: IdleQueryState): (sql: string) => Promise<unknown> {
+    return async sql => {
+        state.queries.push(sql);
+        const changes = sql.includes('_changes');
+        return {
+            rows: [{
+                provider_active: 0,
+                preflight_active: 0,
+                request_active: 0,
+                job_active: 0,
+                ...(changes ? {
+                    provider_changes: 0,
+                    preflight_changes: 0,
+                    request_changes: state.nonzeroChanges.value ? 1 : 0,
+                    job_changes: 0,
+                } : {}),
+                observed_at_ms: state.now(),
+            }],
+        };
+    };
+}
+
+class IdleGoogleTransport implements ProtectedTransport {
+    readonly requests: ProtectedHttpRequest[] = [];
+    purgeTime = '2026-09-16T00:00:00.000Z';
+    queueTarget = 'https://worker.example.invalid/old';
+    queueBindings: readonly Record<string, unknown>[] = [];
+
+    async request(request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> {
+        this.requests.push(request);
+        const url = new URL(request.url);
+        if (url.hostname === 'cloudtasks.googleapis.com') {
+            const queue = SOURCE.queueResources!.find(resource => url.pathname === `/v2/${resource}`);
+            const taskQueue = SOURCE.queueResources!.find(resource => url.pathname === `/v2/${resource}/tasks`);
+            if (request.method === 'GET' && queue) {
+                return this.response(request, {
+                    name: queue,
+                    state: 'PAUSED',
+                    purgeTime: this.purgeTime,
+                    rateLimits: { maxConcurrentDispatches: 2 },
+                    retryConfig: { maxAttempts: 3 },
+                    taskTtl: '2678400s',
+                    httpTarget: { uri: this.queueTarget },
+                });
+            }
+            if (request.method === 'GET' && taskQueue) return this.response(request, { tasks: [] });
+            if (request.method === 'POST' && url.pathname.endsWith(':getIamPolicy')) {
+                return this.response(request, { version: 3, etag: 'Bwfixture', bindings: this.queueBindings });
+            }
+        }
+        if (url.hostname === 'cloudresourcemanager.googleapis.com') {
+            if (request.method === 'GET' && url.pathname === `/v3/projects/${PROJECT}`) {
+                return this.response(request, { name: IDLE_PROJECT_RESOURCE, projectId: PROJECT, parent: 'folders/123' });
+            }
+            if (request.method === 'GET' && url.pathname === '/v3/folders/123') {
+                return this.response(request, { name: 'folders/123', parent: 'organizations/456' });
+            }
+            if (request.method === 'GET' && url.pathname === '/v3/organizations/456') {
+                return this.response(request, { name: 'organizations/456' });
+            }
+            if (request.method === 'POST' && (url.pathname === `/v3/${IDLE_PROJECT_RESOURCE}:getIamPolicy`
+                || url.pathname === '/v3/folders/123:getIamPolicy'
+                || url.pathname === '/v3/organizations/456:getIamPolicy')) {
+                return this.response(request, { version: 3, etag: 'Bwfixture', bindings: [] });
+            }
+        }
+        if (url.hostname === 'iam.googleapis.com' && request.method === 'GET' && url.pathname.startsWith('/v1/')) {
+            const role = decodeURIComponent(url.pathname.slice('/v1/'.length));
+            return this.response(request, {
+                name: role,
+                includedPermissions: role === 'roles/cloudtasks.viewer' ? ['cloudtasks.queues.get'] : [],
+            });
+        }
+        throw new Error(`unexpected idle request ${request.method} ${request.url}`);
+    }
+
+    private response(request: ProtectedHttpRequest, value: unknown): ProtectedHttpResponse {
+        return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify(value), url: request.url };
+    }
+}
+
+function idleCollector(options: Readonly<{
+    google?: IdleGoogleTransport;
+    now?: () => number;
+    queryState?: IdleQueryState;
+    frozenGates?: (leaseCheck: () => Promise<void>) => Promise<string>;
+}> = {}) {
+    const google = options.google ?? new IdleGoogleTransport();
+    const queryState = options.queryState ?? { now: () => NOW + 1_000, nonzeroChanges: { value: false }, queries: [] };
+    const supabase = new SupabaseTransport({ rows: [], date: new Date(NOW + 10_000).toUTCString() });
+    const loggingTransport = new AuthenticatedProtectedTransport({ transport: google, tokenProvider: async () => 'fixture-token', timeoutMs: 1_000, additionalAllowedHosts: new Set(['cloudresourcemanager.googleapis.com']) });
+    const supabaseTransport = new AuthenticatedProtectedTransport({ transport: supabase, tokenProvider: async () => 'fixture-token', timeoutMs: 1_000, additionalAllowedHosts: new Set(['abcdefghijklmnopqrst.supabase.co']) });
+    const collector = new LiveEvidenceCollector({
+        cloudBuild: {} as never, loggingTransport, tasksTransport: loggingTransport,
+        supabaseTransport, supabaseApiKey: SUPABASE_API_KEY, sources: IDLE_LEDGER_SOURCES,
+        receiverTokenProvider: async () => 'fixture-token', now: options.now ?? queryState.now,
+        frozenGates: options.frozenGates ?? (async () => 'gates-closed'),
+        idleAdmissionQuery: idleAdmissionQuery(queryState),
+    });
+    return { collector, google, supabase, queryState };
+}
+
+describe('paused queue idle causal integration', () => {
+    it('keeps baseline conservation stable across approved target and IAM changes', async () => {
+        const fixture = idleCollector();
+        const leaseCheck = async () => undefined;
+        const baseline = await fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck });
+        fixture.google.queueTarget = 'https://worker.example.invalid/approved';
+        fixture.google.queueBindings = [{ role: 'roles/cloudtasks.viewer', members: [`serviceAccount:${IDLE_IDENTITIES[0]}`] }];
+        const afterApprovedChange = await fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck });
+        expect(canonicalDigest(afterApprovedChange)).toBe(canonicalDigest(baseline));
+    });
+
+    it('rejects a nonzero durable admission event in the requested window', async () => {
+        const clock = { value: NOW + 1 };
+        const queryState: IdleQueryState = { now: () => clock.value, nonzeroChanges: { value: false }, queries: [] };
+        const fixture = idleCollector({ now: () => clock.value, queryState });
+        const baseline = await fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck: async () => undefined });
+        queryState.nonzeroChanges.value = true;
+        clock.value = NOW + 2;
+        await expect(fixture.collector.zeroWorkObservation({ windowStartMs: NOW, windowEndMs: NOW + 2, nowMs: NOW + 2,
+            baselineDigest: canonicalDigest(baseline), leaseCheck: async () => undefined })).rejects.satisfy(expectEvidenceUnavailable);
+    });
+
+    it('fails closed when the durable lease is lost', async () => {
+        const fixture = idleCollector();
+        const leaseCheck = async () => { throw new EpochError('LOCK_LOST'); };
+        await expect(fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck })).rejects.toMatchObject({ code: 'LOCK_LOST' });
+    });
+
+    it('brackets each baseline ledger read with the durable lease fence', async () => {
+        const fixture = idleCollector();
+        let checks = 0;
+        const leaseCheck = async () => {
+            checks += 1;
+            if (checks === 2) throw new EpochError('LOCK_LOST');
+        };
+        await expect(fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck })).rejects.toMatchObject({ code: 'LOCK_LOST' });
+        expect(fixture.supabase.requests.filter(request => new URL(request.url).pathname.startsWith('/rest/v1/analysis_'))).toHaveLength(1);
+    });
+
+    it('fails closed when frozen gates change during the read', async () => {
+        let reads = 0;
+        const fixture = idleCollector({ frozenGates: async () => `gates-${++reads}` });
+        await expect(fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck: async () => undefined })).rejects.satisfy(expectEvidenceUnavailable);
+    });
+
+    it('rejects a baseline re-observation after purgeTime changes', async () => {
+        const clock = { value: NOW + 1 };
+        const queryState: IdleQueryState = { now: () => clock.value, nonzeroChanges: { value: false }, queries: [] };
+        const fixture = idleCollector({ now: () => clock.value, queryState });
+        const baseline = await fixture.collector.zeroWorkBaseline({ nowMs: NOW, leaseCheck: async () => undefined });
+        fixture.google.purgeTime = '2026-09-16T00:01:00.000Z';
+        clock.value = NOW + 2;
+        await expect(fixture.collector.zeroWorkObservation({ windowStartMs: NOW, windowEndMs: NOW + 2, nowMs: NOW + 2,
+            baselineDigest: canonicalDigest(baseline), leaseCheck: async () => undefined })).rejects.satisfy(expectEvidenceUnavailable);
+    });
+
+    it('uses one bounded aggregate SELECT and preserves millisecond source timing', async () => {
+        const calls: string[] = [];
+        let leases = 0;
+        const result = await readIdleAdmissionEvidence({
+            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: NOW + 1, now: () => NOW + 1,
+            leaseCheck: async () => { leases += 1; },
+            query: async sql => {
+                calls.push(sql);
+                return { rows: [{ provider_active: '0', preflight_active: '0', request_active: '0', job_active: '0',
+                    provider_changes: '0', preflight_changes: '0', request_changes: '0', job_changes: '0', observed_at_ms: String(NOW + 1) }] };
+            },
+        });
+        expect(result).toMatchObject({ count: 0, observedAtMs: NOW + 1 });
+        expect(leases).toBe(2);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]).toContain('analysis_provider_admission_leases');
+        expect(calls[0]).toContain('analysis_preflights');
+        expect(calls[0]).toContain('analysis_requests');
+        expect(calls[0]).toContain('analysis_pipeline_jobs');
+        expect(calls[0]).toContain('.001Z');
+        expect(calls[0]).toContain("public.analysis_requests where (created_at between");
+        expect(calls[0]).toContain("or completed_at between");
+        expect(calls[0]).not.toMatch(/analysis_requests where \(created_at between[^)]*or updated_at/);
+    });
+
+    it('rejects an admission interval wider than the bounded idle proof window', async () => {
+        await expect(readIdleAdmissionEvidence({
+            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: NOW + 15 * 60_000 + 1,
+            now: () => NOW + 15 * 60_000 + 1, leaseCheck: async () => undefined,
+            query: async () => { throw new Error('query must not run'); },
+        })).rejects.satisfy(expectEvidenceUnavailable);
+    });
+});

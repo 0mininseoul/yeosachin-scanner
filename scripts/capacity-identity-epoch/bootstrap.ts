@@ -2,6 +2,7 @@ import { createAuthenticatedGcsJournalStorage } from './gcs';
 import { EpochJournal, type JournalStorage, validateEpochHeader } from './journal';
 import { CloudRunAdapter } from './cloud-run';
 import { IamAdapter } from './iam';
+import { createSchedulerPauseProvenanceReader } from './scheduler-pause-evidence';
 import { WorkPlaneClient, type PauseProvenance } from './work-planes';
 import {
     createGoogleProtectedTransport,
@@ -12,6 +13,7 @@ import {
     type ReceiverTokenProvider,
 } from './platform';
 import { createVercelProtectedTransport, VercelAdapter } from './vercel';
+import { createFrozenGateReader, createOwnerReadinessTransport } from './vercel-readiness';
 import { EpochCoordinator, LiveEpochControlPlane, type LiveEpochControlPlaneOptions } from './coordinator';
 import { issueCoordinatorCapability, readProtectedDescriptor, rejectDuplicateJsonKeys } from './packet';
 import { canonicalDigest, epochFail, hasExactKeys, isObject, type CapacityEpochPacket, type EpochHeader, type Role, type ProtectedRuntimeInput } from './contracts';
@@ -186,7 +188,12 @@ function validateZeroWorkEvidenceBinding(packet: CapacityEpochPacket, sources: L
             || actual.selectorDigest !== target.selectorDigest || evidenceSelectorDigest(actual) !== target.selectorDigest) {
             fail('CAPABILITY_BINDING_MISMATCH');
         }
-        if (actual.kind === 'cloud-logging') {
+        if (actual.kind === 'paused-queue-conservation') {
+            const identities = [...new Set([packet.oldManifest, packet.desiredManifest]
+                .flatMap(manifest => Object.values(manifest.roleSlots).map(identity => identity.identity)))].sort();
+            if ([...actual.queueResources].sort().join('\n') !== expectedQueueResources.join('\n')
+                || [...actual.controlledIdentities].sort().join('\n') !== identities.join('\n')) fail('CAPABILITY_BINDING_MISMATCH');
+        } else if (actual.kind === 'cloud-logging') {
             if (name === 'taskAudit') {
                 if (actual.queueResources === undefined
                     || [...actual.queueResources].sort().join('\n') !== expectedQueueResources.join('\n')) {
@@ -426,10 +433,20 @@ export async function buildLiveBootstrap(
         ?? createVercelProtectedTransport({ tokenProvider: async () => descriptor.vercelToken });
     const cloudRun = new CloudRunAdapter({ transport: google });
     const iam = new IamAdapter({ transport: google });
-    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance: bootstrapOptions.pauseProvenance, now: bootstrapOptions.now });
+    const pauseProvenance = bootstrapOptions.pauseProvenance ?? createSchedulerPauseProvenanceReader({
+        transport: google, project: packet.providerScope.googleProjectId,
+        resources: Object.values(packet.protectedInputs.desired.schedulers).map(scheduler => scheduler.resource), now,
+    });
+    const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance, now, pauseProvenanceTimeoutMs: 60_000 });
     const vercel = new VercelAdapter({
         transport: vercelTransport,
-        publicTransport: bootstrapOptions.vercelPublicTransport,
+        publicTransport: bootstrapOptions.vercelPublicTransport ?? createOwnerReadinessTransport({
+            transport: vercelTransport,
+            projectId: descriptor.vercelProjectId,
+            teamId: descriptor.vercelTeamId,
+            deploymentIds: [descriptor.vercelExpectedOldDeploymentId, descriptor.vercelDeploymentId],
+            publicReadinessOrigin: new URL(descriptor.publicReadinessUrl).origin,
+        }),
         publicReadinessOrigin: new URL(descriptor.publicReadinessUrl).origin,
     });
     const cloudBuild = new CloudBuildAdapter({
@@ -449,11 +466,22 @@ export async function buildLiveBootstrap(
         supabaseTransport,
         supabaseApiKey,
         sources: descriptor.zeroWorkEvidence ?? undefined,
+        frozenGates: createFrozenGateReader(packet, vercel),
         receiverTransport: bootstrapOptions.receiverTransport,
-        receiverTokenProvider: bootstrapOptions.receiverTokenProvider ?? createGoogleReceiverTokenProvider(),
+        receiverTokenProvider: bootstrapOptions.receiverTokenProvider ?? createGoogleReceiverTokenProvider({
+            transport: google,
+            reviewedBindings: (['preflight', 'paid'] as const).map(role => ({
+                project: packet.protectedInputs.desired.runtime[role].project,
+                audience: packet.protectedInputs.desired.runtime[role].target.audience,
+                callerIdentity: packet.protectedInputs.desired.queues[role].target.callerIdentity.identity,
+            })),
+        }),
         now,
     });
-    const storage = bootstrapOptions.storage ?? createAuthenticatedGcsJournalStorage({ bucket: descriptor.bucket });
+    const storage = bootstrapOptions.storage ?? createAuthenticatedGcsJournalStorage({
+        bucket: descriptor.bucket,
+        tokenProvider: googleTokenProvider,
+    });
     const storagePreflight = typeof (storage as Partial<GcsJournalStorageLike>).preflight === 'function'
         ? (storage as GcsJournalStorageLike).preflight!()
         : Promise.resolve();
@@ -468,7 +496,7 @@ export async function buildLiveBootstrap(
     const header = bootstrapOptions.resolveRetainedHeader === false
         ? candidate
         : await resolveHeader(storage, candidate, now);
-    const journal = new EpochJournal(storage, { header, now });
+    const journal = new EpochJournal(storage, { header, now, leaseMs: 15 * 60_000 });
     const capability = issueCoordinatorCapability(packet, descriptor.ownerDigest);
     const options: LiveEpochControlPlaneOptions = {
         cloudRun,
@@ -507,7 +535,7 @@ export async function buildLiveBootstrap(
         publicReadinessUrl: descriptor.publicReadinessUrl,
         expectedOwnerDigest: descriptor.ownerDigest,
         now,
-        pauseProvenance: bootstrapOptions.pauseProvenance,
+        pauseProvenance,
     });
     return {
         coordinator,

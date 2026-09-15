@@ -1,11 +1,13 @@
 import type { LegacyPublicReadiness } from './legacy-analysis-public-readiness';
 import {
     LEGACY_PUBLIC_READINESS_ROUTES,
+    PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
     PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION,
+    PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
     PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION,
 } from './legacy-analysis-public-readiness';
 
-export const READINESS_KEYS = [
+const HISTORICAL_READINESS_KEYS = [
     'schemaVersion', 'ready', 'stage', 'freezeMode', 'publicFreezeEnabled',
     'sourceSha', 'legacyTargetResource',
     'preflightProducerConfigFingerprintVersion', 'preflightProducerConfigFingerprint',
@@ -13,6 +15,11 @@ export const READINESS_KEYS = [
     'paidProducerConfigFingerprint', 'paidProducerConfigReady', 'routes',
     'analysisV2AdmissionEnabled', 'earlybirdWebhookAutoAdmissionEnabled',
 ] as const;
+const ENQUEUER_READINESS_KEYS = [
+    'preflightEnqueuerIdentityFingerprintVersion', 'preflightEnqueuerIdentityFingerprint',
+    'paidEnqueuerIdentityFingerprintVersion', 'paidEnqueuerIdentityFingerprint',
+] as const;
+export const READINESS_KEYS = [...HISTORICAL_READINESS_KEYS, ...ENQUEUER_READINESS_KEYS] as const;
 
 const ROUTE_KEYS = ['gateState', 'expectedStatus', 'gateBeforeRuntime'] as const;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -27,6 +34,10 @@ export type PublicReadinessExpected = Readonly<{
     preflightProducerConfigFingerprint: string;
     paidProducerConfigFingerprintVersion: string;
     paidProducerConfigFingerprint: string;
+    preflightEnqueuerIdentityFingerprintVersion?: string;
+    preflightEnqueuerIdentityFingerprint?: string;
+    paidEnqueuerIdentityFingerprintVersion?: string;
+    paidEnqueuerIdentityFingerprint?: string;
     analysisV2AdmissionEnabled: boolean;
     earlybirdWebhookAutoAdmissionEnabled: boolean;
     ready?: boolean;
@@ -224,7 +235,11 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
     // JSON object order is not part of the consumer wire contract. The
     // runtime emitter keeps the documented order, while consumers accept any
     // permutation of the exact duplicate-free key set.
-    if (!hasExactKeys(value, READINESS_KEYS)) fail('READINESS_CONTRACT_INVALID');
+    const hasEnqueuerExtension = ENQUEUER_READINESS_KEYS.some(key => Object.hasOwn(value, key));
+    const baseKeys = hasEnqueuerExtension ? READINESS_KEYS : HISTORICAL_READINESS_KEYS;
+    const keys = Object.hasOwn(value, 'testEntitlementsEnabled') ? [...baseKeys, 'testEntitlementsEnabled'] : baseKeys;
+    if (!hasExactKeys(value, keys)) fail('READINESS_CONTRACT_INVALID');
+    if (Object.hasOwn(value, 'testEntitlementsEnabled') && !isBoolean(value.testEntitlementsEnabled)) fail('READINESS_CONTRACT_INVALID');
     if (value.schemaVersion !== 'analysis-public-freeze-readiness-v3'
         || !isBoolean(value.ready)
         || !isString(value.stage)
@@ -244,6 +259,15 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
             && (!isString(value.paidProducerConfigFingerprint)
                 || !FINGERPRINT_PATTERN.test(value.paidProducerConfigFingerprint)))
         || !isBoolean(value.paidProducerConfigReady)
+        || (hasEnqueuerExtension && (value.preflightEnqueuerIdentityFingerprintVersion
+            !== PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION
+            || (value.preflightEnqueuerIdentityFingerprint !== null
+                && (!isString(value.preflightEnqueuerIdentityFingerprint)
+                    || !FINGERPRINT_PATTERN.test(value.preflightEnqueuerIdentityFingerprint)))
+            || value.paidEnqueuerIdentityFingerprintVersion !== PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION
+            || (value.paidEnqueuerIdentityFingerprint !== null
+                && (!isString(value.paidEnqueuerIdentityFingerprint)
+                    || !FINGERPRINT_PATTERN.test(value.paidEnqueuerIdentityFingerprint)))))
         || !isObject(value.routes)
         || !isBoolean(value.analysisV2AdmissionEnabled)
         || !isBoolean(value.earlybirdWebhookAutoAdmissionEnabled)) {
@@ -271,6 +295,9 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
         fail('READINESS_CONTRACT_INVALID');
     }
     const frozen = (routes[LEGACY_PUBLIC_READINESS_ROUTES[0]] as Record<string, unknown>).gateState === 'frozen';
+    const enqueuerReady = !hasEnqueuerExtension
+        || (value.preflightEnqueuerIdentityFingerprint !== null
+            && value.paidEnqueuerIdentityFingerprint !== null);
     if ((routes[LEGACY_PUBLIC_READINESS_ROUTES[1]] as Record<string, unknown>).gateState !== (frozen ? 'frozen' : 'not_ready')
         || (routes[LEGACY_PUBLIC_READINESS_ROUTES[2]] as Record<string, unknown>).gateState !== (frozen ? 'frozen' : 'not_ready')
         || value.ready !== (value.stage !== 'unknown'
@@ -279,7 +306,8 @@ function assertPublicReadinessShape(value: Record<string, unknown>): LegacyPubli
             && frozen
             && value.sourceSha !== null
             && producerReady
-            && paidReady)) {
+            && paidReady
+            && enqueuerReady)) {
         fail('READINESS_CONTRACT_INVALID');
     }
     return value as unknown as LegacyPublicReadiness;
@@ -298,6 +326,18 @@ export function assertPublicReadiness(
         || validated.preflightProducerConfigFingerprint !== expected.preflightProducerConfigFingerprint
         || validated.paidProducerConfigFingerprintVersion !== expected.paidProducerConfigFingerprintVersion
         || validated.paidProducerConfigFingerprint !== expected.paidProducerConfigFingerprint
+        || (expected.preflightEnqueuerIdentityFingerprintVersion !== undefined
+            || expected.preflightEnqueuerIdentityFingerprint !== undefined)
+            && (validated.preflightEnqueuerIdentityFingerprintVersion
+                !== expected.preflightEnqueuerIdentityFingerprintVersion
+                || validated.preflightEnqueuerIdentityFingerprint
+                !== expected.preflightEnqueuerIdentityFingerprint)
+        || (expected.paidEnqueuerIdentityFingerprintVersion !== undefined
+            || expected.paidEnqueuerIdentityFingerprint !== undefined)
+            && (validated.paidEnqueuerIdentityFingerprintVersion
+                !== expected.paidEnqueuerIdentityFingerprintVersion
+                || validated.paidEnqueuerIdentityFingerprint
+                !== expected.paidEnqueuerIdentityFingerprint)
         || validated.analysisV2AdmissionEnabled !== expected.analysisV2AdmissionEnabled
         || validated.earlybirdWebhookAutoAdmissionEnabled !== expected.earlybirdWebhookAutoAdmissionEnabled
         || (expected.ready !== undefined && validated.ready !== expected.ready)) {

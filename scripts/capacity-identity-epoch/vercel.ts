@@ -302,7 +302,7 @@ export class VercelAdapter {
         return sha;
     }
 
-    private async getAlias(options: Readonly<{ alias: string; projectId: string; teamId: string; expectedDeploymentId?: string; allowMissing?: boolean }>): Promise<{ alias: string; projectId: string; teamId: string; deploymentId: string } | null> {
+    async getAlias(options: Readonly<{ alias: string; projectId: string; teamId: string; expectedDeploymentId?: string; allowMissing?: boolean }>): Promise<{ alias: string; projectId: string; teamId: string; deploymentId: string } | null> {
         if (!ALIAS.test(options.alias) || !PROJECT_ID.test(options.projectId) || !TEAM_ID.test(options.teamId)
             || (options.expectedDeploymentId !== undefined && !DEPLOYMENT_ID.test(options.expectedDeploymentId))) fail('ADAPTER_REQUEST_INVALID');
         const path = `/v4/aliases/${encodeURIComponent(options.alias)}`;

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { legacyAnalysisProducerGate } from './legacy-analysis-gate';
 import { isAnalysisV2AdmissionAvailable } from './v2-execution-gate';
 import { readEarlybirdAutoAdmissionConfig } from '../earlybird/auto-admission-config';
+import { analysisTestEntitlementsEnabled } from './test-entitlement';
 
 const SOURCE_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const SERVICE_ACCOUNT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
@@ -11,6 +12,8 @@ export const PUBLIC_READINESS_SCHEMA_VERSION = 'analysis-public-freeze-readiness
 
 export const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1' as const;
 export const PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'paid-producer-config-v1' as const;
+export const PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION = 'preflight-enqueuer-identity-v1' as const;
+export const PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION = 'paid-enqueuer-identity-v1' as const;
 
 export const LEGACY_PUBLIC_READINESS_ROUTES = Object.freeze([
     '/api/analysis/start',
@@ -32,6 +35,11 @@ export type LegacyPublicReadiness = {
     paidProducerConfigFingerprintVersion: typeof PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION;
     paidProducerConfigFingerprint: string | null;
     paidProducerConfigReady: boolean;
+    /** Absent on historical v3 deployments; current emitters publish the pair. */
+    preflightEnqueuerIdentityFingerprintVersion?: typeof PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION;
+    preflightEnqueuerIdentityFingerprint?: string | null;
+    paidEnqueuerIdentityFingerprintVersion?: typeof PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION;
+    paidEnqueuerIdentityFingerprint?: string | null;
     routes: Record<(typeof LEGACY_PUBLIC_READINESS_ROUTES)[number], {
         gateState: 'frozen' | 'not_ready';
         expectedStatus: 410 | 503;
@@ -39,6 +47,8 @@ export type LegacyPublicReadiness = {
     }>;
     analysisV2AdmissionEnabled: boolean;
     earlybirdWebhookAutoAdmissionEnabled: boolean;
+    /** Absent on historical v3 deployments; causal IDLE evidence requires false. */
+    testEntitlementsEnabled?: boolean;
 };
 
 type ProducerConfig = {
@@ -46,6 +56,34 @@ type ProducerConfig = {
     targetUrl: string;
     audience: string;
 };
+
+export type EnqueuerIdentityRole = 'preflight' | 'paid';
+
+/**
+ * Hash the exact normalized producer enqueuer identity without exposing the
+ * identity in public readiness.  The role-specific version is part of the
+ * hash domain so a digest cannot be reused across producer roles.
+ */
+export function enqueuerIdentityFingerprint(
+    role: EnqueuerIdentityRole,
+    identity: string,
+): string {
+    const version = role === 'preflight'
+        ? PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION
+        : PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION;
+    return createHash('sha256').update([
+        version,
+        identity.trim().toLowerCase(),
+    ].join('\n'), 'utf8').digest('hex');
+}
+
+function normalizeEnqueuerIdentity(
+    env: Record<string, string | undefined>,
+    key: string,
+): string | null {
+    const value = env[key]?.trim().toLowerCase() || '';
+    return SERVICE_ACCOUNT_PATTERN.test(value) ? value : null;
+}
 
 function normalizeProducerConfig(
     env: Record<string, string | undefined>,
@@ -168,6 +206,20 @@ export function getLegacyAnalysisPublicReadiness(
         ? producerConfigFingerprint(paidProducerConfig, PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION)
         : null;
     const paidProducerConfigReady = paidProducerConfigFingerprintValue !== null;
+    const preflightEnqueuerIdentity = normalizeEnqueuerIdentity(
+        env,
+        'PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
+    );
+    const paidEnqueuerIdentity = normalizeEnqueuerIdentity(
+        env,
+        'ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL',
+    );
+    const preflightEnqueuerIdentityFingerprintValue = preflightEnqueuerIdentity === null
+        ? null
+        : enqueuerIdentityFingerprint('preflight', preflightEnqueuerIdentity);
+    const paidEnqueuerIdentityFingerprintValue = paidEnqueuerIdentity === null
+        ? null
+        : enqueuerIdentityFingerprint('paid', paidEnqueuerIdentity);
     const frozen = legacyAnalysisProducerGate(env) === 'frozen';
     const routeStatus: 410 | 503 = frozen ? 410 : 503;
     const routes = Object.fromEntries(
@@ -182,6 +234,8 @@ export function getLegacyAnalysisPublicReadiness(
     // than being converted into a success-shaped boolean.
     const analysisV2AdmissionEnabled = isAnalysisV2AdmissionAvailable(env);
     const earlybirdWebhookAutoAdmissionEnabled = readEarlybirdAutoAdmissionConfig(env).enabled;
+    const enqueuerIdentityReady = preflightEnqueuerIdentityFingerprintValue !== null
+        && paidEnqueuerIdentityFingerprintValue !== null;
 
     return {
         schemaVersion: PUBLIC_READINESS_SCHEMA_VERSION,
@@ -191,7 +245,8 @@ export function getLegacyAnalysisPublicReadiness(
             && frozen
             && sourceSha !== null
             && preflightProducerConfigReady
-            && paidProducerConfigReady,
+            && paidProducerConfigReady
+            && enqueuerIdentityReady,
         stage,
         freezeMode,
         publicFreezeEnabled,
@@ -206,5 +261,10 @@ export function getLegacyAnalysisPublicReadiness(
         routes,
         analysisV2AdmissionEnabled,
         earlybirdWebhookAutoAdmissionEnabled,
+        preflightEnqueuerIdentityFingerprintVersion: PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+        preflightEnqueuerIdentityFingerprint: preflightEnqueuerIdentityFingerprintValue,
+        paidEnqueuerIdentityFingerprintVersion: PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+        paidEnqueuerIdentityFingerprint: paidEnqueuerIdentityFingerprintValue,
+        testEntitlementsEnabled: analysisTestEntitlementsEnabled(env),
     };
 }
