@@ -146,7 +146,7 @@ describe('Supabase 22 catalog collector with a disposable catalog', () => {
                 name,
                 relkind: 'r' as const,
                 rlsEnabled: true,
-                forceRls: name === 'analysis_jobs' ? false : true,
+                forceRls: name !== SUPABASE_OPERATIONAL_RETAINED_TABLES[0],
             })),
             acls: [],
             dependencies: [],
