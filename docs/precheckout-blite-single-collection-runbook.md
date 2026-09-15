@@ -24,11 +24,10 @@ ready-preflight card and plans remain the rollback surface until a reviewed coho
 
 ## Post-migration smoke
 
-Run the migration contract and PGlite schema smoke before a rollout change:
+Run the existing executable PGlite schema smoke before a rollout change:
 
 ```bash
-npm test -- lib/services/precheckout/blite-single-collection-migration-contract.test.ts \
-  lib/services/precheckout/blite-single-collection-pglite.test.ts
+npm test -- tests/commerce/precheckout/blite-single-collection-pglite.test.ts
 ```
 
 Then, using an approved isolated operator session and no browser credentials, verify migration

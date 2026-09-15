@@ -270,14 +270,14 @@ npm run test-entitlement:issue -- \
 
 ```bash
 npx vitest run \
-  lib/services/google/vercel-wif.test.ts \
-  lib/services/analysis/background-tasks.test.ts \
-  lib/services/analysis/v2-tasks.test.ts \
-  lib/services/analysis/preflight-tasks.test.ts \
-  lib/services/analysis/v2-maintenance-auth.test.ts \
-  lib/services/analysis/preflight-retention.test.ts \
-  lib/services/analysis/preflight-retention-route.test.ts \
-  lib/services/analysis/v2-recovery-route.test.ts
+  tests/shared/google/vercel-wif.test.ts \
+  tests/analysis/execution/background-tasks.test.ts \
+  tests/analysis/execution/v2-tasks.test.ts \
+  tests/analysis/preflight/preflight-tasks.test.ts \
+  tests/analysis/execution/v2-maintenance-auth.test.ts \
+  tests/analysis/preflight/preflight-retention.test.ts \
+  tests/analysis/preflight/preflight-retention-route.test.ts \
+  tests/analysis/execution/v2-recovery-route.test.ts
 bash scripts/test-analysis-v2-vercel-wif.sh
 bash scripts/test-analysis-v2-secret-scripts.sh
 bash scripts/test-analysis-v2-source-archive.sh

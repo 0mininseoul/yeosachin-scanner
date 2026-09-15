@@ -55,7 +55,7 @@ Email provider를 끈 뒤에도 advisor가 leaked-password protection 경고를 
 로컬 계약 테스트를 먼저 실행한다.
 
 ```bash
-npx vitest run lib/services/analysis/internal-data-api-boundary-migration-contract.test.ts
+npx vitest run tests/analysis/execution/internal-data-api-boundary-migration-contract.test.ts
 ```
 
 운영 반영 후에는 SQL Editor 또는 읽기 전용 점검 연결로 다음을 확인한다.
