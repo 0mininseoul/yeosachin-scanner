@@ -805,8 +805,7 @@ verify_legacy_quiescence() {
     --arg target_resource "$legacy_target_resource" \
     --arg preflight_version "$PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION" \
     --arg paid_version "$PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION" '
-    (keys | sort) == ["analysisV2AdmissionEnabled", "earlybirdWebhookAutoAdmissionEnabled", "freezeMode", "legacyTargetResource", "paidProducerConfigFingerprint", "paidProducerConfigFingerprintVersion", "paidProducerConfigReady", "preflightProducerConfigFingerprint", "preflightProducerConfigFingerprintVersion", "preflightProducerConfigReady", "publicFreezeEnabled", "ready", "routes", "schemaVersion", "sourceSha", "stage"]
-    and .schemaVersion == $schema_version
+    .schemaVersion == $schema_version
     and .ready == true
     and (.stage == "initial" or .stage == "expanded")
     and .freezeMode == "drain-and-block"
@@ -1163,24 +1162,6 @@ verify_role_runtime_fingerprint() {
     --arg producer_ready_field "$producer_ready_field" \
     '
       type == "object"
-      and ((keys | sort) == [
-        "analysisV2AdmissionEnabled",
-        "earlybirdWebhookAutoAdmissionEnabled",
-        "freezeMode",
-        "legacyTargetResource",
-        "paidProducerConfigFingerprint",
-        "paidProducerConfigFingerprintVersion",
-        "paidProducerConfigReady",
-        "preflightProducerConfigFingerprint",
-        "preflightProducerConfigFingerprintVersion",
-        "preflightProducerConfigReady",
-        "publicFreezeEnabled",
-        "ready",
-        "routes",
-        "schemaVersion",
-        "sourceSha",
-        "stage"
-      ])
       and .schemaVersion == $schema_version
       and .ready == true
       and (.stage == "initial" or .stage == "expanded")

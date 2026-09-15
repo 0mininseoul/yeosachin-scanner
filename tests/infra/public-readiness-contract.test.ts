@@ -4,6 +4,10 @@ import {
     assertPublicReadiness,
     parsePublicReadinessJson,
 } from '../../lib/services/analysis/public-readiness-contract';
+import {
+    PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+} from '../../lib/services/analysis/legacy-analysis-public-readiness';
 
 const sourceSha = '0123456789abcdef0123456789abcdef01234567';
 const valid = {
@@ -27,6 +31,10 @@ const valid = {
     },
     analysisV2AdmissionEnabled: false,
     earlybirdWebhookAutoAdmissionEnabled: false,
+    preflightEnqueuerIdentityFingerprintVersion: PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    preflightEnqueuerIdentityFingerprint: 'c'.repeat(64),
+    paidEnqueuerIdentityFingerprintVersion: PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    paidEnqueuerIdentityFingerprint: 'd'.repeat(64),
 } as const;
 
 const expected = {
@@ -36,6 +44,10 @@ const expected = {
     preflightProducerConfigFingerprint: 'a'.repeat(64),
     paidProducerConfigFingerprintVersion: 'paid-producer-config-v1',
     paidProducerConfigFingerprint: 'b'.repeat(64),
+    preflightEnqueuerIdentityFingerprintVersion: PREFLIGHT_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    preflightEnqueuerIdentityFingerprint: 'c'.repeat(64),
+    paidEnqueuerIdentityFingerprintVersion: PAID_ENQUEUER_IDENTITY_FINGERPRINT_VERSION,
+    paidEnqueuerIdentityFingerprint: 'd'.repeat(64),
     analysisV2AdmissionEnabled: false,
     earlybirdWebhookAutoAdmissionEnabled: false,
 };
@@ -58,6 +70,27 @@ describe('strict public readiness v3 contract', () => {
         expect(Object.keys(dto)).toEqual(READINESS_KEYS);
         expect(assertPublicReadiness(dto, expected)).toBe(dto);
         expect(assertPublicReadiness(reverseObject(valid), expected).ready).toBe(true);
+    });
+
+    it('accepts historical v3 readiness without the optional enqueuer fingerprints', () => {
+        const historical = Object.fromEntries(Object.entries(valid).filter(([key]) => !key.includes('Enqueuer')));
+        const dto = parsePublicReadinessJson(raw(historical));
+        expect(dto.preflightEnqueuerIdentityFingerprintVersion).toBeUndefined();
+        expect(dto.preflightEnqueuerIdentityFingerprint).toBeUndefined();
+        expect(dto.paidEnqueuerIdentityFingerprintVersion).toBeUndefined();
+        expect(dto.paidEnqueuerIdentityFingerprint).toBeUndefined();
+    });
+
+    it('rejects a partial or malformed enqueuer fingerprint extension', () => {
+        const historical = Object.fromEntries(Object.entries(valid).filter(([key]) => !key.includes('Enqueuer')));
+        expect(() => parsePublicReadinessJson(raw({
+            ...historical,
+            preflightEnqueuerIdentityFingerprint: 'c'.repeat(64),
+        }))).toThrow('READINESS_CONTRACT_INVALID');
+        expect(() => parsePublicReadinessJson(raw({
+            ...valid,
+            paidEnqueuerIdentityFingerprint: 'not-a-digest',
+        }))).toThrow('READINESS_CONTRACT_INVALID');
     });
 
     it.each([

@@ -8,6 +8,8 @@ import {
 } from './platform';
 import { canonicalDigest, CLOUD_LOG_ID_PATTERN, epochFail, isObject, type ProtectedRuntimeInput, type Role } from './contracts';
 import type { CloudBuildAdapter } from './cloud-build';
+import { readPausedQueueEvidence } from './paused-queue-evidence';
+import { readIdleAdmissionEvidence } from './idle-admission-evidence';
 
 const LOGGING_HOSTS = new Set(['logging.googleapis.com']);
 const TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
@@ -62,11 +64,21 @@ export type CloudLoggingEvidenceSource = Readonly<{
 export type LiveZeroWorkSources = Readonly<{
     providerLedger: SupabaseLedgerSource | CloudLoggingEvidenceSource;
     billingLedger: SupabaseLedgerSource | CloudLoggingEvidenceSource;
-    taskAudit: CloudLoggingEvidenceSource;
+    taskAudit: CloudLoggingEvidenceSource | PausedQueueEvidenceSource;
     receiverLog: SupabaseLedgerSource | CloudLoggingEvidenceSource;
 }>;
 
-type EvidenceSource = SupabaseLedgerSource | CloudLoggingEvidenceSource;
+export type PausedQueueEvidenceSource = Readonly<{
+    kind: 'paused-queue-conservation';
+    source: 'cloud-tasks:paused-queue-conservation-v1';
+    project: string;
+    queueResources: readonly string[];
+    controlledIdentities: readonly string[];
+    lookbackMs: number;
+    selectorDigest: string;
+}>;
+
+type EvidenceSource = SupabaseLedgerSource | CloudLoggingEvidenceSource | PausedQueueEvidenceSource;
 
 function defaultSinkCoversSource(source: CloudLoggingEvidenceSource, filter: unknown): boolean {
     return source.sinkName === '_Default'
@@ -88,7 +100,17 @@ export function validateLiveZeroWorkSources(value: unknown, expectedProject: str
         if (!isObject(source) || typeof source.source !== 'string' || !bounded(source.source, 2048)) return false;
         const lookbackMs = source.lookbackMs;
         if (typeof lookbackMs !== 'number' || !Number.isSafeInteger(lookbackMs) || lookbackMs <= 0) return false;
-        if (source.kind === 'supabase') {
+        if (source.kind === 'paused-queue-conservation') {
+            if (name !== 'taskAudit' || sortedKeys(source) !== 'controlledIdentities,kind,lookbackMs,project,queueResources,selectorDigest,source'
+                || source.source !== 'cloud-tasks:paused-queue-conservation-v1' || source.project !== expectedProject
+                || !Array.isArray(source.queueResources) || source.queueResources.length !== 2
+                || new Set(source.queueResources).size !== 2 || source.queueResources.some(resource => !validQueueResource(resource, expectedProject))
+                || !Array.isArray(source.controlledIdentities) || source.controlledIdentities.length < 8 || source.controlledIdentities.length > 16
+                || new Set(source.controlledIdentities).size !== source.controlledIdentities.length
+                || source.controlledIdentities.some(identity => typeof identity !== 'string'
+                    || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/.test(identity)
+                    || identity.split('@')[1] !== `${expectedProject}.iam.gserviceaccount.com`)) return false;
+        } else if (source.kind === 'supabase') {
             if (name === 'taskAudit') return false;
             const expected = 'columns,eventTimeColumn,kind,lookbackMs,origin,selectorDigest,source,table';
             if (sortedKeys(source) !== expected) return false;
@@ -153,7 +175,7 @@ export function validateLiveZeroWorkSources(value: unknown, expectedProject: str
 }
 
 /** Digest only the concrete reviewed selector, excluding packet-bound source and window fields. */
-export function evidenceSelectorDigest(source: SupabaseLedgerSource | CloudLoggingEvidenceSource): string {
+export function evidenceSelectorDigest(source: EvidenceSource): string {
     const selectors: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(source)) {
         if (key !== 'source' && key !== 'lookbackMs' && key !== 'selectorDigest') selectors[key] = value;
@@ -167,6 +189,7 @@ export function evidenceSelectorDigest(source: SupabaseLedgerSource | CloudLoggi
     if ('receiverRoutes' in selectors && Array.isArray(selectors.receiverRoutes)) {
         selectors.receiverRoutes = [...selectors.receiverRoutes].sort();
     }
+    if ('controlledIdentities' in selectors && Array.isArray(selectors.controlledIdentities)) selectors.controlledIdentities = [...selectors.controlledIdentities].sort();
     return canonicalDigest(selectors);
 }
 
@@ -264,6 +287,9 @@ export class LiveEvidenceCollector {
     private readonly receiverTransport: ProtectedTransport;
     private readonly receiverTokenProvider: ReceiverTokenProvider;
     private readonly now: () => number;
+    private readonly frozenGates?: (leaseCheck: () => Promise<void>) => Promise<string>;
+    /** Provider-free test seam for the helper's fixed aggregate SELECT. */
+    private readonly idleAdmissionQuery?: (sql: string) => Promise<unknown>;
 
     constructor(options: Readonly<{
         cloudBuild: CloudBuildAdapter;
@@ -276,6 +302,9 @@ export class LiveEvidenceCollector {
         receiverTransport?: ProtectedTransport;
         receiverTokenProvider: ReceiverTokenProvider;
         now?: () => number;
+        frozenGates?: (leaseCheck: () => Promise<void>) => Promise<string>;
+        /** Tests may inject only the fixed count-query result; production uses the linked owner CLI. */
+        idleAdmissionQuery?: (sql: string) => Promise<unknown>;
     }>) {
         this.cloudBuild = options.cloudBuild;
         this.loggingTransport = options.loggingTransport;
@@ -286,6 +315,8 @@ export class LiveEvidenceCollector {
         this.receiverTransport = options.receiverTransport ?? new FetchProtectedTransport(65_536);
         this.receiverTokenProvider = options.receiverTokenProvider;
         this.now = options.now ?? (() => Date.now());
+        this.frozenGates = options.frozenGates;
+        this.idleAdmissionQuery = options.idleAdmissionQuery;
     }
 
     sourceObservation(input: Readonly<{ role: Role; phase: 'old' | 'desired'; revision: string; runtime: ProtectedRuntimeInput }>): Promise<unknown> {
@@ -296,12 +327,16 @@ export class LiveEvidenceCollector {
         return this.cloudBuild.buildObservation(input);
     }
 
-    async zeroWorkBaseline(input: Readonly<{ nowMs: number }>): Promise<unknown> {
+    async zeroWorkBaseline(input: Readonly<{ nowMs: number; leaseCheck?: () => Promise<void> }>): Promise<unknown> {
         const sources = this.requireSources();
         if (!Number.isSafeInteger(input.nowMs) || input.nowMs < 0) fail('EVIDENCE_UNAVAILABLE');
         const sourceDigests: Record<string, string> = {};
         for (const [name, source] of Object.entries(sources)) {
-            const snapshot = await this.readSnapshot(source, Math.max(0, input.nowMs - source.lookbackMs), input.nowMs);
+            await input.leaseCheck?.();
+            const snapshot = source.kind === 'paused-queue-conservation'
+                ? await this.readIdleSnapshot(source, input.nowMs, input.leaseCheck)
+                : await this.readSnapshot(source, Math.max(0, input.nowMs - source.lookbackMs), input.nowMs);
+            await input.leaseCheck?.();
             sourceDigests[name] = canonicalDigest(snapshot);
         }
         // This value is intentionally stateless. The coordinator persists its
@@ -309,7 +344,7 @@ export class LiveEvidenceCollector {
         return { capturedAtMs: input.nowMs, sourceDigests };
     }
 
-    async zeroWorkObservation(input: Readonly<{ windowStartMs: number; windowEndMs: number; nowMs: number; baselineDigest?: string }>): Promise<unknown> {
+    async zeroWorkObservation(input: Readonly<{ windowStartMs: number; windowEndMs: number; nowMs: number; baselineDigest?: string; leaseCheck?: () => Promise<void> }>): Promise<unknown> {
         const sources = this.requireSources();
         if (!Number.isSafeInteger(input.windowStartMs) || !Number.isSafeInteger(input.windowEndMs)
             || !Number.isSafeInteger(input.nowMs) || input.windowStartMs < 0 || input.windowEndMs <= input.windowStartMs
@@ -317,15 +352,48 @@ export class LiveEvidenceCollector {
         // Bind to the durable journal checkpoint, not process memory. This
         // re-observation works after a CLI crash/restart and fails closed if
         // the provider changed the baseline window.
-        const baseline = await this.zeroWorkBaseline({ nowMs: input.windowStartMs });
+        if (sources.taskAudit.kind === 'paused-queue-conservation' && !input.leaseCheck) fail('EVIDENCE_UNAVAILABLE');
+        const baseline = await this.zeroWorkBaseline({ nowMs: input.windowStartMs, leaseCheck: input.leaseCheck });
         if (canonicalDigest(baseline) !== input.baselineDigest) fail('EVIDENCE_UNAVAILABLE');
         const proof: Record<string, unknown> = { windowStartMs: input.windowStartMs, windowEndMs: input.windowEndMs };
         for (const [name, source] of Object.entries(sources)) {
+            await input.leaseCheck?.();
+            if (source.kind === 'paused-queue-conservation') {
+                const idle = await this.readIdle(source, input.windowEndMs, input.leaseCheck!, input.windowStartMs);
+                proof[name] = sourceProof(sourceKey(source), input.windowStartMs, input.windowEndMs, idle.observedAtMs, 0, idle.digest);
+                continue;
+            }
             const events = await this.readWindow(source, input.windowStartMs, input.windowEndMs);
             if (events.coveredEndMs < input.windowEndMs) fail('EVIDENCE_UNAVAILABLE');
             proof[name] = sourceProof(sourceKey(source), input.windowStartMs, input.windowEndMs, events.observedAtMs, events.count, events.watermarkDigest);
+            await input.leaseCheck?.();
         }
         return proof;
+    }
+
+    private async readIdle(source: PausedQueueEvidenceSource, end: number, leaseCheck: () => Promise<void>, start?: number) {
+        const provider = this.requireSources().providerLedger;
+        if (!this.frozenGates || provider.kind !== 'supabase' || !this.supabaseTransport || !this.supabaseApiKey) fail('EVIDENCE_UNAVAILABLE');
+        const gates = await this.frozenGates(leaseCheck);
+        const queues = await readPausedQueueEvidence({ project: source.project, queueResources: source.queueResources,
+            controlledIdentities: source.controlledIdentities, transport: this.tasksTransport, leaseCheck, now: this.now,
+            intervalStartMs: start ?? end });
+        const admissions = await readIdleAdmissionEvidence({ origin: provider.origin,
+            windowStartMs: start, windowEndMs: end, now: this.now, leaseCheck, query: this.idleAdmissionQuery });
+        const finalGates = await this.frozenGates(leaseCheck);
+        if (gates !== finalGates) fail('EVIDENCE_UNAVAILABLE');
+        await leaseCheck();
+        return { digest: canonicalDigest({ queues, admissions, gates }), observedAtMs: this.now(),
+            conservation: queues.queues.map(queue => ({ resourceDigest: queue.resourceDigest, state: queue.state,
+                taskCount: queue.taskCount, purgeTime: queue.purgeTime ?? null })) };
+    }
+
+    private async readIdleSnapshot(source: PausedQueueEvidenceSource, end: number, leaseCheck?: () => Promise<void>): Promise<unknown> {
+        // Descriptor inspection checks source availability without authorizing
+        // a rollout. The coordinator supplies its live fence for the durable
+        // baseline and every verification/re-observation.
+        const idle = await this.readIdle(source, end, leaseCheck ?? (async () => {}));
+        return { selectorDigest: source.selectorDigest, emptyQueues: true, closedAdmissions: true, conservation: idle.conservation };
     }
 
     async probe(input: Readonly<{ role: Role; runtime: ProtectedRuntimeInput; revision: string; authority: ReceiverProbeAuthority }>): Promise<Readonly<{ status: number; code: string }>> {
@@ -338,7 +406,7 @@ export class LiveEvidenceCollector {
         return this.sources;
     }
 
-    private async readSnapshot(source: EvidenceSource, windowStartMs: number, windowEndMs: number): Promise<unknown> {
+    private async readSnapshot(source: SupabaseLedgerSource | CloudLoggingEvidenceSource, windowStartMs: number, windowEndMs: number): Promise<unknown> {
         if (source.kind === 'supabase') {
             const result = await this.readSupabaseRows(source, windowStartMs, windowEndMs);
             // PostgREST's authenticated Date header is the only source-time
@@ -353,7 +421,7 @@ export class LiveEvidenceCollector {
         return { events };
     }
 
-    private async readWindow(source: EvidenceSource, windowStartMs: number, windowEndMs: number): Promise<{ count: number; coveredEndMs: number; observedAtMs: number; watermarkDigest: string }> {
+    private async readWindow(source: SupabaseLedgerSource | CloudLoggingEvidenceSource, windowStartMs: number, windowEndMs: number): Promise<{ count: number; coveredEndMs: number; observedAtMs: number; watermarkDigest: string }> {
         if (source.kind === 'supabase') {
             const result = await this.readSupabaseRows(source, windowStartMs, windowEndMs);
             return {

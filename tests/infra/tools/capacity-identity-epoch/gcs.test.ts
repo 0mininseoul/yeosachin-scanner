@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EpochError, canonicalDigest, type EpochHeader, type EpochTransition } from '../../../../scripts/capacity-identity-epoch/contracts';
-import { GcsJournalStorage, type GcsHttpRequest, type GcsHttpResponse } from '../../../../scripts/capacity-identity-epoch/gcs';
+import { createAuthenticatedGcsJournalStorage, GcsJournalStorage, type GcsHttpRequest, type GcsHttpResponse } from '../../../../scripts/capacity-identity-epoch/gcs';
 import { EpochJournal } from '../../../../scripts/capacity-identity-epoch/journal';
 
 class FakeTransport {
@@ -70,6 +70,23 @@ const response = (status: number, body: string, headers: Record<string, string> 
 });
 
 describe('protected GCS journal storage', () => {
+    it('uses an injected owner token provider in the authenticated factory', async () => {
+        let tokenCalls = 0;
+        const transport = new FakeTransport([]);
+        const storage = createAuthenticatedGcsJournalStorage({
+            bucket: 'fixture-bucket', transport,
+            tokenProvider: async () => {
+                tokenCalls += 1;
+                return 'fixture-owner-token';
+            },
+        });
+
+        await storage.preflight();
+
+        expect(tokenCalls).toBe(1);
+        expect(transport.requests).toHaveLength(0);
+    });
+
     it('uses exact generation preconditions and preserves decimal generations as strings', async () => {
         const transport = new FakeTransport([
             response(200, '{"name":"fixture.json","generation":"900719925474099312345"}', { 'x-goog-generation': '900719925474099312345' }),

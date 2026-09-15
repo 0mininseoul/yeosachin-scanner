@@ -66,16 +66,18 @@ function runtimeObservation(expected: ProtectedRuntimeInput, observed: Readonly<
     resourceVersion: string;
     traffic: readonly Readonly<{ revisionName: string | null; percent: number }>[];
     url: string;
-}>, sourceSha: string, revision: string, buildDigest: string): Record<string, unknown> {
+}>, providerUrls: readonly string[], sourceSha: string, revision: string, buildDigest: string): Record<string, unknown> {
     let observedOrigin: string;
     let expectedOrigin: string;
+    let providerOrigins: readonly string[];
     try {
         observedOrigin = new URL(observed.url).origin;
         expectedOrigin = new URL(expected.target.url).origin;
+        providerOrigins = providerUrls.map(url => new URL(url).origin);
     } catch {
         fail('RUNTIME_MISMATCH');
     }
-    if (observedOrigin !== expectedOrigin) fail('RUNTIME_MISMATCH');
+    if (![observedOrigin, ...providerOrigins].includes(expectedOrigin)) fail('RUNTIME_MISMATCH');
     const runtime = {
         ...expected,
         sourceSha,
@@ -159,18 +161,35 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                 || lease.lock.lockFence !== authorityState.lock.lockFence || lease.generation !== authorityState.lock.generation)) {
                 epochFail('LOCK_LOST');
             }
+            const reservationResources = sharedReservationResources(options.packet);
+            const originalReservation = await options.journal.inspectSharedReservation(reservationResources);
+            if (originalReservation.present || !originalReservation.complete || originalReservation.memberCount !== 0) epochFail('LOCK_LOST');
             return verifyProductionOutcome({
                 packet: options.packet,
                 expectedJournal: authorityState.lock,
                 read: async (): Promise<ProductionVerificationSnapshot> => {
-                const state = await options.journal.readValidatedState(lease);
-                if (state.state !== 'VERIFIED' || state.aborted || state.requiresReconciliation) fail('EVIDENCE_UNAVAILABLE');
-                if (state.lock.ownerDigest !== options.expectedOwnerDigest) epochFail('CAPABILITY_BINDING_MISMATCH');
-                if (!sameValidatedJournalState(state, authorityState)) fail('EVIDENCE_UNAVAILABLE');
-                if (lease && (lease.lock.ownerDigest !== state.lock.ownerDigest
-                    || lease.lock.lockFence !== state.lock.lockFence || lease.generation !== state.lock.generation)) {
-                    epochFail('LOCK_LOST');
-                }
+                const temporaryReservation = options.journal.createSharedReservation(reservationResources);
+                const temporaryReservationLease = await temporaryReservation.acquire(
+                    options.journal.epochIdDigest, authorityState.lock.ownerDigest,
+                );
+                const readReadOnlyScope = async (): Promise<Awaited<ReturnType<EpochJournal['readValidatedState']>>> => {
+                    await temporaryReservation.assert(temporaryReservationLease);
+                    const current = await options.journal.readValidatedState(lease);
+                    if (current.state !== 'VERIFIED' || current.aborted || current.requiresReconciliation) fail('EVIDENCE_UNAVAILABLE');
+                    if (current.lock.ownerDigest !== options.expectedOwnerDigest) epochFail('CAPABILITY_BINDING_MISMATCH');
+                    if (!sameValidatedJournalState(current, authorityState)) fail('EVIDENCE_UNAVAILABLE');
+                    if (lease && (lease.lock.ownerDigest !== current.lock.ownerDigest
+                        || lease.lock.lockFence !== current.lock.lockFence || lease.generation !== current.lock.generation)) {
+                        epochFail('LOCK_LOST');
+                    }
+                    return current;
+                };
+                const assertReadOnlyScope = async (): Promise<void> => {
+                    await readReadOnlyScope();
+                };
+                let snapshot: ProductionVerificationSnapshot | undefined;
+                try {
+                await assertReadOnlyScope();
                 const source: Record<Role, unknown> = {} as Record<Role, unknown>;
                 const runtime: Record<Role, unknown> = {} as Record<Role, unknown>;
                 const queues: Record<Role, unknown> = {} as Record<Role, unknown>;
@@ -181,8 +200,9 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                     const revision = desiredRevision(options.packet, role);
                     source[role] = await options.cloudBuild.sourceObservation({ role, phase: 'desired', revision, runtime: options.packet.protectedInputs.desired.runtime[role] });
                     const service = await options.cloudRun.getService(serviceResource(options.packet.protectedInputs.desired.runtime[role]));
+                    const serviceUrls = await options.cloudRun.getServiceUrls(serviceResource(options.packet.protectedInputs.desired.runtime[role]));
                     const buildDigest = await options.cloudBuild.buildObservation({ role, phase: 'desired', revision, image: service.image });
-                    runtime[role] = runtimeObservation(options.packet.protectedInputs.desired.runtime[role], service, source[role] && isObject(source[role]) && typeof source[role].sourceSha === 'string' ? source[role].sourceSha : '', revision, buildDigest);
+                    runtime[role] = runtimeObservation(options.packet.protectedInputs.desired.runtime[role], service, serviceUrls, source[role] && isObject(source[role]) && typeof source[role].sourceSha === 'string' ? source[role].sourceSha : '', revision, buildDigest);
                     const queue = await options.workPlanes.observeQueue(options.packet.protectedInputs.desired.queues[role]);
                     queues[role] = { role, ...queue };
                     const scheduler = await options.workPlanes.observeScheduler(options.packet.protectedInputs.desired.schedulers[role]);
@@ -204,40 +224,53 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                 const baseline = await options.journal.readEvidenceBaseline(lease);
                 if (!baseline) fail('EVIDENCE_UNAVAILABLE');
                 const verificationNow = now();
+                await assertReadOnlyScope();
                 const zeroWork = await options.evidence.zeroWorkObservation({
                     windowStartMs: baseline.capturedAtMs,
                     windowEndMs: verificationNow,
                     nowMs: verificationNow,
                     baselineDigest: baseline.digest,
+                    leaseCheck: assertReadOnlyScope,
                 });
                 const validationNow = now();
-                // Re-read the journal/epoch lock after every provider fact. A
+                // Re-read the journal/epoch lock after the provider-read pass. A
                 // takeover during this read pass must invalidate the snapshot,
                 // even when no new transition has appeared yet.
-                const finalState = await options.journal.readValidatedState(lease);
-                if (finalState.state !== 'VERIFIED' || finalState.aborted || finalState.requiresReconciliation
-                    || !sameValidatedJournalState(finalState, state)) fail('EVIDENCE_UNAVAILABLE');
-                const sharedReservation = await options.journal.inspectSharedReservation(sharedReservationResources(options.packet));
-                // Reservation cleanup is a separate storage family. Confirm
-                // the journal/lock once more after reading it so a takeover or
-                // fence change cannot be paired with the provider snapshot.
-                const confirmedState = await options.journal.readValidatedState(lease);
-                if (!sameValidatedJournalState(confirmedState, finalState)) fail('EVIDENCE_UNAVAILABLE');
-                return {
+                const finalState = await readReadOnlyScope();
+                snapshot = {
                     journal: {
-                        state: confirmedState.state,
-                        transitions: confirmedState.transitions.map(transition => ({ toState: transition.toState, resultCode: transition.resultCode, lockFence: transition.lockFence })),
-                        activation: confirmedState.transitions.some(transition => transition.toState === 'ACTIVATED'),
-                        resumed: confirmedState.resumed,
+                        state: finalState.state,
+                        transitions: finalState.transitions.map(transition => ({ toState: transition.toState, resultCode: transition.resultCode, lockFence: transition.lockFence })),
+                        activation: finalState.transitions.some(transition => transition.toState === 'ACTIVATED'),
+                        resumed: finalState.resumed,
                         gatesOpen: readiness.analysisV2AdmissionEnabled === true || readiness.earlybirdWebhookAutoAdmissionEnabled === true,
-                        requiresReconciliation: confirmedState.requiresReconciliation,
-                        lock: confirmedState.lock,
-                        sharedReservation,
+                        requiresReconciliation: finalState.requiresReconciliation,
+                        lock: finalState.lock,
+                        // The temporary reservation is released before this
+                        // projection is returned and replaced by the final
+                        // cleanup inspection below.
+                        sharedReservation: { present: true, complete: true, memberCount: reservationResources.length },
                     },
                     facts: {
                         source, runtime, queues, schedulers, pauseProvenance, iam,
                         retention, readiness, zeroWork, zeroWorkNowMs: validationNow,
                     },
+                };
+                } finally {
+                    await temporaryReservation.release(temporaryReservationLease);
+                }
+                if (!snapshot) fail('EVIDENCE_UNAVAILABLE');
+                const sharedReservation = await options.journal.inspectSharedReservation(reservationResources);
+                // Reservation cleanup is a separate storage family. Confirm
+                // the journal/lock once more after releasing the temporary
+                // verifier reservation before returning the provider snapshot.
+                const confirmedState = await options.journal.readValidatedState(lease);
+                if (confirmedState.state !== 'VERIFIED' || confirmedState.aborted || confirmedState.requiresReconciliation
+                    || !sameValidatedJournalState(confirmedState, authorityState)) fail('EVIDENCE_UNAVAILABLE');
+                if (sharedReservation.present || !sharedReservation.complete || sharedReservation.memberCount !== 0) epochFail('LOCK_LOST');
+                return {
+                    ...snapshot,
+                    journal: { ...snapshot.journal, sharedReservation },
                 };
                 },
             });

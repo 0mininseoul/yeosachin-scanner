@@ -536,9 +536,9 @@ export type LiveEpochControlPlaneOptions = Readonly<{
     /** Build/source provenance binds the deployed image to the reviewed build input. */
     buildObservation?: (input: Readonly<{ role: Role; phase: 'old' | 'desired'; revision: string; image: string }>) => Promise<unknown>;
     /** Ledger/log evidence is fetched only at VERIFIED, never supplied as a success bit. */
-    zeroWorkObservation?: (input: Readonly<{ windowStartMs: number; windowEndMs: number; nowMs: number; baselineDigest?: string }>) => Promise<unknown>;
+    zeroWorkObservation?: (input: Readonly<{ windowStartMs: number; windowEndMs: number; nowMs: number; baselineDigest?: string; leaseCheck?: () => Promise<void> }>) => Promise<unknown>;
     /** Captured before the first authorized mutation; only its digest survives. */
-    zeroWorkBaseline?: (input: Readonly<{ nowMs: number }>) => Promise<unknown>;
+    zeroWorkBaseline?: (input: Readonly<{ nowMs: number; leaseCheck?: () => Promise<void> }>) => Promise<unknown>;
     /** Provider-free probes are executed by the reviewed probe harness. */
     probe?: (input: Readonly<{ role: Role; runtime: ProtectedRuntimeInput; revision: string; authority: ReceiverProbeAuthority }>) => Promise<unknown>;
     /** Activation compensation closes both producer gates before pausing resources. */
@@ -581,7 +581,10 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             operation,
             resource: resources,
             journal: this.options.journal,
-            renew: this.options.renewLease !== undefined,
+            // Evidence readers check ownership per request without racing or
+            // repeatedly rewriting the lease. Their bounded read pass must
+            // finish within the existing lease; mutations still renew it.
+            renew: this.options.renewLease !== undefined && operation !== 'evidence.observe',
             onRenew: async updated => { await this.leaseUpdated?.(updated); },
         });
     }
@@ -609,7 +612,8 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             // not a fresh capture: a tampered timestamp/digest cannot become
             // the new zero-work window after a crash before PREPARED append.
             if (!this.options.zeroWorkBaseline) fail('EVIDENCE_UNAVAILABLE');
-            const observedBaseline = await this.options.zeroWorkBaseline({ nowMs: retained.capturedAtMs });
+            const observedBaseline = await this.options.zeroWorkBaseline({ nowMs: retained.capturedAtMs,
+                leaseCheck: this.leaseCheckFor(input.packet, input.lease, 'evidence.observe', Object.values(input.packet.protectedInputs.old.queues).map(queue => queue.resource)) });
             if (!isObject(observedBaseline) || observedBaseline.capturedAtMs !== retained.capturedAtMs
                 || canonicalDigest(observedBaseline) !== retained.digest) fail('OBSERVATION_RACE');
             if (input.state !== null) {
@@ -630,7 +634,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         // A cold admission has no journal lease and cannot own a durable
         // baseline.  Capture it only from the leased PREPARED operation so
         // the observation window is entirely inside the common reservation.
-        if (input.lease) await this.captureZeroWorkBaseline();
+        if (input.lease) await this.captureZeroWorkBaseline(this.leaseCheckFor(packet, input.lease, 'evidence.observe', Object.values(packet.protectedInputs.old.queues).map(queue => queue.resource)));
         const readiness = await this.readReadiness(packet, 'old');
         const services: unknown[] = [];
         const queues: unknown[] = [];
@@ -647,7 +651,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const service = await this.options.cloudRun.getService(this.serviceResource(runtime));
             const buildDigest = await this.readBuildDigest({ role, phase: 'old', revision: packet.oldManifest.source[role].oldRevision, image: service.image });
             const mode = service.noTraffic ? 'STAGED' as const : 'PROMOTED' as const;
-            const runtimeObservation = this.runtimeObservation(runtime, service, source.sourceSha, packet.oldManifest.source[role].oldRevision, mode, buildDigest);
+            const runtimeObservation = await this.runtimeObservation(runtime, service, source.sourceSha, packet.oldManifest.source[role].oldRevision, mode, buildDigest);
             validateRuntimeObservation(runtimeObservation, runtime, {
                 mode,
                 revision: packet.oldManifest.source[role].oldRevision,
@@ -775,7 +779,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             // object instead of relabeling whole-service traffic as no-op.
             const revisionObservation = await this.options.cloudRun.observeRevision(runtime.project, runtime.location, captured);
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision: captured, image: revisionObservation.image });
-            const runtimeObservation = this.runtimeObservation(runtime, {
+            const runtimeObservation = await this.runtimeObservation(runtime, {
                 ...revisionObservation,
                 noTraffic: true,
                 traffic: [],
@@ -937,7 +941,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             this.capturedRevisions.set(role, revision);
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: after.image });
-            const observation = this.runtimeObservation(runtime, after, source.sourceSha, revision, 'PROMOTED', buildDigest);
+            const observation = await this.runtimeObservation(runtime, after, source.sourceSha, revision, 'PROMOTED', buildDigest);
             validateRuntimeObservation(observation, runtime, {
                 mode: 'PROMOTED', revision,
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
@@ -988,7 +992,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
             const service = await this.options.cloudRun.getService(this.serviceResource(runtime));
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: service.image });
-            const runtimeObservation = this.runtimeObservation(runtime, service, source.sourceSha, revision, 'PROMOTED', buildDigest);
+            const runtimeObservation = await this.runtimeObservation(runtime, service, source.sourceSha, revision, 'PROMOTED', buildDigest);
             validateRuntimeObservation(runtimeObservation, runtime, {
                 mode: 'PROMOTED', revision,
                 runtimeDigest: packet.desiredManifest.source[role].desiredRuntimeDigest,
@@ -1043,7 +1047,9 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         if (!Number.isSafeInteger(windowEndMs) || windowEndMs < lastProbeMs || windowEndMs < this.zeroWorkBaseline.capturedAtMs) fail('EVIDENCE_UNAVAILABLE');
         const windowStartMs = this.zeroWorkBaseline.capturedAtMs;
         if (windowEndMs <= windowStartMs) fail('EVIDENCE_UNAVAILABLE');
-        const zeroWork = await this.options.zeroWorkObservation({ windowStartMs, windowEndMs, nowMs: windowEndMs, baselineDigest: this.zeroWorkBaseline.digest });
+        const evidenceLease = this.leaseCheckFor(packet, currentLease, 'evidence.observe', Object.values(packet.protectedInputs.desired.queues).map(queue => queue.resource));
+        const zeroWork = await this.options.zeroWorkObservation({ windowStartMs, windowEndMs, nowMs: windowEndMs, baselineDigest: this.zeroWorkBaseline.digest, leaseCheck: evidenceLease });
+        await evidenceLease();
         // Validate freshness at a new trusted boundary after the asynchronous
         // collector returns.  This accepts honest positive collector latency
         // without moving the covered interval beyond the last probe.
@@ -1070,7 +1076,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
             const revisionObservation = await this.options.cloudRun.observeRevision(runtime.project, runtime.location, revision);
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: revisionObservation.image });
-            const observation = this.runtimeObservation(runtime, {
+            const observation = await this.runtimeObservation(runtime, {
                 ...revisionObservation,
                 noTraffic: true,
                 traffic: [],
@@ -1228,7 +1234,7 @@ export class LiveEpochControlPlane implements EpochControlPlane {
             const service = await this.options.cloudRun.getService(this.serviceResource(runtime));
             const source = await this.readSource({ role, phase: 'desired', revision, runtime });
             const buildDigest = await this.readBuildDigest({ role, phase: 'desired', revision, image: service.image });
-            const observation = this.runtimeObservation(runtime, service, source.sourceSha, revision, 'PROMOTED', buildDigest);
+            const observation = await this.runtimeObservation(runtime, service, source.sourceSha, revision, 'PROMOTED', buildDigest);
             validateRuntimeObservation(observation, runtime, {
                 mode: 'PROMOTED', revision,
                 runtimeDigest: input.packet.desiredManifest.source[role].desiredRuntimeDigest,
@@ -1307,11 +1313,11 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         fail('ACTIVATION_AUTH_REQUIRED');
     }
 
-    private async captureZeroWorkBaseline(): Promise<void> {
+    private async captureZeroWorkBaseline(leaseCheck?: () => Promise<void>): Promise<void> {
         if (this.zeroWorkBaseline || !this.options.zeroWorkBaseline) return;
         const capturedAtMs = this.now();
         if (!Number.isSafeInteger(capturedAtMs) || capturedAtMs < 0) fail('EVIDENCE_UNAVAILABLE');
-        const baseline = await this.options.zeroWorkBaseline({ nowMs: capturedAtMs });
+        const baseline = await this.options.zeroWorkBaseline({ nowMs: capturedAtMs, leaseCheck });
         if (!isObject(baseline) || typeof baseline.capturedAtMs !== 'number'
             || !Number.isSafeInteger(baseline.capturedAtMs) || baseline.capturedAtMs < 0
             || baseline.capturedAtMs > capturedAtMs) fail('EVIDENCE_UNAVAILABLE');
@@ -1377,14 +1383,14 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         return bindings.filter(binding => !retired.has(canonicalDigest(binding)));
     }
 
-    private runtimeObservation(
+    private async runtimeObservation(
         expected: ProtectedRuntimeInput,
         observed: Readonly<{ identity: ProtectedRuntimeInput['identity']; environment: Readonly<Record<string, string>>; secretReferences: Readonly<Record<string, string>>; settings: ProtectedRuntimeInput['settings']; noTraffic: boolean; generation: string; resourceVersion: string; traffic: readonly Readonly<{ revisionName: string | null; percent: number }>[]; url: string }>,
         sourceSha: string,
         revision: string,
         mode: 'STAGED' | 'PROMOTED',
         buildDigest: string,
-    ): Record<string, unknown> {
+    ): Promise<Record<string, unknown>> {
         let observedOrigin: string;
         let expectedOrigin: string;
         try {
@@ -1393,7 +1399,10 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         } catch {
             fail('RUNTIME_MISMATCH');
         }
-        if (observedOrigin !== expectedOrigin) fail('RUNTIME_MISMATCH');
+        if (observedOrigin !== expectedOrigin) {
+            const urls = await this.options.cloudRun.getServiceUrls(this.serviceResource(expected));
+            if (!urls.some(url => new URL(url).origin === expectedOrigin)) fail('RUNTIME_MISMATCH');
+        }
         const runtime = {
             ...expected,
             sourceSha,

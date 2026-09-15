@@ -3,12 +3,12 @@ import { createFixturePacket, FIXTURE_ZERO_WORK_SELECTOR_DIGESTS } from '../../.
 import { canonicalDigest, EpochError, type CapacityEpochPacket, type EpochHeader, type ProtectedIamBinding, type ProtectedQueueInput, type ProtectedRuntimeInput, type ProtectedSchedulerInput, type Role } from '../../../../scripts/capacity-identity-epoch/contracts';
 import { EpochJournal } from '../../../../scripts/capacity-identity-epoch/journal';
 import { GcsJournalStorage, type GcsHttpRequest, type GcsHttpResponse, type GcsTransport } from '../../../../scripts/capacity-identity-epoch/gcs';
-import { AuthenticatedProtectedTransport, AuthenticatedReceiverProbe, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from '../../../../scripts/capacity-identity-epoch/platform';
+import { AuthenticatedProtectedTransport, AuthenticatedReceiverProbe, createGoogleReceiverTokenProvider, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from '../../../../scripts/capacity-identity-epoch/platform';
 import { CloudRunAdapter } from '../../../../scripts/capacity-identity-epoch/cloud-run';
 import { IamAdapter } from '../../../../scripts/capacity-identity-epoch/iam';
 import { WorkPlaneClient, type PauseProvenance } from '../../../../scripts/capacity-identity-epoch/work-planes';
 import { VercelAdapter } from '../../../../scripts/capacity-identity-epoch/vercel';
-import { EpochCoordinator, LiveEpochControlPlane } from '../../../../scripts/capacity-identity-epoch/coordinator';
+import { EpochCoordinator, LiveEpochControlPlane, sharedReservationResources } from '../../../../scripts/capacity-identity-epoch/coordinator';
 import { issueCoordinatorCapability } from '../../../../scripts/capacity-identity-epoch/packet';
 import { buildLiveBootstrap, validateServiceBodies } from '../../../../scripts/capacity-identity-epoch/bootstrap';
 import { evidenceSelectorDigest, type LiveZeroWorkSources, type SupabaseLedgerSource } from '../../../../scripts/capacity-identity-epoch/live-evidence';
@@ -419,6 +419,7 @@ export class FakeProvider implements ProtectedTransport {
         if (url.hostname === 'preflight.example.com' || url.hostname === 'paid.example.com') return this.receiver(request, url);
         if (url.hostname === 'cloudtasks.googleapis.com') return this.tasks(request, url);
         if (url.hostname === 'cloudscheduler.googleapis.com') return this.scheduler(request, url);
+        if (url.hostname === 'run.googleapis.com') return this.googleV2(request, url);
         if (url.hostname === 'iam.googleapis.com' || url.hostname.endsWith('-run.googleapis.com')) return this.google(request, url);
         throw new Error('unexpected fake provider host');
     }
@@ -471,6 +472,18 @@ export class FakeProvider implements ProtectedTransport {
             return this.json(request, 200, service.body);
         }
         throw new Error('unexpected fake google request');
+    }
+
+    private googleV2(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
+        const match = url.pathname.match(/^\/v2\/(projects\/[^/]+\/locations\/[^/]+\/services\/[^/]+)$/);
+        const resource = match?.[1];
+        const service = resource ? this.services.get(resource) : undefined;
+        if (!service) return this.json(request, 404, {});
+        const status = service.body.status as Record<string, unknown>;
+        return this.json(request, 200, {
+            name: resource,
+            urls: [status.url, origin(service.runtime.target.url)],
+        });
     }
 
     private tasks(request: ProtectedHttpRequest, url: URL): ProtectedHttpResponse {
@@ -794,6 +807,39 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe('provider-free live adapter vertical', () => {
+    it('mints receiver ID tokens through IAMCredentials for only reviewed same-project bindings', async () => {
+        const requests: ProtectedHttpRequest[] = [];
+        const google = new AuthenticatedProtectedTransport({
+            transport: {
+                request: async (request: ProtectedHttpRequest): Promise<ProtectedHttpResponse> => {
+                    requests.push(request);
+                    return { status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: 'fixture-id-token' }), url: request.url };
+                },
+            },
+            tokenProvider: async () => 'fixture-owner-token',
+            timeoutMs: 2_000,
+        });
+        const reviewedBindings = [
+            { project: 'example-project', callerIdentity: 'preflight-caller@example-project.iam.gserviceaccount.com', audience: 'https://preflight.example.com' },
+            { project: 'example-project', callerIdentity: 'paid-caller@example-project.iam.gserviceaccount.com', audience: 'https://paid.example.com' },
+        ] as const;
+        const provider = createGoogleReceiverTokenProvider({
+            transport: google,
+            reviewedBindings,
+        });
+
+        await expect(provider({ audience: reviewedBindings[0].audience, callerIdentity: reviewedBindings[0].callerIdentity })).resolves.toBe('fixture-id-token');
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.method).toBe('POST');
+        expect(requests[0]?.url).toBe('https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/'
+            + `${reviewedBindings[0].callerIdentity}:generateIdToken`);
+        expect(requests[0]?.headers.authorization).toBe('Bearer fixture-owner-token');
+        expect(JSON.parse(requests[0]?.body ?? '{}')).toEqual({ audience: reviewedBindings[0].audience, includeEmail: true });
+        await expect(provider({ audience: reviewedBindings[0].audience, callerIdentity: 'other-project-caller@other-project.iam.gserviceaccount.com' })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        await expect(provider({ audience: 'https://unreviewed.example.com', callerIdentity: reviewedBindings[0].callerIdentity })).rejects.toThrow('CAPABILITY_BINDING_MISMATCH');
+        expect(requests).toHaveLength(1);
+    });
+
     it('rejects reviewed Cloud Run body metadata drift before any mutation graph is built', () => {
         const packet = createFixturePacket();
         const bodies = reviewedBodies(packet);
@@ -888,8 +934,26 @@ describe('provider-free live adapter vertical', () => {
             expect(provider.requests.some(request => new URL(request.url).hostname === 'cloudbuild.googleapis.com')).toBe(true);
             expect(provider.requests.some(request => new URL(request.url).hostname === 'logging.googleapis.com')).toBe(true);
             expect(provider.receiverRequestLogs).toHaveLength(2);
+            for (const role of ['preflight', 'paid'] as const) {
+                const runtime = packet.protectedInputs.desired.runtime[role];
+                const resource = `projects/${runtime.project}/locations/${runtime.location}/services/${runtime.service}`;
+                const service = provider.services.get(resource);
+                if (!service) throw new Error('missing service fixture');
+                service.body = { ...service.body, status: { ...(service.body.status as Record<string, unknown>), url: `https://${role}-hash.run.app/` } };
+            }
+            const reservationResources = sharedReservationResources(packet);
+            const reservationRequestStart = gcs.requests.length;
             const independent = await live.verifier.verify(result.lease);
             expect(independent).toEqual({ status: 'VERIFIED', activated: false, packetDigest: canonicalDigest(packet) });
+            expect(provider.requests.some(request => new URL(request.url).hostname === 'run.googleapis.com')).toBe(true);
+            const temporaryReservationRequests = gcs.requests.slice(reservationRequestStart).filter(request => {
+                const url = new URL(request.url);
+                const key = url.searchParams.get('name') ?? url.pathname;
+                return decodeURIComponent(key).includes('epoch-reservation/');
+            });
+            expect(temporaryReservationRequests.some(request => request.method === 'POST')).toBe(true);
+            expect(temporaryReservationRequests.some(request => request.method === 'DELETE')).toBe(true);
+            await expect(live.journal.inspectSharedReservation(reservationResources)).resolves.toEqual({ present: false, complete: true, memberCount: 0 });
         } finally {
             globalThis.fetch = originalFetch;
         }
@@ -1107,6 +1171,33 @@ describe('provider-free live adapter vertical', () => {
         expect(harness.provider.requests.length).toBeGreaterThan(0);
         expect(harness.provider.tasksCreated).toHaveLength(0);
         expect(state.transitions.at(-1)?.toState).toBe('VERIFIED');
+    });
+
+    it('preserves existing Cloud Run execution controls when staging the reviewed epoch fields', async () => {
+        const harness = createHarness();
+        const old = harness.packet.protectedInputs.old.runtime.preflight;
+        const resource = `projects/${old.project}/locations/${old.location}/services/${old.service}`;
+        const live = harness.provider.services.get(resource)!.body;
+        const metadata = live.metadata as Record<string, unknown>;
+        metadata.annotations = { 'run.googleapis.com/ingress': 'internal', 'run.googleapis.com/maxScale': '32' };
+        metadata.labels = { 'analysis-workload-role': 'preflight' };
+        const template = (live.spec as Record<string, unknown>).template as Record<string, unknown>;
+        const tm = template.metadata as Record<string, unknown>;
+        tm.annotations = { ...(tm.annotations as object), 'run.googleapis.com/cpu-throttling': 'false', 'run.googleapis.com/startup-cpu-boost': 'true' };
+        const container = ((template.spec as Record<string, unknown>).containers as Record<string, unknown>[])[0]!;
+        container.ports = [{ name: 'http1', containerPort: 8080 }];
+        container.startupProbe = { timeoutSeconds: 240, periodSeconds: 240, failureThreshold: 1, tcpSocket: { port: 8080 } };
+        const result = await harness.coordinator.runThroughVerified();
+        expect(result.state).toBe('VERIFIED');
+        const firstPut = harness.provider.requests.find(request => request.method === 'PUT' && new URL(request.url).pathname.endsWith('/services/' + old.service))!;
+        const body = JSON.parse(firstPut.body!);
+        expect(body.metadata.annotations).toMatchObject({ 'run.googleapis.com/ingress': 'internal', 'run.googleapis.com/maxScale': '32' });
+        expect(body.metadata.labels).toMatchObject({ 'analysis-workload-role': 'preflight' });
+        expect(body.spec.template.metadata.annotations).toMatchObject({ 'run.googleapis.com/cpu-throttling': 'false', 'run.googleapis.com/startup-cpu-boost': 'true' });
+        expect(body.spec.template.spec.containers[0].ports).toEqual(container.ports);
+        expect(body.spec.template.spec.containers[0].startupProbe).toEqual(container.startupProbe);
+        expect(body.spec.traffic).toEqual([{ revisionName: harness.packet.oldManifest.source.preflight.oldRevision, percent: 100 }]);
+        expect(harness.provider.tasksCreated).toHaveLength(0);
     });
 
     it('rejects denied cold PREPARED admission before any GCS write', async () => {

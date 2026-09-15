@@ -104,19 +104,20 @@ export class FetchGcsTransport implements GcsTransport {
 export function createAuthenticatedGcsJournalStorage(options: Readonly<{
     bucket: string;
     auth?: GoogleAuth;
+    tokenProvider?: () => Promise<string>;
     transport?: GcsTransport;
     maxResponseBytes?: number;
     timeoutMs?: number;
 }>): GcsJournalStorage {
-    const auth = options.auth ?? new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/devstorage.read_write'] });
+    const auth = options.tokenProvider ? undefined : options.auth ?? new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/devstorage.read_write'] });
     return new GcsJournalStorage({
         bucket: options.bucket,
         transport: options.transport ?? new FetchGcsTransport(options.maxResponseBytes),
-        tokenProvider: async () => {
-            const token = await auth.getAccessToken();
+        tokenProvider: options.tokenProvider ?? (async () => {
+            const token = await auth!.getAccessToken();
             if (!token) fail('ADAPTER_REQUEST_INVALID');
             return token;
-        },
+        }),
         maxResponseBytes: options.maxResponseBytes,
         timeoutMs: options.timeoutMs,
     });
