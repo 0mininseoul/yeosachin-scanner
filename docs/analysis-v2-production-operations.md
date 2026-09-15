@@ -266,7 +266,7 @@ provider-free local evidence and do not authorize production observation,
 mutation, activation, or deployment.
 
 The local acceptance replay for this bridge is
-`npx vitest run scripts/automatic-analysis-capacity-infra.test.ts --reporter=dot`;
+`npx vitest run tests/infra/tools/automatic-analysis-capacity-infra.test.ts --reporter=dot`;
 the current candidate passes all 319 actual-adapter/subprocess tests. Its
 provider-free in-memory reservation/raw-lock storage is reachable only when
 Vitest and the explicit test-storage marker are both set by the test harness;

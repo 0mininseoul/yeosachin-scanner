@@ -1,0 +1,2706 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { FeatureAnalysisResult } from '@/lib/services/ai/v2-staged-analysis';
+const testRunnerPolicies = vi.hoisted(() => new WeakMap<object, string>());
+const testRunnerFeatureConcurrency = vi.hoisted(
+    () => new WeakMap<object, 3 | 4>(),
+);
+
+vi.mock('../../../lib/services/analysis/replay/replay-staged-ai-adapter', () => ({
+    lookupReplayStagedAiAdapterPolicy: (runner: object) => (
+        testRunnerPolicies.get(runner)
+    ),
+    lookupReplayStagedAiAdapterFeatureConcurrency: (runner: object) => (
+        testRunnerFeatureConcurrency.get(runner)
+    ),
+}));
+
+import {
+    analysisV2ReplayResolverReadyOutcome,
+    runAnalysisV2AiReplay,
+    selectReplayFeatureMedia,
+    type ReplayAiRunner,
+} from '../../../lib/services/analysis/replay/replay-runner';
+import type { AnalysisV2ReplayBundle } from '../../../lib/services/analysis/replay/replay-bundle';
+import { historicalPartialSourceUniverseDigest } from '../../../lib/services/analysis/replay/historical-partial-available-artifact';
+import { parseReplayCliArgs } from '../../../scripts/replay-analysis-v2';
+import { FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY } from '../../../lib/services/analysis/replay/replay-source-lineage';
+
+function v27Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.7');
+    testRunnerFeatureConcurrency.set(runner, 3);
+    return runner;
+}
+
+function v29Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.9');
+    testRunnerFeatureConcurrency.set(runner, 3);
+    return runner;
+}
+
+function v210Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.10');
+    testRunnerFeatureConcurrency.set(runner, 3);
+    return runner;
+}
+
+function v211Runner(operations: ReplayAiRunner): ReplayAiRunner {
+    const runner = Object.freeze({ ...operations });
+    testRunnerPolicies.set(runner, 'ai-stage-policy-v2.11');
+    testRunnerFeatureConcurrency.set(runner, 3);
+    return runner;
+}
+
+function diagnosticPartialCoverageCapability(
+    aiStagePolicy: 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10' =
+        'ai-stage-policy-v2.9',
+) {
+    const parsed = parseReplayCliArgs([
+        '--run',
+        '--paid-ai',
+        '--confirm-paid-ai',
+        '--historical-partial-available',
+        '--allow-low-partial-coverage',
+        '--confirm-low-partial-coverage',
+        `--evaluation-ai-policy=${aiStagePolicy}`,
+        '--bundle=a.enc',
+        '--key=a.key',
+    ]);
+    if (
+        parsed.command !== 'run'
+        || !('diagnosticPartialCoverageCapability' in parsed)
+        || !parsed.diagnosticPartialCoverageCapability
+    ) {
+        throw new Error('TEST_DIAGNOSTIC_PARTIAL_COVERAGE_CAPABILITY_MISSING');
+    }
+    return parsed.diagnosticPartialCoverageCapability;
+}
+
+const bundle = {
+    schemaVersion: 1 as const,
+    createdAt: '2026-07-27T00:00:00.000Z', expiresAt: '2026-07-27T01:00:00.000Z',
+    capture: {
+        requestFingerprint: 'a'.repeat(64),
+        sourceLineage: {
+            selectedPlanId: 'standard' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.7' as const,
+                risk: 'risk-policy-v2.4' as const,
+            },
+        },
+    },
+    profiles: [
+        { ordinal: 1, isPrivate: false, username: 'public', fullName: null, hasProfileImage: true, bio: null, media: [
+            { selectionId: 'm1', kind: 'feed' as const, postId: 'p1', caption: null, jpegBase64: '/9j/2Q==' },
+            { selectionId: 'm2', kind: 'feed' as const, postId: 'p2', caption: null, jpegBase64: '/9j/2Q==' },
+        ], triageSelectionIds: ['m1', 'm2'], featureSelectionIds: ['m1', 'm2'], resolverSelectionIds: ['m1', 'm2'], captions: [], coverage: { selectedCount: 2, normalizedCount: 2, failures: [] } },
+        { ordinal: 2, isPrivate: true, username: 'private', fullName: null, hasProfileImage: false, bio: null, media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
+    ], evidence: { relationship: [], targetInteractions: [], reverseInteractions: [] },
+};
+
+const firstPaymentBundle = {
+    ...bundle,
+    capture: {
+        ...bundle.capture,
+        sourceLineage: {
+            selectedPlanId: 'basic' as const,
+            policyVersions: {
+                pipeline: 'v2' as const,
+                aiStage: 'ai-stage-policy-v2.11' as const,
+                risk: 'risk-policy-v2.5' as const,
+                scheduler: 'ai-scheduler-v1' as const,
+            },
+        },
+        evaluationPolicy: {
+            capability: FIRST_PAYMENT_BASIC_V211_CONCIERGE_CAPABILITY,
+            aiStage: 'ai-stage-policy-v2.11' as const,
+        },
+    },
+    profiles: [
+        {
+            ordinal: 1,
+            isPrivate: false,
+            username: 'female_candidate',
+            fullName: '김수연',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:female', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:female', kind: 'feed' as const, postId: 'pf', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:female', 'feed:female'],
+            featureSelectionIds: ['profile:female', 'feed:female'],
+            resolverSelectionIds: ['profile:female', 'feed:female'],
+            captions: [{ evidenceRefId: 'caption:female', selectionId: 'feed:female', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+        {
+            ordinal: 2,
+            isPrivate: false,
+            username: 'unknown_candidate',
+            fullName: '박지민',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:unknown', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:unknown', kind: 'feed' as const, postId: 'pu', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:unknown', 'feed:unknown'],
+            featureSelectionIds: ['profile:unknown', 'feed:unknown'],
+            resolverSelectionIds: ['profile:unknown', 'feed:unknown'],
+            captions: [{ evidenceRefId: 'caption:unknown', selectionId: 'feed:unknown', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+        {
+            ordinal: 3,
+            isPrivate: false,
+            username: 'male_candidate',
+            fullName: '김민수',
+            hasProfileImage: true,
+            bio: null,
+            media: [
+                { selectionId: 'profile:male', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' },
+                { selectionId: 'feed:male', kind: 'feed' as const, postId: 'pm', caption: 'feed', jpegBase64: '/9j/2Q==' },
+            ],
+            triageSelectionIds: ['profile:male', 'feed:male'],
+            featureSelectionIds: ['profile:male', 'feed:male'],
+            resolverSelectionIds: ['profile:male', 'feed:male'],
+            captions: [{ evidenceRefId: 'caption:male', selectionId: 'feed:male', text: 'feed' }],
+            coverage: { selectedCount: 2, normalizedCount: 2, failures: [] },
+        },
+    ],
+} satisfies AnalysisV2ReplayBundle;
+
+describe('AI-only replay runner', () => {
+    it('text-only maintenance skips retained public accounts without usable triage media and emits only the analyzed subset', async () => {
+        const textOnly = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.10' as const,
+                        risk: 'risk-policy-v2.5' as const,
+                        scheduler: 'ai-scheduler-v1' as const,
+                    },
+                },
+                evaluationPolicy: {
+                    capability: 'test-entitlement-standard-v210-risk-v25-scheduler-v1-to-ai-v211-legacy-secondary-account-text-only' as const,
+                    aiStage: 'ai-stage-policy-v2.11' as const,
+                },
+                legacySecondary: {
+                    requestId: '10000000-0000-4000-8000-000000000001',
+                    sourceFingerprint: 'b'.repeat(64), currentRevision: 0,
+                    originalFemaleRows: [{
+                        candidateId: 'candidate:one', sortOrdinal: 1, instagramId: 'public', fullName: null,
+                        profileImageUrl: null, bio: null, displayScore: 7, riskBand: 'normal' as const,
+                        featuredRank: null, recentMutualRank: null, analysisDepth: 'features' as const,
+                        oneLineOverview: '기존 요약', highRiskNarrative: null,
+                    }],
+                    textOnly: { canonicalCounts: { male: 1, female: 1, unknown: 0 } },
+                },
+            },
+            profiles: [
+                { ...bundle.profiles[0], ordinal: 1, username: 'no_media', media: [], triageSelectionIds: [], featureSelectionIds: [], resolverSelectionIds: [], captions: [], coverage: { selectedCount: 0, normalizedCount: 0, failures: [] } },
+                { ...bundle.profiles[0], ordinal: 2, username: 'public' },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'male' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] },
+                routingDecision: 'exclude_high_confidence_male' as const,
+                routingReason: 'high_confidence_same_owner_male' as const,
+                analyzedSelectionIds: ['m1'], v29AccountContext: 'personal' as const,
+            }, attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: textOnly, runner: v211Runner({ triage }), mode: 'paid-ai',
+            paidAiOptIn: true, evaluationPolicy: textOnly.capture.evaluationPolicy,
+        });
+        expect(triage).toHaveBeenCalledOnce();
+        expect(report.sourceKind).toBe('test_entitlement_v211_legacy_secondary_text_only');
+        expect(report.accountOutputs).toEqual([{
+            ordinal: 2, finalClassification: 'verified_non_female',
+            classificationSource: 'triage', featureOverview: null,
+        }]);
+    });
+    it.each([
+        {
+            expected: 'ready_high_confirmed',
+            assessment: {
+                inferredGender: 'female' as const,
+                confidence: 'high' as const,
+                ownerConsistency: 'same_person' as const,
+                evidenceSelectionIds: ['m1', 'm2'],
+            },
+        },
+        {
+            expected: 'evidence_insufficient',
+            assessment: {
+                inferredGender: 'female' as const,
+                confidence: 'medium' as const,
+                ownerConsistency: 'same_person' as const,
+                evidenceSelectionIds: ['m1'],
+            },
+        },
+        {
+            expected: 'mixed',
+            assessment: {
+                inferredGender: 'unknown' as const,
+                confidence: 'low' as const,
+                ownerConsistency: 'mixed_people' as const,
+                evidenceSelectionIds: ['m1', 'm2'],
+            },
+        },
+        {
+            expected: 'unknown',
+            assessment: {
+                inferredGender: 'unknown' as const,
+                confidence: 'low' as const,
+                ownerConsistency: 'not_visible' as const,
+                evidenceSelectionIds: [],
+            },
+        },
+    ])('classifies aggregate-only ready resolver outcome as $expected', ({
+        assessment,
+        expected,
+    }) => {
+        expect(analysisV2ReplayResolverReadyOutcome({
+            assessment,
+            analyzedSelectionIds: ['m1', 'm2'],
+        })).toBe(expected);
+    });
+
+    function validPartialBundle(): Extract<AnalysisV2ReplayBundle, { schemaVersion: 2 }> {
+        const sourceIdentities = [
+            { ordinal: 1, username: 'public', partition: 'public' as const },
+            { ordinal: 2, username: 'private', partition: 'private' as const },
+        ];
+        return {
+            ...bundle,
+            schemaVersion: 2,
+            capture: {
+                ...bundle.capture,
+                scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true,
+                sourceLineage: { selectedPlanId: 'standard', policyVersions: { pipeline: 'v2', aiStage: 'ai-stage-policy-v2.7', risk: 'risk-policy-v2.3' } },
+                evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' },
+                partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities), sourceIdentities, mediaUnavailable: [] },
+            },
+        };
+    }
+
+    function eligiblePaidPartialBundle(): ReturnType<typeof validPartialBundle> {
+        const publicProfiles = Array.from({ length: 379 }, (_, profileIndex) => {
+            const mediaCount = 5 + (profileIndex < 9 ? 1 : 0);
+            const media = Array.from({ length: mediaCount }, (_, mediaIndex) => {
+                const selectionId = `m-${profileIndex + 1}-${mediaIndex + 1}`;
+                return { selectionId, kind: 'feed' as const, postId: `p-${profileIndex + 1}-${mediaIndex + 1}`, caption: null, jpegBase64: '/9j/2Q==' };
+            });
+            return {
+                ordinal: profileIndex + 1,
+                isPrivate: false,
+                username: `public_${profileIndex + 1}`,
+                fullName: null,
+                hasProfileImage: true,
+                bio: null,
+                media,
+                triageSelectionIds: media.slice(0, 2).map(item => item.selectionId),
+                featureSelectionIds: media.map(item => item.selectionId),
+                resolverSelectionIds: media.map(item => item.selectionId),
+                captions: [],
+                coverage: {
+                    selectedCount: mediaCount + (profileIndex < 11 ? 1 : 0),
+                    normalizedCount: mediaCount,
+                    failures: profileIndex < 11
+                        ? [{ selectionId: `failed-${profileIndex + 1}`, reason: 'normalization_failed', disposition: 'permanent' as const }]
+                        : [],
+                },
+            };
+        });
+        const privateProfile = { ...bundle.profiles[1]!, ordinal: 380, username: 'private_380' };
+        const sourceIdentities = [
+            ...publicProfiles.map(profile => ({ ordinal: profile.ordinal, username: profile.username, partition: 'public' as const })),
+            { ordinal: 380, username: 'private_380', partition: 'private' as const },
+            ...Array.from({ length: 5 }, (_, index) => ({ ordinal: 381 + index, username: `terminal_${381 + index}`, partition: 'fetch_terminal' as const })),
+        ];
+        const value = validPartialBundle();
+        return {
+            ...value,
+            profiles: [...publicProfiles, privateProfile],
+            capture: { ...value.capture, partial: {
+                sourceIdentities,
+                sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                mediaUnavailable: [],
+            } },
+        };
+    }
+
+    function diagnosticPaidPartialBundle(): ReturnType<typeof validPartialBundle> {
+        const retainedProfiles = Array.from({ length: 49 }, (_, index) => {
+            const selectionId = `diagnostic-media-${index + 1}`;
+            return {
+                ...bundle.profiles[0]!,
+                ordinal: index + 1,
+                username: `diagnostic_${index + 1}`,
+                media: [{
+                    selectionId,
+                    kind: 'feed' as const,
+                    postId: `diagnostic-post-${index + 1}`,
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }],
+                triageSelectionIds: [selectionId],
+                featureSelectionIds: [selectionId],
+                resolverSelectionIds: [selectionId],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            };
+        });
+        const sourceIdentities = [
+            ...retainedProfiles.map(profile => ({
+                ordinal: profile.ordinal,
+                username: profile.username,
+                partition: 'public' as const,
+            })),
+            { ordinal: 50, username: 'diagnostic_unavailable', partition: 'public' as const },
+        ];
+        const value = validPartialBundle();
+        return {
+            ...value,
+            profiles: retainedProfiles,
+            capture: {
+                ...value.capture,
+                partial: {
+                    sourceIdentities,
+                    sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+                    mediaUnavailable: [{
+                        ordinal: 50,
+                        terminal: 'media_unavailable',
+                        selectedMediaCount: 1,
+                        triageFailures: 1,
+                        featureFailures: 1,
+                        reasons: ['source_missing'],
+                    }],
+                },
+            },
+        } as ReturnType<typeof validPartialBundle>;
+    }
+
+    const withIdentities = (
+        value: ReturnType<typeof validPartialBundle>,
+        sourceIdentities: ReturnType<typeof validPartialBundle>['capture']['partial']['sourceIdentities'],
+    ) => ({ ...value, capture: { ...value.capture, partial: {
+        ...value.capture.partial,
+        sourceIdentities,
+        sourceUniverseDigest: historicalPartialSourceUniverseDigest(sourceIdentities),
+    } } });
+
+    it('rejects a stale digest before a direct runner invocation', async () => {
+        const value = validPartialBundle();
+        const invalid = { ...value, capture: { ...value.capture, partial: { ...value.capture.partial, sourceUniverseDigest: '0'.repeat(64) } } };
+        await expect(runAnalysisV2AiReplay({ bundle: invalid, mode: 'dry-run', evaluationPolicy: invalid.capture.evaluationPolicy })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    });
+
+    it.each([
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, [...value.capture.partial.sourceIdentities, { ordinal: 8, username: 'PUBLIC', partition: 'fetch_terminal' as const }]),
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, value.capture.partial.sourceIdentities.slice(0, 1)),
+        (value: ReturnType<typeof validPartialBundle>) => withIdentities(value, value.capture.partial.sourceIdentities.map(identity => identity.ordinal === 1 ? { ...identity, partition: 'private' as const } : identity)),
+    ])('rejects an identity invariant with a matching recomputed digest before direct runner invocation %#', async mutate => {
+        const invalid = mutate(validPartialBundle());
+        await expect(runAnalysisV2AiReplay({ bundle: invalid, mode: 'dry-run', evaluationPolicy: invalid.capture.evaluationPolicy })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+    });
+
+    it.each([
+        { ...bundle, capture: { ...bundle.capture, evaluationPolicy: { capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest([]), sourceIdentities: [], mediaUnavailable: [] } } },
+        { ...bundle, schemaVersion: 2, capture: { ...bundle.capture, scope: 'ai-only-historical-partial-available', notExact: true, fullE2eEvidence: false, noMediaSubstitution: true, evaluationPolicy: { capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29', aiStage: 'ai-stage-policy-v2.9' }, partial: { sourceUniverseDigest: historicalPartialSourceUniverseDigest([]), sourceIdentities: [], mediaUnavailable: [] } } },
+    ])('rejects cross-version artifact capability at the runner boundary %#', async invalid => {
+        await expect(runAnalysisV2AiReplay({ bundle: invalid as AnalysisV2ReplayBundle, mode: 'dry-run', ...('evaluationPolicy' in invalid.capture ? { evaluationPolicy: invalid.capture.evaluationPolicy as never } : {}) })).rejects.toThrow('ANALYSIS_V2_REPLAY_ARTIFACT_CAPABILITY_MISMATCH');
+    });
+
+    it('dry-run validates inputs without calling AI and emits only safe aggregate metrics', async () => {
+        const triage = vi.fn();
+        const lines: string[] = [];
+        const report = await runAnalysisV2AiReplay({ bundle, runner: { triage }, mode: 'dry-run', write: line => lines.push(line) });
+        expect(triage).not.toHaveBeenCalled();
+        expect(report.stages.genderTriage.calls).toBe(0);
+        expect(lines.join('\n')).not.toContain('m1');
+        expect(lines.join('\n')).not.toContain('a'.repeat(64));
+        expect(lines.join('\n')).not.toContain('public');
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            benchmark_scope: 'ai-only-exact-replay',
+            source_plan: 'standard',
+            source_pipeline: 'v2',
+            source_ai_policy: 'ai-stage-policy-v2.7',
+            source_risk_policy: 'risk-policy-v2.4',
+            replay_ai_policy: 'ai-stage-policy-v2.7',
+            full_e2e_evidence: false,
+        });
+    });
+
+    it('reports authenticated partial v2.10 without weakening non-exact scope labels', async () => {
+        const partial = validPartialBundle();
+        const evaluationPolicy = {
+            capability: 'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partialV210 = {
+            ...partial,
+            capture: { ...partial.capture, evaluationPolicy },
+        } satisfies AnalysisV2ReplayBundle;
+        const report = await runAnalysisV2AiReplay({
+            bundle: partialV210,
+            mode: 'dry-run',
+            evaluationPolicy,
+        });
+
+        expect(report).toMatchObject({
+            benchmarkScope: 'ai-only-historical-partial-available',
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+            fullE2eEvidence: false,
+            notExact: true,
+            noMediaSubstitution: true,
+        });
+    });
+
+    it('runs eligible partial paid replay through the authenticated v2.9 stages and preserves aggregate-only scope labels', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'female' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1', 'm2'] },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['m1', 'm2'],
+                v29AccountContext: 'personal' as const,
+            },
+            attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const feature = vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
+        const privateNames = vi.fn(async () => ({ outcome: 'ok' as const, attempts: 1, retries: 0, elapsedMs: 1 }));
+        const lines: string[] = [];
+        const partial = eligiblePaidPartialBundle();
+        await runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v29Runner({ triage, feature, privateNames }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: partial.capture.evaluationPolicy,
+            write: line => lines.push(line),
+        });
+        expect(triage).toHaveBeenCalledTimes(379);
+        expect(feature).toHaveBeenCalledTimes(379);
+        expect(privateNames).toHaveBeenCalledOnce();
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            benchmark_scope: 'ai-only-historical-partial-available',
+            not_exact: true,
+            full_e2e_evidence: false,
+            no_media_substitution: true,
+            replay_ai_policy: 'ai-stage-policy-v2.9',
+        });
+    });
+
+    it('admits v2.10 exact-count diagnostic coverage only through double-confirmed CLI capability', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            value: {
+                assessment: { inferredGender: 'male' as const, confidence: 'high' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['diagnostic-media-1'] },
+                routingDecision: 'exclude_high_confidence_male' as const,
+                routingReason: 'high_confidence_same_owner_male' as const,
+                analyzedSelectionIds: ['diagnostic-media-1'],
+                v29AccountContext: 'personal' as const,
+            },
+            attempts: 1, retries: 0, elapsedMs: 1,
+        }));
+        const basePartial = diagnosticPaidPartialBundle();
+        const evaluationPolicy = {
+            capability:
+                'historical-partial-available-standard-v27-risk-v23-to-ai-v210',
+            aiStage: 'ai-stage-policy-v2.10',
+        } as const;
+        const partial = {
+            ...basePartial,
+            capture: {
+                ...basePartial.capture,
+                evaluationPolicy,
+            },
+        } satisfies AnalysisV2ReplayBundle;
+        const lines: string[] = [];
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v210Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
+        expect(triage).not.toHaveBeenCalled();
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: partial,
+            runner: v210Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(
+                    'ai-stage-policy-v2.10',
+                ),
+            evaluationPolicy,
+            write: line => lines.push(line),
+        });
+
+        expect(triage).toHaveBeenCalledTimes(49);
+        expect(report).toMatchObject({
+            fullE2eEvidence: false,
+            notExact: true,
+            noMediaSubstitution: true,
+            evaluationAiPolicy: 'ai-stage-policy-v2.10',
+            replayAiPolicy: 'ai-stage-policy-v2.10',
+            diagnosticCoverageOverride: {
+                used: true,
+                retainedProfiles: 49,
+                sourceProfiles: 50,
+                retainedMedia: 49,
+                exactSelectedMedia: 50,
+                profileRetentionBps: 9_800,
+                mediaRetentionBps: 9_800,
+            },
+        });
+        const safe = JSON.parse(lines[0]!);
+        expect(safe).toMatchObject({
+            full_e2e_evidence: false,
+            not_exact: true,
+            no_media_substitution: true,
+            diagnostic_partial_coverage_override: {
+                used: true,
+                retained_profiles: 49,
+                source_profiles: 50,
+                retained_media: 49,
+                exact_selected_media: 50,
+                profile_retention_bps: 9_800,
+                media_retention_bps: 9_800,
+            },
+        });
+        expect(lines.join('')).not.toContain('diagnostic_1');
+        expect(lines.join('')).not.toContain('diagnostic-media');
+    });
+
+    it('rejects direct boolean and forged diagnostic approval before any AI call', async () => {
+        const triage = vi.fn();
+        const feature = vi.fn();
+        const privateNames = vi.fn();
+        const resolveGender = vi.fn();
+        const partial = diagnosticPaidPartialBundle();
+        const runner = v29Runner({
+            triage,
+            feature,
+            privateNames,
+            resolveGender,
+        });
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            allowLowPartialCoverage: true,
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+        await expect(runAnalysisV2AiReplay({
+            bundle: partial,
+            runner,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability: Object.freeze({}),
+            evaluationPolicy: partial.capture.evaluationPolicy,
+        } as Parameters<typeof runAnalysisV2AiReplay>[0])).rejects.toThrow(
+            'ANALYSIS_V2_REPLAY_LOW_PARTIAL_COVERAGE_AUTHORIZATION_REQUIRED',
+        );
+
+        expect(triage).not.toHaveBeenCalled();
+        expect(feature).not.toHaveBeenCalled();
+        expect(privateNames).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+    });
+
+    it('rejects diagnostic coverage for legacy countless partial artifacts before AI', async () => {
+        const triage = vi.fn();
+        const partial = diagnosticPaidPartialBundle();
+        const legacy = {
+            ...partial,
+            capture: {
+                ...partial.capture,
+                partial: {
+                    ...partial.capture.partial,
+                    mediaUnavailable: partial.capture.partial.mediaUnavailable.map(item => {
+                        const rest = { ...item };
+                        delete rest.selectedMediaCount;
+                        return rest;
+                    }),
+                },
+            },
+        } as ReturnType<typeof validPartialBundle>;
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: legacy,
+            runner: v29Runner({ triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            diagnosticPartialCoverageCapability:
+                diagnosticPartialCoverageCapability(),
+            evaluationPolicy: legacy.capture.evaluationPolicy,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_PARTIAL_COVERAGE_INSUFFICIENT');
+        expect(triage).not.toHaveBeenCalled();
+    });
+
+    it('requires the authenticated historical capability on every run', async () => {
+        const historicalBundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        aiStage: 'ai-stage-policy-v2.7' as const,
+                        risk: 'risk-policy-v2.3' as const,
+                    },
+                },
+                evaluationPolicy: {
+                    capability: 'historical-official-e2e-standard-v27-risk-v23-to-ai-v29' as const,
+                    aiStage: 'ai-stage-policy-v2.9' as const,
+                },
+            },
+        };
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalBundle, mode: 'dry-run',
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_EVALUATION_POLICY_MISMATCH');
+        await expect(runAnalysisV2AiReplay({
+            bundle: historicalBundle,
+            mode: 'dry-run',
+            evaluationPolicy: historicalBundle.capture.evaluationPolicy,
+        })).resolves.toMatchObject({ replayAiPolicy: 'ai-stage-policy-v2.9' });
+    });
+
+    it('rejects malformed normalized input during dry-run before invoking AI', async () => {
+        const triage = vi.fn();
+        await expect(runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: [{ ...bundle.profiles[0], media: [{ selectionId: 'm1', kind: 'feed', caption: null, jpegBase64: 'aGVsbG8=' }] }] },
+            runner: { triage }, mode: 'dry-run',
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_INPUT_INVALID');
+        expect(triage).not.toHaveBeenCalled();
+    });
+
+    it('never relabels a historical Plus source as Standard evidence', async () => {
+        const lines: string[] = [];
+        await expect(runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    requestFingerprint: 'b'.repeat(64),
+                    sourceLineage: {
+                        selectedPlanId: 'plus',
+                        policyVersions: {
+                            pipeline: 'v2',
+                            aiStage: 'ai-stage-policy-v2.4',
+                            risk: 'risk-policy-v2.2',
+                        },
+                    },
+                },
+            },
+            runner: {},
+            mode: 'dry-run',
+            write: line => lines.push(line),
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_POLICY_UNSUPPORTED');
+        expect(lines).toEqual([]);
+    });
+
+    it('replays an exact v2.8 bundle using v2.8 rather than ambient latest policy', async () => {
+        const lines: string[] = [];
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        selectedPlanId: 'standard',
+                        policyVersions: {
+                            pipeline: 'v2',
+                            risk: 'risk-policy-v2.4',
+                            aiStage: 'ai-stage-policy-v2.8',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            runner: {},
+            mode: 'dry-run',
+            write: line => lines.push(line),
+        });
+        expect(report.replayAiPolicy).toBe('ai-stage-policy-v2.8');
+        expect(JSON.parse(lines[0]!)).toMatchObject({
+            source_ai_policy: 'ai-stage-policy-v2.8',
+            replay_ai_policy: 'ai-stage-policy-v2.8',
+        });
+    });
+
+    it('rejects a v2.7 runner for a v2.8 bundle before any paid AI call', async () => {
+        const triage = vi.fn();
+        const privateNames = vi.fn();
+        const v28Bundle = {
+            ...bundle,
+            capture: {
+                ...bundle.capture,
+                sourceLineage: {
+                    selectedPlanId: 'standard' as const,
+                    policyVersions: {
+                        pipeline: 'v2' as const,
+                        risk: 'risk-policy-v2.4' as const,
+                        aiStage: 'ai-stage-policy-v2.8' as const,
+                        scheduler: 'ai-scheduler-v1' as const,
+                    },
+                },
+            },
+        };
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28Bundle,
+            runner: v27Runner({ triage, privateNames }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+        expect(triage).not.toHaveBeenCalled();
+        expect(privateNames).not.toHaveBeenCalled();
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: v28Bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+        })).rejects.toThrow('ANALYSIS_V2_REPLAY_AI_RUNNER_POLICY_MISMATCH');
+    });
+
+    it('requires explicit paid-ai mode, summarizes retry/rate-limit/outcome metrics, and has no persistence dependency', async () => {
+        const runner = v27Runner({
+            triage: vi.fn(async () => ({ outcome: 'ok' as const, value: { assessment: { inferredGender: 'female' as const, confidence: 'medium' as const, ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1'] }, routingDecision: 'route_to_feature_analysis' as const, routingReason: 'conserve_female_recall' as const, analyzedSelectionIds: ['m1'] }, attempts: 2, retries: 1, elapsedMs: 20 })),
+            feature: vi.fn(async () => ({ outcome: 'rate_limited' as const, attempts: 1, retries: 0, elapsedMs: 30 })),
+            privateNames: vi.fn(async () => ({
+                outcome: 'ok' as const,
+                calls: 1,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 10,
+                attemptLatenciesMs: [4],
+                failureDisposition: { response_rejected: 1 },
+            })),
+        });
+        await expect(runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai' })).rejects.toThrow('ANALYSIS_V2_REPLAY_PAID_AI_OPT_IN_REQUIRED');
+        const report = await runAnalysisV2AiReplay({ bundle, runner, mode: 'paid-ai', paidAiOptIn: true });
+        expect(report.stages.genderTriage).toMatchObject({ calls: 1, retries: 1, meanLatencyMs: 20 });
+        expect(report.stages.featureAnalysis).toMatchObject({ calls: 1, rateLimited: 1, failureDisposition: { rate_limited: 1 } });
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+        expect(report.stages.privateAccountName).toMatchObject({
+            calls: 1,
+            meanLatencyMs: 4,
+            p50LatencyMs: 4,
+            p95LatencyMs: 4,
+        });
+        expect(report.stages.privateAccountName.failureDisposition)
+            .toEqual({ response_rejected: 1 });
+    });
+
+    it('excludes only a high-confidence same-owner male before feature work', async () => {
+        const feature = vi.fn();
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: { inferredGender: 'male', confidence: 'high', ownerConsistency: 'same_person', evidenceSelectionIds: ['m1'] },
+                        routingDecision: 'exclude_high_confidence_male',
+                        routingReason: 'high_confidence_same_owner_male',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature,
+            }),
+        });
+        expect(feature).not.toHaveBeenCalled();
+        expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
+    });
+
+    it('routes a low-confidence concierge male through feature analysis', async () => {
+        const firstPass = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'male' as const,
+                    confidence: 'medium' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: ['profile:male'],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['profile:male'],
+            },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 2,
+            value: {
+                features: {
+                    gender: 'female' as const,
+                    genderConfidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    businessClassification: 'personal' as const,
+                    businessConfidence: 'medium' as const,
+                    accountContext: 'personal' as const,
+                    marriageEvidence: 'none' as const,
+                    partnerEvidence: 'none' as const,
+                    partnerExclusionContext: 'none' as const,
+                    evidenceSelectionIds: {
+                        gender: ['profile:male'],
+                        appearance: ['profile:male'],
+                        exposure: ['profile:male'],
+                        business: ['profile:male'],
+                        accountContext: ['profile:male'],
+                        marriagePartner: [],
+                    },
+                    oneLineOverview: '프로필과 피드에서 확인된 단서를 중심으로 계정의 분위기를 정리한 충분한 총평입니다.',
+                },
+                finalGenderDecision: 'verified_female' as const,
+                analyzedSelectionIds: ['profile:male', 'feed:male'],
+            } satisfies FeatureAnalysisResult,
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...firstPaymentBundle,
+                profiles: [{ ...firstPaymentBundle.profiles[2]!, ordinal: 1 }],
+            },
+            runner: v211Runner({ firstPass, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: firstPaymentBundle.capture.evaluationPolicy,
+        });
+
+        expect(firstPass).toHaveBeenCalledOnce();
+        expect(feature).toHaveBeenCalledOnce();
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+    });
+
+    it('keeps the profile image in feature media when feed selections fill the cap', () => {
+        const profile = {
+            media: [
+                { selectionId: 'profile:one', kind: 'profile' as const, jpegBase64: '/9j/2Q==' },
+                ...Array.from({ length: 11 }, (_, index) => ({
+                    selectionId: `feed:${index + 1}`,
+                    kind: 'feed' as const,
+                    postId: `post:${index + 1}`,
+                    jpegBase64: '/9j/2Q==',
+                })),
+            ],
+        } as Parameters<typeof selectReplayFeatureMedia>[0];
+
+        const selected = selectReplayFeatureMedia(
+            profile,
+            profile.media.slice(1).map(item => item.selectionId),
+        );
+
+        expect(selected).toHaveLength(11);
+        expect(selected[0]).toMatchObject({ selectionId: 'profile:one', kind: 'profile' });
+        expect(selected.slice(1).map(item => item.selectionId)).toEqual(
+            Array.from({ length: 10 }, (_, index) => `feed:${index + 1}`),
+        );
+    });
+
+    it('uses the paid concierge first-pass contract and sends media to every non-excluded candidate', async () => {
+        const firstPass = vi.fn(async (input: {
+            ordinal: number;
+            fullName: string;
+            media: readonly { selectionId: string; kind: string }[];
+        }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: input.ordinal === 1
+                ? {
+                    assessment: {
+                        inferredGender: 'female' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: ['profile:female'],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: ['profile:female'],
+                }
+                : input.ordinal === 2
+                ? {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: ['profile:unknown'],
+                }
+                : {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: ['profile:male'],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: ['profile:male'],
+                },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 2,
+            value: {
+                features: {
+                    gender: 'female' as const,
+                    genderConfidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    appearanceGrade: 3,
+                    exposureScore: 1,
+                    businessClassification: 'personal' as const,
+                    businessConfidence: 'medium' as const,
+                    accountContext: 'personal' as const,
+                    marriageEvidence: 'none' as const,
+                    partnerEvidence: 'none' as const,
+                    partnerExclusionContext: 'none' as const,
+                    evidenceSelectionIds: {
+                        gender: ['feed:female'], appearance: ['feed:female'], exposure: ['feed:female'],
+                        business: ['feed:female'], accountContext: ['feed:female'], marriagePartner: [],
+                    },
+                    oneLineOverview: '구체적인 공개 단서를 바탕으로 계정의 분위기와 맥락을 정리한 충분히 긴 한국어 총평입니다.',
+                },
+                finalGenderDecision: 'verified_female' as const,
+                analyzedSelectionIds: ['profile:female', 'feed:female'],
+            } satisfies FeatureAnalysisResult,
+        }));
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: firstPaymentBundle,
+            runner: v211Runner({ firstPass, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: firstPaymentBundle.capture.evaluationPolicy,
+        });
+
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        const firstPassCalls = firstPass.mock.calls as Array<[{
+            fullName: string;
+            media: readonly { kind: string }[];
+        }] >;
+        expect(firstPassCalls.map(([input]) => ({
+            fullName: input.fullName,
+            media: input.media.map(item => item.kind),
+        }))).toEqual([
+            { fullName: '김수연', media: ['profile'] },
+            { fullName: '박지민', media: ['profile'] },
+            { fullName: '김민수', media: ['profile'] },
+        ]);
+        expect(feature).toHaveBeenCalledTimes(2);
+        const featureCalls = feature.mock.calls as unknown as Array<[{
+            media: readonly { kind: string }[];
+            triage: { assessment: { inferredGender: string } };
+        }] >;
+        expect(featureCalls.map(([input]) => ({
+            gender: input.triage.assessment.inferredGender,
+            media: input.media.map(item => item.kind),
+        }))).toEqual([
+            { gender: 'female', media: ['profile', 'feed'] },
+            { gender: 'unknown', media: ['profile', 'feed'] },
+        ]);
+        expect(report.gender).toEqual({ male: 1, female: 2, unknown: 0, unknownRate: 0 });
+    });
+
+    it('routes a profile-image-less concierge candidate through the independent name-only batch without media', async () => {
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'male' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const firstPass = vi.fn();
+        const noProfileBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [{
+                    selectionId: 'feed:missing-profile',
+                    kind: 'feed' as const,
+                    postId: 'post:missing-profile',
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }],
+                triageSelectionIds: ['feed:missing-profile'],
+                featureSelectionIds: ['feed:missing-profile'],
+                resolverSelectionIds: ['feed:missing-profile'],
+                captions: [],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+        const report = await runAnalysisV2AiReplay({
+            bundle: noProfileBundle,
+            runner: v211Runner({ firstPass, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noProfileBundle.capture.evaluationPolicy,
+        });
+        expect(firstPass).not.toHaveBeenCalled();
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{
+            candidateId: 'ordinal:1',
+            fullName: '김수연',
+        }]);
+        expect(report.gender).toEqual({ male: 1, female: 0, unknown: 0, unknownRate: 0 });
+    });
+
+    it('routes all image-less named concierge candidates through one name-only batch and never individual triage', async () => {
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            calls: 1,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const triage = vi.fn();
+        const firstPass = vi.fn();
+        const noProfileBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [{
+                    selectionId: 'feed:missing-profile',
+                    kind: 'feed' as const,
+                    postId: 'post:missing-profile',
+                    caption: null,
+                    jpegBase64: '/9j/2Q==',
+                }],
+                triageSelectionIds: ['feed:missing-profile'],
+                featureSelectionIds: ['feed:missing-profile'],
+                resolverSelectionIds: ['feed:missing-profile'],
+                captions: [],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: noProfileBundle,
+            runner: v211Runner({ nameOnly, firstPass, triage }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noProfileBundle.capture.evaluationPolicy,
+        });
+
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{
+            candidateId: 'ordinal:1',
+            fullName: '김수연',
+        }]);
+        expect(firstPass).not.toHaveBeenCalled();
+        expect(triage).not.toHaveBeenCalled();
+        expect(report.stages.genderTriage.calls).toBe(1);
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.accountOutputs[0]).toMatchObject({
+            finalClassification: 'verified_female',
+            classificationSource: 'name_only',
+        });
+    });
+
+    it('routes every image-having candidate through individual triage and only image-less candidates through the name-only batch', async () => {
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // All 3 image-having candidates (ordinals 1-3) get an individual triage call each.
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(firstPass.mock.calls.map(([input]) => input.ordinal).sort())
+            .toEqual([1, 2, 3]);
+        // Only the image-less candidate (ordinal 4) goes into the name-only batch.
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
+    });
+
+    it('retries an image-having candidate whose triage call is rejected once by shared stage capacity, instead of losing it permanently', async () => {
+        // Reproduces the outage where enabling the name-only path (which runs
+        // concurrently with individual triage/firstPass calls, sharing the
+        // same non-queueing genderTriage-stage admission slot) caused a
+        // capacity-rejected individual candidate to be marked
+        // analysis_unavailable forever after exactly one attempt. On
+        // unfixed code this test fails: firstPass is called exactly once per
+        // ordinal and the capacity-rejected candidate never recovers.
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        let ordinal1Attempts = 0;
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => {
+            if (input.ordinal === 1) {
+                ordinal1Attempts += 1;
+                if (ordinal1Attempts === 1) {
+                    // Simulates a rejected shared-stage capacity acquisition:
+                    // returns almost instantly, no real Gemini round trip.
+                    return {
+                        outcome: 'failed' as const,
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 0,
+                    };
+                }
+                // The retry succeeds with a confident, high-signal result -
+                // proving the retried call's real result is actually used
+                // (excluded via triage alone, no feature dependency needed),
+                // not just that a second attempt merely happened.
+                return {
+                    outcome: 'ok' as const,
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'male' as const,
+                            confidence: 'high' as const,
+                            ownerConsistency: 'same_person' as const,
+                            evidenceSelectionIds: [`profile:${input.ordinal}`],
+                        },
+                        routingDecision: 'exclude_high_confidence_male' as const,
+                        routingReason: 'high_confidence_same_owner_male' as const,
+                        analyzedSelectionIds: [`profile:${input.ordinal}`],
+                    },
+                };
+            }
+            return {
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: [`profile:${input.ordinal}`],
+                },
+            };
+        });
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // The rejected candidate (ordinal 1) must be retried, not abandoned
+        // after one attempt.
+        expect(ordinal1Attempts).toBeGreaterThan(1);
+        // The retried call's real (confident) result is what gets used -
+        // not a permanent "unknown" fallback from giving up after one
+        // transient capacity rejection.
+        const ordinal1Output = report.accountOutputs.find(output => output.ordinal === 1);
+        expect(ordinal1Output).toMatchObject({
+            finalClassification: 'verified_non_female',
+            classificationSource: 'triage',
+        });
+        expect(nameOnly).toHaveBeenCalledOnce();
+    });
+
+    it('still routes an image-having candidate without a display name through triage, and both paths run together with exact call counts', async () => {
+        // Regression for the outage where image-having candidates lacking a
+        // fullName were silently dropped to "unknown" with zero AI calls,
+        // because the fallback branch required fullName even for candidates
+        // whose only problem was not fitting the narrow single-profile-image
+        // firstPass shape. genderTriage call count must track the number of
+        // image-having candidates exactly, independent of name presence.
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'medium' as const,
+            })),
+        }));
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const triage = vi.fn(async (input: { ordinal: number }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const nameOnlyProfile = {
+            ordinal: 4,
+            isPrivate: false,
+            username: 'name_only_candidate',
+            fullName: '이서연',
+            hasProfileImage: false,
+            bio: null,
+            media: [],
+            triageSelectionIds: [],
+            featureSelectionIds: [],
+            resolverSelectionIds: [],
+            captions: [],
+            coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        };
+        // Image-having, but no display name: must still reach triage (not the
+        // firstPass path, since it lacks a name), not be silently skipped.
+        const namelessImageProfile = {
+            ordinal: 5,
+            isPrivate: false,
+            username: 'nameless_image_candidate',
+            fullName: null,
+            hasProfileImage: true,
+            bio: null,
+            media: [],
+            triageSelectionIds: [],
+            featureSelectionIds: [],
+            resolverSelectionIds: [],
+            captions: [],
+            coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+        };
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [...firstPaymentBundle.profiles, nameOnlyProfile, namelessImageProfile],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, triage, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+        });
+
+        // Exactly the 3 image-having, named candidates (ordinals 1-3) use firstPass.
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(firstPass.mock.calls.map(([input]) => input.ordinal).sort())
+            .toEqual([1, 2, 3]);
+        // The image-having, nameless candidate (ordinal 5) still reaches triage.
+        expect(triage).toHaveBeenCalledTimes(1);
+        // Together, every image-having candidate (4 of them: 1, 2, 3, 5) reaches
+        // an individual genderTriage-stage call - the exact count, not just "some".
+        expect(report.stages.genderTriage.calls).toBe(
+            firstPass.mock.calls.length + triage.mock.calls.length + nameOnly.mock.calls.length,
+        );
+        expect(firstPass.mock.calls.length + triage.mock.calls.length).toBe(4);
+        // Only the one true image-less, named candidate (ordinal 4) goes into
+        // the name-only batch; the image-having nameless candidate must not.
+        expect(nameOnly).toHaveBeenCalledOnce();
+        expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:4', fullName: '이서연' }]);
+        expect(triage.mock.calls[0]?.[0]).toMatchObject({ ordinal: 5 });
+    });
+
+    it('routes every candidate through the pre-name-only path when nameOnlyEnabled is explicitly false', async () => {
+        const nameOnly = vi.fn();
+        const firstPass = vi.fn(async (input: { ordinal: number; fullName: string }) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [`profile:${input.ordinal}`],
+            },
+        }));
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: [],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const mixedBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                ...firstPaymentBundle.profiles,
+                {
+                    ordinal: 4,
+                    isPrivate: false,
+                    username: 'name_only_candidate',
+                    fullName: '이서연',
+                    hasProfileImage: false,
+                    bio: null,
+                    media: [],
+                    triageSelectionIds: [],
+                    featureSelectionIds: [],
+                    resolverSelectionIds: [],
+                    captions: [],
+                    coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+                },
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: mixedBundle,
+            runner: v211Runner({ firstPass, triage, nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: mixedBundle.capture.evaluationPolicy,
+            nameOnlyEnabled: false,
+        });
+
+        expect(nameOnly).not.toHaveBeenCalled();
+        // The image-less candidate falls back through the pre-name-only path
+        // (individual triage using its accountProfile name hint), not the batch.
+        expect(triage).toHaveBeenCalledOnce();
+        expect(firstPass).toHaveBeenCalledTimes(3);
+        expect(report.accountOutputs.every(output => output.classificationSource !== 'name_only')).toBe(true);
+    });
+
+    it('fails the whole replay instead of silently marking every name-only candidate unknown when the batch fails', async () => {
+        const nameOnly = vi.fn(async () => ({
+            outcome: 'rejected' as const,
+            attempts: 4,
+            retries: 3,
+            elapsedMs: 1,
+        }));
+        const noProfileBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+
+        await expect(runAnalysisV2AiReplay({
+            bundle: noProfileBundle,
+            runner: v211Runner({ nameOnly }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noProfileBundle.capture.evaluationPolicy,
+        })).rejects.toThrow();
+    });
+
+    it('skips concierge feature analysis when the final candidate media set is empty', async () => {
+        const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: candidates.map(candidate => ({
+                candidateId: candidate.candidateId,
+                gender: 'female' as const,
+                confidence: 'low' as const,
+            })),
+        }));
+        const feature = vi.fn();
+        const details: Array<{ feature: unknown; finalClassification: string; classificationSource: string }> = [];
+        const noMediaBundle = {
+            ...firstPaymentBundle,
+            profiles: [{
+                ...firstPaymentBundle.profiles[0]!,
+                hasProfileImage: false,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            }],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: noMediaBundle,
+            runner: v211Runner({ nameOnly, feature }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: noMediaBundle.capture.evaluationPolicy,
+            onAccountAnalyzed(detail) {
+                details.push({
+                    feature: detail.feature,
+                    finalClassification: detail.finalClassification,
+                    classificationSource: detail.classificationSource,
+                });
+            },
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(details).toHaveLength(1);
+        expect(details[0]).toMatchObject({ feature: null, finalClassification: 'unresolved' });
+        expect(details[0]).toMatchObject({ classificationSource: 'name_only' });
+        expect(report.stages.featureAnalysis.calls).toBe(0);
+        expect(report.gender.unknown).toBe(1);
+    });
+
+    describe('(A) name-fallback for image-path unknowns (CONCIERGE_BATCH_NAME_FALLBACK_ENABLED)', () => {
+        function unresolvableImageProfile(ordinal: number, fullName: string) {
+            return {
+                ordinal,
+                isPrivate: false,
+                username: `image_unknown_${ordinal}`,
+                fullName,
+                hasProfileImage: true,
+                bio: null,
+                // No media at all: featureMedia/resolverMedia end up empty, so
+                // the candidate deterministically falls through to "unknown"
+                // regardless of the (unrelated to this test) admission rules.
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            };
+        }
+        const confidentMaleProfile = {
+            ordinal: 12,
+            isPrivate: false,
+            username: 'already_male',
+            fullName: '문창현',
+            hasProfileImage: true,
+            bio: null,
+            media: [{ selectionId: 'profile:12', kind: 'profile' as const, caption: null, jpegBase64: '/9j/2Q==' }],
+            triageSelectionIds: ['profile:12'],
+            featureSelectionIds: ['profile:12'],
+            resolverSelectionIds: ['profile:12'],
+            captions: [],
+            coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+        };
+        const fallbackBundle = {
+            ...firstPaymentBundle,
+            profiles: [
+                unresolvableImageProfile(10, '박찬주'),
+                unresolvableImageProfile(11, '김가람'),
+                confidentMaleProfile,
+            ],
+        } satisfies AnalysisV2ReplayBundle;
+
+        function fallbackRunner() {
+            const triage = vi.fn(async () => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown' as const,
+                        confidence: 'low' as const,
+                        ownerConsistency: 'not_visible' as const,
+                        evidenceSelectionIds: [],
+                    },
+                    routingDecision: 'route_to_feature_analysis' as const,
+                    routingReason: 'conserve_female_recall' as const,
+                    analyzedSelectionIds: [],
+                    v29AccountContext: 'uncertain' as const,
+                },
+            }));
+            const firstPass = vi.fn(async (input: { ordinal: number }) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: [`profile:${input.ordinal}`],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: [`profile:${input.ordinal}`],
+                },
+            }));
+            // Only the two truly-unknown candidates (박찬주 leans male, 김가람 is
+            // a genuine unisex/no-lean name) are ever offered to the fallback
+            // batch; 문창현 (already verified male via firstPass) never appears.
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: candidate.fullName === '박찬주' ? 'male' as const : 'unknown' as const,
+                    confidence: candidate.fullName === '박찬주' ? 'medium' as const : 'low' as const,
+                })),
+            }));
+            return { triage, firstPass, nameOnly };
+        }
+
+        it('fills only genuine unknowns from the name-only fallback, leaves a no-lean name unknown, and never revisits an already-verified candidate', async () => {
+            const { triage, firstPass, nameOnly } = fallbackRunner();
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: fallbackBundle,
+                runner: v211Runner({ triage, firstPass, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: fallbackBundle.capture.evaluationPolicy,
+                nameFallbackEnabled: true,
+            });
+
+            expect(nameOnly).toHaveBeenCalledOnce();
+            const fallbackCandidates = (nameOnly.mock.calls[0]?.[0] ?? []) as Array<{ candidateId: string; fullName: string }>;
+            expect([...fallbackCandidates].sort((left, right) => left.candidateId.localeCompare(right.candidateId)))
+                .toEqual([
+                    { candidateId: 'ordinal:10', fullName: '박찬주' },
+                    { candidateId: 'ordinal:11', fullName: '김가람' },
+                ]);
+
+            expect(report.accountOutputs.find(output => output.ordinal === 10)).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'name_only',
+            });
+            expect(report.accountOutputs.find(output => output.ordinal === 11)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            // Already classified male via firstPass/triage alone; the
+            // fallback must never overwrite it (and never even saw it).
+            expect(report.accountOutputs.find(output => output.ordinal === 12)).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'triage',
+            });
+            expect(report.gender).toEqual({ male: 2, female: 0, unknown: 1, unknownRate: 0.3333 });
+        });
+
+        it('off (default) leaves image-path unknowns untouched - byte parity', async () => {
+            const { triage, firstPass, nameOnly } = fallbackRunner();
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: fallbackBundle,
+                runner: v211Runner({ triage, firstPass, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: fallbackBundle.capture.evaluationPolicy,
+                // nameFallbackEnabled intentionally omitted (defaults to off).
+            });
+
+            expect(nameOnly).not.toHaveBeenCalled();
+            expect(report.accountOutputs.find(output => output.ordinal === 10)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            expect(report.accountOutputs.find(output => output.ordinal === 11)).toMatchObject({
+                finalClassification: 'unresolved',
+                classificationSource: 'unknown',
+            });
+            expect(report.gender).toEqual({ male: 1, female: 0, unknown: 2, unknownRate: 0.6667 });
+        });
+    });
+
+    describe('(B) feed-image triage for avatar-less candidates (CONCIERGE_BATCH_FEED_TRIAGE_ENABLED)', () => {
+        // A name that leans female (per the assertive name-only classifier)
+        // must not decide gender for a candidate whose feed photo is
+        // available - this is the 강태연/제성-style regression: avatar-less,
+        // but a real feed image exists and shows the account is male.
+        function avatarlessFeedProfile(overrides: { fullName: string }) {
+            return {
+                ordinal: 20,
+                isPrivate: false,
+                username: 'avatarless_with_feed',
+                fullName: overrides.fullName,
+                hasProfileImage: false,
+                bio: null,
+                media: [
+                    { selectionId: 'feed:20', kind: 'feed' as const, postId: 'p20', caption: null, jpegBase64: '/9j/2Q==' },
+                ],
+                triageSelectionIds: ['feed:20'],
+                featureSelectionIds: ['feed:20'],
+                resolverSelectionIds: ['feed:20'],
+                captions: [],
+                coverage: { selectedCount: 1, normalizedCount: 1, failures: [] },
+            };
+        }
+        function avatarlessNoFeedProfile(fullName: string) {
+            return {
+                ordinal: 21,
+                isPrivate: false,
+                username: 'avatarless_no_feed',
+                fullName,
+                hasProfileImage: false,
+                bio: null,
+                media: [],
+                triageSelectionIds: [],
+                featureSelectionIds: [],
+                resolverSelectionIds: [],
+                captions: [],
+                coverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            };
+        }
+        function confidentMaleFeedTriage() {
+            return vi.fn(async (input: { ordinal: number; media: readonly { kind: string }[] }) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: [`feed:${input.ordinal}`],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: [`feed:${input.ordinal}`],
+                },
+            }));
+        }
+
+        it('routes an avatar-less candidate with a female-leaning name but a real feed photo through feed-image triage, decided by the photo not the name', async () => {
+            const triage = confidentMaleFeedTriage();
+            const nameOnly = vi.fn();
+            const bundle20 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessFeedProfile({ fullName: '강태연' })],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle20,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle20.capture.evaluationPolicy,
+                feedTriageEnabled: true,
+            });
+
+            expect(nameOnly).not.toHaveBeenCalled();
+            expect(triage).toHaveBeenCalledOnce();
+            const [triageInput] = triage.mock.calls[0]!;
+            expect((triageInput as { media: readonly { kind: string }[] }).media.map(item => item.kind))
+                .toEqual(['feed']);
+            expect(report.accountOutputs[0]).toMatchObject({
+                finalClassification: 'verified_non_female',
+                classificationSource: 'triage',
+            });
+        });
+
+        it('leaves an avatar-less candidate with no feed media on the name-only path when feed triage is enabled', async () => {
+            const triage = vi.fn();
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: 'female' as const,
+                    confidence: 'medium' as const,
+                })),
+            }));
+            const bundle21 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessNoFeedProfile('최윤교')],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle21,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle21.capture.evaluationPolicy,
+                feedTriageEnabled: true,
+            });
+
+            expect(triage).not.toHaveBeenCalled();
+            expect(nameOnly).toHaveBeenCalledWith([{ candidateId: 'ordinal:21', fullName: '최윤교' }]);
+            expect(report.accountOutputs[0]).toMatchObject({ classificationSource: 'name_only' });
+        });
+
+        it('off (default) still routes an avatar-less-with-feed candidate through the name-only batch - byte parity', async () => {
+            const triage = vi.fn();
+            const nameOnly = vi.fn(async (candidates: readonly { candidateId: string; fullName: string }[]) => ({
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: candidates.map(candidate => ({
+                    candidateId: candidate.candidateId,
+                    gender: 'female' as const,
+                    confidence: 'medium' as const,
+                })),
+            }));
+            const bundle20 = {
+                ...firstPaymentBundle,
+                profiles: [avatarlessFeedProfile({ fullName: '강태연' })],
+            } satisfies AnalysisV2ReplayBundle;
+
+            const report = await runAnalysisV2AiReplay({
+                bundle: bundle20,
+                runner: v211Runner({ triage, nameOnly }),
+                mode: 'paid-ai',
+                paidAiOptIn: true,
+                evaluationPolicy: bundle20.capture.evaluationPolicy,
+                // feedTriageEnabled intentionally omitted (defaults to off).
+            });
+
+            expect(triage).not.toHaveBeenCalled();
+            expect(nameOnly).toHaveBeenCalledOnce();
+            expect(report.accountOutputs[0]).toMatchObject({ classificationSource: 'name_only' });
+        });
+    });
+
+    it('does not promote a concierge candidate to female without a feature result', async () => {
+        const triage = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'unknown' as const,
+                    confidence: 'low' as const,
+                    ownerConsistency: 'not_visible' as const,
+                    evidenceSelectionIds: [],
+                },
+                routingDecision: 'route_to_feature_analysis' as const,
+                routingReason: 'conserve_female_recall' as const,
+                analyzedSelectionIds: ['profile:female'],
+                v29AccountContext: 'personal' as const,
+            },
+        }));
+        const feature = vi.fn(async () => ({
+            outcome: 'failed' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+        }));
+        const resolveGender = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 1,
+            value: {
+                assessment: {
+                    inferredGender: 'female' as const,
+                    confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['profile:female', 'feed:female'],
+                },
+                analyzedSelectionIds: ['profile:female', 'feed:female'],
+            },
+        }));
+        const details: Array<{ feature: unknown; finalClassification: string }> = [];
+        const singleCandidateBundle = {
+            ...firstPaymentBundle,
+            profiles: [firstPaymentBundle.profiles[0]!],
+        } satisfies AnalysisV2ReplayBundle;
+
+        const report = await runAnalysisV2AiReplay({
+            bundle: singleCandidateBundle,
+            runner: v211Runner({ triage, feature, resolveGender }),
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            evaluationPolicy: singleCandidateBundle.capture.evaluationPolicy,
+            onAccountAnalyzed(detail) {
+                details.push({
+                    feature: detail.feature,
+                    finalClassification: detail.finalClassification,
+                });
+            },
+        });
+
+        expect(feature).toHaveBeenCalledOnce();
+        expect(resolveGender).toHaveBeenCalledOnce();
+        expect(details[0]).toMatchObject({ feature: null, finalClassification: 'unresolved' });
+        expect(report.gender.female).toBe(0);
+        expect(report.gender.unknown).toBe(1);
+    });
+
+    it('starts feature and resolver together and applies the production reconciliation to final gender', async () => {
+        let resolverStarted = false;
+        const featureResult = {
+            features: {
+                gender: 'female', genderConfidence: 'medium', ownerConsistency: 'same_person',
+                appearanceGrade: 3, exposureScore: 1, businessClassification: 'personal',
+                businessConfidence: 'medium', accountContext: 'personal',
+                marriageEvidence: 'none', partnerEvidence: 'none', partnerExclusionContext: 'none',
+                evidenceSelectionIds: { gender: ['m1'], appearance: ['m1'], exposure: ['m1'], business: ['m1'], accountContext: ['m1'], marriagePartner: [] },
+                oneLineOverview: '구체적인 관찰을 바탕으로 계정 맥락을 정리한 충분히 긴 한국어 총평입니다.',
+            },
+            finalGenderDecision: 'unresolved' as const,
+            analyzedSelectionIds: ['m1', 'm2'],
+        } satisfies FeatureAnalysisResult;
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: { inferredGender: 'unknown', confidence: 'low', ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: ['m1'] },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => {
+                    await Promise.resolve();
+                    expect(resolverStarted).toBe(true);
+                    return { outcome: 'ok', value: featureResult, attempts: 1, retries: 0, elapsedMs: 2 };
+                },
+                resolveGender: async () => {
+                    resolverStarted = true;
+                    return {
+                        outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 3,
+                        value: {
+                            assessment: { inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person', evidenceSelectionIds: ['m1', 'm2'] },
+                            analyzedSelectionIds: ['m1', 'm2'],
+                        },
+                    };
+                },
+            }),
+        });
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.resolver).toMatchObject({ ready: 1, applied: 1, inconclusive: 0, cutoff: 0 });
+    });
+
+    it('runs the v2.9 resolver for an ambiguous personal account without admitting feature', async () => {
+        const feature = vi.fn();
+        const resolveGender = vi.fn(async () => ({
+            outcome: 'ok' as const,
+            attempts: 1,
+            retries: 0,
+            elapsedMs: 3,
+            value: {
+                assessment: {
+                    inferredGender: 'female' as const,
+                    confidence: 'high' as const,
+                    ownerConsistency: 'same_person' as const,
+                    evidenceSelectionIds: ['m1', 'm2'],
+                },
+                analyzedSelectionIds: ['m1', 'm2'],
+            },
+        }));
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        ...bundle.capture.sourceLineage,
+                        policyVersions: {
+                            ...bundle.capture.sourceLineage.policyVersions,
+                            aiStage: 'ai-stage-policy-v2.9',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                        v29AccountContext: 'personal',
+                    },
+                }),
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).toHaveBeenCalledOnce();
+        expect(report.gender).toEqual({ male: 0, female: 1, unknown: 0, unknownRate: 0 });
+        expect(report.resolver).toMatchObject({
+            ready: 1, applied: 1, inconclusive: 0, cutoff: 0, capacitySkipped: 0,
+            admission: {
+                eligible: 1,
+                alreadyVerified: 0,
+                officialOrGroup: 0,
+                uncertainOrAbsent: 0,
+                insufficientMedia: 0,
+            },
+            outcomes: {
+                readyHighConfirmed: 1,
+                evidenceInsufficient: 0,
+                mixed: 0,
+                unknown: 0,
+                reconciliationApplied: 1,
+                reconciliationInconclusive: 0,
+                cutoff: 0,
+                capacitySkipped: 0,
+            },
+        });
+    });
+
+    // The genderResolution stage's global concurrent-slot cap (2, no
+    // request_id filter - shared across every concurrent replay) throws
+    // ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED when contended, surfaced here
+    // as outcome 'capacity_skipped'. Symmetric with 971b29ac's genderTriage
+    // fix: only this transient outcome is retried, with the same bounded
+    // attempt count and backoff.
+    function v29PersonalAmbiguousRunner(operations: Partial<ReplayAiRunner>): ReplayAiRunner {
+        return v29Runner({
+            triage: async () => ({
+                outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'unknown', confidence: 'low',
+                        ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: ['m1'],
+                    },
+                    routingDecision: 'route_to_feature_analysis',
+                    routingReason: 'conserve_female_recall',
+                    analyzedSelectionIds: ['m1', 'm2'],
+                    v29AccountContext: 'personal',
+                },
+            }),
+            feature: vi.fn(),
+            ...operations,
+        });
+    }
+    const v29Ai29BundleOverride: AnalysisV2ReplayBundle = {
+        ...bundle,
+        capture: {
+            ...bundle.capture,
+            sourceLineage: {
+                ...bundle.capture.sourceLineage,
+                policyVersions: {
+                    ...bundle.capture.sourceLineage.policyVersions,
+                    aiStage: 'ai-stage-policy-v2.9',
+                    scheduler: 'ai-scheduler-v1',
+                },
+            },
+        },
+    };
+    const resolvedFemaleValue = {
+        outcome: 'ok' as const,
+        attempts: 1, retries: 0, elapsedMs: 3,
+        value: {
+            assessment: {
+                inferredGender: 'female' as const, confidence: 'high' as const,
+                ownerConsistency: 'same_person' as const, evidenceSelectionIds: ['m1', 'm2'],
+            },
+            analyzedSelectionIds: ['m1', 'm2'],
+        },
+    };
+    /**
+     * The resolver's promise is tracked (not awaited) while the rest of the
+     * replay's required work continues; once every required task settles, any
+     * resolver not yet settled is cut off (see abortAndObserveResolvers /
+     * resolver.cutoff). In production a batch of many real Gemini calls keeps
+     * that barrier open long enough for an early-launched resolver's retry to
+     * land; a single-candidate test with instant mocks does not, so this fixture
+     * bundle's one private account is given an artificially slow privateNames
+     * response to hold the barrier open past the resolver's real retry backoff -
+     * the same "real work in flight elsewhere" cover the retry relies on in
+     * production, not a relaxation of the cutoff mechanism itself.
+     */
+    function slowPrivateNames(delayMs: number): NonNullable<ReplayAiRunner['privateNames']> {
+        return async () => {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            return { outcome: 'ok', attempts: 1, retries: 0, elapsedMs: delayMs, value: [] };
+        };
+    }
+
+    it('retries the resolver once after a transient capacity_skipped rejection, and applies the recovered result', async () => {
+        // Criterion 1: capacity_skipped once, then ok -> final outcome 'ok',
+        // resolver.ready increments (the candidate is not permanently lost).
+        let attempts = 0;
+        const resolveGender = vi.fn(async () => {
+            attempts += 1;
+            if (attempts === 1) {
+                return { outcome: 'capacity_skipped' as const, attempts: 1, retries: 0, elapsedMs: 0 };
+            }
+            return resolvedFemaleValue;
+        });
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({
+                resolveGender,
+                privateNames: slowPrivateNames(500),
+            }),
+        });
+
+        expect(resolveGender).toHaveBeenCalledTimes(2);
+        expect(report.resolver).toMatchObject({ ready: 1, applied: 1, cutoff: 0, capacitySkipped: 0 });
+    });
+
+    it('drops the candidate after exhausting resolver capacity_skipped retries, without exceeding the attempt cap', async () => {
+        // Criterion 2 + 4: capacity_skipped every time -> eventually dropped
+        // (same as today's worst case), resolver.capacitySkipped increments,
+        // and the retry loop is bounded (no infinite loop).
+        const resolveGender = vi.fn(async () => (
+            { outcome: 'capacity_skipped' as const, attempts: 1, retries: 0, elapsedMs: 0 }
+        ));
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({
+                resolveGender,
+                privateNames: slowPrivateNames(1_000),
+            }),
+        });
+
+        // Same retry cap as 971b29ac's genderTriage fix (3 attempts total).
+        expect(resolveGender).toHaveBeenCalledTimes(3);
+        expect(report.resolver.capacitySkipped).toBe(1);
+        expect(report.resolver.outcomes.capacitySkipped).toBe(1);
+        expect(report.resolver.ready).toBe(0);
+        expect(report.resolver.cutoff).toBe(0);
+    });
+
+    it('does not retry a genuinely rejected (non-capacity) resolver outcome', async () => {
+        // Criterion 3: rejected/failed outcomes are not transient capacity
+        // contention, so they must not be retried.
+        const resolveGender = vi.fn(async () => (
+            { outcome: 'rejected' as const, attempts: 1, retries: 0, elapsedMs: 5 }
+        ));
+        const report = await runAnalysisV2AiReplay({
+            bundle: v29Ai29BundleOverride,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29PersonalAmbiguousRunner({ resolveGender }),
+        });
+
+        expect(resolveGender).toHaveBeenCalledTimes(1);
+        expect(report.resolver.capacitySkipped).toBe(0);
+        expect(report.resolver.ready).toBe(0);
+    });
+
+    it('counts a verified-looking official account as official rather than already verified', async () => {
+        const feature = vi.fn();
+        const resolveGender = vi.fn();
+        const report = await runAnalysisV2AiReplay({
+            bundle: {
+                ...bundle,
+                capture: {
+                    ...bundle.capture,
+                    sourceLineage: {
+                        ...bundle.capture.sourceLineage,
+                        policyVersions: {
+                            ...bundle.capture.sourceLineage.policyVersions,
+                            aiStage: 'ai-stage-policy-v2.9',
+                            scheduler: 'ai-scheduler-v1',
+                        },
+                    },
+                },
+            },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v29Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'female',
+                            confidence: 'high',
+                            ownerConsistency: 'same_person',
+                            evidenceSelectionIds: ['m1', 'm2'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                        v29AccountContext: 'official_group_or_brand',
+                    },
+                }),
+                feature,
+                resolveGender,
+            }),
+        });
+
+        expect(feature).not.toHaveBeenCalled();
+        expect(resolveGender).not.toHaveBeenCalled();
+        expect(report.resolver.admission).toEqual({
+            eligible: 0,
+            alreadyVerified: 0,
+            officialOrGroup: 1,
+            uncertainOrAbsent: 0,
+            insufficientMedia: 0,
+        });
+    });
+
+    it('caps concurrently active public profiles at four', async () => {
+        let active = 0;
+        let maximum = 0;
+        const releases: Array<() => void> = [];
+        const publicProfiles = Array.from({ length: 5 }, (_, index) => ({
+            ...bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `public${index}`,
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: publicProfiles },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v27Runner({
+                triage: async () => {
+                    active++;
+                    maximum = Math.max(maximum, active);
+                    await new Promise<void>(resolve => releases.push(resolve));
+                    active--;
+                    return {
+                        outcome: 'ok',
+                        attempts: 1,
+                        retries: 0,
+                        elapsedMs: 1,
+                        value: {
+                            assessment: {
+                                inferredGender: 'male',
+                                confidence: 'high',
+                                ownerConsistency: 'same_person',
+                                evidenceSelectionIds: ['m1'],
+                            },
+                            routingDecision: 'exclude_high_confidence_male',
+                            routingReason: 'high_confidence_same_owner_male',
+                            analyzedSelectionIds: ['m1', 'm2'],
+                        },
+                    };
+                },
+            }),
+        });
+
+        await vi.waitFor(() => expect(releases).toHaveLength(4));
+        expect(maximum).toBe(4);
+        releases.splice(0, 4).forEach(release => release());
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+        releases.splice(0).forEach(release => release());
+        await expect(pending).resolves.toMatchObject({
+            gender: { male: 5, female: 0, unknown: 0 },
+        });
+        expect(maximum).toBe(4);
+    });
+
+    it('runs the private-name batch alongside public profile AI work', async () => {
+        let privateStarted = false;
+        let releasePrivate: (() => void) | undefined;
+        const privateNames = vi.fn(async () => {
+            privateStarted = true;
+            await new Promise<void>(resolve => {
+                releasePrivate = resolve;
+            });
+            return { outcome: 'ok' as const, calls: 1, attempts: 1, retries: 0, elapsedMs: 1 };
+        });
+        const triage = vi.fn(async () => {
+            expect(privateStarted).toBe(true);
+            releasePrivate?.();
+            return {
+                outcome: 'ok' as const,
+                attempts: 1,
+                retries: 0,
+                elapsedMs: 1,
+                value: {
+                    assessment: {
+                        inferredGender: 'male' as const,
+                        confidence: 'high' as const,
+                        ownerConsistency: 'same_person' as const,
+                        evidenceSelectionIds: ['m1'],
+                    },
+                    routingDecision: 'exclude_high_confidence_male' as const,
+                    routingReason: 'high_confidence_same_owner_male' as const,
+                    analyzedSelectionIds: ['m1', 'm2'],
+                },
+            };
+        });
+
+        await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            runner: v27Runner({ privateNames, triage }),
+        });
+        expect(privateNames).toHaveBeenCalledOnce();
+        expect(triage).toHaveBeenCalledOnce();
+    });
+
+    it('cuts off an opportunistic resolver without blocking the required result', async () => {
+        let aborted = false;
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({
+                    signal,
+                    onAttemptStart,
+                    onAttemptTelemetry,
+                }) => new Promise(resolve => {
+                    onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onAttemptTelemetry?.({
+                        attempt: 1,
+                        retryCount: 0,
+                        disposition: 'rate_limited',
+                        latencyMs: 5,
+                    });
+                    onAttemptStart?.({ attempt: 2, retryCount: 1 });
+                    signal.addEventListener('abort', () => {
+                        aborted = true;
+                        setTimeout(() => resolve({
+                            outcome: 'failed', attempts: 1, retries: 0, elapsedMs: 20,
+                        }), 20);
+                    }, { once: true });
+                }),
+            }),
+        });
+
+        expect(aborted).toBe(true);
+        expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.stages.genderResolution).toMatchObject({
+            calls: 2,
+            retries: 1,
+            rateLimited: 1,
+            failureDisposition: { rate_limited: 1, cutoff: 1 },
+        });
+        expect(report.stages.genderResolution.meanLatencyMs).toBeGreaterThanOrEqual(3);
+        expect(report.gender).toEqual({ male: 0, female: 0, unknown: 1, unknownRate: 1 });
+    });
+
+    it('marks retry-backoff cutoff without fabricating an attempt or latency', async () => {
+        const report = await runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({
+                    signal,
+                    onAttemptStart,
+                    onAttemptTelemetry,
+                }) => new Promise(resolve => {
+                    onAttemptStart?.({ attempt: 1, retryCount: 0 });
+                    onAttemptTelemetry?.({
+                        attempt: 1,
+                        retryCount: 0,
+                        disposition: 'rate_limited',
+                        latencyMs: 5,
+                    });
+                    signal.addEventListener('abort', () => {
+                        resolve({
+                            outcome: 'failed',
+                            attempts: 1,
+                            retries: 0,
+                            elapsedMs: 5,
+                        });
+                    }, { once: true });
+                }),
+            }),
+        });
+
+        expect(report.resolver).toMatchObject({ cutoff: 1, applied: 0 });
+        expect(report.stages.genderResolution).toMatchObject({
+            calls: 1,
+            retries: 0,
+            rateLimited: 1,
+            meanLatencyMs: 5,
+            failureDisposition: {
+                rate_limited: 1,
+                backoff_cutoff: 1,
+            },
+        });
+        expect(report.stages.genderResolution.failureDisposition.cutoff).toBeUndefined();
+    });
+
+    it('lets all required profile work finish before cutting off pending resolvers', async () => {
+        const publicProfiles = Array.from({ length: 5 }, (_, index) => ({
+            ...bundle.profiles[0]!,
+            ordinal: index + 1,
+            username: `candidate${index}`,
+        }));
+        let resolverStarts = 0;
+        let everyRequiredProfileStartedBeforeAbort = true;
+        const report = await runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: publicProfiles },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 1,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'failed',
+                    attempts: 1,
+                    retries: 0,
+                    elapsedMs: 1,
+                }),
+                resolveGender: async ({ signal }) => {
+                    resolverStarts++;
+                    return new Promise(resolve => {
+                        signal.addEventListener('abort', () => {
+                            if (resolverStarts !== publicProfiles.length) {
+                                everyRequiredProfileStartedBeforeAbort = false;
+                            }
+                            resolve({
+                                outcome: 'failed',
+                                attempts: 0,
+                                retries: 0,
+                                elapsedMs: 1,
+                            });
+                        }, { once: true });
+                    });
+                },
+            }),
+        });
+
+        expect(resolverStarts).toBe(5);
+        expect(everyRequiredProfileStartedBeforeAbort).toBe(true);
+        expect(report.resolver.cutoff).toBe(5);
+        expect(report.gender.unknown).toBe(5);
+    });
+
+    it('aborts and observes a launched resolver when private-name work rejects', async () => {
+        let rejectPrivate!: (error: Error) => void;
+        let resolverSignal: AbortSignal | undefined;
+        let resolverRejected = false;
+        const privateNames = vi.fn(() => new Promise<never>((_, reject) => {
+            rejectPrivate = reject;
+        }));
+        const resolveGender = vi.fn((input: Parameters<
+            NonNullable<ReplayAiRunner['resolveGender']>
+        >[0]) => new Promise<never>((_, reject) => {
+            resolverSignal = input.signal;
+            input.signal.addEventListener('abort', () => {
+                resolverRejected = true;
+                reject(new Error('resolver aborted'));
+            }, { once: true });
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle,
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 10,
+            runner: v27Runner({
+                privateNames,
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        features: {
+                            gender: 'unknown',
+                            genderConfidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            appearanceGrade: 3,
+                            exposureScore: 0,
+                            businessClassification: 'uncertain',
+                            businessConfidence: 'low',
+                            accountContext: 'uncertain',
+                            marriageEvidence: 'none',
+                            partnerEvidence: 'none',
+                            partnerExclusionContext: 'none',
+                            evidenceSelectionIds: {
+                                gender: [], appearance: [], exposure: [],
+                                business: [], accountContext: [], marriagePartner: [],
+                            },
+                            oneLineOverview: '공개 단서가 부족해 계정 맥락을 확정하기 어렵습니다.',
+                        },
+                        finalGenderDecision: 'unresolved',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                resolveGender,
+            }),
+        });
+
+        await vi.waitFor(() => expect(resolveGender).toHaveBeenCalledOnce());
+        rejectPrivate(new Error('private failed'));
+        await expect(pending).rejects.toThrow('private failed');
+        expect(resolverSignal?.aborted).toBe(true);
+        expect(resolverRejected).toBe(true);
+    });
+
+    it('aborts and observes a launched resolver when feature work rejects', async () => {
+        let rejectFeature!: (error: Error) => void;
+        let resolverSignal: AbortSignal | undefined;
+        let resolverRejected = false;
+        const resolveGender = vi.fn((input: Parameters<
+            NonNullable<ReplayAiRunner['resolveGender']>
+        >[0]) => new Promise<never>((_, reject) => {
+            resolverSignal = input.signal;
+            input.signal.addEventListener('abort', () => {
+                resolverRejected = true;
+                reject(new Error('resolver aborted'));
+            }, { once: true });
+        }));
+        const pending = runAnalysisV2AiReplay({
+            bundle: { ...bundle, profiles: [bundle.profiles[0]!] },
+            mode: 'paid-ai',
+            paidAiOptIn: true,
+            resolverCutoffMs: 10,
+            runner: v27Runner({
+                triage: async () => ({
+                    outcome: 'ok', attempts: 1, retries: 0, elapsedMs: 1,
+                    value: {
+                        assessment: {
+                            inferredGender: 'unknown',
+                            confidence: 'low',
+                            ownerConsistency: 'multiple_or_unclear',
+                            evidenceSelectionIds: ['m1'],
+                        },
+                        routingDecision: 'route_to_feature_analysis',
+                        routingReason: 'conserve_female_recall',
+                        analyzedSelectionIds: ['m1', 'm2'],
+                    },
+                }),
+                feature: () => new Promise<never>((_, reject) => {
+                    rejectFeature = reject;
+                }),
+                resolveGender,
+            }),
+        });
+
+        await vi.waitFor(() => expect(resolveGender).toHaveBeenCalledOnce());
+        rejectFeature(new Error('feature failed'));
+        await expect(pending).rejects.toThrow('feature failed');
+        expect(resolverSignal?.aborted).toBe(true);
+        expect(resolverRejected).toBe(true);
+    });
+});

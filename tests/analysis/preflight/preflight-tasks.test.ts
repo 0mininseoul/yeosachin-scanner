@@ -1,0 +1,375 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+    PreflightTaskEnqueueError,
+    betaPreflightPrepareTaskId,
+    enqueueBetaPreflightPrepareTask,
+    enqueuePreflightTask,
+    preflightEnqueueFailureCode,
+    preflightEnqueueFailureMetadata,
+    freshAdmissionTaskId,
+    enqueuePrecheckoutBliteTask,
+    precheckoutBliteTaskId,
+    getPreflightTasksConfig,
+    preflightTaskId,
+    resolvePreflightDispatchPolicy,
+    verifyPreflightTaskAuthorization,
+    type PreflightTasksConfig,
+} from '../../../lib/services/analysis/preflight-tasks';
+
+const preflightId = '123e4567-e89b-42d3-a456-426614174000';
+const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
+const prepareToken = preflightId.replace(/0$/, '6');
+const config: PreflightTasksConfig = {
+    workloadRole: 'preflight',
+    project: 'example-project',
+    location: 'asia-northeast3',
+    queue: 'analysis-preflight',
+    targetUrl: 'https://worker.example.com/api/analysis/preflight/worker',
+    oidcAudience: 'https://worker.example.com',
+    serviceAccountEmail: 'preflight-task@example-project.iam.gserviceaccount.com',
+    callerAuth: { mode: 'adc', projectId: 'example-project' },
+};
+
+function configEnv(): Record<string, string> {
+    return {
+        PREFLIGHT_TASKS_ENABLED: 'true',
+        PREFLIGHT_TASKS_PROJECT: config.project,
+        PREFLIGHT_TASKS_LOCATION: config.location,
+        PREFLIGHT_TASKS_QUEUE: config.queue,
+        PREFLIGHT_TASKS_TARGET_URL: config.targetUrl,
+        PREFLIGHT_TASKS_OIDC_AUDIENCE: config.oidcAudience,
+        PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: config.serviceAccountEmail,
+        PREFLIGHT_TASKS_CALLER_AUTH_MODE: 'adc',
+        ANALYSIS_WORKLOAD_ROLE: 'preflight',
+    };
+}
+
+describe('preflight Cloud Tasks', () => {
+    it('reduces enqueue failures to bounded non-sensitive diagnostic codes', () => {
+        expect(preflightEnqueueFailureCode(new Error(
+            "The 'x-vercel-oidc-token' header is missing from the request."
+        ))).toBe('OIDC_TOKEN_UNAVAILABLE');
+        expect(preflightEnqueueFailureCode(new Error(
+            'Failed to exchange token: rejected'
+        ))).toBe('VERCEL_OIDC_EXCHANGE_REJECTED');
+        expect(preflightEnqueueFailureCode({
+            code: 7,
+            message: 'caller lacks cloudtasks.tasks.create',
+        })).toBe('CLOUD_TASKS_PERMISSION_DENIED');
+        expect(preflightEnqueueFailureCode({
+            cause: { message: 'iamcredentials.googleapis.com generateAccessToken failed' },
+        })).toBe('SERVICE_ACCOUNT_IMPERSONATION_REJECTED');
+        expect(preflightEnqueueFailureCode(new Error('opaque provider error')))
+            .toBe('UNKNOWN');
+        expect(preflightEnqueueFailureMetadata({
+            name: 'GoogleError',
+            code: 3,
+            message: 'must not escape',
+        })).toEqual({
+            errorName: 'GoogleError',
+            providerCode: '3',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            cause: { name: 'GaxiosError', code: 'INVALID_TARGET' },
+        })).toEqual({
+            errorName: 'GaxiosError',
+            providerCode: 'INVALID_TARGET',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            name: 'unsafe name!', code: 'secret:value',
+        })).toEqual({
+            errorName: 'UnknownError',
+            providerCode: 'ABSENT',
+            missingModule: 'ABSENT',
+        });
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '@grpc/grpc-js/build/src/index'",
+        }).missingModule).toBe('@grpc/grpc-js');
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '../../private/customer-id'",
+        }).missingModule).toBe('REDACTED');
+        expect(preflightEnqueueFailureMetadata({
+            code: 'MODULE_NOT_FOUND',
+            message: "Cannot find module '../../build/protos/protos.json'",
+        }).missingModule).toBe('protos.json');
+    });
+
+    it('validates the full HTTPS path, audience, and service account configuration', () => {
+        expect(getPreflightTasksConfig(configEnv())).toEqual(config);
+        expect(() => getPreflightTasksConfig({
+            ...configEnv(),
+            PREFLIGHT_TASKS_TARGET_URL: 'https://worker.example.com/api/analysis/step',
+        })).toThrow('task target must be /api/analysis/preflight/worker');
+        expect(() => getPreflightTasksConfig({
+            ...configEnv(),
+            PREFLIGHT_TASKS_OIDC_AUDIENCE: 'https://other.example.com',
+        })).toThrow('OIDC audience');
+        expect(() => getPreflightTasksConfig({
+            ...configEnv(),
+            PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL: 'not-an-email',
+        })).toThrow('invalid service account');
+        expect(() => getPreflightTasksConfig({
+            ...configEnv(),
+            PREFLIGHT_TASKS_CALLER_AUTH_MODE: '',
+        })).toThrow('PREFLIGHT_TASKS_CALLER_AUTH_MODE');
+        expect(() => getPreflightTasksConfig({
+            ...configEnv(),
+            K_SERVICE: 'analysis-worker',
+            PREFLIGHT_TASKS_CALLER_AUTH_MODE: 'vercel-wif',
+        })).toThrow('Cloud Run must use attached ADC');
+    });
+
+    it('uses the same dedicated WIF caller while preserving the preflight task identity', () => {
+        const providerResource =
+            'projects/123456789012/locations/global/workloadIdentityPools/'
+            + 'vercel-production/providers/ai-baram-detector';
+        const resolved = getPreflightTasksConfig({
+            ...configEnv(),
+            PREFLIGHT_TASKS_CALLER_AUTH_MODE: 'vercel-wif',
+            PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL:
+                'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com',
+            GCP_VERCEL_WIF_PROVIDER_RESOURCE: providerResource,
+            VERCEL: '1',
+            VERCEL_ENV: 'production',
+        });
+        expect(resolved?.serviceAccountEmail).toBe(config.serviceAccountEmail);
+        expect(resolved?.callerAuth).toMatchObject({
+            mode: 'vercel-wif',
+            stsAudience: `//iam.googleapis.com/${providerResource}`,
+            oidcTokenAudience: `https://iam.googleapis.com/${providerResource}`,
+            enqueuerServiceAccountEmail:
+                'analysis-v2-enqueuer@example-project.iam.gserviceaccount.com',
+        });
+    });
+
+    it('permits local after execution only through an explicit non-production switch', () => {
+        expect(resolvePreflightDispatchPolicy({})).toEqual({ mode: 'unavailable' });
+        expect(resolvePreflightDispatchPolicy({
+            NODE_ENV: 'test',
+            PREFLIGHT_LOCAL_AFTER_ENABLED: 'true',
+        })).toEqual({ mode: 'local_after' });
+        expect(() => resolvePreflightDispatchPolicy({
+            NODE_ENV: 'production',
+            PREFLIGHT_LOCAL_AFTER_ENABLED: 'true',
+        })).toThrow('forbidden in production');
+        expect(resolvePreflightDispatchPolicy(configEnv())).toEqual({ mode: 'queue', config });
+    });
+
+    it('creates one deterministic OIDC task', async () => {
+        const createTask = vi.fn<(
+            request: Record<string, unknown>
+        ) => Promise<unknown[]>>().mockResolvedValue([{}]);
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p, _l, _q, task) => `queue-path/tasks/${task}`),
+            createTask,
+        };
+
+        expect(preflightTaskId(preflightId, 1)).toBe(`preflight-${preflightId}-g1`);
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('enqueued');
+        const request = createTask.mock.calls[0][0] as {
+            task: {
+                name: string;
+                dispatchDeadline: { seconds: number };
+                httpRequest: {
+                    body: string;
+                    oidcToken: { audience: string; serviceAccountEmail: string };
+                };
+            };
+        };
+        expect(request.task.name).toContain(`preflight-${preflightId}-g1`);
+        expect(request.task.dispatchDeadline.seconds).toBe(120);
+        expect(request.task.httpRequest.oidcToken).toEqual({
+            audience: config.oidcAudience,
+            serviceAccountEmail: config.serviceAccountEmail,
+        });
+        expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
+            .toEqual({ workloadRole: 'preflight', preflightId });
+    });
+
+    it('creates one deterministic source-only B-lite task', async () => {
+        const createTask = vi.fn().mockResolvedValue([{}]);
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+        expect(precheckoutBliteTaskId(preflightId)).toBe(`preflight-blite-${preflightId}`);
+        await expect(enqueuePrecheckoutBliteTask(preflightId, { config, client }))
+            .resolves.toBe('enqueued');
+        const request = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
+        expect(JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()))
+            .toEqual({ workloadRole: 'preflight', kind: 'precheckout_blite', preflightId });
+    });
+
+    it('treats the UUID-named task as idempotent when Cloud Tasks reports it exists', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('exists');
+        expect(createTask).toHaveBeenCalledOnce();
+    });
+
+    it('confirms an ambiguous response loss through deterministic ALREADY_EXISTS replay', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 4 })
+            .mockRejectedValueOnce({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('exists');
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
+    });
+
+    it('retries one ambiguous failure and accepts a subsequent create', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 14 })
+            .mockResolvedValueOnce([{}]);
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        await expect(enqueuePreflightTask(preflightId, 1, { config, client }))
+            .resolves.toBe('enqueued');
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
+    });
+
+    it('classifies a definitive rejection without retrying', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 7 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'terminal' });
+        expect(createTask).toHaveBeenCalledOnce();
+    });
+
+    it('keeps resource exhaustion replayable after the bounded retry', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 8 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'replayable' });
+        expect(createTask).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves an ambiguous outcome after the bounded deterministic retry', async () => {
+        const createTask = vi.fn()
+            .mockRejectedValueOnce({ code: 4 })
+            .mockRejectedValueOnce({ code: 7 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+
+        const error = await enqueuePreflightTask(preflightId, 1, { config, client })
+            .catch(caught => caught);
+        expect(error).toBeInstanceOf(PreflightTaskEnqueueError);
+        expect(error).toMatchObject({ disposition: 'replayable' });
+        expect(createTask).toHaveBeenCalledTimes(2);
+        expect(createTask.mock.calls[0][0]).toEqual(createTask.mock.calls[1][0]);
+    });
+
+    it('replays a deterministic beta-prepare task without reserving ordinary dispatch', async () => {
+        const createTask = vi.fn().mockRejectedValue({ code: 6 });
+        const client = {
+            queuePath: vi.fn(() => 'queue-path'),
+            taskPath: vi.fn((_p: string, _l: string, _q: string, task: string) => (
+                `queue-path/tasks/${task}`
+            )),
+            createTask,
+        };
+        const ownerId = '223e4567-e89b-42d3-a456-426614174000';
+        expect(betaPreflightPrepareTaskId(preflightId, 3, prepareToken))
+            .toBe(`preflight-beta-prepare-${preflightId}-g3-t${prepareToken}`);
+        await expect(enqueueBetaPreflightPrepareTask(
+            preflightId, ownerId, 3, prepareToken, { config, client }
+        ))
+            .resolves.toBe('exists');
+        const task = createTask.mock.calls[0][0] as { task: { httpRequest: { body: string } } };
+        expect(JSON.parse(Buffer.from(task.task.httpRequest.body, 'base64').toString()))
+            .toEqual({
+                kind: 'beta_prepare', preflightId, userId: ownerId,
+                workloadRole: 'preflight',
+                prepareGeneration: 3, prepareToken,
+            });
+    });
+
+    it('rejects malformed beta prepare fences before touching Cloud Tasks', async () => {
+        expect(() => betaPreflightPrepareTaskId(preflightId, 0, prepareToken))
+            .toThrow('invalid beta prepare generation');
+        expect(() => betaPreflightPrepareTaskId(preflightId, 1, 'not-a-token'))
+            .toThrow('invalid beta prepare token');
+    });
+
+    it('accepts only a verified token from the configured service account', async () => {
+        const verifier = {
+            verifyIdToken: vi.fn(async () => ({
+                getPayload: () => ({
+                    email: config.serviceAccountEmail,
+                    email_verified: true,
+                }),
+            })),
+        };
+        await expect(verifyPreflightTaskAuthorization('Bearer signed', {
+            config,
+            verifier,
+        })).resolves.toBe(true);
+        expect(verifier.verifyIdToken).toHaveBeenCalledWith({
+            idToken: 'signed',
+            audience: config.oidcAudience,
+        });
+        await expect(verifyPreflightTaskAuthorization('Bearer signed', {
+            config,
+            verifier: {
+                verifyIdToken: async () => ({
+                    getPayload: () => ({ email: 'other@example.com', email_verified: true }),
+                }),
+            },
+        })).resolves.toBe(false);
+    });
+});

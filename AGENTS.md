@@ -64,7 +64,9 @@ yeosachin-scanner/
 
 ### Key Flows
 
-**분석 파이프라인** (`/api/analysis/run`):
+**현재 분석 실행 진입점**: `app/api/analysis/preflight/` → admission → `lib/services/analysis/v2-tasks.ts` → `app/api/analysis/v2/worker/route.ts` → `lib/services/analysis/v2-worker.ts`. AI는 `v2-ai-scoring-production.ts`와 `lib/services/ai/v2-staged-analysis.ts`에서 찾는다. `/api/analysis/run`과 `/step`은 기존/호환 경로이므로 신규 작업의 기본 진입점으로 보지 않는다.
+
+**분석 단계 개요**:
 1. 프로필 수집 → 팔로워/팔로잉 수집 → 맞팔 추출
 2. Gemini로 성별 판단 → 이성 필터링
 3. 상호작용 수집 (좋아요, 댓글, 태그, 멘션)
@@ -97,6 +99,14 @@ yeosachin-scanner/
 
 ### Protected Routes
 미들웨어에서 `/analyze`, `/progress`, `/result` 경로는 로그인 필수로 처리
+
+## AI 작업 범위와 검증
+
+- 기능별 실행 진입점과 검증 위치는 `tests/README.md`에서 찾는다. 구현마다 테스트 파일 하나를 만들지 않는다.
+- 테스트는 `tests/` 아래 기능별로 유지한다. 작은 순수 검증은 기능 경계로 묶고, mock·환경·DB 수명이 다른 검증은 분리한다.
+- 기본 CI는 타입체크만 유지한다. 작은 변경마다 전체 테스트·전체 migration·과거 계획을 읽거나 실행하지 않는다.
+- 먼저 대상 코드와 직접 caller를 읽고, 필요할 때 해당 기존 검사만 실행한다. 중요한 동작을 기존 검사로 확인할 수 없는 경우가 아니면 새 테스트를 추가하지 않는다.
+- DB 변경은 해당 RPC의 최신 정의와 실제 reader/writer·권한·보존 데이터를 확인한다. 코드/테스트 삭제를 테이블 삭제 허가로 해석하지 않는다.
 
 ## Supabase 운영 규칙
 

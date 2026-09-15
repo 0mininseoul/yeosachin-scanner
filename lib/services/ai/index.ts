@@ -2,7 +2,6 @@
 export { analyzeGender, analyzeGenderBatch } from './gender-analysis';
 export { analyzePhotogenic, analyzePhotogenicBatch } from './photogenic-analysis';
 export { analyzeExposure, analyzeExposureBatch } from './exposure-analysis';
-export { analyzeCommentIntimacy, analyzeCommentIntimacyBatch } from './intimacy-analysis';
 export {
     analyzeWithGemini,
     imageUrlToBase64,
@@ -82,6 +81,3 @@ export {
     type PrivateNameAccountInput,
     type PrivateNameAnalysisResult,
 } from './private-name-analysis';
-
-// 기존 호환성 (deprecated)
-export { analyzeAppearance } from './appearance-analysis';

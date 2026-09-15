@@ -1,0 +1,47 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    consumeLandingLeadCaptureToken,
+    readLandingLeadCaptureToken,
+    reportLandingLead,
+} from '../../lib/services/landing-lead';
+
+describe('reportLandingLead', () => {
+    beforeEach(() => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            json: vi.fn().mockResolvedValue({
+                status: 'stored',
+                captureToken: 'v1.capture.signature',
+            }),
+        }));
+        vi.stubGlobal('document', { referrer: 'https://ref.example' });
+    });
+    afterEach(() => {
+        consumeLandingLeadCaptureToken();
+        vi.unstubAllGlobals();
+    });
+
+    it('POSTs id, raw input, attribution and referrer as JSON', () => {
+        reportLandingLead({ instagramId: 'suzy', rawInput: '@Suzy', search: '?utm_source=instagram' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+        const [url, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(url).toBe('/api/leads');
+        expect(init.method).toBe('POST');
+        const body = JSON.parse(init.body);
+        expect(body.instagramId).toBe('suzy');
+        expect(body.rawInput).toBe('@Suzy');
+        expect(body.referrer).toBe('https://ref.example');
+        expect(body.attribution.source).toBe('instagram');
+    });
+
+    it('keeps the opaque capture token available for the following preflight request', async () => {
+        reportLandingLead({ instagramId: 'suzy', rawInput: 'suzy', search: '' });
+        await vi.waitFor(() => expect(readLandingLeadCaptureToken()).toBe('v1.capture.signature'));
+    });
+
+    it('never throws even if fetch rejects', () => {
+        (fetch as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+        expect(() => reportLandingLead({ instagramId: 'suzy', rawInput: 'suzy', search: '' }))
+            .not.toThrow();
+    });
+});
