@@ -1080,7 +1080,10 @@ describe('protected platform adapters', () => {
             if (url.pathname === `/v2/deployments/${deploymentId}/aliases` && request.method === 'POST') {
                 expect(JSON.parse(request.body!)).toEqual({ alias: 'desired.example.invalid', redirect: null });
                 aliasDeployment = deploymentId;
-                return response(request, 200, { alias: 'desired.example.invalid', deploymentId, projectId });
+                return response(request, 200, {
+                    uid: 'alias-fixture', alias: 'desired.example.invalid',
+                    created: '2026-09-15T00:00:00.000Z', oldDeploymentId,
+                });
             }
             if (url.pathname === `/v2/deployments/${deploymentId}/aliases`) return response(request, 200, { aliases: [{ alias: 'desired.example.invalid' }] });
             throw new Error(`unexpected fixture request ${request.method} ${request.url}`);
