@@ -233,7 +233,7 @@ export function createLiveProductionVerifier(options: LiveProductionVerifierOpti
                     leaseCheck: assertReadOnlyScope,
                 });
                 const validationNow = now();
-                // Re-read the journal/epoch lock after every provider fact. A
+                // Re-read the journal/epoch lock after the provider-read pass. A
                 // takeover during this read pass must invalidate the snapshot,
                 // even when no new transition has appeared yet.
                 const finalState = await readReadOnlyScope();
