@@ -1080,7 +1080,10 @@ describe('protected platform adapters', () => {
             if (url.pathname === `/v2/deployments/${deploymentId}/aliases` && request.method === 'POST') {
                 expect(JSON.parse(request.body!)).toEqual({ alias: 'desired.example.invalid', redirect: null });
                 aliasDeployment = deploymentId;
-                return response(request, 200, { alias: 'desired.example.invalid', deploymentId, projectId });
+                return response(request, 200, {
+                    uid: 'alias-fixture', alias: 'desired.example.invalid',
+                    created: '2026-09-15T00:00:00.000Z', oldDeploymentId,
+                });
             }
             if (url.pathname === `/v2/deployments/${deploymentId}/aliases`) return response(request, 200, { aliases: [{ alias: 'desired.example.invalid' }] });
             throw new Error(`unexpected fixture request ${request.method} ${request.url}`);
@@ -1134,7 +1137,7 @@ describe('bounded paused queue causal evidence', () => {
         'paid-old@' + evidenceProject + '.iam.gserviceaccount.com',
         'paid-desired@' + evidenceProject + '.iam.gserviceaccount.com',
     ] as const;
-    const evidenceNow = 1_000_000;
+    const evidenceNow = Date.parse('2026-09-16T01:00:00.000Z');
     const evidenceStart = evidenceNow - 60_000;
 
     type EvidenceFixtureOptions = Readonly<{
@@ -1197,7 +1200,7 @@ describe('bounded paused queue causal evidence', () => {
 
     it('returns empty paused queue evidence with stable safe digests', async () => {
         const f = fixture();
-        const result = await readPausedQueueEvidence(input(f.transport));
+        const result = await readPausedQueueEvidence({ ...input(f.transport), intervalStartMs: evidenceNow - 20 * 60_000 });
         expect(result.queues).toHaveLength(2);
         expect(result.queues.every(queue => queue.state === 'PAUSED' && queue.taskCount === 0 && queue.complete)).toBe(true);
         expect(result.queues.every(queue => queue.purgeTime === '2026-09-16T00:00:00.000Z')).toBe(true);
@@ -1207,6 +1210,8 @@ describe('bounded paused queue causal evidence', () => {
         expect(result.cloudLoggingCompleteness).toBe(false);
         expect(result).not.toHaveProperty('iam');
         expect(result.snapshotDigest).toMatch(/^[0-9a-f]{64}$/);
+        await expect(readPausedQueueEvidence({ ...input(f.transport), intervalStartMs: evidenceNow - 45 * 60_000 - 1 }))
+            .rejects.toThrow('EVIDENCE_UNAVAILABLE');
         expect(JSON.stringify(result)).not.toContain('/tasks/');
         const taskRequests = f.fake.requests.filter(request => request.url.includes('/tasks?'));
         expect(taskRequests).toHaveLength(2);

@@ -595,16 +595,17 @@ describe('paused queue idle causal integration', () => {
     it('uses one bounded aggregate SELECT and preserves millisecond source timing', async () => {
         const calls: string[] = [];
         let leases = 0;
+        const end = NOW + 20 * 60_000 + 1;
         const result = await readIdleAdmissionEvidence({
-            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: NOW + 1, now: () => NOW + 1,
+            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: end, now: () => end,
             leaseCheck: async () => { leases += 1; },
             query: async sql => {
                 calls.push(sql);
                 return { rows: [{ provider_active: '0', preflight_active: '0', request_active: '0', job_active: '0',
-                    provider_changes: '0', preflight_changes: '0', request_changes: '0', job_changes: '0', observed_at_ms: String(NOW + 1) }] };
+                    provider_changes: '0', preflight_changes: '0', request_changes: '0', job_changes: '0', observed_at_ms: String(end) }] };
             },
         });
-        expect(result).toMatchObject({ count: 0, observedAtMs: NOW + 1 });
+        expect(result).toMatchObject({ count: 0, observedAtMs: end });
         expect(leases).toBe(2);
         expect(calls).toHaveLength(1);
         expect(calls[0]).toContain('analysis_provider_admission_leases');
@@ -619,8 +620,8 @@ describe('paused queue idle causal integration', () => {
 
     it('rejects an admission interval wider than the bounded idle proof window', async () => {
         await expect(readIdleAdmissionEvidence({
-            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: NOW + 15 * 60_000 + 1,
-            now: () => NOW + 15 * 60_000 + 1, leaseCheck: async () => undefined,
+            origin: IDLE_SUPABASE_ORIGIN, windowStartMs: NOW, windowEndMs: NOW + 45 * 60_000 + 1,
+            now: () => NOW + 45 * 60_000 + 1, leaseCheck: async () => undefined,
             query: async () => { throw new Error('query must not run'); },
         })).rejects.satisfy(expectEvidenceUnavailable);
     });

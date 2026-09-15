@@ -14,7 +14,9 @@ import { AuthenticatedProtectedTransport } from './platform';
 const CLOUD_TASKS_HOSTS = new Set(['cloudtasks.googleapis.com']);
 const TASK_PAGE_SIZE = 1_000;
 const MAX_TASK_PAGES = 100;
-const MAX_INTERVAL_MS = 15 * 60 * 1_000;
+// Cover the bounded 30-minute apply plus independent verification reads.
+// Lease renewal, exact queue conservation and the 31-day retention bound stay independent.
+export const MAX_ZERO_WORK_INTERVAL_MS = 45 * 60_000;
 const MAX_RETENTION_MS = 31 * 24 * 60 * 60 * 1_000;
 const MAX_STRING_LENGTH = 8_192;
 const TRUSTED_SCOPE = {
@@ -117,7 +119,7 @@ function checkProject(project: string): void {
 function checkInterval(input: NormalizedReadInput, value: number): number {
     if (!Number.isSafeInteger(value) || value < input.intervalStartMs) fail('EVIDENCE_UNAVAILABLE');
     const elapsed = value - input.intervalStartMs;
-    if (elapsed > MAX_INTERVAL_MS || elapsed >= MAX_RETENTION_MS) fail('EVIDENCE_UNAVAILABLE');
+    if (elapsed > MAX_ZERO_WORK_INTERVAL_MS || elapsed >= MAX_RETENTION_MS) fail('EVIDENCE_UNAVAILABLE');
     return value;
 }
 

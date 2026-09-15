@@ -212,7 +212,12 @@ export class VercelAdapter {
             beforeDispatch: leaseCheck,
         });
         const post = object(response.value);
-        if (post.alias !== options.alias || post.projectId !== options.projectId || post.deploymentId !== options.deploymentId
+        // Assign Alias returns alias metadata, not the project/deployment
+        // ownership fields returned by Get Alias. Prove ownership below with
+        // a fresh native GET, and reject contradictory optional fields here.
+        if (post.alias !== options.alias
+            || (post.projectId !== undefined && post.projectId !== options.projectId)
+            || (post.deploymentId !== undefined && post.deploymentId !== options.deploymentId)
             || (post.oldDeploymentId !== undefined && post.oldDeploymentId !== options.expectedOldDeploymentId)) fail('OBSERVATION_RACE');
         // The pre-read is an ownership barrier, not a provider-side atomic
         // CAS.  The independent post-read below detects a race after POST and

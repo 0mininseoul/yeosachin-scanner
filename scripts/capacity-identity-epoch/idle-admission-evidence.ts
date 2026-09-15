@@ -3,8 +3,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalDigest, EpochError, epochFail, isObject } from './contracts';
 import { readOwnerBoundedFile, supabaseProjectRefFromOrigin } from './owner-auth';
+import { MAX_ZERO_WORK_INTERVAL_MS } from './paused-queue-evidence';
 
-const MAX_INTERVAL_MS = 15 * 60 * 1_000;
 const MAX_RETENTION_MS = 31 * 24 * 60 * 60 * 1_000;
 
 type Input = Readonly<{
@@ -73,7 +73,7 @@ export async function readIdleAdmissionEvidence(input: Input): Promise<Readonly<
     if (!Number.isSafeInteger(input.windowEndMs) || input.windowEndMs < 0 || input.windowEndMs > input.now()
         || (input.windowStartMs !== undefined && (!Number.isSafeInteger(input.windowStartMs)
             || input.windowStartMs < 0 || input.windowStartMs >= input.windowEndMs
-            || input.windowEndMs - input.windowStartMs > MAX_INTERVAL_MS
+            || input.windowEndMs - input.windowStartMs > MAX_ZERO_WORK_INTERVAL_MS
             || input.windowEndMs - input.windowStartMs >= MAX_RETENTION_MS))) epochFail('EVIDENCE_UNAVAILABLE');
     const parts = [
         "(select count(*) from public.analysis_provider_admission_leases where state in ('leased','recovery_required')) as provider_active",

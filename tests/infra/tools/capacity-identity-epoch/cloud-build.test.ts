@@ -182,6 +182,20 @@ describe('Cloud Build provenance adapter contracts', () => {
         await expect(adapter(wrong).buildObservation({ role: 'paid', phase: 'desired', revision: 'paid-epochfixture', image: IMAGE('paid', 'c'.repeat(64)) })).rejects.toMatchObject({ code: 'EVIDENCE_UNAVAILABLE' });
     });
 
+    it('matches a resolved Cloud Run image after its optional tag is removed, preserving repository and digest binding', async () => {
+        const packet = createFixturePacket();
+        const build = buildFor(packet, 'desired');
+        const image = IMAGE('paid', 'b'.repeat(64));
+        build.results = { images: [{ name: image.split('@')[0] + ':release', digest: `sha256:${'b'.repeat(64)}` }] };
+        const transport = new BuildTransport([{ builds: [build] }]);
+        const request = { role: 'paid' as const, phase: 'desired' as const, revision: 'paid-epochfixture' };
+        await expect(adapter(transport).buildObservation({ ...request, image }))
+            .resolves.toBe(canonicalDigest(packet.protectedInputs.desired.build));
+        for (const changed of [IMAGE('preflight', 'b'.repeat(64)), IMAGE('paid', 'c'.repeat(64)), image.split('@')[0] + ':release']) {
+            await expect(adapter(transport).buildObservation({ ...request, image: changed })).rejects.toThrow('EVIDENCE_UNAVAILABLE');
+        }
+    });
+
     it('looks up an old build in the old observation runtime location', async () => {
         const packet = createFixturePacket();
         const packetForTest = {

@@ -213,9 +213,12 @@ export class CapacityReservation {
 
     async assert(lease: ReservationLease): Promise<void> {
         const members = this.leaseMembers(lease);
-        for (const member of members) {
-            const current = await this.currentMember(member);
-            if (expired(current.record, this.now())) epochFail('LOCK_LOST');
+        // These exact-member reads are independent. Await all of them before
+        // authorizing a write, then check expiry at the completed read boundary.
+        const observations = await Promise.allSettled(members.map(member => this.currentMember(member)));
+        for (const observation of observations) {
+            if (observation.status === 'rejected') throw observation.reason;
+            if (expired(observation.value.record, this.now())) epochFail('LOCK_LOST');
         }
     }
 

@@ -831,7 +831,20 @@ export class LiveEpochControlPlane implements EpochControlPlane {
         });
         await leaseCheck();
         const aliases = await this.options.vercel.assignAlias({ projectId: this.options.projectId, teamId: this.options.teamId, deploymentId: this.options.deploymentId, expectedOldDeploymentId: this.options.expectedOldDeploymentId, expectedSourceSha: input.packet.desiredManifest.readiness.sourceSha, alias: this.options.producerAlias, leaseCheck });
-        const readiness = await this.readReadiness(input.packet, 'desired');
+        let readiness: Readonly<Record<string, unknown>>;
+        for (let attempt = 0; ; attempt += 1) {
+            try {
+                readiness = await this.readReadiness(input.packet, 'desired');
+                break;
+            } catch (error) {
+                // Alias ownership can settle before public routing. Retry
+                // only the read, under the same live fence and exact owner.
+                if (!(error instanceof EpochError) || error.code !== 'READINESS_INVALID' || attempt >= 4) throw error;
+                await leaseCheck();
+                await this.options.vercel.getAlias({ alias: this.options.producerAlias, projectId: this.options.projectId, teamId: this.options.teamId, expectedDeploymentId: this.options.deploymentId });
+                await new Promise(resolve => setTimeout(resolve, 250));
+            }
+        }
         return this.evidence('PRODUCERS_CLOSED_ALIGNED', { oldReadiness, aliases, deployment, deploymentReadiness: { sourceSha: deploymentReadiness.sourceSha, ready: deploymentReadiness.ready, analysisV2AdmissionEnabled: deploymentReadiness.analysisV2AdmissionEnabled, earlybirdWebhookAutoAdmissionEnabled: deploymentReadiness.earlybirdWebhookAutoAdmissionEnabled }, readiness }, leaseCheck.currentLease().lock.lockFence);
     }
 

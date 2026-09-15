@@ -8,8 +8,10 @@ import type { ProtectedLiveBootstrapDescriptor } from './bootstrap';
 
 const PACKET_FD = 3;
 const BOOTSTRAP_FD = 4;
-const DEFAULT_TIMEOUT_MS = 15 * 60_000;
-const MAX_TIMEOUT_MS = 15 * 60_000;
+// Native source/IAM proofs can outlast a single lease interval. Lease expiry
+// and renewal remain independently enforced inside the coordinator.
+const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+const MAX_TIMEOUT_MS = 30 * 60_000;
 const MAX_OUTPUT_BYTES = 32 * 1024;
 const TERM_GRACE_MS = 250;
 const KILL_GRACE_MS = 250;

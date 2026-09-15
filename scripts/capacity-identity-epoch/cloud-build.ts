@@ -68,12 +68,25 @@ function substitutionsMatch(build: Record<string, unknown>, expected: Readonly<R
     return canonicalDigest(normalized) === canonicalDigest(expected);
 }
 
+export function immutableImageReference(image: string): string | null {
+    const match = /^([^@\s]+)@sha256:([0-9a-f]{64})$/.exec(image);
+    if (!match) return null;
+    const name = match[1]!;
+    const colon = name.lastIndexOf(':');
+    // Cloud Run resolves a digest-pinned image and omits its optional tag.
+    // Repository and content digest must still match exactly.
+    const repository = colon > name.lastIndexOf('/') ? name.slice(0, colon) : name;
+    return repository ? `${repository}@sha256:${match[2]}` : null;
+}
+
 function imageMatches(build: Record<string, unknown>, image: string): boolean {
+    const expected = immutableImageReference(image);
+    if (expected === null) return false;
     const results = object(build.results);
     if (!Array.isArray(results.images)) return false;
     return results.images.some(entry => {
         if (!isObject(entry) || typeof entry.name !== 'string' || typeof entry.digest !== 'string') return false;
-        return `${entry.name}@${entry.digest.replace(/^sha256:/, 'sha256:')}` === image;
+        return immutableImageReference(`${entry.name}@${entry.digest}`) === expected;
     });
 }
 

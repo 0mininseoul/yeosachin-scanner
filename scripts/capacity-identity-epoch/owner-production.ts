@@ -72,7 +72,7 @@ import {
     type SchedulerObservation,
 } from './work-planes';
 import { AuthenticatedProtectedTransport, FetchProtectedTransport, type ProtectedTransport } from './platform';
-import { CloudBuildAdapter, observedBuildMetadataDigest } from './cloud-build';
+import { CloudBuildAdapter, immutableImageReference, observedBuildMetadataDigest } from './cloud-build';
 import { createStorageSourceVerifier, normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
@@ -1181,8 +1181,10 @@ async function buildRoleLive(input: Readonly<{
     const selector = resolveRoleSelectorFromCloudRun({ role: input.role, selector: input.selector, runtime });
     const resources = roleResource(input.role, selector);
     const revision = await cloudRun.observeRevision(runtime.project, runtime.location, runtime.latestReadyRevision);
-    if (!revision.ready || revision.identity.identity !== runtime.identity.identity || revision.image !== runtime.image
-        || revision.runtimeDigest !== runtime.runtimeDigest || revision.buildDigest !== runtime.buildDigest) fail('SOURCE_INVALID');
+    const runtimeImage = immutableImageReference(runtime.image);
+    if (!revision.ready || revision.identity.identity !== runtime.identity.identity || runtimeImage === null
+        || immutableImageReference(revision.image) !== runtimeImage
+        || revision.runtimeDigest !== runtime.runtimeDigest) fail('SOURCE_INVALID');
     // Labels select the historical commit to check; independent Build/Git
     // content proof below is what establishes that source, not the label.
     const revisionMetadata = object(revision.raw.metadata);
@@ -1332,12 +1334,24 @@ function makeSupabaseOrigin(env: Env): string {
     return origin;
 }
 
+export function ownerZeroWorkLookbackMs(nowMs: number, earliestMs: number): number {
+    if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(earliestMs)
+        || earliestMs < 0 || earliestMs > nowMs) fail('EVIDENCE_UNAVAILABLE');
+    // This is a selector duration, not an observation timestamp. Round up so
+    // successive fresh passes share a plan while retaining the full pause
+    // and last-attempt window. Actual observation times remain unrounded.
+    const dayMs = 86_400_000;
+    const requiredMs = nowMs - earliestMs + QUIESCENCE.timeoutMs + QUIESCENCE.graceMs;
+    const lookbackMs = Math.ceil(requiredMs / dayMs) * dayMs;
+    if (!Number.isSafeInteger(lookbackMs) || lookbackMs <= 0) fail('EVIDENCE_UNAVAILABLE');
+    return lookbackMs;
+}
+
 function buildZeroWorkSources(env: Env, projectId: string, roles: RoleMap<RoleLive>, nowMs: number, desiredGraph: DesiredIdentityGraph): LiveZeroWorkSources {
     const minPause = Math.min(...ROLES.map(role => roles[role].schedulerObservation.pauseEpochMs));
     const lastAttempts = ROLES.map(role => roles[role].schedulerObservation.lastAttemptMs).filter((value): value is number => value !== null);
     const earliest = Math.min(minPause, ...(lastAttempts.length === 0 ? [nowMs] : lastAttempts));
-    const lookbackMs = Math.max(60_000, nowMs - earliest + QUIESCENCE.timeoutMs + QUIESCENCE.graceMs);
-    if (!Number.isSafeInteger(lookbackMs) || lookbackMs <= 0) fail('EVIDENCE_UNAVAILABLE');
+    const lookbackMs = ownerZeroWorkLookbackMs(nowMs, earliest);
     const origin = makeSupabaseOrigin(env);
     const supabase = (source: string, table: string, columns: readonly string[]) => {
         const selector = { kind: 'supabase' as const, source, origin, table, columns, eventTimeColumn: 'created_at', lookbackMs, selectorDigest: '' };
@@ -1623,8 +1637,14 @@ function oldIam(live: RoleLive): ProtectedIamInputsForRole {
 }
 
 function sourceContract(role: Role, live: RoleLive, oldSourceSha: string, desiredSourceSha: string, desiredRuntime: ProtectedRuntimeInput, desiredBuild: ProtectedBuildInput): CapacityManifest['source'][Role] {
-    const suffix = canonicalDigest({ project: live.selector.project, role, sourceSha: desiredSourceSha }).slice(0, 20);
-    const revisionPlan = { prefix: `epoch-${role}-`, suffix };
+    // A fresh plan after a service change must not reuse an immutable revision
+    // created by an interrupted epoch, even when its source is unchanged.
+    const suffix = canonicalDigest({
+        project: live.selector.project, role, sourceSha: desiredSourceSha,
+        priorGeneration: live.runtime.generation,
+        priorResourceVersion: live.runtime.resourceVersion,
+    }).slice(0, 20);
+    const revisionPlan = { prefix: `${live.runtime.service}-`, suffix };
     return {
         oldSha: oldSourceSha,
         oldRevision: live.runtime.latestReadyRevision!,
@@ -1989,6 +2009,9 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
         desiredDeployment: pass.desiredDeployment.id,
         oldSourceSha,
         desiredSourceSha,
+        // A corrected immutable revision plan is a new epoch. Preserve any
+        // failed journal for the previous plan instead of reusing its key.
+        sourceContracts,
     });
     const baseInput = {
         epochId: `identity-epoch-${epochDigest.slice(0, 48)}`,
