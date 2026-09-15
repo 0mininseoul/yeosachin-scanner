@@ -68,7 +68,7 @@ function substitutionsMatch(build: Record<string, unknown>, expected: Readonly<R
     return canonicalDigest(normalized) === canonicalDigest(expected);
 }
 
-function immutableImageReference(image: string): string | null {
+export function immutableImageReference(image: string): string | null {
     const match = /^([^@\s]+)@sha256:([0-9a-f]{64})$/.exec(image);
     if (!match) return null;
     const name = match[1]!;

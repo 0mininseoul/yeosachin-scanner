@@ -72,7 +72,7 @@ import {
     type SchedulerObservation,
 } from './work-planes';
 import { AuthenticatedProtectedTransport, FetchProtectedTransport, type ProtectedTransport } from './platform';
-import { CloudBuildAdapter, observedBuildMetadataDigest } from './cloud-build';
+import { CloudBuildAdapter, immutableImageReference, observedBuildMetadataDigest } from './cloud-build';
 import { createStorageSourceVerifier, normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
@@ -1181,8 +1181,10 @@ async function buildRoleLive(input: Readonly<{
     const selector = resolveRoleSelectorFromCloudRun({ role: input.role, selector: input.selector, runtime });
     const resources = roleResource(input.role, selector);
     const revision = await cloudRun.observeRevision(runtime.project, runtime.location, runtime.latestReadyRevision);
-    if (!revision.ready || revision.identity.identity !== runtime.identity.identity || revision.image !== runtime.image
-        || revision.runtimeDigest !== runtime.runtimeDigest || revision.buildDigest !== runtime.buildDigest) fail('SOURCE_INVALID');
+    const runtimeImage = immutableImageReference(runtime.image);
+    if (!revision.ready || revision.identity.identity !== runtime.identity.identity || runtimeImage === null
+        || immutableImageReference(revision.image) !== runtimeImage
+        || revision.runtimeDigest !== runtime.runtimeDigest) fail('SOURCE_INVALID');
     // Labels select the historical commit to check; independent Build/Git
     // content proof below is what establishes that source, not the label.
     const revisionMetadata = object(revision.raw.metadata);
