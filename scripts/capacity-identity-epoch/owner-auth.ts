@@ -13,6 +13,8 @@ import { rejectDuplicateJsonKeys } from './packet';
 
 const MAX_OWNER_FILE_BYTES = 64 * 1024;
 const MAX_TOKEN_BYTES = 8 * 1024;
+const MAX_GOOGLE_CREDENTIAL_BYTES = 16 * 1024;
+const MIN_GOOGLE_CREDENTIAL_LIFETIME_MS = 49 * 60_000;
 const MAX_SUPABASE_OUTPUT_BYTES = 64 * 1024;
 const MAX_SUPABASE_PROJECT_REF_BYTES = 128;
 const MAX_SUPABASE_VERSION_BYTES = 128;
@@ -282,10 +284,20 @@ function verifySupabaseCliVersion(command: string, cwd: string): void {
         || (raw !== SUPABASE_CLI_VERSION && raw !== `${SUPABASE_CLI_VERSION}\n`)) unavailable();
 }
 
-/**
- * Capture exactly one gcloud access-token line.  stdout/stderr are consumed
- * in private memory and are never interpolated into an Error or output.
- */
+export function parseGoogleOwnerCredential(raw: string, nowMs = Date.now()): string {
+    if (Buffer.byteLength(raw, 'utf8') > MAX_GOOGLE_CREDENTIAL_BYTES || !Number.isSafeInteger(nowMs)) unavailable();
+    let value: unknown;
+    try { rejectDuplicateJsonKeys(raw); value = JSON.parse(raw); } catch { unavailable(); }
+    if (!isObject(value) || !hasExactKeys(value, ['credential']) || !isObject(value.credential)
+        || !hasExactKeys(value.credential, ['access_token', 'token_expiry'])
+        || !safeToken(value.credential.access_token) || typeof value.credential.token_expiry !== 'string'
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value.credential.token_expiry)) unavailable();
+    const expiresAtMs = Date.parse(value.credential.token_expiry);
+    if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs - nowMs < MIN_GOOGLE_CREDENTIAL_LIFETIME_MS) unavailable();
+    return value.credential.access_token;
+}
+
+/** Capture a sufficiently fresh owner-session token through private pipes. */
 export async function captureGoogleAccessToken(options: CaptureGoogleAccessTokenOptions = {}): Promise<string> {
     const command = options.command ?? 'gcloud';
     if (!safeSpawnCommand(command)) unavailable();
@@ -301,7 +313,10 @@ export async function captureGoogleAccessToken(options: CaptureGoogleAccessToken
         // Do not inherit the operator's environment.  gcloud may use its
         // credential store and a fixed PATH, but no dotenv/current secret is
         // allowed to cross this process boundary.
-        child = spawn(command, ['auth', 'print-access-token'], {
+        // print-access-token may return a cached token near expiry. The FD
+        // descriptor retains one token for the whole epoch, so refresh before
+        // capture and verify the returned lifetime without exposing config.
+        child = spawn(command, ['config', 'config-helper', '--min-expiry=50m', '--format=json(credential.access_token,credential.token_expiry)'], {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { PATH: '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin', LANG: 'C', NODE_ENV: 'production' },
         });
@@ -318,7 +333,7 @@ export async function captureGoogleAccessToken(options: CaptureGoogleAccessToken
         stdoutBytes += value.byteLength;
         // Preserve only a bounded token-sized output; stderr is consumed and
         // discarded below so provider details cannot leak on failure.
-        if (stdoutBytes <= MAX_TOKEN_BYTES) stdout.push(value);
+        if (stdoutBytes <= MAX_GOOGLE_CREDENTIAL_BYTES) stdout.push(value);
         else {
             try { child.kill('SIGKILL'); } catch { /* best effort */ }
         }
@@ -337,10 +352,10 @@ export async function captureGoogleAccessToken(options: CaptureGoogleAccessToken
             if (timer !== undefined) clearTimeout(timer);
             if (error) reject(error);
             else {
-                const raw = Buffer.concat(stdout).toString('utf8');
-                const token = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
-                if (!safeToken(token) || token.includes('\n') || stdoutBytes > MAX_TOKEN_BYTES) reject(new EpochError('OWNER_AUTH_UNAVAILABLE'));
-                else resolve(token);
+                try {
+                    if (stdoutBytes > MAX_GOOGLE_CREDENTIAL_BYTES) unavailable();
+                    resolve(parseGoogleOwnerCredential(Buffer.concat(stdout).toString('utf8')));
+                } catch { reject(new EpochError('OWNER_AUTH_UNAVAILABLE')); }
             }
         };
         timer = setTimeout(() => {

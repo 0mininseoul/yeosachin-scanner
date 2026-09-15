@@ -7,6 +7,7 @@ import {
     captureSupabaseServiceRoleKey,
     createOwnerProtectedTransports,
     loadOwnerAuthBoundary,
+    parseGoogleOwnerCredential,
     parseSupabaseServiceRoleKey,
     scrubOwnerError,
     supabaseProjectRefFromOrigin,
@@ -98,13 +99,17 @@ describe('owner credential boundary', () => {
     });
 
     it('captures gcloud stdout/stderr privately and never includes protected output in fixed errors', async () => {
+        const freshCredential = JSON.stringify({ credential: { access_token: GOOGLE_TOKEN, token_expiry: new Date(Date.now() + 60 * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z') } });
         const child: GoogleTokenChild = {
-            stdout: { on: (_event, handler) => { handler(Buffer.from(`${GOOGLE_TOKEN}\n`)); handler(); return child.stdout; } },
+            stdout: { on: (_event, handler) => { handler(Buffer.from(freshCredential)); handler(); return child.stdout; } },
             stderr: { on: (_event, handler) => { handler(Buffer.from(PROTECTED_TOKEN)); handler(); return child.stderr; } },
             once: (event, handler) => { if (event === 'close') queueMicrotask(() => handler(0, null)); return child; },
             kill: () => true,
         };
-        const token = await captureGoogleAccessToken({ spawn: () => child, timeoutMs: 1_000 });
+        const token = await captureGoogleAccessToken({ spawn: (_command, args) => {
+            expect(args).toEqual(['config', 'config-helper', '--min-expiry=50m', '--format=json(credential.access_token,credential.token_expiry)']);
+            return child;
+        }, timeoutMs: 1_000 });
         expect(token).toBe(GOOGLE_TOKEN);
 
         const failed: GoogleTokenChild = {
@@ -116,6 +121,17 @@ describe('owner credential boundary', () => {
         await expect(captureGoogleAccessToken({ spawn: () => failed, timeoutMs: 1_000 })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
         await expect(captureGoogleAccessToken({ spawn: () => failed, timeoutMs: 1_000 })).rejects.not.toThrow(PROTECTED_TOKEN);
         expect(scrubOwnerError(new Error(PROTECTED_TOKEN)).message).toBe('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects expired or short-lived Google credentials before they enter an epoch', () => {
+        const now = Date.parse('2026-09-15T21:00:00Z');
+        const credential = (token_expiry: string) => JSON.stringify({ credential: { access_token: GOOGLE_TOKEN, token_expiry } });
+        expect(parseGoogleOwnerCredential(credential('2026-09-15T22:00:00Z'), now)).toBe(GOOGLE_TOKEN);
+        for (const expiry of ['2026-09-15T20:59:59Z', '2026-09-15T21:08:00Z', 'invalid']) {
+            expect(() => parseGoogleOwnerCredential(credential(expiry), now)).toThrow('OWNER_AUTH_UNAVAILABLE');
+        }
+        expect(() => parseGoogleOwnerCredential(JSON.stringify({ credential: { access_token: PROTECTED_TOKEN } }), now))
+            .toThrow('OWNER_AUTH_UNAVAILABLE');
     });
 
     it('builds authenticated Vercel, Google, and optional Supabase transports without exposing credential inputs', async () => {
