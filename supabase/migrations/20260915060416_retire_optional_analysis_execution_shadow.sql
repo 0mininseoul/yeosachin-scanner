@@ -48,7 +48,7 @@ BEGIN
               'public.analysis_execution_payload_valid_v1(jsonb)',
               'public.analysis_execution_payload_has_only_keys_v1(jsonb,text[])'
           ]::regprocedure[])
-          AND pg_catalog.pg_get_functiondef(p.oid) ~ '\m(analysis_jobs|analysis_events|record_analysis_canonical_job|append_analysis_canonical_event|enqueue_analysis_execution_retry_v1|load_analysis_execution_family_v1|reject_analysis_canonical_mutation|analysis_canonical_json_object_has_exact_keys|analysis_canonical_json_value_valid|analysis_canonical_payload_valid|analysis_canonical_payload_has_only_keys|analysis_execution_json_object_has_exact_keys_v1|analysis_execution_json_value_valid_v1|analysis_execution_payload_valid_v1|analysis_execution_payload_has_only_keys_v1)\M'
+          AND pg_catalog.pg_get_functiondef(p.oid) ~* '\m(analysis_jobs|analysis_events|record_analysis_canonical_job|append_analysis_canonical_event|enqueue_analysis_execution_retry_v1|load_analysis_execution_family_v1|reject_analysis_canonical_mutation|analysis_canonical_json_object_has_exact_keys|analysis_canonical_json_value_valid|analysis_canonical_payload_valid|analysis_canonical_payload_has_only_keys|analysis_execution_json_object_has_exact_keys_v1|analysis_execution_json_value_valid_v1|analysis_execution_payload_valid_v1|analysis_execution_payload_has_only_keys_v1)\M'
     ) THEN
         RAISE EXCEPTION 'SHADOW_RETIREMENT_UNEXPECTED_ROUTINE_CALLER';
     END IF;
