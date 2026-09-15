@@ -23,6 +23,8 @@ export const SERVICE_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 export const QUEUE_ID_PATTERN = /^[A-Za-z0-9-]{1,100}$/;
 /** Cloud Scheduler JOB_ID: uppercase and underscore are both valid. */
 export const SCHEDULER_ID_PATTERN = /^[A-Za-z0-9_-]{1,500}$/;
+/** Cloud Logging returns slash-containing log IDs with canonical %2F encoding. */
+export const CLOUD_LOG_ID_PATTERN = /^(?:[A-Za-z0-9_.-]|%2F){1,511}$/;
 export const SERVICE_ACCOUNT_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}@[a-z][a-z0-9-]{0,62}(?:\.[a-z0-9-]{2,63})+$/;
 
 export type EpochErrorCode =

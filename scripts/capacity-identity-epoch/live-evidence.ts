@@ -6,7 +6,7 @@ import {
     type ReceiverTokenProvider,
     type ProtectedTransport,
 } from './platform';
-import { canonicalDigest, epochFail, isObject, type ProtectedRuntimeInput, type Role } from './contracts';
+import { canonicalDigest, CLOUD_LOG_ID_PATTERN, epochFail, isObject, type ProtectedRuntimeInput, type Role } from './contracts';
 import type { CloudBuildAdapter } from './cloud-build';
 
 const LOGGING_HOSTS = new Set(['logging.googleapis.com']);
@@ -22,7 +22,6 @@ const GOOGLE_PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const GOOGLE_LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const GOOGLE_RESOURCE_ATOM = /^[A-Za-z0-9_-]{1,128}$/;
 const GOOGLE_QUEUE_ID = /^[A-Za-z0-9-]{1,100}$/;
-const GOOGLE_LOG_ID = /^[A-Za-z0-9_.-]{1,512}$/;
 const FILTER_ATOM = /^[A-Za-z0-9_.:-]{1,256}$/;
 
 export type SupabaseLedgerSource = Readonly<{
@@ -177,7 +176,7 @@ function validLogName(value: unknown, expectedProject?: string): value is string
     if (typeof value !== 'string') return false;
     const match = /^projects\/([^/]+)\/logs\/([^/]+)$/.exec(value);
     return match !== null && GOOGLE_PROJECT.test(match[1]!) && (expectedProject === undefined || match[1] === expectedProject)
-        && GOOGLE_LOG_ID.test(match[2]!);
+        && CLOUD_LOG_ID_PATTERN.test(match[2]!);
 }
 
 function validQueueResource(value: unknown, expectedProject?: string): value is string {

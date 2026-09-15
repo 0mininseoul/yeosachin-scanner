@@ -3,6 +3,7 @@ import { createFixturePacket } from '../../../../scripts/capacity-identity-epoch
 import { CloudBuildAdapter } from '../../../../scripts/capacity-identity-epoch/cloud-build';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from '../../../../scripts/capacity-identity-epoch/platform';
 import { canonicalDigest } from '../../../../scripts/capacity-identity-epoch/contracts';
+import { storageSourceContext, type StorageSourceVerifier } from '../../../../scripts/capacity-identity-epoch/storage-source';
 
 const IMAGE = (role: 'preflight' | 'paid', digest: string) => `asia-northeast3-docker.pkg.dev/example-project/workers/${role}@sha256:${digest}`;
 
@@ -21,19 +22,97 @@ class BuildTransport implements ProtectedTransport {
 function buildFor(packet: ReturnType<typeof createFixturePacket>, phase: 'old' | 'desired'): Record<string, unknown> {
     const input = packet.protectedInputs[phase].build;
     return {
-        id: `fixture-${phase}`, status: 'SUCCESS', serviceAccount: input.identity.identity,
+        id: `fixture-${phase}`, status: 'SUCCESS',
+        serviceAccount: `projects/${input.identity.project}/serviceAccounts/${input.identity.identity}`,
         sourceProvenance: { resolvedRepoSource: { repoName: input.sourceContext, commitSha: input.sourceSha } },
         substitutions: { _NODE_ENV: 'production' },
         results: { images: [{ name: IMAGE('preflight', phase === 'old' ? 'a'.repeat(64) : 'b'.repeat(64)).split('@')[0], digest: `sha256:${phase === 'old' ? 'a'.repeat(64) : 'b'.repeat(64)}` }, { name: IMAGE('paid', phase === 'old' ? 'a'.repeat(64) : 'b'.repeat(64)).split('@')[0], digest: `sha256:${phase === 'old' ? 'a'.repeat(64) : 'b'.repeat(64)}` }] },
     };
 }
 
-function adapter(transport: BuildTransport, packet = createFixturePacket()): CloudBuildAdapter {
+function storagePacket(packet: ReturnType<typeof createFixturePacket>, phase: 'old' | 'desired') {
+    const source = { bucket: 'fixture-bucket', object: 'source.zip', generation: 42 };
+    return {
+        ...packet,
+        protectedInputs: {
+            ...packet.protectedInputs,
+            [phase]: {
+                ...packet.protectedInputs[phase],
+                build: { ...packet.protectedInputs[phase].build, sourceContext: storageSourceContext(source) },
+            },
+        },
+    } as typeof packet;
+}
+
+function storageBuildFor(packet: ReturnType<typeof createFixturePacket>, phase: 'old' | 'desired'): Record<string, unknown> {
+    const source = { bucket: 'fixture-bucket', object: 'source.zip', generation: 42 };
+    return { ...buildFor(storagePacket(packet, phase), phase), sourceProvenance: { resolvedStorageSource: source } };
+}
+
+function adapter(transport: BuildTransport, packet = createFixturePacket(), storageSourceVerifier?: StorageSourceVerifier): CloudBuildAdapter {
     const authenticated = new AuthenticatedProtectedTransport({ transport, tokenProvider: async () => 'fixture-token', timeoutMs: 1_000 });
-    return new CloudBuildAdapter({ transport: authenticated, builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build }, runtimes: { old: packet.protectedInputs.old.runtime, desired: packet.protectedInputs.desired.runtime } });
+    return new CloudBuildAdapter({
+        transport: authenticated,
+        builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build },
+        runtimes: { old: packet.protectedInputs.old.runtime, desired: packet.protectedInputs.desired.runtime },
+        storageSourceVerifier,
+    });
 }
 
 describe('Cloud Build provenance adapter contracts', () => {
+    it('keeps bare account compatibility without accepting a foreign project resource', async () => {
+        const packet = createFixturePacket();
+        const old = buildFor(packet, 'old');
+        const request = { role: 'preflight' as const, phase: 'old' as const, revision: packet.oldManifest.source.preflight.oldRevision, runtime: packet.protectedInputs.old.runtime.preflight };
+        const email = packet.protectedInputs.old.build.identity.identity;
+        const bare = new BuildTransport([{ builds: [{ ...old, serviceAccount: email }] }]);
+        await expect(adapter(bare).sourceObservation(request)).resolves.toMatchObject({ sourceSha: packet.protectedInputs.old.build.sourceSha });
+        const foreign = new BuildTransport([{ builds: [{ ...old, serviceAccount: `projects/other-project/serviceAccounts/${email}` }] }]);
+        await expect(adapter(foreign).sourceObservation(request)).rejects.toMatchObject({ code: 'EVIDENCE_UNAVAILABLE' });
+    });
+
+    it('never treats a storage generation as a Git SHA and fails closed without a verifier', async () => {
+        const packet = storagePacket(createFixturePacket(), 'old');
+        const old = storageBuildFor(packet, 'old');
+        const transport = new BuildTransport([{ builds: [old] }]);
+        const request = {
+            role: 'preflight' as const,
+            phase: 'old' as const,
+            revision: packet.oldManifest.source.preflight.oldRevision,
+            runtime: packet.protectedInputs.old.runtime.preflight,
+        };
+        await expect(adapter(transport, packet).sourceObservation(request)).rejects.toMatchObject({ code: 'EVIDENCE_UNAVAILABLE' });
+    });
+
+    it('accepts a storage source only after an injected full-content proof', async () => {
+        const packet = storagePacket(createFixturePacket(), 'old');
+        const old = storageBuildFor(packet, 'old');
+        const seen: { reviewedSha?: string; generation?: string } = {};
+        const verifier: StorageSourceVerifier = async ({ source, reviewedSha }) => {
+            seen.reviewedSha = reviewedSha;
+            seen.generation = String(source.generation);
+            return {
+                reviewedSha,
+                archiveSha256: 'a'.repeat(64),
+                sourceContext: storageSourceContext(source),
+                sourceBucket: source.bucket,
+                sourceObject: source.object,
+                sourceGeneration: String(source.generation),
+            };
+        };
+        const transport = new BuildTransport([{ builds: [old] }]);
+        const request = {
+            role: 'preflight' as const,
+            phase: 'old' as const,
+            revision: packet.oldManifest.source.preflight.oldRevision,
+            runtime: packet.protectedInputs.old.runtime.preflight,
+        };
+        await expect(adapter(transport, packet, verifier).sourceObservation(request))
+            .resolves.toMatchObject({ sourceSha: packet.protectedInputs.old.build.sourceSha });
+        expect(seen.reviewedSha).toBe(packet.protectedInputs.old.build.sourceSha);
+        expect(seen.generation).toBe('42');
+    });
+
     it('uses the regional list endpoint and follows an empty page with a continuation token', async () => {
         const packet = createFixturePacket();
         const old = buildFor(packet, 'old');

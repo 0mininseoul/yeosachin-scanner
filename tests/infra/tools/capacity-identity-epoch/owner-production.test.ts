@@ -2,8 +2,50 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { resolveLocalSupabaseCliPathForOwner, resolvePrimaryRepositoryRootForOwner, resolveRoleSelectorFromCloudRun } from '../../../../scripts/capacity-identity-epoch/owner-production';
+import { describe, expect, it, vi } from 'vitest';
+import { resolveLocalSupabaseCliPathForOwner, resolvePrimaryRepositoryRootForOwner, resolveRoleSelectorFromCloudRun, resolveOwnerBuildForImage } from '../../../../scripts/capacity-identity-epoch/owner-production';
+
+describe('owner uploaded build discovery', () => {
+    const project = 'fixture-project';
+    const sha = 'a'.repeat(40);
+    const image = `region-docker.pkg.dev/${project}/workers/worker@sha256:${'b'.repeat(64)}`;
+    const source = { bucket: 'fixture-source-bucket', object: 'uploads/source.zip', generation: '1234567890123456' };
+    const context = `${source.bucket}/${source.object}#${source.generation}`;
+    const raw = {
+        status: 'SUCCESS',
+        serviceAccount: `projects/${project}/serviceAccounts/builder@${project}.iam.gserviceaccount.com`,
+        substitutions: { _PUBLIC_BUILD_INPUT: 'fixture' },
+        sourceProvenance: { resolvedStorageSource: source },
+    };
+    const proof = { reviewedSha: sha, archiveSha256: 'c'.repeat(64), sourceContext: context,
+        sourceBucket: source.bucket, sourceObject: source.object, sourceGeneration: source.generation };
+
+    it('selects the exact image before verifying its generation-pinned archive', async () => {
+        const verify = vi.fn().mockResolvedValue(proof);
+        const result = await resolveOwnerBuildForImage([
+            { raw, images: [image.replace('worker@', 'unrelated@')] }, { raw, images: [image] },
+        ], sha, image, project, verify);
+        expect(verify).toHaveBeenCalledExactlyOnceWith({ source, reviewedSha: sha });
+        expect(result.input).toEqual({ identity: { project, identity: `builder@${project}.iam.gserviceaccount.com` },
+            sourceSha: sha, sourceContext: context, buildArguments: { PUBLIC_BUILD_INPUT: 'fixture' } });
+    });
+
+    it('rejects ambiguous images and foreign build identities before downloading sources', async () => {
+        const verify = vi.fn().mockResolvedValue(proof);
+        const candidate = { raw, images: [image] };
+        await expect(resolveOwnerBuildForImage([candidate, candidate], sha, image, project, verify)).rejects.toThrow('DISCOVERY_AMBIGUOUS');
+        await expect(resolveOwnerBuildForImage([{ ...candidate, raw: { ...raw,
+            serviceAccount: 'projects/foreign-project/serviceAccounts/builder@foreign-project.iam.gserviceaccount.com' } }], sha, image, project, verify)).rejects.toThrow('PROJECT_MISMATCH');
+        expect(verify).not.toHaveBeenCalled();
+    });
+
+    it('never substitutes a generation, label or mismatched archive proof for the reviewed commit', async () => {
+        const candidate = { raw: { ...raw, tags: [sha] }, images: [image] };
+        for (const value of [null, { ...proof, reviewedSha: 'd'.repeat(40) }, { ...proof, sourceGeneration: '999' }]) {
+            await expect(resolveOwnerBuildForImage([candidate], sha, image, project, vi.fn().mockResolvedValue(value))).rejects.toThrow('SOURCE_INVALID');
+        }
+    });
+});
 
 function runGit(cwd: string, args: readonly string[]): void {
     execFileSync('git', [...args], {

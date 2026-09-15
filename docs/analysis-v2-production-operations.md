@@ -185,6 +185,18 @@ invent any of those protected values.
 
 ### Owner-only identity epoch preparation
 
+업로드형 Cloud Build(`resolvedStorageSource`)를 사용하는 경우 운영 selector
+`ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE`에 검토한 `image@sha256:...`를 지정한다.
+이 값은 조회 대상을 고정할 뿐 소스 증거를 대신하지 않는다. 준비 단계와 독립
+검증 단계 모두 정확한 성공 build의 bucket/object/generation으로 ZIP을 읽어,
+현재 검토 워크트리의 지정 Git 커밋과 파일 경로·내용 전체를 비교한다. 저장
+generation이나 Cloud Run label을 Git SHA로 해석하지 않는다. 기본 gcloud 업로드의
+문서화된 루트 `.gitignore` 누락만 허용하며, 다른 누락·추가·변조 파일이나 링크,
+경로 탈출, 중복 경로는 검증 실패다. 원본 ZIP·파일 내용·인증 값은 디스크나 정상
+출력에 남기지 않는다. 로컬 `git`과 Python 3 표준 `zipfile`을 사용하며 npm 의존성은
+추가하지 않는다. 별도 ignore 프로필로 축약한 source archive는 이 검증 계약을
+충족하지 않으므로 전체 추적 파일을 포함하는 reviewed archive를 사용해야 한다.
+
 The supported preparation CLI reads the linked owner session and exact
 production selectors in memory. It does not source dotenv, pull production
 environment values to a file, accept protected resource values in argv, or

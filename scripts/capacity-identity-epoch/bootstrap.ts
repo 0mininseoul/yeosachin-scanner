@@ -18,6 +18,8 @@ import { canonicalDigest, epochFail, hasExactKeys, isObject, type CapacityEpochP
 import { LiveEvidenceCollector } from './live-evidence';
 import { evidenceSelectorDigest, validateLiveZeroWorkSources, type LiveZeroWorkSources } from './live-evidence';
 import { CloudBuildAdapter } from './cloud-build';
+import { createStorageSourceVerifier, type StorageSourceVerifier } from './storage-source';
+import { GoogleAuth } from 'google-auth-library';
 import { createLiveProductionVerifier, type LiveProductionVerifier } from './verifier';
 
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -206,6 +208,7 @@ function validateZeroWorkEvidenceBinding(packet: CapacityEpochPacket, sources: L
  * unable to claim PREPARED or VERIFIED.
  */
 export type LiveBootstrapOptions = Readonly<{
+    storageSourceVerifier?: StorageSourceVerifier;
     /** Provider-free tests inject storage; production defaults to authenticated GCS. */
     storage?: JournalStorage;
     now?: () => number;
@@ -411,9 +414,14 @@ export async function buildLiveBootstrap(
         }
     }
     const now = bootstrapOptions.now ?? (() => Date.now());
-    const google = bootstrapOptions.googleTransport ?? (descriptor.googleAccessToken === undefined
-        ? createGoogleProtectedTransport()
-        : createGoogleProtectedTransport({ tokenProvider: async () => descriptor.googleAccessToken! }));
+    const googleAuth = descriptor.googleAccessToken === undefined
+        ? new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }) : undefined;
+    const googleTokenProvider = async (): Promise<string> => {
+        const token = descriptor.googleAccessToken ?? await googleAuth!.getAccessToken();
+        if (!token) fail('EVIDENCE_UNAVAILABLE');
+        return token;
+    };
+    const google = bootstrapOptions.googleTransport ?? createGoogleProtectedTransport({ tokenProvider: googleTokenProvider });
     const vercelTransport = bootstrapOptions.vercelTransport
         ?? createVercelProtectedTransport({ tokenProvider: async () => descriptor.vercelToken });
     const cloudRun = new CloudRunAdapter({ transport: google });
@@ -426,6 +434,9 @@ export async function buildLiveBootstrap(
     });
     const cloudBuild = new CloudBuildAdapter({
         transport: google,
+        storageSourceVerifier: bootstrapOptions.storageSourceVerifier ?? createStorageSourceVerifier({
+            repoCwd: process.cwd(), tokenProvider: googleTokenProvider,
+        }),
         builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build },
         runtimes: { old: packet.protectedInputs.old.runtime, desired: packet.protectedInputs.desired.runtime },
     });

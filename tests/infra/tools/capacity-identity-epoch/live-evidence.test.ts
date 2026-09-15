@@ -131,6 +131,20 @@ function expectEvidenceUnavailable(error: unknown): boolean {
 }
 
 describe('live evidence primary-source contracts', () => {
+    it('accepts Google encoded log IDs while rejecting escaped filter syntax and other projects', () => {
+        const withLogName = (logName: string): LiveZeroWorkSources => {
+            const source = { ...SOURCE, logName };
+            return { ...SEMANTIC_LEDGER_SOURCES, taskAudit: { ...source, selectorDigest: evidenceSelectorDigest(source) } };
+        };
+        for (const logId of ['cloudtasks.googleapis.com%2Ftask_operations_log', 'cloudaudit.googleapis.com%2Factivity']) {
+            expect(validateLiveZeroWorkSources(withLogName(`projects/${PROJECT}/logs/${logId}`), PROJECT)).toBe(true);
+            expect(validateLiveZeroWorkSources(withLogName(`projects/other-project/logs/${logId}`), PROJECT)).toBe(false);
+        }
+        for (const logId of ['bad%22', 'bad%0A', 'bad%252F', 'bad%2f', 'bad/slash', 'x'.repeat(512)]) {
+            expect(validateLiveZeroWorkSources(withLogName(`projects/${PROJECT}/logs/${logId}`), PROJECT)).toBe(false);
+        }
+    });
+
     it('binds provider, billing, and receiver slots to durable forbidden-event ledgers instead of receiver request logs', () => {
         expect(validateLiveZeroWorkSources(SEMANTIC_LEDGER_SOURCES, PROJECT)).toBe(true);
         expect(SEMANTIC_LEDGER_SOURCES.providerLedger.kind).toBe('supabase');
