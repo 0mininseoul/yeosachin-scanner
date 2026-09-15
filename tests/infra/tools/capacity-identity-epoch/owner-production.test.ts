@@ -14,7 +14,7 @@ describe('owner uploaded build discovery', () => {
     const raw = {
         status: 'SUCCESS',
         serviceAccount: `projects/${project}/serviceAccounts/builder@${project}.iam.gserviceaccount.com`,
-        substitutions: { _PUBLIC_BUILD_INPUT: 'fixture' },
+        substitutions: { _PUBLIC_BUILD_INPUT: 'fixture', _GOOGLE_TPC_HOSTNAME: '' },
         sourceProvenance: { resolvedStorageSource: source },
     };
     const proof = { reviewedSha: sha, archiveSha256: 'c'.repeat(64), sourceContext: context,
@@ -27,7 +27,16 @@ describe('owner uploaded build discovery', () => {
         ], sha, image, project, verify);
         expect(verify).toHaveBeenCalledExactlyOnceWith({ source, reviewedSha: sha });
         expect(result.input).toEqual({ identity: { project, identity: `builder@${project}.iam.gserviceaccount.com` },
-            sourceSha: sha, sourceContext: context, buildArguments: { PUBLIC_BUILD_INPUT: 'fixture' } });
+            sourceSha: sha, sourceContext: context, buildArguments: { PUBLIC_BUILD_INPUT: 'fixture', GOOGLE_TPC_HOSTNAME: '' } });
+    });
+
+    it('preserves empty substitutions but rejects non-string, oversized and control values', async () => {
+        const verify = vi.fn().mockResolvedValue(proof);
+        for (const value of [null, 0, 'x'.repeat(2049), 'bad\nvalue']) {
+            await expect(resolveOwnerBuildForImage([{ raw: { ...raw, substitutions: { _INPUT: value } }, images: [image] }],
+                sha, image, project, verify)).rejects.toThrow('SOURCE_INVALID');
+        }
+        expect(verify).not.toHaveBeenCalled();
     });
 
     it('rejects ambiguous images and foreign build identities before downloading sources', async () => {

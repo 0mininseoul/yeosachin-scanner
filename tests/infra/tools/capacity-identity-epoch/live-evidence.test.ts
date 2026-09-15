@@ -61,6 +61,7 @@ type LoggingOptions = Readonly<{
     includePostWindowEntry?: boolean;
     retentionDays?: number;
     legacySinkDestination?: boolean;
+    sinkOverride?: Readonly<Record<string, unknown>>;
 }>;
 
 class LoggingTransport implements ProtectedTransport {
@@ -82,7 +83,7 @@ class LoggingTransport implements ProtectedTransport {
             const destination = this.options.legacySinkDestination
                 ? SOURCE.bucketResource
                 : `logging.googleapis.com/${SOURCE.bucketResource}`;
-            return this.response(request, 200, { sinks: [{ name: SOURCE.sinkName, destination, filter: this.filter() }] });
+            return this.response(request, 200, { sinks: [{ name: SOURCE.sinkName, destination, filter: this.filter(), ...this.options.sinkOverride }] });
         }
         if (request.method === 'GET' && url.pathname.endsWith('/exclusions')) {
             if (this.options.exclusionPageToken && url.searchParams.get('pageToken') === null) return this.response(request, 200, { exclusions: [], nextPageToken: 'exclusion-page-2' });
@@ -131,6 +132,34 @@ function expectEvidenceUnavailable(error: unknown): boolean {
 }
 
 describe('live evidence primary-source contracts', () => {
+    it('accepts the observed global _Default routing filter without broadening task queries or synthesizing coverage', async () => {
+        const base = { ...SOURCE, sinkName: '_Default', bucketResource: `projects/${PROJECT}/locations/global/buckets/_Default`,
+            logName: `projects/${PROJECT}/logs/cloudtasks.googleapis.com%2Ftask_operations_log` };
+        const source = { ...base, selectorDigest: evidenceSelectorDigest(base) };
+        const filter = ['cloudaudit.googleapis.com/activity', 'externalaudit.googleapis.com/activity',
+            'cloudaudit.googleapis.com/system_event', 'externalaudit.googleapis.com/system_event',
+            'cloudaudit.googleapis.com/access_transparency', 'externalaudit.googleapis.com/access_transparency']
+            .map(id => `NOT LOG_ID("${id}")`).join(' AND\n');
+        const sinkOverride = { name: '_Default', destination: `logging.googleapis.com/${source.bucketResource}`, filter };
+        const transport = new LoggingTransport({ sinkOverride });
+        await expect(collector(transport, sources(source)).zeroWorkBaseline({ nowMs: NOW })).resolves.toBeDefined();
+        const queries = transport.requests.filter(request => request.method === 'POST')
+            .map(request => JSON.parse(request.body!).filter as string);
+        expect(queries.every(query => query.includes(`logName="${source.logName}"`) && query.includes('resource.labels.queue_id='))).toBe(true);
+        await expect(collector(new LoggingTransport({ sinkOverride, includePostWindowEntry: false }), sources(source))
+            .zeroWorkBaseline({ nowMs: NOW })).rejects.satisfy(expectEvidenceUnavailable);
+        for (const change of [{ disabled: true }, { disabled: 'false' }, { exclusions: [{ name: 'unknown' }] },
+            { destination: 'logging.googleapis.com/projects/other/locations/global/buckets/_Default' },
+            { filter: `${filter} AND NOT LOG_ID("cloudtasks.googleapis.com/task_operations_log")` }, { filter: '' }]) {
+            await expect(collector(new LoggingTransport({ sinkOverride: { ...sinkOverride, ...change } }), sources(source))
+                .zeroWorkBaseline({ nowMs: NOW })).rejects.satisfy(expectEvidenceUnavailable);
+        }
+        const excludedBase = { ...source, logName: `projects/${PROJECT}/logs/cloudaudit.googleapis.com%2Factivity` };
+        const excludedSource = { ...excludedBase, selectorDigest: evidenceSelectorDigest(excludedBase) };
+        await expect(collector(new LoggingTransport({ sinkOverride }), sources(excludedSource))
+            .zeroWorkBaseline({ nowMs: NOW })).rejects.satisfy(expectEvidenceUnavailable);
+    });
+
     it('accepts Google encoded log IDs while rejecting escaped filter syntax and other projects', () => {
         const withLogName = (logName: string): LiveZeroWorkSources => {
             const source = { ...SOURCE, logName };

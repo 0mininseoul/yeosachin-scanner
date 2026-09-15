@@ -125,6 +125,14 @@ to test coverage. It records only a bounded digest and safe evidence status;
 the coordinator combines this source with provider, billing/work-ledger, and
 receiver-log evidence before `VERIFIED`.
 
+기존 global `_Default` sink는 문서화된 기본 필터와 정확히 일치하고, 활성 상태·
+동일 프로젝트의 `_Default` bucket·제외 규칙 없음이 확인될 때 재사용한다. 실제
+로그 조회는 별도로 정확한 log ID와 두 queue를 계속 지정한다. 이 검사는 저장
+경로를 확인할 뿐 빈 로그의 수집 완료 증거를 만들지 않는다. 현재 collector는
+관찰 구간 끝 이후의 실제 TaskActivityLog 수신 시각을 요구하므로 idle queue에
+그 기록이 없으면 `EVIDENCE_UNAVAILABLE`이다. 빈 Monitoring 응답이나 queue depth
+0으로 이를 대체하거나 synthetic task로 통과시키지 않는다.
+
 ### Protected operator path: check, apply through VERIFIED, and independent read-back
 
 The supported operator path uses two owner-only inherited descriptors: one
@@ -196,6 +204,17 @@ generation이나 Cloud Run label을 Git SHA로 해석하지 않는다. 기본 gc
 출력에 남기지 않는다. 로컬 `git`과 Python 3 표준 `zipfile`을 사용하며 npm 의존성은
 추가하지 않는다. 별도 ignore 프로필로 축약한 source archive는 이 검증 계약을
 충족하지 않으므로 전체 추적 파일을 포함하는 reviewed archive를 사용해야 한다.
+
+과거 웹과 두 worker는 배포 시점이 다를 수 있다. 과거 worker는 각각의 실제
+revision에서 SHA 후보를 읽고, 해당 immutable image를 만든 성공 build와 Git
+내용 증명으로 확인한다. 역할별 과거 build 입력·provenance·image digest를 packet에
+묶으므로 서로 다른 source context나 build argument도 정확히 재검증한다. 공통
+builder identity는 확인하며, 새 두 worker의 검토 SHA·build 입력 일치 조건은
+유지한다. 과거 역할의 task caller 공유는 출발 상태로 기록하되, 새 identity graph의
+역할 분리 검사는 계속 적용한다.
+Cloud Build가 반환하는 빈 optional substitution도 삭제하지 않고 build 입력 digest에
+보존한다. 빈 문자열을 허용하되 문자열 타입·2048자 상한·제어문자 금지 조건은
+owner, packet, 독립 build reader에 동일하게 적용한다.
 
 The supported preparation CLI reads the linked owner session and exact
 production selectors in memory. It does not source dotenv, pull production

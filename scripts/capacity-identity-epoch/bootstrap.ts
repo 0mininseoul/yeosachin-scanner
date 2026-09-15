@@ -434,6 +434,7 @@ export async function buildLiveBootstrap(
     });
     const cloudBuild = new CloudBuildAdapter({
         transport: google,
+        oldObservations: packet.protectedObservations.old,
         storageSourceVerifier: bootstrapOptions.storageSourceVerifier ?? createStorageSourceVerifier({
             repoCwd: process.cwd(), tokenProvider: googleTokenProvider,
         }),
