@@ -47,7 +47,6 @@ export const SUPABASE_OPERATIONAL_POSTDEPLOY_DEFERRED_EVIDENCE = [
 ] as const;
 
 export const SUPABASE_OPERATIONAL_RETAINED_TABLES = [
-    'analysis_jobs', 'analysis_events',
     'analysis_provider_runs', 'analysis_v2_provider_runs',
     'payment_events', 'earlybird_orders', 'maintenance_jobs',
     'analysis_order_audit_assembly_queue', 'analysis_order_audit_bundles',
@@ -370,7 +369,7 @@ export type SupabaseOperationalContractionEvaluation = Readonly<{
     productionMutation: 'none';
 }>;
 
-/** Objects whose retention/non-mutation must be proven before contraction. */
+/** Historical W1A non-mutation scope; later shadow retirement is a separate wave. */
 export const SUPABASE_OPERATIONAL_FORBIDDEN_W1A = [
     'analysis_jobs', 'analysis_events', 'analysis_provider_runs',
     'analysis_v2_provider_runs', 'payment_events', 'maintenance_jobs',
@@ -441,7 +440,6 @@ export const SUPABASE_OPERATIONAL_RETAINED_OPERATOR_TRIGGER_NAMES = [
  * keep catalog readiness blocked; unrelated catalog objects remain descriptive.
  */
 export const SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES = [
-    'reject_analysis_canonical_mutation',
     'reject_commerce_append_only_mutation',
     'canonical_json_string_v1',
     'canonical_json_number_v1',
@@ -452,10 +450,6 @@ export const SUPABASE_OPERATIONAL_PRIVATE_ROUTINE_NAMES = [
 ] as const;
 
 export const SUPABASE_OPERATIONAL_SERVICE_RPC_NAMES = [
-    'record_analysis_canonical_job',
-    'append_analysis_canonical_event',
-    'enqueue_analysis_execution_retry_v1',
-    'load_analysis_execution_family_v1',
     'record_payment_event_v1',
     'append_account_lifecycle_v1',
     'enqueue_maintenance_job_v1',
@@ -495,7 +489,6 @@ export const SUPABASE_OPERATIONAL_ROUTINE_NAMES = [
  * pg_get_function_identity_arguments(), never just to proname.
  */
 export const SUPABASE_OPERATIONAL_ROUTINE_SIGNATURES = Object.freeze({
-    reject_analysis_canonical_mutation: '',
     reject_commerce_append_only_mutation: '',
     canonical_json_string_v1: 'text',
     canonical_json_number_v1: 'jsonb',
@@ -516,10 +509,6 @@ export const SUPABASE_OPERATIONAL_ROUTINE_SIGNATURES = Object.freeze({
     analysis_order_audit_enqueue_from_request: '',
     analysis_order_audit_enqueue_from_request_id: '',
     capture_analysis_order_audit_parity_attestation: '',
-    record_analysis_canonical_job: 'uuid,text,text,text,bigint,integer,integer,timestamptz,timestamptz,text,jsonb,text',
-    append_analysis_canonical_event: 'uuid,uuid,text,text,jsonb,text,text',
-    enqueue_analysis_execution_retry_v1: 'uuid,text',
-    load_analysis_execution_family_v1: 'uuid,text',
     record_payment_event_v1: 'text,text,text,text,uuid,text,text,text,jsonb,timestamptz,integer',
     append_account_lifecycle_v1: 'uuid,text,text,jsonb,text',
     enqueue_maintenance_job_v1: 'text,text,jsonb,text,boolean',
