@@ -1635,7 +1635,13 @@ function oldIam(live: RoleLive): ProtectedIamInputsForRole {
 }
 
 function sourceContract(role: Role, live: RoleLive, oldSourceSha: string, desiredSourceSha: string, desiredRuntime: ProtectedRuntimeInput, desiredBuild: ProtectedBuildInput): CapacityManifest['source'][Role] {
-    const suffix = canonicalDigest({ project: live.selector.project, role, sourceSha: desiredSourceSha }).slice(0, 20);
+    // A fresh plan after a service change must not reuse an immutable revision
+    // created by an interrupted epoch, even when its source is unchanged.
+    const suffix = canonicalDigest({
+        project: live.selector.project, role, sourceSha: desiredSourceSha,
+        priorGeneration: live.runtime.generation,
+        priorResourceVersion: live.runtime.resourceVersion,
+    }).slice(0, 20);
     const revisionPlan = { prefix: `${live.runtime.service}-`, suffix };
     return {
         oldSha: oldSourceSha,
@@ -2004,10 +2010,6 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
         // A corrected immutable revision plan is a new epoch. Preserve any
         // failed journal for the previous plan instead of reusing its key.
         sourceContracts,
-        oldRuntimeVersions: Object.fromEntries(ROLES.map(role => [role, {
-            generation: oldObservationsValue.runtime[role].generation,
-            resourceVersion: oldObservationsValue.runtime[role].resourceVersion,
-        }])),
     });
     const baseInput = {
         epochId: `identity-epoch-${epochDigest.slice(0, 48)}`,
