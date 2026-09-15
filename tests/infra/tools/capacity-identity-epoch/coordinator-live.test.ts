@@ -133,7 +133,7 @@ function preparedTransition(journal: EpochJournal, lockFence: string): EpochTran
 }
 
 describe('live coordinator producer wire ordering', () => {
-    it('proves OLD public, DESIRED immutable, then PUBLIC desired around alias assignment', async () => {
+    it('proves desired public readiness after a stale read following alias assignment', async () => {
         const packet = createFixturePacket();
         expect(packet.oldManifest.readiness.sourceSha).not.toBe(packet.desiredManifest.readiness.sourceSha);
         expect(packet.oldManifest.readiness.preflightFingerprint).not.toBe(packet.desiredManifest.readiness.preflightFingerprint);
@@ -177,7 +177,7 @@ describe('live coordinator producer wire ordering', () => {
                 } else {
                     events.push('immutable-desired');
                 }
-                return { status: 200, headers: {}, body: JSON.stringify(readiness(packet, url.startsWith('https://public.example.invalid') && publicReadinessReads === 1 ? 'old' : 'desired')), url };
+                return { status: 200, headers: {}, body: JSON.stringify(readiness(packet, url.startsWith('https://public.example.invalid') && publicReadinessReads <= 2 ? 'old' : 'desired')), url };
             },
         });
         const authority = liveAuthority(packet);
@@ -195,7 +195,7 @@ describe('live coordinator producer wire ordering', () => {
         expect(events.slice(0, 4)).toEqual(['public-old-or-post', 'deployment', 'immutable-desired', 'deployment']);
         expect(events.indexOf('alias-post')).toBeGreaterThan(events.indexOf('immutable-desired'));
         expect(events.at(-1)).toBe('public-old-or-post');
-        expect(publicReadinessReads).toBe(2);
+        expect(publicReadinessReads).toBe(3);
     });
 
     it('prepares from complete coherent old observations and rejects one changed live field', async () => {
