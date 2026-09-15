@@ -12,6 +12,7 @@ import {
     EpochError,
     epochFail,
     isObject,
+    isBuildArgumentValue,
     isSha,
     PROJECT_ID_PATTERN,
     ROLES,
@@ -69,7 +70,7 @@ import {
     type SchedulerObservation,
 } from './work-planes';
 import { AuthenticatedProtectedTransport, FetchProtectedTransport } from './platform';
-import { CloudBuildAdapter } from './cloud-build';
+import { CloudBuildAdapter, observedBuildMetadataDigest } from './cloud-build';
 import { createStorageSourceVerifier, normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
@@ -639,7 +640,7 @@ function buildArguments(raw: Record<string, unknown>): Readonly<Record<string, s
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(substitutions)) {
         if (!key.startsWith('_')) continue;
-        if (typeof value !== 'string' || value.length > 2048 || !SAFE.test(value)) fail('SOURCE_INVALID');
+        if (!isBuildArgumentValue(value)) fail('SOURCE_INVALID');
         result[key.slice(1)] = value;
     }
     return Object.freeze(result);
@@ -1024,7 +1025,6 @@ async function buildRoleLive(input: Readonly<{
     google: AuthenticatedProtectedTransport;
     workPlanes: WorkPlaneClient;
     iamAdapter: IamAdapter;
-    oldSourceSha: string;
     desiredSourceSha: string;
     desiredImage: string;
     storageSourceVerifier: StorageSourceVerifier;
@@ -1038,6 +1038,14 @@ async function buildRoleLive(input: Readonly<{
     const revision = await cloudRun.observeRevision(runtime.project, runtime.location, runtime.latestReadyRevision);
     if (!revision.ready || revision.identity.identity !== runtime.identity.identity || revision.image !== runtime.image
         || revision.runtimeDigest !== runtime.runtimeDigest || revision.buildDigest !== runtime.buildDigest) fail('SOURCE_INVALID');
+    // Labels select the historical commit to check; independent Build/Git
+    // content proof below is what establishes that source, not the label.
+    const revisionMetadata = object(revision.raw.metadata);
+    const sourceCandidates = [object(revisionMetadata.labels ?? {})['analysis-v2-source-commit'],
+        object(revisionMetadata.annotations ?? {})['capacity.identity-epoch/source-sha']].filter(value => value !== undefined);
+    if (sourceCandidates.length === 0 || sourceCandidates.some(value => typeof value !== 'string' || !SHA.test(value))
+        || new Set(sourceCandidates).size !== 1) fail('SOURCE_INVALID');
+    const oldSourceSha = sourceCandidates[0] as string;
     const runtimeTarget = roleTargetFromEnvironment(runtime.environment, input.role);
     let runtimeTargetParsed: URL;
     try { runtimeTargetParsed = new URL(runtimeTarget.url); } catch { fail('RESOURCE_INVALID'); }
@@ -1081,7 +1089,7 @@ async function buildRoleLive(input: Readonly<{
     if (canonicalDigest(iam.run.bindings) !== canonicalDigest(iam.maintenance.bindings) || iam.run.etag !== iam.maintenance.etag) fail('RESOURCE_INVALID');
     const buildRecords = Object.values(buildsByLocation).flat();
     if (buildRecords.length === 0) fail('EVIDENCE_UNAVAILABLE');
-    const oldBuild = await resolveOwnerBuildForImage(buildRecords, input.oldSourceSha, runtime.image, selector.project, input.storageSourceVerifier);
+    const oldBuild = await resolveOwnerBuildForImage(buildRecords, oldSourceSha, runtime.image, selector.project, input.storageSourceVerifier);
     const desiredBuild = await resolveOwnerBuildForImage(buildRecords, input.desiredSourceSha, input.desiredImage, selector.project, input.storageSourceVerifier);
     return {
         role: input.role, selector, resources, runtime, revision, queueInput: queueInputValue, queueObservation,
@@ -1208,7 +1216,7 @@ function mapOldSlots(roles: RoleMap<RoleLive>): Readonly<Record<(typeof SLOTS)[n
 
 function accountGraph(pass: Readonly<{ project: string; roles: RoleMap<RoleLive>; accounts: readonly IdentityAccountObservation[] }>): IdentityGraphObservation {
     const oldBuild = pass.roles.preflight.oldBuild.input;
-    if (canonicalDigest(oldBuild) !== canonicalDigest(pass.roles.paid.oldBuild.input)) fail('SOURCE_INVALID');
+    if (canonicalDigest(oldBuild.identity) !== canonicalDigest(pass.roles.paid.oldBuild.input.identity)) fail('SOURCE_INVALID');
     return {
         project: pass.project,
         build: oldBuild.identity,
@@ -1218,27 +1226,6 @@ function accountGraph(pass: Readonly<{ project: string; roles: RoleMap<RoleLive>
         schedulerResources: Object.fromEntries(ROLES.map(role => [role, pass.roles[role].schedulerInput.resource])) as Readonly<Record<Role, string>>,
         retentionSchedulerResource: pass.roles.preflight.retentionInput.resource,
     };
-}
-
-function assertRoleIamIdentityIsolation(roles: RoleMap<RoleLive>): void {
-    const owners = new Map<string, Role>();
-    for (const role of ROLES) {
-        for (const value of Object.values(roles[role].slots)) {
-            const prior = owners.get(value.identity);
-            if (prior !== undefined && prior !== role) fail('IDENTITY_CONFLICT');
-            owners.set(value.identity, role);
-        }
-    }
-    for (const role of ROLES) {
-        const snapshots = Object.values(roles[role].iam);
-        for (const snapshot of snapshots) {
-            for (const binding of snapshot.bindings) {
-                if (!binding.member.startsWith('serviceAccount:')) continue;
-                const owner = owners.get(binding.member.slice('serviceAccount:'.length));
-                if (owner !== undefined && owner !== role) fail('IDENTITY_CONFLICT');
-            }
-        }
-    }
 }
 
 async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtectedTransports, now: () => number, storageSourceVerifier: StorageSourceVerifier): Promise<OwnerPass> {
@@ -1270,17 +1257,16 @@ async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtected
     const desiredArtifact = await selectUniqueBuildForSource(allBuilds, desired.sourceSha, env.ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE, projectId, storageSourceVerifier);
     const roleValues = await Promise.all(ROLES.map(role => buildRoleLive({
         role, env, selector: selectors[role], google, workPlanes, iamAdapter, storageSourceVerifier,
-        oldSourceSha: oldDeployment.sourceSha, desiredSourceSha: desired.sourceSha, desiredImage: desiredArtifact.image,
+        desiredSourceSha: desired.sourceSha, desiredImage: desiredArtifact.image,
     }, buildsByLocation)));
     const roles = Object.fromEntries(roleValues.map(value => [value.role, value])) as RoleMap<RoleLive>;
     const buildOld = roles.preflight.oldBuild;
     const buildDesired = roles.preflight.desiredBuild;
-    assertSameBuild(buildOld, roles.paid.oldBuild);
+    if (canonicalDigest(buildOld.input.identity) !== canonicalDigest(roles.paid.oldBuild.input.identity)) fail('SOURCE_INVALID');
     assertSameBuild(buildDesired, roles.paid.desiredBuild);
     for (const role of ROLES) {
-        if (roles[role].oldBuild.input.sourceSha !== oldDeployment.sourceSha || roles[role].desiredBuild.input.sourceSha !== desired.sourceSha) fail('SOURCE_INVALID');
+        if (roles[role].desiredBuild.input.sourceSha !== desired.sourceSha) fail('SOURCE_INVALID');
     }
-    assertRoleIamIdentityIsolation(roles);
     const slots = mapOldSlots(roles);
     const accounts = await readServiceAccounts(google, projectId, slots);
     const bucket = required(env, 'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET');
@@ -1477,21 +1463,17 @@ function iamContract(value: ProtectedIamInputsForRole, retiredBindings: readonly
 function oldObservations(
     pass: OwnerPass,
     oldInputs: ProtectedPlatformInputs,
-    oldSourceSha: string,
     oldReadiness: Readonly<{ contract: ReadinessContract }>,
 ): ProtectedOldObservations {
     const source = Object.fromEntries(ROLES.map(role => [role, {
-        sourceSha: oldSourceSha,
+        sourceSha: pass.roles[role].oldBuild.input.sourceSha,
         revision: pass.roles[role].runtime.latestReadyRevision!,
-        metadataDigest: canonicalDigest({
-            revision: pass.roles[role].revision.raw,
-            buildProvenance: object(pass.roles[role].oldBuild.raw.sourceProvenance),
-        }),
+        metadataDigest: observedBuildMetadataDigest(pass.roles[role].oldBuild.raw, pass.roles[role].oldBuild.input),
     }])) as ProtectedOldObservations['source'];
     const runtime = Object.fromEntries(ROLES.map(role => {
         const live = pass.roles[role];
         return [role, {
-            sourceSha: oldSourceSha,
+            sourceSha: live.oldBuild.input.sourceSha,
             service: live.runtime.service,
             project: live.runtime.project,
             location: live.runtime.location,
@@ -1699,8 +1681,8 @@ function buildManifest(
     });
 }
 
-function buildOldPlatform(pass: OwnerPass, oldSourceSha: string): ProtectedPlatformInputs {
-    const runtime = Object.fromEntries(ROLES.map(role => [role, buildOldRuntime(role, pass.roles[role], oldSourceSha)])) as Record<Role, ProtectedRuntimeInput>;
+function buildOldPlatform(pass: OwnerPass): ProtectedPlatformInputs {
+    const runtime = Object.fromEntries(ROLES.map(role => [role, buildOldRuntime(role, pass.roles[role], pass.roles[role].oldBuild.input.sourceSha)])) as Record<Role, ProtectedRuntimeInput>;
     const queues = Object.fromEntries(ROLES.map(role => [role, pass.roles[role].queueInput])) as Record<Role, ProtectedQueueInput>;
     const schedulers = Object.fromEntries(ROLES.map(role => [role, pass.roles[role].schedulerInput])) as Record<Role, ProtectedSchedulerInput>;
     const iam = Object.fromEntries(ROLES.map(role => [role, oldIam(pass.roles[role])])) as ProtectedIamInputs;
@@ -1761,12 +1743,12 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
     const selection = selectDesiredIdentityGraph(oldGraph);
     if (selection.actions.length !== 0 || selection.missingAccounts.length !== 0) fail('EVIDENCE_UNAVAILABLE');
     const desiredGraph = selection.desired;
-    const oldInputs = buildOldPlatform(pass, oldSourceSha);
+    const oldInputs = buildOldPlatform(pass);
     const desiredInputs = await buildDesiredPlatform(pass, desiredGraph, desiredSourceSha);
     const sourceContracts = Object.fromEntries(ROLES.map(role => [role, sourceContract(
         role,
         pass.roles[role],
-        oldSourceSha,
+        pass.roles[role].oldBuild.input.sourceSha,
         desiredSourceSha,
         desiredInputs.runtime[role],
         desiredInputs.build,
@@ -1776,7 +1758,7 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
     const retired = deriveRetiredIamBindingDigests(oldManifest, desiredManifestBase, oldInputs);
     const desiredManifest = buildManifest(pass, 'desired', desiredGraph, desiredInputs, pass.desiredReadiness.contract, sourceContracts, retired);
     const zeroWorkEvidence = buildZeroWorkSources(pass.env, pass.project, pass.roles, nowMs);
-    const oldObservationsValue = oldObservations(pass, oldInputs, oldSourceSha, pass.oldReadiness);
+    const oldObservationsValue = oldObservations(pass, oldInputs, pass.oldReadiness);
     const desiredObservationsValue = desiredObservations(
         pass,
         desiredInputs,
@@ -1855,6 +1837,7 @@ async function assertOwnerZeroWorkCoverage(pass: OwnerPass, built: Readonly<{
     const cloudBuild = new CloudBuildAdapter({
         transport: pass.transports.google,
         storageSourceVerifier: pass.storageSourceVerifier,
+        oldObservations: built.packet.protectedObservations.old,
         builds: { old: built.packet.protectedInputs.old.build, desired: built.packet.protectedInputs.desired.build },
         runtimes: { old: built.packet.protectedInputs.old.runtime, desired: built.packet.protectedInputs.desired.runtime },
     });

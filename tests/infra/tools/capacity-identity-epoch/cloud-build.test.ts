@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createFixturePacket } from '../../../../scripts/capacity-identity-epoch/fixtures';
-import { CloudBuildAdapter } from '../../../../scripts/capacity-identity-epoch/cloud-build';
+import { CloudBuildAdapter, observedBuildMetadataDigest } from '../../../../scripts/capacity-identity-epoch/cloud-build';
 import { AuthenticatedProtectedTransport, type ProtectedHttpRequest, type ProtectedHttpResponse, type ProtectedTransport } from '../../../../scripts/capacity-identity-epoch/platform';
 import { canonicalDigest } from '../../../../scripts/capacity-identity-epoch/contracts';
 import { storageSourceContext, type StorageSourceVerifier } from '../../../../scripts/capacity-identity-epoch/storage-source';
@@ -60,6 +60,45 @@ function adapter(transport: BuildTransport, packet = createFixturePacket(), stor
 }
 
 describe('Cloud Build provenance adapter contracts', () => {
+    it('binds each old role to its own source, build inputs and immutable image', async () => {
+        const packet = createFixturePacket();
+        const paidSha = 'd'.repeat(40);
+        const paidImage = IMAGE('paid', 'e'.repeat(64));
+        const paidInput = { ...packet.protectedInputs.old.build, sourceSha: paidSha,
+            sourceContext: 'independent-old-paid-source', buildArguments: { NODE_ENV: 'old-paid-build' } };
+        const paidBuild = { ...buildFor(packet, 'old'),
+            sourceProvenance: { resolvedRepoSource: { repoName: paidInput.sourceContext, commitSha: paidSha } },
+            substitutions: { _NODE_ENV: 'old-paid-build' },
+            results: { images: [{ name: paidImage.split('@')[0], digest: `sha256:${'e'.repeat(64)}` }] } };
+        const old = packet.protectedObservations.old;
+        const oldObservations = { ...old,
+            source: { ...old.source, paid: { ...old.source.paid, sourceSha: paidSha,
+                metadataDigest: observedBuildMetadataDigest(paidBuild, paidInput) } },
+            runtime: { ...old.runtime, paid: { ...old.runtime.paid, sourceSha: paidSha,
+                buildDigest: canonicalDigest({ image: paidImage }) } },
+        };
+        const paidRuntime = { ...packet.protectedInputs.old.runtime.paid, sourceSha: paidSha };
+        const makeAdapter = (build: Record<string, unknown>) => new CloudBuildAdapter({
+            transport: new AuthenticatedProtectedTransport({
+                transport: new BuildTransport([{ builds: [buildFor(packet, 'old'), build] }]),
+                tokenProvider: async () => 'fixture-token',
+            }),
+            builds: { old: packet.protectedInputs.old.build, desired: packet.protectedInputs.desired.build },
+            runtimes: { old: { ...packet.protectedInputs.old.runtime, paid: paidRuntime }, desired: packet.protectedInputs.desired.runtime },
+            oldObservations,
+        });
+        const request = { role: 'paid' as const, phase: 'old' as const,
+            revision: oldObservations.source.paid.revision, runtime: paidRuntime };
+        await expect(makeAdapter(paidBuild).sourceObservation(request)).resolves.toMatchObject({
+            sourceSha: paidSha, metadataDigest: oldObservations.source.paid.metadataDigest });
+        await expect(makeAdapter(paidBuild).buildObservation({ ...request, image: paidImage }))
+            .resolves.toBe(canonicalDigest({ image: paidImage }));
+        await expect(makeAdapter({ ...paidBuild, substitutions: { _NODE_ENV: 'tampered' } }).sourceObservation(request))
+            .rejects.toThrow('EVIDENCE_UNAVAILABLE');
+        await expect(makeAdapter({ ...paidBuild, results: { images: [{ name: 'other-image', digest: `sha256:${'e'.repeat(64)}` }] } }).sourceObservation(request))
+            .rejects.toThrow('EVIDENCE_UNAVAILABLE');
+    });
+
     it('keeps bare account compatibility without accepting a foreign project resource', async () => {
         const packet = createFixturePacket();
         const old = buildFor(packet, 'old');

@@ -13,6 +13,7 @@ import {
     hasExactKeys,
     isDigest,
     isObject,
+    isBuildArgumentValue,
     isRole,
     isSha,
     validateQueueTargetConfiguration,
@@ -389,7 +390,7 @@ function validateBuildInput(value: unknown): asserts value is ProtectedBuildInpu
     validateProtectedIdentity(value.identity);
     if (!isSha(value.sourceSha) || !safeString(value.sourceContext, 2048)
         || !isObject(value.buildArguments)
-        || !Object.values(value.buildArguments).every(item => safeString(item, 2048))) epochFail('SOURCE_INVALID');
+        || !Object.values(value.buildArguments).every(isBuildArgumentValue)) epochFail('SOURCE_INVALID');
 }
 
 function validateRuntimeInput(value: unknown, role: Role): asserts value is ProtectedRuntimeInput {

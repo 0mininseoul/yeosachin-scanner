@@ -91,7 +91,7 @@ function manifest(kind: 'old' | 'desired'): CapacityManifest {
     ]));
     const buildInput = {
         identity: identity('new-build@example-project.iam.gserviceaccount.com'),
-        sourceSha: 'b'.repeat(40), sourceContext: 'fixture-source-context', buildArguments: { NODE_ENV: 'production' },
+        sourceSha: 'b'.repeat(40), sourceContext: 'fixture-source-context', buildArguments: { NODE_ENV: 'production', GOOGLE_TPC_HOSTNAME: '' },
     };
     const runtimeTarget = (role: 'preflight' | 'paid') => ({
         role,
@@ -260,7 +260,7 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
             identity: identity(`${kind === 'old' ? 'old' : 'new'}-build@example-project.iam.gserviceaccount.com`),
             sourceSha,
             sourceContext: 'fixture-source-context',
-            buildArguments: { NODE_ENV: 'production' },
+            buildArguments: { NODE_ENV: 'production', GOOGLE_TPC_HOSTNAME: '' },
         },
         runtime: { preflight: roleInput('preflight'), paid: roleInput('paid') },
         queues: { preflight: queueInput('preflight'), paid: queueInput('paid') },

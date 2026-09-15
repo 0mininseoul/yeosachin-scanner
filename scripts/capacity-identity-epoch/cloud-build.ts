@@ -2,8 +2,10 @@ import {
     canonicalDigest,
     epochFail,
     isObject,
+    isBuildArgumentValue,
     type ProtectedBuildInput,
     type ProtectedRuntimeInput,
+    type ProtectedOldObservations,
     type Role,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
@@ -80,6 +82,27 @@ function buildIdentityMatches(build: Record<string, unknown>, expected: Protecte
         || build.serviceAccount === `projects/${expected.identity.project}/serviceAccounts/${expected.identity.identity}`;
 }
 
+/** Bind each historical build's inputs, rather than assuming both roles shared a build. */
+export function observedBuildMetadataDigest(build: Readonly<Record<string, unknown>>, input: ProtectedBuildInput): string {
+    return canonicalDigest({ sourceProvenance: object(build.sourceProvenance), buildInput: input });
+}
+
+function observedBuildInput(build: Record<string, unknown>, identity: ProtectedBuildInput['identity'], sourceSha: string): ProtectedBuildInput | null {
+    if (!isObject(build.sourceProvenance) || !isObject(build.substitutions)) return null;
+    const provenance = build.sourceProvenance;
+    const storage = normalizeStorageSource(provenance.resolvedStorageSource);
+    const repo = isObject(provenance.resolvedRepoSource) ? provenance.resolvedRepoSource : undefined;
+    const context = storage ? storageSourceContext(storage) : repo?.repoName ?? repo?.url ?? repo?.dir;
+    if (!safe(context)) return null;
+    const buildArguments: Record<string, string> = {};
+    for (const [key, value] of Object.entries(build.substitutions)) {
+        if (!key.startsWith('_')) continue;
+        if (!isBuildArgumentValue(value)) return null;
+        buildArguments[key.slice(1)] = value;
+    }
+    return { identity, sourceSha, sourceContext: context, buildArguments };
+}
+
 /**
  * Read-only Cloud Build provenance.  It intentionally lists and fully pages
  * successful regional builds, then requires one exact source/context,
@@ -90,6 +113,7 @@ function buildIdentityMatches(build: Record<string, unknown>, expected: Protecte
 export class CloudBuildAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
     private readonly storageSourceVerifier?: StorageSourceVerifier;
+    private readonly oldObservations?: Pick<ProtectedOldObservations, 'source' | 'runtime'>;
     private readonly builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
     private readonly runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
 
@@ -98,9 +122,11 @@ export class CloudBuildAdapter {
         builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
         runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
         storageSourceVerifier?: StorageSourceVerifier;
+        oldObservations?: Pick<ProtectedOldObservations, 'source' | 'runtime'>;
     }>) {
         this.transport = options.transport;
         this.storageSourceVerifier = options.storageSourceVerifier;
+        this.oldObservations = options.oldObservations;
         this.builds = options.builds;
         this.runtimes = options.runtimes;
     }
@@ -108,11 +134,13 @@ export class CloudBuildAdapter {
     async sourceObservation(input: Readonly<{ role: Role; phase: 'old' | 'desired'; revision: string; runtime: ProtectedRuntimeInput }>): Promise<Readonly<{ role: Role; sourceSha: string; revision: string; metadataDigest: string }>> {
         const build = await this.findExactBuild(input.role, input.phase, undefined);
         const sourceProvenance = object(build.sourceProvenance);
+        const historicalInput = input.phase === 'old' && this.oldObservations
+            ? observedBuildInput(build, this.builds.old.identity, this.runtimes.old[input.role].sourceSha) : null;
         return {
             role: input.role,
-            sourceSha: this.builds[input.phase].sourceSha,
+            sourceSha: historicalInput?.sourceSha ?? this.builds[input.phase].sourceSha,
             revision: input.revision,
-            metadataDigest: canonicalDigest(sourceProvenance),
+            metadataDigest: historicalInput ? observedBuildMetadataDigest(build, historicalInput) : canonicalDigest(sourceProvenance),
         };
     }
 
@@ -152,9 +180,22 @@ export class CloudBuildAdapter {
             for (const item of builds) {
                 const build = object(item);
                 if (build.status !== 'SUCCESS' || !buildIdentityMatches(build, expected)
-                    || !substitutionsMatch(build, expected.buildArguments)
-                    || (image !== undefined && !imageMatches(build, image))
-                    || !(await buildSourceMatches(build, expected, this.storageSourceVerifier))) continue;
+                    || (image !== undefined && !imageMatches(build, image))) continue;
+                let sourceInput = expected;
+                if (phase === 'old' && this.oldObservations) {
+                    const observed = this.oldObservations;
+                    const historicalInput = observedBuildInput(build, expected.identity, runtime.sourceSha);
+                    if (!historicalInput || observed.source[role].sourceSha !== runtime.sourceSha
+                        || observed.runtime[role].sourceSha !== runtime.sourceSha
+                        || observedBuildMetadataDigest(build, historicalInput) !== observed.source[role].metadataDigest) continue;
+                    const images = object(build.results).images;
+                    if (!Array.isArray(images) || !images.some(entry => isObject(entry)
+                        && typeof entry.name === 'string' && typeof entry.digest === 'string'
+                        && /^sha256:[0-9a-f]{64}$/.test(entry.digest)
+                        && canonicalDigest({ image: `${entry.name}@${entry.digest}` }) === observed.runtime[role].buildDigest)) continue;
+                    sourceInput = historicalInput;
+                } else if (!substitutionsMatch(build, expected.buildArguments)) continue;
+                if (!(await buildSourceMatches(build, sourceInput, this.storageSourceVerifier))) continue;
                 matches.push(build);
             }
             if (body.nextPageToken === undefined || body.nextPageToken === '') break;

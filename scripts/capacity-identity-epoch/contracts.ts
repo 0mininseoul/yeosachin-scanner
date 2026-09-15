@@ -182,6 +182,11 @@ export type ProtectedBuildInput = Readonly<{
     buildArguments: Readonly<Record<string, string>>;
 }>;
 
+/** Cloud Build emits empty optional substitutions; preserve them in the input digest. */
+export function isBuildArgumentValue(value: unknown): value is string {
+    return typeof value === 'string' && value.length <= 2048 && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
 export type ProtectedRuntimeInput = Readonly<{
     role: Role;
     service: string;

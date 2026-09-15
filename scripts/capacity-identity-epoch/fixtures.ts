@@ -205,7 +205,10 @@ function platformInputs(kind: 'old' | 'desired'): ProtectedPlatformInputs {
 function oldObservations(): ProtectedOldObservations {
     const platform = platformInputs('old');
     const oldImage = (role: Role) => `asia-northeast3-docker.pkg.dev/${FIXTURE_PROJECT}/workers/${role}@sha256:${'a'.repeat(64)}`;
-    const oldSourceMetadataDigest = canonicalDigest({ resolvedRepoSource: { repoName: 'fixture-source-context', commitSha: 'a'.repeat(40) } });
+    const oldSourceMetadataDigest = canonicalDigest({
+        sourceProvenance: { resolvedRepoSource: { repoName: 'fixture-source-context', commitSha: 'a'.repeat(40) } },
+        buildInput: platform.build,
+    });
     return {
         source: { preflight: { sourceSha: 'a'.repeat(40), revision: 'preflight-old-revision', metadataDigest: oldSourceMetadataDigest }, paid: { sourceSha: 'a'.repeat(40), revision: 'paid-old-revision', metadataDigest: oldSourceMetadataDigest } },
         runtime: { preflight: { sourceSha: 'a'.repeat(40), service: platform.runtime.preflight.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'preflight-old-revision', generation: '1', resourceVersion: 'rv-1', identity: platform.runtime.preflight.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: canonicalRuntimeInputDigest(platform.runtime.preflight), buildDigest: canonicalDigest({ image: oldImage('preflight') }) }, paid: { sourceSha: 'a'.repeat(40), service: platform.runtime.paid.service, project: FIXTURE_PROJECT, location: 'asia-northeast3', revision: 'paid-old-revision', generation: '1', resourceVersion: 'rv-1', identity: platform.runtime.paid.identity, providerAdmissionEnabled: true, noTraffic: true, runtimeDigest: canonicalRuntimeInputDigest(platform.runtime.paid), buildDigest: canonicalDigest({ image: oldImage('paid') }) } },

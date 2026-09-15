@@ -23,6 +23,14 @@ const GOOGLE_LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
 const GOOGLE_RESOURCE_ATOM = /^[A-Za-z0-9_-]{1,128}$/;
 const GOOGLE_QUEUE_ID = /^[A-Za-z0-9-]{1,100}$/;
 const FILTER_ATOM = /^[A-Za-z0-9_.:-]{1,256}$/;
+// Recognize only the documented system filter, not arbitrary filter implication.
+// https://docs.cloud.google.com/logging/docs/routing/overview#default-sink
+const DEFAULT_EXCLUDED_LOG_IDS = [
+    'cloudaudit.googleapis.com/activity', 'externalaudit.googleapis.com/activity',
+    'cloudaudit.googleapis.com/system_event', 'externalaudit.googleapis.com/system_event',
+    'cloudaudit.googleapis.com/access_transparency', 'externalaudit.googleapis.com/access_transparency',
+] as const;
+const DEFAULT_SINK_FILTER = DEFAULT_EXCLUDED_LOG_IDS.map(id => `NOT LOG_ID("${id}")`).join(' AND ');
 
 export type SupabaseLedgerSource = Readonly<{
     kind: 'supabase';
@@ -59,6 +67,13 @@ export type LiveZeroWorkSources = Readonly<{
 }>;
 
 type EvidenceSource = SupabaseLedgerSource | CloudLoggingEvidenceSource;
+
+function defaultSinkCoversSource(source: CloudLoggingEvidenceSource, filter: unknown): boolean {
+    return source.sinkName === '_Default'
+        && source.bucketResource === `projects/${source.project}/locations/global/buckets/_Default`
+        && typeof filter === 'string' && filter.trim().replace(/\s+/g, ' ') === DEFAULT_SINK_FILTER
+        && !DEFAULT_EXCLUDED_LOG_IDS.some(id => source.logName === `projects/${source.project}/logs/${id.replace('/', '%2F')}`);
+}
 
 function sortedKeys(value: Record<string, unknown>): string {
     return Object.keys(value).sort().join(',');
@@ -534,7 +549,10 @@ export class LiveEvidenceCollector {
         const matches = sinks.filter(item => isObject(item) && item.name === source.sinkName);
         if (matches.length !== 1) fail('EVIDENCE_UNAVAILABLE');
         const sink = object(matches[0]);
-        if (sink.destination !== `logging.googleapis.com/${source.bucketResource}` || sink.filter !== this.logFilter(source)) fail('EVIDENCE_UNAVAILABLE');
+        if ((sink.disabled !== undefined && sink.disabled !== false)
+            || (sink.exclusions !== undefined && (!Array.isArray(sink.exclusions) || sink.exclusions.length !== 0))
+            || sink.destination !== `logging.googleapis.com/${source.bucketResource}`
+            || (sink.filter !== this.logFilter(source) && !defaultSinkCoversSource(source, sink.filter))) fail('EVIDENCE_UNAVAILABLE');
         const bucketPath = `/v2/${source.bucketResource}`;
         const { value: bucketValue } = await this.loggingTransport.json({
             method: 'GET', url: `https://logging.googleapis.com${bucketPath}`, allowedHosts: LOGGING_HOSTS,
