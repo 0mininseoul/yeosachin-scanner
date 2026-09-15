@@ -2004,6 +2004,10 @@ async function buildOwnerPacket(pass: OwnerPass, nowMs: number): Promise<Readonl
         // A corrected immutable revision plan is a new epoch. Preserve any
         // failed journal for the previous plan instead of reusing its key.
         sourceContracts,
+        oldRuntimeVersions: Object.fromEntries(ROLES.map(role => [role, {
+            generation: oldObservationsValue.runtime[role].generation,
+            resourceVersion: oldObservationsValue.runtime[role].resourceVersion,
+        }])),
     });
     const baseInput = {
         epochId: `identity-epoch-${epochDigest.slice(0, 48)}`,
