@@ -7,10 +7,13 @@ import {
     type Role,
 } from './contracts';
 import { AuthenticatedProtectedTransport } from './platform';
+import { normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 
 const HOSTS = new Set(['cloudbuild.googleapis.com']);
 const PROJECT = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const LOCATION = /^[a-z][a-z0-9-]{0,62}$/;
+const PROOF_SHA1 = /^[0-9a-f]{40}$/;
+const PROOF_SHA256 = /^[0-9a-f]{64}$/;
 const MAX_PAGES = 100;
 
 function fail(code: 'ADAPTER_REQUEST_INVALID' | 'ADAPTER_RESPONSE_INVALID' | 'EVIDENCE_UNAVAILABLE' | 'SOURCE_INVALID'): never {
@@ -26,22 +29,32 @@ function safe(value: unknown, max = 4096): value is string {
     return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
-function buildSourceMatches(build: Record<string, unknown>, input: ProtectedBuildInput): boolean {
+async function buildSourceMatches(build: Record<string, unknown>, input: ProtectedBuildInput, verifier?: StorageSourceVerifier): Promise<boolean> {
     const provenance = object(build.sourceProvenance);
-    const repo = isObject(provenance.resolvedRepoSource) ? provenance.resolvedRepoSource : undefined;
-    const storage = isObject(provenance.resolvedStorageSource) ? provenance.resolvedStorageSource : undefined;
-    const sourceSha = repo?.commitSha ?? repo?.revision ?? storage?.generation;
-    if (sourceSha !== input.sourceSha) return false;
-    const contexts = [
-        repo?.repoName,
-        repo?.url,
-        repo?.dir,
-        storage && typeof storage.bucket === 'string' && typeof storage.object === 'string'
-            ? `${storage.bucket}/${storage.object}` : undefined,
-        storage && typeof storage.bucket === 'string' && typeof storage.object === 'string' && typeof storage.generation === 'string'
-            ? `${storage.bucket}/${storage.object}#${storage.generation}` : undefined,
-    ].filter((value): value is string => typeof value === 'string');
-    return contexts.includes(input.sourceContext);
+    const rawRepo = provenance.resolvedRepoSource;
+    const rawStorage = provenance.resolvedStorageSource;
+    if ((rawRepo !== undefined && !isObject(rawRepo)) || (rawStorage !== undefined && !isObject(rawStorage))) return false;
+    const repo = isObject(rawRepo) ? rawRepo : undefined;
+    if (repo && rawStorage !== undefined) return false;
+    if (repo) {
+        const sourceSha = repo.commitSha ?? repo.revision;
+        if (sourceSha !== input.sourceSha) return false;
+        const contexts = [repo.repoName, repo.url, repo.dir]
+            .filter((value): value is string => typeof value === 'string');
+        return contexts.includes(input.sourceContext);
+    }
+    const storage = normalizeStorageSource(provenance.resolvedStorageSource);
+    if (!storage || !verifier || !PROOF_SHA1.test(input.sourceSha)
+        || input.sourceContext !== storageSourceContext(storage)) return false;
+    const proof = await verifier({ source: storage, reviewedSha: input.sourceSha });
+    return isObject(proof)
+        && proof.reviewedSha === input.sourceSha
+        && proof.sourceContext === input.sourceContext
+        && proof.sourceBucket === storage.bucket
+        && proof.sourceObject === storage.object
+        && proof.sourceGeneration === storage.generation
+        && typeof proof.archiveSha256 === 'string'
+        && PROOF_SHA256.test(proof.archiveSha256);
 }
 
 function substitutionsMatch(build: Record<string, unknown>, expected: Readonly<Record<string, string>>): boolean {
@@ -63,7 +76,8 @@ function imageMatches(build: Record<string, unknown>, image: string): boolean {
 }
 
 function buildIdentityMatches(build: Record<string, unknown>, expected: ProtectedBuildInput): boolean {
-    return build.serviceAccount === expected.identity.identity;
+    return build.serviceAccount === expected.identity.identity
+        || build.serviceAccount === `projects/${expected.identity.project}/serviceAccounts/${expected.identity.identity}`;
 }
 
 /**
@@ -75,6 +89,7 @@ function buildIdentityMatches(build: Record<string, unknown>, expected: Protecte
  */
 export class CloudBuildAdapter {
     private readonly transport: AuthenticatedProtectedTransport;
+    private readonly storageSourceVerifier?: StorageSourceVerifier;
     private readonly builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
     private readonly runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
 
@@ -82,8 +97,10 @@ export class CloudBuildAdapter {
         transport: AuthenticatedProtectedTransport;
         builds: Readonly<Record<'old' | 'desired', ProtectedBuildInput>>;
         runtimes: Readonly<Record<'old' | 'desired', Readonly<Record<Role, ProtectedRuntimeInput>>>>;
+        storageSourceVerifier?: StorageSourceVerifier;
     }>) {
         this.transport = options.transport;
+        this.storageSourceVerifier = options.storageSourceVerifier;
         this.builds = options.builds;
         this.runtimes = options.runtimes;
     }
@@ -130,12 +147,14 @@ export class CloudBuildAdapter {
                 acceptedStatuses: [200],
             });
             const body = object(value);
-            if (!Array.isArray(body.builds)) fail('ADAPTER_RESPONSE_INVALID');
-            for (const item of body.builds) {
+            const builds = body.builds === undefined ? [] : body.builds;
+            if (!Array.isArray(builds)) fail('ADAPTER_RESPONSE_INVALID');
+            for (const item of builds) {
                 const build = object(item);
                 if (build.status !== 'SUCCESS' || !buildIdentityMatches(build, expected)
-                    || !buildSourceMatches(build, expected) || !substitutionsMatch(build, expected.buildArguments)
-                    || (image !== undefined && !imageMatches(build, image))) continue;
+                    || !substitutionsMatch(build, expected.buildArguments)
+                    || (image !== undefined && !imageMatches(build, image))
+                    || !(await buildSourceMatches(build, expected, this.storageSourceVerifier))) continue;
                 matches.push(build);
             }
             if (body.nextPageToken === undefined || body.nextPageToken === '') break;

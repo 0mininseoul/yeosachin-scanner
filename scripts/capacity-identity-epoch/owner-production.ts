@@ -8,6 +8,7 @@ import {
     canonicalIamPolicyDigest,
     canonicalQueueConfiguration,
     canonicalRuntimeInputDigest,
+    CLOUD_LOG_ID_PATTERN,
     EpochError,
     epochFail,
     isObject,
@@ -69,6 +70,7 @@ import {
 } from './work-planes';
 import { AuthenticatedProtectedTransport, FetchProtectedTransport } from './platform';
 import { CloudBuildAdapter } from './cloud-build';
+import { createStorageSourceVerifier, normalizeStorageSource, storageSourceContext, type StorageSourceVerifier } from './storage-source';
 import { parsePublicReadinessJson } from '../../lib/services/analysis/public-readiness-contract';
 import type { LegacyPublicReadiness } from '../../lib/services/analysis/legacy-analysis-public-readiness';
 import { deriveObservationInputDigests, createProtectedPacket, deriveRetiredIamBindingDigests, type ProtectedPacketInput } from './packet';
@@ -116,6 +118,7 @@ const GIT_ENV = Object.freeze({
 
 const ENV_KEYS = Object.freeze(new Set([
     'ANALYSIS_CAPACITY_DEPLOY_LOCK_BUCKET',
+    'ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE',
     'ANALYSIS_CAPACITY_LEGACY_TARGET_RESOURCE',
     'ANALYSIS_CAPACITY_TASK_AUDIT_LOG_NAME',
     'ANALYSIS_CAPACITY_TASK_AUDIT_SINK_NAME',
@@ -606,20 +609,27 @@ async function readPublicReadiness(url: string, expectedSourceSha: string, publi
     };
 }
 
-type BuildRecord = Readonly<{
+type BuildCandidate = Readonly<{
     raw: Readonly<Record<string, unknown>>;
-    input: ProtectedBuildInput;
     images: readonly string[];
 }>;
+type BuildRecord = BuildCandidate & Readonly<{ input: ProtectedBuildInput }>;
 
-function buildSource(raw: Record<string, unknown>): Readonly<{ sha: string; context: string }> {
+async function buildSource(raw: Record<string, unknown>, reviewedSha: string, verifyStorage: StorageSourceVerifier): Promise<Readonly<{ sha: string; context: string }>> {
     const provenance = object(raw.sourceProvenance);
     const repo = isObject(provenance.resolvedRepoSource) ? provenance.resolvedRepoSource : undefined;
-    const storage = isObject(provenance.resolvedStorageSource) ? provenance.resolvedStorageSource : undefined;
-    const sha = repo?.commitSha ?? repo?.revision ?? storage?.generation;
-    if (typeof sha !== 'string' || !SHA.test(sha)) fail('SOURCE_INVALID');
-    const context = repo?.repoName ?? repo?.url ?? repo?.dir
-        ?? (storage && typeof storage.bucket === 'string' && typeof storage.object === 'string' ? `${storage.bucket}/${storage.object}` : undefined);
+    const storage = normalizeStorageSource(provenance.resolvedStorageSource);
+    if (!SHA.test(reviewedSha) || (repo !== undefined && storage !== null)) fail('SOURCE_INVALID');
+    if (storage !== null) {
+        const proof = await verifyStorage({ source: storage, reviewedSha });
+        if (!proof || proof.reviewedSha !== reviewedSha || proof.sourceContext !== storageSourceContext(storage)
+            || proof.sourceBucket !== storage.bucket || proof.sourceObject !== storage.object
+            || proof.sourceGeneration !== storage.generation || !/^[0-9a-f]{64}$/.test(proof.archiveSha256)) fail('SOURCE_INVALID');
+        return { sha: proof.reviewedSha, context: proof.sourceContext };
+    }
+    const sha = repo?.commitSha ?? repo?.revision;
+    if (sha !== reviewedSha) fail('SOURCE_INVALID');
+    const context = repo?.repoName ?? repo?.url ?? repo?.dir;
     if (typeof context !== 'string' || !SAFE.test(context)) fail('SOURCE_INVALID');
     return { sha, context };
 }
@@ -647,8 +657,7 @@ function buildImages(raw: Record<string, unknown>): readonly string[] {
     }));
 }
 
-function buildInput(raw: Record<string, unknown>, expectedProject: string): ProtectedBuildInput {
-    const source = buildSource(raw);
+async function buildInput(raw: Record<string, unknown>, expectedProject: string, reviewedSha: string, verifyStorage: StorageSourceVerifier): Promise<ProtectedBuildInput> {
     const rawServiceAccount = raw.serviceAccount;
     if (typeof rawServiceAccount !== 'string') fail('SOURCE_INVALID');
     // Cloud Build returns this field as the canonical resource name in the
@@ -669,15 +678,18 @@ function buildInput(raw: Record<string, unknown>, expectedProject: string): Prot
         ? accountDomain.slice(0, -'.iam.gserviceaccount.com'.length)
         : '';
     if (accountProject !== '' && accountProject !== expectedProject) fail('PROJECT_MISMATCH');
+    const buildIdentity = identity(serviceAccount, expectedProject);
+    const argumentsValue = buildArguments(raw);
+    const source = await buildSource(raw, reviewedSha, verifyStorage);
     return {
-        identity: identity(serviceAccount, expectedProject),
+        identity: buildIdentity,
         sourceSha: source.sha,
         sourceContext: source.context,
-        buildArguments: buildArguments(raw),
+        buildArguments: argumentsValue,
     };
 }
 
-async function readBuilds(google: AuthenticatedProtectedTransport, projectId: string, location: string): Promise<readonly BuildRecord[]> {
+async function readBuilds(google: AuthenticatedProtectedTransport, projectId: string, location: string): Promise<readonly BuildCandidate[]> {
     if (!PROJECT_ID_PATTERN.test(projectId) || !LOCATION.test(location)) fail('ADAPTER_REQUEST_INVALID');
     const path = `/v1/projects/${encodeURIComponent(projectId)}/locations/${encodeURIComponent(location)}/builds`;
     const rows = await collectFullyPaged({
@@ -689,23 +701,21 @@ async function readBuilds(google: AuthenticatedProtectedTransport, projectId: st
                 allowedHosts: new Set(['cloudbuild.googleapis.com']), allowedPath: candidate => candidate === path, allowedMethods: ['GET'], allowedQueryKeys: pageToken === undefined ? ['filter', 'pageSize'] : ['filter', 'pageSize', 'pageToken'], acceptedStatuses: [200],
             });
             const body = object(value);
-            if (!Array.isArray(body.builds)) fail('ADAPTER_RESPONSE_INVALID');
+            if (body.builds !== undefined && !Array.isArray(body.builds)) fail('ADAPTER_RESPONSE_INVALID');
             const next = body.nextPageToken;
             if (next !== undefined && typeof next !== 'string') fail('PAGINATION_INCOMPLETE');
-            return { items: body.builds, ...(typeof next === 'string' && next.length > 0 ? { nextPageToken: next } : {}) };
+            return { items: (body.builds ?? []) as unknown[], ...(typeof next === 'string' && next.length > 0 ? { nextPageToken: next } : {}) };
         },
     });
-    const result: BuildRecord[] = [];
+    const result: BuildCandidate[] = [];
     for (const value of rows) {
         const raw = object(value);
         if (raw.status !== 'SUCCESS') continue;
-        // Historical successful builds may use the provider's default
-        // service account or omit optional provenance/results fields. They
-        // cannot satisfy an exact source/image selector, so discard those
-        // unrelated rows; a malformed candidate still fails closed when the
-        // exact selector finds zero valid records.
+        // Only image metadata is needed to narrow this historical inventory.
+        // Validate identity and source after exact image selection, so no
+        // unrelated source archive is downloaded during discovery.
         try {
-            result.push(Object.freeze({ raw, input: buildInput(raw, projectId), images: buildImages(raw) }));
+            result.push(Object.freeze({ raw, images: buildImages(raw) }));
         } catch (error) {
             if (error instanceof EpochError && error.code === 'PROJECT_MISMATCH') throw error;
         }
@@ -713,18 +723,29 @@ async function readBuilds(google: AuthenticatedProtectedTransport, projectId: st
     return Object.freeze(result);
 }
 
-function selectBuild(records: readonly BuildRecord[], sourceSha: string, image: string): BuildRecord {
+export async function resolveOwnerBuildForImage(records: readonly BuildCandidate[], sourceSha: string, image: string, project: string, verifyStorage: StorageSourceVerifier): Promise<BuildRecord> {
     if (!SHA.test(sourceSha) || !IMAGE.test(image)) fail('SOURCE_INVALID');
-    const candidates = records.filter(record => record.input.sourceSha === sourceSha && record.images.includes(image));
+    // Select the exact immutable image before downloading any source archive.
+    // An image selector narrows discovery; only content proof establishes SHA.
+    const candidates = records.filter(record => record.images.includes(image));
     if (candidates.length !== 1) fail('DISCOVERY_AMBIGUOUS');
-    return candidates[0]!;
+    const candidate = candidates[0]!;
+    return Object.freeze({ ...candidate, input: await buildInput(candidate.raw, project, sourceSha, verifyStorage) });
 }
 
-function selectUniqueBuildForSource(records: readonly BuildRecord[], sourceSha: string): Readonly<{ build: BuildRecord; image: string }> {
+async function selectUniqueBuildForSource(records: readonly BuildCandidate[], sourceSha: string, selectedImage: string | undefined, project: string, verifyStorage: StorageSourceVerifier): Promise<Readonly<{ build: BuildRecord; image: string }>> {
     if (!SHA.test(sourceSha)) fail('SOURCE_INVALID');
-    const candidates = records.filter(record => record.input.sourceSha === sourceSha);
+    if (selectedImage !== undefined) return { build: await resolveOwnerBuildForImage(records, sourceSha, selectedImage, project, verifyStorage), image: selectedImage };
+    // Repo-backed builds remain discoverable by provider commit SHA. Uploaded
+    // sources need a reviewed immutable image anchor, never a latest-build guess.
+    const candidates = records.filter(record => {
+        const provenance = record.raw.sourceProvenance;
+        if (!isObject(provenance) || !isObject(provenance.resolvedRepoSource)) return false;
+        return (provenance.resolvedRepoSource.commitSha ?? provenance.resolvedRepoSource.revision) === sourceSha;
+    });
     if (candidates.length !== 1 || candidates[0]!.images.length !== 1) fail('DISCOVERY_AMBIGUOUS');
-    return { build: candidates[0]!, image: candidates[0]!.images[0]! };
+    const image = candidates[0]!.images[0]!;
+    return { build: await resolveOwnerBuildForImage(candidates, sourceSha, image, project, verifyStorage), image };
 }
 
 function assertSameBuild(left: BuildRecord, right: BuildRecord): void {
@@ -853,7 +874,8 @@ function validateAuditSelectors(env: Env, prefix: 'TASK' | 'SCHEDULER'): Readonl
     const sinkName = required(env, names.sinkName);
     const bucketResource = required(env, names.bucketResource);
     const correlation = required(env, names.correlation);
-    if (!/^projects\/[A-Za-z0-9-]{6,30}\/logs\/[A-Za-z0-9_.-]{1,512}$/.test(logName)
+    const log = /^projects\/[A-Za-z0-9-]{6,30}\/logs\/([^/]+)$/.exec(logName);
+    if (log === null || !CLOUD_LOG_ID_PATTERN.test(log[1]!)
         || !/^[A-Za-z0-9_-]{1,128}$/.test(sinkName)
         || !/^projects\/[A-Za-z0-9-]{6,30}\/locations\/[a-z][a-z0-9-]{0,62}\/buckets\/[A-Za-z0-9_-]{1,128}$/.test(bucketResource)
         || !/^[A-Za-z0-9_.:-]{1,256}$/.test(correlation)) fail('EVIDENCE_UNAVAILABLE');
@@ -982,6 +1004,7 @@ type OwnerPass = Readonly<{
     supabaseServiceRoleSensitive: boolean;
     auth: OwnerAuthBoundary;
     transports: OwnerProtectedTransports;
+    storageSourceVerifier: StorageSourceVerifier;
     project: string;
     accounts: readonly IdentityAccountObservation[];
     roles: RoleMap<RoleLive>;
@@ -1004,7 +1027,8 @@ async function buildRoleLive(input: Readonly<{
     oldSourceSha: string;
     desiredSourceSha: string;
     desiredImage: string;
-}>, buildsByLocation: Readonly<Record<string, readonly BuildRecord[]>>): Promise<RoleLive> {
+    storageSourceVerifier: StorageSourceVerifier;
+}>, buildsByLocation: Readonly<Record<string, readonly BuildCandidate[]>>): Promise<RoleLive> {
     const cloudRun = new CloudRunAdapter({ transport: input.google });
     const runtime = await cloudRun.getService(serviceResource(input.selector));
     if (runtime.project !== input.selector.project || runtime.location !== input.selector.cloudRunRegion || runtime.service !== input.selector.service
@@ -1057,8 +1081,8 @@ async function buildRoleLive(input: Readonly<{
     if (canonicalDigest(iam.run.bindings) !== canonicalDigest(iam.maintenance.bindings) || iam.run.etag !== iam.maintenance.etag) fail('RESOURCE_INVALID');
     const buildRecords = Object.values(buildsByLocation).flat();
     if (buildRecords.length === 0) fail('EVIDENCE_UNAVAILABLE');
-    const oldBuild = selectBuild(buildRecords, input.oldSourceSha, runtime.image);
-    const desiredBuild = selectBuild(buildRecords, input.desiredSourceSha, input.desiredImage);
+    const oldBuild = await resolveOwnerBuildForImage(buildRecords, input.oldSourceSha, runtime.image, selector.project, input.storageSourceVerifier);
+    const desiredBuild = await resolveOwnerBuildForImage(buildRecords, input.desiredSourceSha, input.desiredImage, selector.project, input.storageSourceVerifier);
     return {
         role: input.role, selector, resources, runtime, revision, queueInput: queueInputValue, queueObservation,
         schedulerInput: { ...schedulerInputValue, state: schedulerObservation.state, pauseEpochMs: schedulerObservation.pauseEpochMs, lastAttemptMs: schedulerObservation.lastAttemptMs }, schedulerObservation, retentionInput: retentionInputValue, iam,
@@ -1217,7 +1241,7 @@ function assertRoleIamIdentityIsolation(roles: RoleMap<RoleLive>): void {
     }
 }
 
-async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtectedTransports, now: () => number): Promise<OwnerPass> {
+async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtectedTransports, now: () => number, storageSourceVerifier: StorageSourceVerifier): Promise<OwnerPass> {
     const productionEnv = await readProductionEnv(transports.vercel, auth);
     const env = envMap(productionEnv);
     const selectors = Object.fromEntries(ROLES.map(role => [role, readRoleSelector(env, role)])) as RoleMap<ReturnType<typeof readRoleSelector>>;
@@ -1240,12 +1264,12 @@ async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtected
     const workPlanes = new WorkPlaneClient({ transport: google, pauseProvenance, now });
     const iamAdapter = new IamAdapter({ transport: google });
     const locations = new Set(['global', ...ROLES.flatMap(role => [selectors[role].location, selectors[role].cloudRunRegion, selectors[role].maintenanceLocation])]);
-    const buildsByLocation: Record<string, readonly BuildRecord[]> = {};
+    const buildsByLocation: Record<string, readonly BuildCandidate[]> = {};
     for (const location of locations) buildsByLocation[location] = await readBuilds(google, projectId, location);
     const allBuilds = Object.values(buildsByLocation).flat();
-    const desiredArtifact = selectUniqueBuildForSource(allBuilds, desired.sourceSha);
+    const desiredArtifact = await selectUniqueBuildForSource(allBuilds, desired.sourceSha, env.ANALYSIS_CAPACITY_DESIRED_WORKER_IMAGE, projectId, storageSourceVerifier);
     const roleValues = await Promise.all(ROLES.map(role => buildRoleLive({
-        role, env, selector: selectors[role], google, workPlanes, iamAdapter,
+        role, env, selector: selectors[role], google, workPlanes, iamAdapter, storageSourceVerifier,
         oldSourceSha: oldDeployment.sourceSha, desiredSourceSha: desired.sourceSha, desiredImage: desiredArtifact.image,
     }, buildsByLocation)));
     const roles = Object.fromEntries(roleValues.map(value => [value.role, value])) as RoleMap<RoleLive>;
@@ -1264,7 +1288,7 @@ async function readOwnerPass(auth: OwnerAuthBoundary, transports: OwnerProtected
     return Object.freeze({
         env,
         supabaseServiceRoleSensitive: productionEnv.sensitiveKeys.includes('SUPABASE_SERVICE_ROLE_KEY'),
-        auth, transports, project: projectId, accounts, roles, oldReadiness, desiredReadiness,
+        auth, transports, storageSourceVerifier, project: projectId, accounts, roles, oldReadiness, desiredReadiness,
         oldDeployment, desiredDeployment: desired, alias, bucket,
         supabaseOrigin: makeSupabaseOrigin(env),
     });
@@ -1830,6 +1854,7 @@ async function assertOwnerZeroWorkCoverage(pass: OwnerPass, built: Readonly<{
     });
     const cloudBuild = new CloudBuildAdapter({
         transport: pass.transports.google,
+        storageSourceVerifier: pass.storageSourceVerifier,
         builds: { old: built.packet.protectedInputs.old.build, desired: built.packet.protectedInputs.desired.build },
         runtimes: { old: built.packet.protectedInputs.old.runtime, desired: built.packet.protectedInputs.desired.runtime },
     });
@@ -1959,7 +1984,11 @@ export async function createOwnerProductionCliDependencies(options: Readonly<{
         googleTokenProvider: ownerAuth.googleTokenProvider,
     });
     const now = options.now ?? (() => Date.now());
-    const readPass = async (): Promise<OwnerPass> => readOwnerPass(ownerAuth, transports, now);
+    const storageSourceVerifier = createStorageSourceVerifier({
+        repoCwd: options.cwd ?? process.cwd(),
+        tokenProvider: ownerAuth.googleTokenProvider,
+    });
+    const readPass = async (): Promise<OwnerPass> => readOwnerPass(ownerAuth, transports, now, storageSourceVerifier);
     const discover = async (): Promise<PreparationObservation> => preparationObservation(await readPass());
     const mutate: PreparationMutator = {
         createAccount: input => createKeylessAccount(transports.google, input),
