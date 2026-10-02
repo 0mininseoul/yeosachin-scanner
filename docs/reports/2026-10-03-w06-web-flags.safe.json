@@ -1,0 +1,22 @@
+{
+  "observedAtUtc": "2026-10-02T18:58:27.571919+00:00",
+  "scope": "Vercel production project environment inventory, not direct runtime read",
+  "inventoryComplete": true,
+  "flags": [
+    {
+      "key": "COMMERCE_CANONICAL_ACCOUNT_WRITE",
+      "metadataCount": 0,
+      "value": null
+    },
+    {
+      "key": "COMMERCE_CANONICAL_PAYMENT_WRITE",
+      "metadataCount": 0,
+      "value": null
+    },
+    {
+      "key": "COMMERCE_CANONICAL_MAINTENANCE_WRITE",
+      "metadataCount": 0,
+      "value": null
+    }
+  ]
+}
