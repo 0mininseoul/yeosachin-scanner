@@ -1,0 +1,315 @@
+{
+  "observedAtUtc": "2026-10-02T18:38:28.778743+00:00",
+  "status": "OBSERVED",
+  "readonly": true,
+  "mutationsExecuted": false,
+  "targetAnalysisExecuted": false,
+  "projectCount": 1,
+  "selectorKeys": [
+    "ANALYSIS_V2_TASKS_LOCATION",
+    "ANALYSIS_V2_TASKS_PROJECT",
+    "ANALYSIS_V2_TASKS_QUEUE",
+    "PREFLIGHT_TASKS_LOCATION",
+    "PREFLIGHT_TASKS_PROJECT",
+    "PREFLIGHT_TASKS_QUEUE"
+  ],
+  "approved": {
+    "sourceSha": "b44f718042dfd14909dd5a358f3a92fb44aec76e",
+    "imageDigest": "sha256:25bab7b270ac999b67b1fa76b4eb850147476a83f1cf56fec97b0b64aa9ff40d",
+    "sourceArchiveDigest": "c52fc553c1c828f1cfcb86d076288eef5cb756d164e38ef174b7945791986bc5",
+    "sourceArchiveProvedInRetainedReceipt": true
+  },
+  "roles": [
+    {
+      "role": "preflight",
+      "status": "OK",
+      "serviceNameHash": "9390329dcb395778cf614b44bcd2849cdc69865df16afee37e1685388d236332",
+      "revisionNameHash": "b6beff1c2af952cac505ac89dfd01a31bb7219b7c17bfa34dcc86fe727669543",
+      "ready": true,
+      "generation": 28,
+      "observedGeneration": 28,
+      "generationMatchesRetainedReceipt": true,
+      "revisionMatchesRetainedReceipt": true,
+      "latestCreatedEqualsReady": true,
+      "trafficEntryCount": 1,
+      "latestReadyTrafficPercent": 100,
+      "imageDigest": "sha256:25bab7b270ac999b67b1fa76b4eb850147476a83f1cf56fec97b0b64aa9ff40d",
+      "imageMatchesApproved": true,
+      "imageMatchesEpochAnnotation": true,
+      "sourceLabelSha": "b44f718042dfd14909dd5a358f3a92fb44aec76e",
+      "sourceEpochAnnotationSha": "b44f718042dfd14909dd5a358f3a92fb44aec76e",
+      "sourceMatchesApproved": true,
+      "runtimeConfig": {
+        "ANALYSIS_CAPACITY_EXPANSION_CANARY": false,
+        "ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN": true,
+        "ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED": true,
+        "ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED": true,
+        "ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED": true,
+        "ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED": true,
+        "ANALYSIS_V2_WORKER_ENABLED": false,
+        "ANALYSIS_V2_WORKER_EXECUTION_ENABLED": null,
+        "ANALYSIS_V2_RECOVERY_ENABLED": false,
+        "ANALYSIS_V2_TASKS_ENABLED": null,
+        "PREFLIGHT_TASKS_ENABLED": true,
+        "ANALYSIS_CAPACITY_STAGE": "INITIAL",
+        "ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE": "DRAIN-AND-BLOCK",
+        "containerConcurrency": 1,
+        "maxInstanceCount": 32,
+        "serviceMaxInstanceCount": 32,
+        "cpuCount": 2
+      },
+      "vertexConfig": {
+        "VERTEX_AI_COST_OPTIMIZED": null,
+        "VERTEX_AI_BUDGET_GUARD_ENABLED": true,
+        "VERTEX_AI_MODEL": {
+          "present": false,
+          "valueHash": null
+        },
+        "VERTEX_AI_DAILY_BUDGET_USD": {
+          "present": true,
+          "valueHash": "d66c66a96157220af2fe47c6d564d0d2a61d9d441a2e52a92bc78b15876053c8"
+        },
+        "VERTEX_AI_PER_ORDER_BUDGET_USD": {
+          "present": true,
+          "valueHash": "9ae1524b324f28bb0f8f05b60edbe1fddb0f26978b716c75b73f83506b32cd4b"
+        },
+        "VERTEX_AI_PER_RUN_BUDGET_USD": {
+          "present": true,
+          "valueHash": "9f770654da26ea8d83cecc52f971d4411c85522f9d5cb8c6042642ba6552a03b"
+        },
+        "VERTEX_AI_BUDGET_STORE": "SUPABASE",
+        "ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT": "TEST_ENTITLEMENT",
+        "VERTEX_AI_ANALYSIS_CONCURRENCY": null
+      },
+      "queue": {
+        "selectorMatchesRootEnv": true,
+        "matchingQueueCount": 1,
+        "status": "RUNNING",
+        "queueNameHash": "30709f02810feffa83575f2a5b8db619289e62851c8a5dc210e300e24d7b5e33",
+        "maxConcurrentDispatches": 32,
+        "maxDispatchesPerSecond": 32.0,
+        "nativeTaskCount": null,
+        "targetOriginMatchesRoleService": null,
+        "oidcConfigured": false,
+        "oidcIdentityHash": null,
+        "targetConfigured": false
+      },
+      "schedulers": [
+        {
+          "kind": "recovery",
+          "status": "ENABLED",
+          "nameHash": "5e221d33911cd564971328d631efd9aa0dbf1aeacb9ac76cbc9441ca72ecc8ec",
+          "scheduleHash": "1cec0fa1fffc54374c4b78b2e63d1395db1a15a7f0472ab86a41bc09ee0f2094",
+          "targetMatchesRoleService": true,
+          "httpMethod": "POST",
+          "oidcConfigured": true
+        }
+      ],
+      "nativeBuildAnnotationMatchesApprovedId": false,
+      "epochImageAnnotationKind": "CANONICAL_IMAGE_REFERENCE_SHA256",
+      "templateImageMatchesApproved": true
+    },
+    {
+      "role": "paid",
+      "status": "OK",
+      "serviceNameHash": "ce175fc4369376270dad60a7a3b6f708f3790e265d2566de9ed2e5ec701f0600",
+      "revisionNameHash": "89d6a57a124fa88ba8c09fb433d0ed05b5d00b2b5f3fcade93b8309c5d048467",
+      "ready": true,
+      "generation": 20,
+      "observedGeneration": 20,
+      "generationMatchesRetainedReceipt": true,
+      "revisionMatchesRetainedReceipt": true,
+      "latestCreatedEqualsReady": true,
+      "trafficEntryCount": 1,
+      "latestReadyTrafficPercent": 100,
+      "imageDigest": "sha256:25bab7b270ac999b67b1fa76b4eb850147476a83f1cf56fec97b0b64aa9ff40d",
+      "imageMatchesApproved": true,
+      "imageMatchesEpochAnnotation": true,
+      "sourceLabelSha": "b44f718042dfd14909dd5a358f3a92fb44aec76e",
+      "sourceEpochAnnotationSha": "b44f718042dfd14909dd5a358f3a92fb44aec76e",
+      "sourceMatchesApproved": true,
+      "runtimeConfig": {
+        "ANALYSIS_CAPACITY_EXPANSION_CANARY": false,
+        "ANALYSIS_CAPACITY_LEGACY_PRODUCERS_FROZEN": true,
+        "ANALYSIS_CAPACITY_LEGACY_QUEUE_PAUSE_CONFIRMED": true,
+        "ANALYSIS_CAPACITY_LEGACY_TARGETS_BLOCKED": true,
+        "ANALYSIS_CAPACITY_LEGACY_TASKS_DRAINED": true,
+        "ANALYSIS_CAPACITY_PUBLIC_FREEZE_ENABLED": true,
+        "ANALYSIS_V2_WORKER_ENABLED": true,
+        "ANALYSIS_V2_WORKER_EXECUTION_ENABLED": null,
+        "ANALYSIS_V2_RECOVERY_ENABLED": true,
+        "ANALYSIS_V2_TASKS_ENABLED": true,
+        "PREFLIGHT_TASKS_ENABLED": null,
+        "ANALYSIS_CAPACITY_STAGE": "INITIAL",
+        "ANALYSIS_CAPACITY_LEGACY_FREEZE_MODE": "DRAIN-AND-BLOCK",
+        "containerConcurrency": 1,
+        "maxInstanceCount": 8,
+        "serviceMaxInstanceCount": 10,
+        "cpuCount": 2
+      },
+      "vertexConfig": {
+        "VERTEX_AI_COST_OPTIMIZED": null,
+        "VERTEX_AI_BUDGET_GUARD_ENABLED": true,
+        "VERTEX_AI_MODEL": {
+          "present": false,
+          "valueHash": null
+        },
+        "VERTEX_AI_DAILY_BUDGET_USD": {
+          "present": true,
+          "valueHash": "d66c66a96157220af2fe47c6d564d0d2a61d9d441a2e52a92bc78b15876053c8"
+        },
+        "VERTEX_AI_PER_ORDER_BUDGET_USD": {
+          "present": true,
+          "valueHash": "9ae1524b324f28bb0f8f05b60edbe1fddb0f26978b716c75b73f83506b32cd4b"
+        },
+        "VERTEX_AI_PER_RUN_BUDGET_USD": {
+          "present": true,
+          "valueHash": "9f770654da26ea8d83cecc52f971d4411c85522f9d5cb8c6042642ba6552a03b"
+        },
+        "VERTEX_AI_BUDGET_STORE": "SUPABASE",
+        "ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT": "TEST_ENTITLEMENT",
+        "VERTEX_AI_ANALYSIS_CONCURRENCY": null
+      },
+      "queue": {
+        "selectorMatchesRootEnv": true,
+        "matchingQueueCount": 1,
+        "status": "RUNNING",
+        "queueNameHash": "cc0fc8dff31c1841077dfa332afdbb5129a2154dab56744e33f60164d8ee80dd",
+        "maxConcurrentDispatches": 8,
+        "maxDispatchesPerSecond": 8.0,
+        "nativeTaskCount": null,
+        "targetOriginMatchesRoleService": null,
+        "oidcConfigured": false,
+        "oidcIdentityHash": null,
+        "targetConfigured": false
+      },
+      "schedulers": [
+        {
+          "kind": "retention",
+          "status": "ENABLED",
+          "nameHash": "8d78de1d0cce4db8c37afa6ab636c6705729ab37e9f937e01d2466d5fae847e5",
+          "scheduleHash": "f9c7d85929d778680a374b59e37d4eda3e19bc9ad173fcd332ac332826c1dd82",
+          "targetMatchesRoleService": true,
+          "httpMethod": "POST",
+          "oidcConfigured": true
+        },
+        {
+          "kind": "recovery",
+          "status": "ENABLED",
+          "nameHash": "59bacf02d5015fe9898aea648e1460092b92ea3ae1349fa13ab745738a40077a",
+          "scheduleHash": "1cec0fa1fffc54374c4b78b2e63d1395db1a15a7f0472ab86a41bc09ee0f2094",
+          "targetMatchesRoleService": true,
+          "httpMethod": "POST",
+          "oidcConfigured": true
+        }
+      ],
+      "nativeBuildAnnotationMatchesApprovedId": false,
+      "epochImageAnnotationKind": "CANONICAL_IMAGE_REFERENCE_SHA256",
+      "templateImageMatchesApproved": true
+    }
+  ],
+  "blockers": [],
+  "inventoryCounts": {
+    "services": 5,
+    "queues": 4,
+    "schedulers": 3
+  },
+  "queuesSummary": [
+    {
+      "nameHash": "fb55a26c85a820ff243168eab17825972a27b9c225bfc2f26bb7178eef95d74a",
+      "status": "PAUSED"
+    },
+    {
+      "nameHash": "30709f02810feffa83575f2a5b8db619289e62851c8a5dc210e300e24d7b5e33",
+      "status": "RUNNING"
+    },
+    {
+      "nameHash": "7ba9625f42a94bf7d90069e79b43246814e1412c461bf3b6b17262ce44d4b6d2",
+      "status": "PAUSED"
+    },
+    {
+      "nameHash": "cc0fc8dff31c1841077dfa332afdbb5129a2154dab56744e33f60164d8ee80dd",
+      "status": "RUNNING"
+    }
+  ],
+  "schedulerSummary": {
+    "enabledCount": 3,
+    "pausedCount": 0,
+    "retentionCandidateCount": 1,
+    "retentionEnabledCount": 1
+  },
+  "commands": [
+    {
+      "kind": "build-describe-approved-global",
+      "status": "NOT_FOUND",
+      "exitCode": 1
+    },
+    {
+      "kind": "run-revision-describe-paid",
+      "status": "OK"
+    },
+    {
+      "kind": "run-revision-describe-preflight",
+      "status": "OK"
+    },
+    {
+      "kind": "run-service-describe-paid",
+      "status": "OK"
+    },
+    {
+      "kind": "run-service-describe-preflight",
+      "status": "OK"
+    },
+    {
+      "kind": "run-services-list",
+      "status": "OK"
+    },
+    {
+      "kind": "scheduler-jobs-list",
+      "status": "OK"
+    },
+    {
+      "kind": "tasks-queue-describe-paid",
+      "status": "OK"
+    },
+    {
+      "kind": "tasks-queue-describe-preflight",
+      "status": "OK"
+    },
+    {
+      "kind": "tasks-queues-list",
+      "status": "OK"
+    },
+    {
+      "kind": "build-describe-approved-worker-region",
+      "status": "OK"
+    },
+    {
+      "kind": "run-services-list-epoch-annotation-validation",
+      "status": "OK"
+    }
+  ],
+  "completedAtUtc": "2026-10-02T18:41:31.669510+00:00",
+  "approvedBuildCurrent": {
+    "status": "SUCCESS",
+    "imageCount": 1,
+    "containsApprovedImageDigest": true,
+    "resolvedStorageSourcePresent": true,
+    "sourceGenerationPinned": true,
+    "sourceContextHash": "5a6ede1ec6f07f8059eccf1911c33ed71179aabcc6f965ccb05ab52e65f65a48",
+    "nativeRepositorySha": null,
+    "archiveReverifiedThisObservation": false
+  },
+  "limitations": [
+    "FRESH_ARCHIVE_BYTE_COMPARISON_NOT_RUN",
+    "TASK_COUNT_NOT_RETURNED_BY_QUEUE_DESCRIBE",
+    "PER_TASK_HTTP_TARGET_NOT_READ",
+    "NATIVE_BUILD_ANNOTATIONS_DIFFER_FROM_APPROVED_BUILD"
+  ],
+  "initialDiscovery": {
+    "runServiceListSucceeded": true,
+    "candidateCount": 4,
+    "printedBuildIdentifierIncident": true,
+    "printedCredentialOrUserIdentifier": false
+  }
+}

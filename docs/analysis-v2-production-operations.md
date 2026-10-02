@@ -1,8 +1,8 @@
 # Analysis V2 프로덕션 운영 정본
 
-기준일: 2026-08-27. 이 문서는 Analysis V2의 현재 운영 상태와 장애·배포 판단의 정본이다. 과거 계획은 [최종 출시 준비 계획](./superpowers/plans/2026-07-28-final-launch-readiness.md), 결제 자동 입장과 rollback은 [Earlybird automatic fulfillment](./earlybird-automatic-fulfillment-runbook.md), 비용 측정 상태는 [운영 비용 모델](./operations-cost-model.md)을 따른다. 아래의 운영 사실은 코드, forward migration, 배포 실측을 함께 근거로 한다.
+이 문서는 Analysis V2의 운영 계약과 장애·배포 판단의 정본이다. **현재 관측과 후속 상태는 [2026-10-03 통합 상태판](./operations/2026-10-03-continuation-status.ko.md) 및 [worker 관측](./reports/2026-10-03-w02-runtime.ko.md)을 먼저 확인한다.** 아래 날짜가 붙은 배포 기록은 해당 날짜의 관측이며 현재 설정으로 재사용하지 않는다. 과거 계획은 [최종 출시 준비 계획](./superpowers/plans/2026-07-28-final-launch-readiness.md), 결제 자동 입장과 rollback은 [Earlybird automatic fulfillment](./earlybird-automatic-fulfillment-runbook.md), 비용 측정 상태는 [운영 비용 모델](./operations-cost-model.md)을 따른다.
 
-## 현재 배포·실행 상태
+## 2026-08-27 배포·실행 관측 (과거 기록)
 
 - 2026-08-27 canonical Cloud Run worker는 revision `analysis-worker-fd70251r827a`가 traffic 100%를 받는다. worker/recovery/V2 tasks/preflight tasks는 활성화되어 있고 `PREFLIGHT_APIFY_API_TOKEN_SLOTS=primary,quinary,senary`다. 새 preflight run만 이 풀에서 결정적으로 선택하며, 이미 durable provider run이 있는 요청은 저장된 슬롯을 그대로 재개한다.
 - Vercel production은 exact source commit `5511a6ca`를 배포해 `yeosachin.com`에 연결했다. 신규 결제 자동 입장은 `EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED=true`와 고정 cutoff `2026-08-27T04:40:00Z`를 함께 요구하므로, cutoff 이전 signed payment는 계속 concierge `awaiting_operator` 경계를 따른다.
@@ -253,6 +253,12 @@ normal output, files, logs, or independent serialization.
 자동 대체하지 않는다. 새 코드는 PR·관련 검사·독립 리뷰 후 병합한다.
 9월 16일 운영 활성화는 완료됐으므로 아래 apply 예시를 상태 조회 목적으로
 재실행하지 않는다. 현행 운영 상태는 관측 시각을 붙인 읽기 전용 증거로 판단한다.
+
+일반 DB provenance 조회의 2026-10-03 재현 경로와 인증·환경 파싱 문제는
+[W05/W06 조사](./reports/2026-10-03-w05-w06-provenance.ko.md)를 따른다.
+이 조회는 위 owner credential conduit와 다른 CLI 경로다. root 환경을 shell로
+source하거나 feature 환경으로 대체하지 말고, 검증한 root 연결과 필요한 인증값을
+각각 최소 임시 메타데이터와 프로세스 메모리 경계에서만 사용한다.
 
 ~~~text
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare inspect

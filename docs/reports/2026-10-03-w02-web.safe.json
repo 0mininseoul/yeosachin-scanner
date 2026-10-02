@@ -1,0 +1,26 @@
+{
+  "observedAt": "2026-10-02T18:38:21.981723+00:00",
+  "deployment": {
+    "error": null,
+    "readyState": "READY",
+    "target": "production",
+    "sourceSha": "55483734b03f30e44d670892a4835d41fdb7e92b",
+    "projectMatches": true,
+    "nameMatches": true
+  },
+  "supabaseLink": {
+    "uniqueProductionUrl": true,
+    "rootMatchesProduction": true,
+    "productionUrlReadSucceeded": true
+  },
+  "publicReadiness": {
+    "httpStatus": 200,
+    "ready": true,
+    "sourceSha": "55483734b03f30e44d670892a4835d41fdb7e92b",
+    "analysisV2AdmissionEnabled": true,
+    "earlybirdWebhookAutoAdmissionEnabled": true,
+    "preflightProducerConfigReady": true,
+    "paidProducerConfigReady": true
+  },
+  "publicObservedAt": "2026-10-02T18:39:16.555039+00:00"
+}
