@@ -227,10 +227,10 @@ function ownerDirectory(path: string, expectedUid: number): string {
     return path;
 }
 
-function gitCommonDirectory(cwd: string): string {
+function ownerGitValue(cwd: string, args: readonly string[]): string {
     let raw: string;
     try {
-        raw = execFileSync('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+        raw = execFileSync('git', ['-C', cwd, ...args], {
             cwd,
             env: { ...GIT_ENV },
             shell: false,
@@ -241,33 +241,36 @@ function gitCommonDirectory(cwd: string): string {
         }) as string;
     } catch { unavailable(); }
     if (!raw.endsWith('\n')) unavailable();
-    const commonDirRaw = raw.slice(0, -1);
-    if (commonDirRaw.length === 0 || commonDirRaw.includes('\n') || commonDirRaw.includes('\r') || !SAFE.test(commonDirRaw)) unavailable();
+    const value = raw.slice(0, -1);
+    if (value.length === 0 || value.includes('\n') || value.includes('\r') || !SAFE.test(value)) unavailable();
+    return value;
+}
+
+function gitCommonDirectory(cwd: string): string {
+    const commonDirRaw = ownerGitValue(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
     const commonDir = resolve(commonDirRaw);
     if (commonDir !== commonDirRaw || !commonDir.endsWith('/.git')) unavailable();
     return commonDir;
 }
 
 /**
- * Resolve the fixed owner Supabase workdir from Git's common directory. A
+ * Resolve the root main checkout from Git's common directory. A
  * linked worktree's own root is intentionally not used for the project-ref:
- * the owner workdir is the canonical `.worktrees/final-main-20260725`
- * worktree, and it must belong to the same repository as the current one.
+ * the owner workdir must be the primary checkout of the same repository,
+ * with main checked out. No alternate worktree is used as a fallback.
  */
 function primaryRepositoryRoot(cwd: string, expectedUid: number): string {
     const commonDir = gitCommonDirectory(cwd);
-    ownerDirectory(dirname(commonDir), expectedUid);
-    ownerDirectory(commonDir, expectedUid);
     const primary = dirname(commonDir);
-    const worktreesDirectory = join(primary, '.worktrees');
-    ownerDirectory(worktreesDirectory, expectedUid);
-    const candidate = join(worktreesDirectory, 'final-main-20260725');
-    ownerDirectory(candidate, expectedUid);
-    let realCandidate: string;
-    try { realCandidate = realpathSync(candidate); } catch { unavailable(); }
-    ownerDirectory(realCandidate, expectedUid);
-    if (gitCommonDirectory(realCandidate) !== commonDir) unavailable();
-    return realCandidate;
+    ownerDirectory(primary, expectedUid);
+    ownerDirectory(commonDir, expectedUid);
+    let realPrimary: string;
+    try { realPrimary = realpathSync(primary); } catch { unavailable(); }
+    ownerDirectory(realPrimary, expectedUid);
+    if (gitCommonDirectory(realPrimary) !== commonDir
+        || ownerGitValue(realPrimary, ['rev-parse', '--path-format=absolute', '--show-toplevel']) !== realPrimary
+        || ownerGitValue(realPrimary, ['symbolic-ref', '--quiet', 'HEAD']) !== 'refs/heads/main') unavailable();
+    return realPrimary;
 }
 
 export function resolvePrimaryRepositoryRootForOwner(cwd: string): string {
@@ -490,31 +493,18 @@ function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSe
 function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string; supabaseWorkdir: string; supabaseCliPath: string }> {
     if (!SAFE.test(cwd)) unavailable();
     const currentWorktree = resolve(cwd);
-    let linkedMetadataPath: string | undefined;
-    for (let directory = currentWorktree;; directory = dirname(directory)) {
-        const projectPath = join(directory, '.vercel', 'project.json');
-        const repoPath = join(directory, '.vercel', 'repo.json');
+    const primaryRoot = resolvePrimaryRepositoryRootForOwner(currentWorktree);
+    const projectPath = join(primaryRoot, '.vercel', 'project.json');
+    const repoPath = join(primaryRoot, '.vercel', 'repo.json');
+    const linkedMetadataPath = [projectPath, repoPath].find(path => {
         try {
-            if (lstatSync(projectPath).isFile()) {
-                linkedMetadataPath = projectPath;
-                break;
-            }
-        } catch { /* try the repository link below */ }
-        try {
-            if (lstatSync(repoPath).isFile()) {
-                linkedMetadataPath = repoPath;
-                break;
-            }
-        } catch { /* continue to the next worktree ancestor */ }
-        const parent = dirname(directory);
-        if (parent === directory) break;
-        try {
-            if (lstatSync(join(directory, '.git')).isFile() || lstatSync(join(directory, '.git')).isDirectory()) break;
-        } catch { /* a repository root marker is optional for test seams */ }
-    }
-    // Keep the legacy path as the failure target when no link is present; the
-    // owner boundary still performs the strict lstat/uid/mode validation.
-    linkedMetadataPath ??= resolve(currentWorktree, '.vercel', 'project.json');
+            lstatSync(path);
+            return true;
+        } catch { return false; }
+    }) ?? projectPath;
+    // The owner boundary validates the chosen root link, including rejecting
+    // symlinks. Missing or invalid root metadata never falls back to a feature
+    // worktree or an ancestor outside this repository.
     const candidates = [
         join(homedir(), '.local', 'share', 'com.vercel.cli', 'auth.json'),
         join(homedir(), 'Library', 'Application Support', 'com.vercel.cli', 'auth.json'),
@@ -524,11 +514,10 @@ function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath
         try { return lstatSync(candidate).isFile(); } catch { return false; }
     });
     if (existing.length !== 1) unavailable();
-    const primaryRoot = resolvePrimaryRepositoryRootForOwner(currentWorktree);
     return {
         linkedMetadataPath,
         credentialStorePath: existing[0]!,
-        cwd: currentWorktree,
+        cwd: primaryRoot,
         supabaseWorkdir: primaryRoot,
         supabaseCliPath: resolveLocalSupabaseCliPathForOwner(currentWorktree),
     };
