@@ -1,6 +1,6 @@
 import { createSchedulerPauseProvenanceReader } from '../../../../scripts/capacity-identity-epoch/scheduler-pause-evidence';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -29,6 +29,7 @@ import {
     type ProtectedTransport,
 } from '../../../../scripts/capacity-identity-epoch/platform';
 import { enqueuerIdentityFingerprint } from '../../../../lib/services/analysis/legacy-analysis-public-readiness';
+import { captureSupabaseServiceRoleKey } from '../../../../scripts/capacity-identity-epoch/owner-auth';
 
 class FakeVercelTransport implements ProtectedTransport {
     readonly requests: ProtectedHttpRequest[] = [];
@@ -322,27 +323,89 @@ function installSupabaseCliFixture(worktree: string, options: Readonly<{ version
     symlinkSync('../supabase/dist/supabase.js', join(binDirectory, 'supabase'));
 }
 
+function installGitWorktreeFixture(): Readonly<{ primary: string; linked: string }> {
+    const container = mkdtempSync(join(tmpdir(), 'owner-production-git-'));
+    const primary = join(container, 'primary');
+    const linked = join(container, 'linked');
+    mkdirSync(primary);
+    runGit(primary, ['init', '--quiet', '--initial-branch=main']);
+    runGit(primary, ['config', 'user.email', 'fixture@example.invalid']);
+    runGit(primary, ['config', 'user.name', 'Fixture']);
+    writeFileSync(join(primary, 'README.md'), 'fixture\n');
+    runGit(primary, ['add', 'README.md']);
+    runGit(primary, ['commit', '--quiet', '-m', 'fixture']);
+    runGit(primary, ['worktree', 'add', '--quiet', '--detach', linked, 'HEAD']);
+    return { primary, linked };
+}
+
 describe('owner production queue selector boundary', () => {
-    it('resolves the fixed canonical Supabase workdir from the Git common repository', () => {
-        const container = mkdtempSync(join(tmpdir(), 'owner-production-git-'));
-        const primary = join(container, 'primary');
-        const linked = join(container, 'linked');
-        mkdirSync(primary);
-        mkdirSync(join(primary, '.worktrees'));
-        runGit(primary, ['init', '--quiet']);
-        runGit(primary, ['config', 'user.email', 'fixture@example.invalid']);
-        runGit(primary, ['config', 'user.name', 'Fixture']);
-        writeFileSync(join(primary, 'README.md'), 'fixture\n');
-        runGit(primary, ['add', 'README.md']);
-        runGit(primary, ['commit', '--quiet', '-m', 'fixture']);
-        const canonical = join(primary, '.worktrees', 'final-main-20260725');
-        runGit(primary, ['worktree', 'add', '--quiet', '--detach', canonical, 'HEAD']);
-        runGit(primary, ['worktree', 'add', '--quiet', '--detach', linked, 'HEAD']);
+    it('resolves the root main Supabase workdir from both primary and linked checkouts', () => {
+        const { primary, linked } = installGitWorktreeFixture();
         installSupabaseCliFixture(linked);
 
-        expect(resolvePrimaryRepositoryRootForOwner(linked)).toBe(realpathSync(canonical));
+        expect(resolvePrimaryRepositoryRootForOwner(primary)).toBe(realpathSync(primary));
+        expect(resolvePrimaryRepositoryRootForOwner(linked)).toBe(realpathSync(primary));
         expect(resolveLocalSupabaseCliPathForOwner(linked)).toBe(join(linked, 'node_modules', '.bin', 'supabase'));
         expect(resolveLocalSupabaseCliPathForOwner(linked)).not.toBe(join(primary, 'node_modules', '.bin', 'supabase'));
+    });
+
+    it.each(['feature', 'detached'])('rejects a %s primary checkout even when a linked checkout has main', state => {
+        const { primary, linked } = installGitWorktreeFixture();
+        runGit(primary, state === 'feature' ? ['checkout', '--quiet', '-b', 'feature'] : ['checkout', '--quiet', '--detach']);
+        runGit(linked, ['checkout', '--quiet', 'main']);
+        expect(() => resolvePrimaryRepositoryRootForOwner(linked)).toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects a common directory configured to use another repository checkout', () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        const foreign = installGitWorktreeFixture();
+        runGit(primary, ['config', 'core.worktree', foreign.primary]);
+        expect(() => resolvePrimaryRepositoryRootForOwner(linked)).toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects a primary checkout owned by another uid', () => {
+        const { linked } = installGitWorktreeFixture();
+        const ownerProcess = process as typeof process & { getuid: () => number };
+        const owner = vi.spyOn(ownerProcess, 'getuid').mockReturnValue(ownerProcess.getuid() + 1);
+        try {
+            expect(() => resolvePrimaryRepositoryRootForOwner(linked)).toThrow('OWNER_AUTH_UNAVAILABLE');
+        } finally {
+            owner.mockRestore();
+        }
+    });
+
+    it.each(['primary', 'common'])('rejects group-writable %s directories', directory => {
+        const { primary, linked } = installGitWorktreeFixture();
+        chmodSync(directory === 'primary' ? primary : join(primary, '.git'), 0o775);
+        expect(() => resolvePrimaryRepositoryRootForOwner(linked)).toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects a symlink replacing the common Git directory', () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        renameSync(join(primary, '.git'), join(primary, 'git-data'));
+        symlinkSync('git-data', join(primary, '.git'));
+        expect(() => resolvePrimaryRepositoryRootForOwner(linked)).toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('requires the root Supabase link without falling back to a valid feature worktree link', async () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        mkdirSync(join(linked, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(linked, 'supabase', '.temp', 'project-ref'), 'abcdefghijklmnopqrst\n', { mode: 0o600 });
+        const verifyCliVersion = vi.fn();
+        const spawn = vi.fn();
+        const options = {
+            origin: 'https://abcdefghijklmnopqrst.supabase.co/',
+            workdir: resolvePrimaryRepositoryRootForOwner(linked),
+            command: 'supabase',
+            verifyCliVersion,
+            spawn,
+        };
+        await expect(captureSupabaseServiceRoleKey(options)).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        mkdirSync(join(primary, 'supabase', '.temp'), { recursive: true });
+        writeFileSync(join(primary, 'supabase', '.temp', 'project-ref'), 'tsrqponmlkjihgfedcba\n', { mode: 0o600 });
+        await expect(captureSupabaseServiceRoleKey(options)).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+        expect(verifyCliVersion).not.toHaveBeenCalled();
+        expect(spawn).not.toHaveBeenCalled();
     });
 
     it('requires the owner-installed pinned package and its exact executable link', () => {

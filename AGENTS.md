@@ -119,9 +119,17 @@ yeosachin-scanner/
 
 ## Worktree 및 파일 보존 규칙
 
-- fetch 및 `origin/main` 검증 후의 canonical main worktree는 `.worktrees/final-main-20260725`이다.
+- fetch 및 `origin/main` 검증 후의 canonical main worktree는 Git common dir(`.git`)의 부모인 저장소 root checkout이다. 삭제된 `.worktrees/final-main-20260725`를 재생성하거나 alias로 사용하지 않는다.
+- owner CLI는 실제 root가 같은 repository의 `main`이며 동일 owner·안전한 권한을 가진 디렉터리인지 검증한다. 운영 환경과 Supabase/Vercel 연결은 root main 기준으로 확인하며 feature worktree 설정으로 자동 fallback하지 않는다.
+- 새 변경은 `codex/` 브랜치에서 PR 생성 → 관련 검사·독립 리뷰 → main 병합으로 반영한다. 직접 main push하지 않는다.
 - 사용자 소유 경로 `.playwright-mcp/` 및 `supabase/migrations/20260719190000_reconcile_stuck_groble_earlybird_order.sql`은 삭제, reset, overwrite하지 않는다.
 - `git reset --hard`, 광범위한 `git checkout`, 파괴적 cleanup을 실행하지 않는다.
+
+## 언어와 승인 문서
+
+- 사용자 응답과 작업 보고는 한국어로 작성한다.
+- 영어 명세·구현 계획에 사용자 검토 또는 승인이 필요하면 같은 디렉터리에 `.ko`를 확장자 앞에 붙인 전체 한국어 사본을 만든다. 요구사항·결정·제약·미결 질문·수용 기준을 생략하지 않는다.
+- 두 문서는 변경 때마다 동기화하며 한국어 사본을 링크해 한국어로 승인을 요청한다. 한국어 사본의 승인은 영어 원본에도 적용된다. 충돌이 있으면 먼저 일치시킨다.
 
 ## Project Rules
 

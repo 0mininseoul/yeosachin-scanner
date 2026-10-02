@@ -226,9 +226,13 @@ If the service-role environment value is marked sensitive and cannot be
 retrieved from Vercel, the authenticated linked Supabase CLI is allowed only as
 an owner credential conduit for the zero-work read. The linked
 `supabase/.temp/project-ref` is read from the owner-controlled canonical
-worktree at `<primary>/.worktrees/final-main-20260725`, where `<primary>` is
-derived from the current worktree's Git common dir. The candidate must have the
-same owner and pass `git -C <candidate>
+root `main` checkout at `<primary>`, the parent of the current worktree's
+Git common directory (`.git`). The former
+`<primary>/.worktrees/final-main-20260725` checkout was archived on 2026-10-03
+and must not be recreated as a fallback or symlink. The candidate and common
+directory must be real directories owned by the current user, without group or
+world write permissions. The candidate must have `refs/heads/main` checked out
+and pass `git -C <candidate>
 rev-parse --git-common-dir` equality against the current worktree; the resolver
 returns its real path and does not scan history or other worktrees. The selected
 ref must exactly match the configured Supabase origin, which remains the sole
@@ -243,6 +247,12 @@ bounded top-level array whose rows use the observed 7-field base or 10-field
 extended exact contract, select exactly one legacy `service_role` row with a bounded non-whitespace `api_key`, and keep the raw
 response/credential within the protected in-memory/FD boundary rather than
 normal output, files, logs, or independent serialization.
+
+2026-10-03 후속 작업은 [통합 상태판](./operations/2026-10-03-continuation-status.ko.md)을 따른다.
+위 root main의 Supabase/Vercel 연결을 검증하고 feature worktree의 환경으로
+자동 대체하지 않는다. 새 코드는 PR·관련 검사·독립 리뷰 후 병합한다.
+9월 16일 운영 활성화는 완료됐으므로 아래 apply 예시를 상태 조회 목적으로
+재실행하지 않는다. 현행 운영 상태는 관측 시각을 붙인 읽기 전용 증거로 판단한다.
 
 ~~~text
 node --import tsx scripts/prepare-capacity-identity-epoch.ts prepare inspect
