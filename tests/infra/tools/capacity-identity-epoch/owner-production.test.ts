@@ -1,12 +1,13 @@
 import { createSchedulerPauseProvenanceReader } from '../../../../scripts/capacity-identity-epoch/scheduler-pause-evidence';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     assertCloudRunTargetOrigin,
     assertOwnerDesiredDeployment,
+    createOwnerProductionCliDependencies,
     mergeOwnerResourceSelectorOverrides,
     ownerZeroWorkLookbackMs,
     parseOwnerDesiredDeploymentSelector,
@@ -30,6 +31,13 @@ import {
 } from '../../../../scripts/capacity-identity-epoch/platform';
 import { enqueuerIdentityFingerprint } from '../../../../lib/services/analysis/legacy-analysis-public-readiness';
 import { captureSupabaseServiceRoleKey } from '../../../../scripts/capacity-identity-epoch/owner-auth';
+
+vi.mock('node:os', async importOriginal => {
+    const actual = await importOriginal<typeof import('node:os')>();
+    return { ...actual, homedir: vi.fn(actual.homedir) };
+});
+
+afterEach(() => vi.mocked(homedir).mockReset());
 
 class FakeVercelTransport implements ProtectedTransport {
     readonly requests: ProtectedHttpRequest[] = [];
@@ -338,6 +346,19 @@ function installGitWorktreeFixture(): Readonly<{ primary: string; linked: string
     return { primary, linked };
 }
 
+function installOwnerAuthFixture(primary: string, linked: string): void {
+    const authDirectory = join(primary, '.config', 'com.vercel.cli');
+    mkdirSync(authDirectory, { recursive: true });
+    writeFileSync(join(authDirectory, 'auth.json'), JSON.stringify({ token: 'fixture-owner-token' }), { mode: 0o600 });
+    vi.mocked(homedir).mockReturnValue(primary);
+    installSupabaseCliFixture(linked);
+}
+
+function installVercelProjectFixture(directory: string, projectId: string): void {
+    mkdirSync(join(directory, '.vercel'), { recursive: true });
+    writeFileSync(join(directory, '.vercel', 'project.json'), JSON.stringify({ projectId, orgId: 'team-fixture' }), { mode: 0o600 });
+}
+
 describe('owner production queue selector boundary', () => {
     it('resolves the root main Supabase workdir from both primary and linked checkouts', () => {
         const { primary, linked } = installGitWorktreeFixture();
@@ -406,6 +427,47 @@ describe('owner production queue selector boundary', () => {
         await expect(captureSupabaseServiceRoleKey(options)).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
         expect(verifyCliVersion).not.toHaveBeenCalled();
         expect(spawn).not.toHaveBeenCalled();
+    });
+
+    it.each(['absent', 'different'])('uses the root Vercel project when the feature link is %s', async state => {
+        const { primary, linked } = installGitWorktreeFixture();
+        installOwnerAuthFixture(primary, linked);
+        installVercelProjectFixture(primary, 'project-primary');
+        if (state === 'different') installVercelProjectFixture(linked, 'project-feature');
+        const dependencies = await createOwnerProductionCliDependencies({ cwd: linked });
+        expect(dependencies.ownerAuth.vercelProjectId).toBe('project-primary');
+    });
+
+    it('resolves a root Vercel repo link relative to the root checkout', async () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        installOwnerAuthFixture(primary, linked);
+        mkdirSync(join(primary, '.vercel'));
+        writeFileSync(join(primary, '.vercel', 'repo.json'), JSON.stringify({
+            orgId: 'team-fixture', remoteName: 'origin',
+            projects: [{ directory: '.', id: 'project-primary', name: 'fixture' }],
+        }), { mode: 0o600 });
+        const dependencies = await createOwnerProductionCliDependencies({ cwd: linked });
+        expect(dependencies.ownerAuth.vercelProjectId).toBe('project-primary');
+    });
+
+    it('rejects a missing root Vercel link even when the feature link is valid', async () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        installOwnerAuthFixture(primary, linked);
+        installVercelProjectFixture(linked, 'project-feature');
+        await expect(createOwnerProductionCliDependencies({ cwd: linked })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
+    });
+
+    it('rejects a symlink root project link without falling back to a root repo link', async () => {
+        const { primary, linked } = installGitWorktreeFixture();
+        installOwnerAuthFixture(primary, linked);
+        installVercelProjectFixture(linked, 'project-feature');
+        mkdirSync(join(primary, '.vercel'));
+        symlinkSync(join(linked, '.vercel', 'project.json'), join(primary, '.vercel', 'project.json'));
+        writeFileSync(join(primary, '.vercel', 'repo.json'), JSON.stringify({
+            orgId: 'team-fixture', remoteName: 'origin',
+            projects: [{ directory: '.', id: 'project-primary', name: 'fixture' }],
+        }), { mode: 0o600 });
+        await expect(createOwnerProductionCliDependencies({ cwd: linked })).rejects.toThrow('OWNER_AUTH_UNAVAILABLE');
     });
 
     it('requires the owner-installed pinned package and its exact executable link', () => {

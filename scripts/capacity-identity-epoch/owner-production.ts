@@ -493,31 +493,18 @@ function requireProjectAgreement(selectors: RoleMap<ReturnType<typeof readRoleSe
 function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath: string; credentialStorePath: string; cwd: string; supabaseWorkdir: string; supabaseCliPath: string }> {
     if (!SAFE.test(cwd)) unavailable();
     const currentWorktree = resolve(cwd);
-    let linkedMetadataPath: string | undefined;
-    for (let directory = currentWorktree;; directory = dirname(directory)) {
-        const projectPath = join(directory, '.vercel', 'project.json');
-        const repoPath = join(directory, '.vercel', 'repo.json');
+    const primaryRoot = resolvePrimaryRepositoryRootForOwner(currentWorktree);
+    const projectPath = join(primaryRoot, '.vercel', 'project.json');
+    const repoPath = join(primaryRoot, '.vercel', 'repo.json');
+    const linkedMetadataPath = [projectPath, repoPath].find(path => {
         try {
-            if (lstatSync(projectPath).isFile()) {
-                linkedMetadataPath = projectPath;
-                break;
-            }
-        } catch { /* try the repository link below */ }
-        try {
-            if (lstatSync(repoPath).isFile()) {
-                linkedMetadataPath = repoPath;
-                break;
-            }
-        } catch { /* continue to the next worktree ancestor */ }
-        const parent = dirname(directory);
-        if (parent === directory) break;
-        try {
-            if (lstatSync(join(directory, '.git')).isFile() || lstatSync(join(directory, '.git')).isDirectory()) break;
-        } catch { /* a repository root marker is optional for test seams */ }
-    }
-    // Keep the legacy path as the failure target when no link is present; the
-    // owner boundary still performs the strict lstat/uid/mode validation.
-    linkedMetadataPath ??= resolve(currentWorktree, '.vercel', 'project.json');
+            lstatSync(path);
+            return true;
+        } catch { return false; }
+    }) ?? projectPath;
+    // The owner boundary validates the chosen root link, including rejecting
+    // symlinks. Missing or invalid root metadata never falls back to a feature
+    // worktree or an ancestor outside this repository.
     const candidates = [
         join(homedir(), '.local', 'share', 'com.vercel.cli', 'auth.json'),
         join(homedir(), 'Library', 'Application Support', 'com.vercel.cli', 'auth.json'),
@@ -527,11 +514,10 @@ function localCredentialPath(cwd = process.cwd()): Readonly<{ linkedMetadataPath
         try { return lstatSync(candidate).isFile(); } catch { return false; }
     });
     if (existing.length !== 1) unavailable();
-    const primaryRoot = resolvePrimaryRepositoryRootForOwner(currentWorktree);
     return {
         linkedMetadataPath,
         credentialStorePath: existing[0]!,
-        cwd: currentWorktree,
+        cwd: primaryRoot,
         supabaseWorkdir: primaryRoot,
         supabaseCliPath: resolveLocalSupabaseCliPathForOwner(currentWorktree),
     };

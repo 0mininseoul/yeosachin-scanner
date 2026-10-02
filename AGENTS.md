@@ -59,7 +59,7 @@ yeosachin-scanner/
 │   └── constants/          # 점수 계산 상수, AI 프롬프트
 ├── hooks/                  # React 커스텀 훅 (useAuth, useAnalysisProgress)
 ├── supabase/migrations/    # DB 마이그레이션 SQL
-└── middleware.ts           # 인증 미들웨어 (보호 경로 처리)
+└── proxy.ts                # 인증 및 보호 경로 처리
 ```
 
 ### Key Flows
@@ -98,7 +98,7 @@ yeosachin-scanner/
 - `payments`: 결제 내역
 
 ### Protected Routes
-미들웨어에서 `/analyze`, `/progress`, `/result` 경로는 로그인 필수로 처리
+`proxy.ts`에서 `/progress`, `/result`, `/earlybird`는 로그인 필수로 처리한다. `/analyze`는 익명 프로필 preflight와 제한된 플랜/가격 조회를 허용하며, 실행·결과·결제는 해당 API에서도 소유자 권한을 확인한다. 관리자 콘솔과 API는 별도 운영자 권한을 확인한다.
 
 ## AI 작업 범위와 검증
 
