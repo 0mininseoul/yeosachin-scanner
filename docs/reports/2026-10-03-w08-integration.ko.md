@@ -1,6 +1,6 @@
 # 2026-10-03 W08 독립 리뷰 및 통합 검증
 
-상위 Codex 세션이 편집권·선행 관계·PR 반영을 조정했다. 첫 코드 PR은 [#596](https://github.com/0mininseoul/yeosachin-scanner/pull/596), 병합 commit은 `735fedebb9bc773508179622db8135ce515ecdd4`다. 직접 main push는 하지 않았다.
+상위 Codex 세션이 편집권·선행 관계·PR 반영을 조정했다. 첫 코드 PR은 [#596](https://github.com/0mininseoul/yeosachin-scanner/pull/596), 병합 commit은 `735fedebb9bc773508179622db8135ce515ecdd4`다. 후속 조사 문서는 [evidence PR #597](https://github.com/0mininseoul/yeosachin-scanner/pull/597)로 반영하며, 이 PR의 최종 head·CI·병합 commit은 연결된 GitHub 기록으로 확인한다. 직접 main push는 하지 않았다.
 
 ## 구현과 독립 리뷰
 

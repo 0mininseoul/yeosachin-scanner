@@ -18,7 +18,7 @@
 | W05 migration provenance | 근거대기 | `w05_w06_provenance`; 전용 조사 보고서 | 원본 6개와 현행 효과 대조 완료. 격리 source-set 392/392·zero-pending dry-run PASS. 실제 저장소의 6대6 차이는 유지하며, 고정 식별자를 새로 기록하지 않는 정확한 원본의 접근·source 정렬 방식이 필요. [상세](../reports/2026-10-03-w05-w06-provenance.ko.md) |
 | W06 조건부 DB 후보 | 근거대기 | `w05_w06_provenance`; W05 보고서와 함께 관리 | 현재 public 150 tables/802 routines, bounded 후보 9개는 0행이나 routine/FK·reader/writer 유지. producer drain·보존·복구와 reader/writer 대체 및 최소 이득 근거 전 DROP allowlist는 빈 집합 |
 | W07 용량 확장 | 불필요확정 | 상위 세션; W02/W03 근거 재사용 | [사용자·용량 경계](../reports/2026-10-03-w03-w07-user-capacity.ko.md), 현재 추가 확대 근거 없음, initial 32/8 유지. 보존행 기준 9/16 후 생성 0·비종결 요청 0; 오래된 pending 3개는 실패한 parent의 잔여 기록 |
-| W08 독립 리뷰·통합 | 검증완료 | 구현자와 다른 agent + 상위 세션 | [통합 검증 기록](../reports/2026-10-03-w08-integration.ko.md)의 별도 reviewer 최종 PASS, 관련 기존 검사 167개·타입체크 및 보존 검증 PASS. 코드 PR #596 병합 완료; 본 evidence PR의 CI·병합 기록과 최종 main 동기화는 GitHub 및 종료 보고로 확인 |
+| W08 독립 리뷰·통합 | 검증완료 | 구현자와 다른 agent + 상위 세션 | [통합 검증 기록](../reports/2026-10-03-w08-integration.ko.md)의 별도 reviewer 최종 PASS, 관련 기존 검사 167개·타입체크 및 보존 검증 PASS. 코드 PR #596 병합 완료; [evidence PR #597](https://github.com/0mininseoul/yeosachin-scanner/pull/597)의 CI·병합 기록과 최종 main 동기화는 GitHub 및 종료 보고로 확인 |
 
 ## 통합 규칙과 종료 기준
 
