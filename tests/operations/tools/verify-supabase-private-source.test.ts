@@ -19,8 +19,8 @@ import { runPrivateSourceCli } from '../../../scripts/verify-supabase-private-so
 const REF = 'abcdefghijklmnopqrst';
 const TOKEN = 'FAKE_TEST_TOKEN_ONLY';
 const HASH = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
-const QUERY_HELP = '--linked --project-ref string --workdir string --output [json]';
-const PUSH_HELP = '--linked --project-ref string --workdir string --dry-run --skip-vault';
+const QUERY_HELP = '--linked --project-ref string --workdir string --output [json] --agent [auto|yes|no] --profile string';
+const PUSH_HELP = '--linked --project-ref string --workdir string --dry-run --skip-vault --profile string';
 
 describe('private migration source verifier (fake fixtures and children only)', () => {
     let base: string;
@@ -122,7 +122,7 @@ describe('private migration source verifier (fake fixtures and children only)', 
                 await behavior?.(request);
                 if (request.args[0] === '--version') return { stdout: '2.114.0\n', stderr: '', exitCode: 0 };
                 if (request.args.includes('--help')) return { stdout: request.args.includes('query') ? QUERY_HELP : PUSH_HELP, stderr: '', exitCode: 0 };
-                if (request.args.includes('query')) return { stdout: queryOverride ?? JSON.stringify({ rows: rows() }), stderr: 'Initialising login role...\nConnecting to remote database...\n', exitCode: 0 };
+                if (request.args.includes('query')) return { stdout: queryOverride ?? JSON.stringify(rows()), stderr: 'Initialising login role...\nConnecting to remote database...\n', exitCode: 0 };
                 return dryOverride ?? { stdout: 'Remote database is up to date.\n', stderr: 'DRY RUN: migrations will *not* be pushed to the database.\n', exitCode: 0 };
             },
         };
@@ -302,7 +302,7 @@ describe('private migration source verifier (fake fixtures and children only)', 
         delete dependencies.resolveRoot;
         const result = await run('--dry-run', true);
         expect(result.exitCode).toBe(0);
-        expect(calls.every(call => call.cwd === root && call.env.SUPABASE_ACCESS_TOKEN === TOKEN)).toBe(true);
+        expect(calls.every(call => call.cwd === call.env.TMPDIR && call.env.SUPABASE_ACCESS_TOKEN === TOKEN)).toBe(true);
     });
 
     it('rejects private sources inside any checkout of the same repository', async () => {
@@ -337,7 +337,7 @@ describe('private migration source verifier (fake fixtures and children only)', 
             expect(files.every(file => lstatSync(join(supabase, 'migrations', file)).isSymbolicLink())).toBe(true);
             expect(files).not.toEqual(expect.arrayContaining(manifest.excludedLocalSources.map(source => source.filename)));
             for (const file of ['project-ref', 'pooler-url']) expect(lstatSync(join(supabase, '.temp', file)).mode & 0o777).toBe(0o600);
-            expect(readdirSync(workdir)).toEqual(['supabase']);
+            expect(readdirSync(workdir).sort()).toEqual(['cli-state', 'supabase']);
         };
         const result = await run('--dry-run');
         expect(result.exitCode).toBe(0);
@@ -345,13 +345,162 @@ describe('private migration source verifier (fake fixtures and children only)', 
         expect(calls).toHaveLength(5);
         expect(calls.filter(call => call.args.includes('push') && !call.args.includes('--help'))).toHaveLength(1);
         expect(calls.every(call => call.env.SUPABASE_ACCESS_TOKEN === undefined)).toBe(true);
-        expect(calls.every(call => Object.keys(call.env).sort().join(',') === 'HOME,LANG,LC_ALL,PATH,TMPDIR')).toBe(true);
+        expect(calls.every(call => Object.keys(call.env).sort().join(',') === 'DO_NOT_TRACK,HOME,LANG,LC_ALL,PATH,SUPABASE_HOME,TMPDIR')).toBe(true);
         expect(() => lstatSync(workdir!)).toThrow();
         expect(lstatSync(join(root, 'supabase', '.temp', 'project-ref')).mode & 0o777).toBe(0o644);
-        const sql = calls.find(call => call.args.includes('query') && !call.args.includes('--help'))!.args.at(-1)!;
+        const query = calls.find(call => call.args.includes('query') && !call.args.includes('--help'))!;
+        expect(query.args).toContain('--agent=no');
+        expect(query.args).toContain('--profile=supabase');
+        expect(calls.find(call => call.args.includes('push') && !call.args.includes('--help'))!.args).toContain('--profile=supabase');
+        const sql = query.args.at(-1)!;
         expect(sql).toMatch(/^SELECT\b/);
         expect(sql).toContain('array_to_string(statements');
         expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|ALTER|DROP|GRANT|CREATE|REPAIR)\b/i);
+    });
+
+    it('isolates each native CLI cwd and state while retaining the real owner HOME', async () => {
+        behavior = request => {
+            expect(request.cwd).toBe(request.env.TMPDIR);
+            expect(request.env.HOME).toBe(base);
+            expect(request.env.DO_NOT_TRACK).toBe('1');
+            expect(request.env.SUPABASE_HOME).toBe(join(request.env.TMPDIR, 'cli-state'));
+            const stat = lstatSync(request.env.SUPABASE_HOME);
+            expect(stat.isDirectory() && !stat.isSymbolicLink()).toBe(true);
+            expect(stat.uid).toBe(process.getuid!());
+            expect(stat.mode & 0o7777).toBe(0o700);
+            expect(readdirSync(request.env.SUPABASE_HOME)).toEqual([]);
+        };
+        expect((await run('--dry-run')).exitCode).toBe(0);
+    });
+
+    it.each([0o600, 0o644, 0o200])('allows one bounded denied-consent state file without interpreting its body or changing mode %i', async mode => {
+        let statePath: string | undefined;
+        behavior = request => {
+            statePath = join(request.env.SUPABASE_HOME, 'telemetry.json');
+            if (request.args[0] === '--version') writeFileSync(statePath, 'FAKE_OPAQUE_STATE_DO_NOT_INTERPRET', { mode });
+            if (request.args.includes('push') && !request.args.includes('--help')) expect(lstatSync(statePath).mode & 0o777).toBe(mode);
+        };
+        const result = await run('--dry-run');
+        expect(result.exitCode).toBe(0);
+        expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true });
+        expect(() => lstatSync(statePath!)).toThrow();
+        expect(output.join('')).not.toContain('FAKE_OPAQUE_STATE_DO_NOT_INTERPRET');
+    });
+
+    it('accepts the exact one KiB telemetry metadata bound without reading its body', async () => {
+        behavior = request => {
+            if (request.args[0] === '--version') writeFileSync(join(request.env.SUPABASE_HOME, 'telemetry.json'), 'x'.repeat(1024), { mode: 0o600 });
+        };
+        expect((await run('--dry-run')).exitCode).toBe(0);
+    });
+
+    it.each(['token', 'profile', 'unknown', 'atomic', 'traces', 'multiple', 'oversize', 'mode', 'symlink', 'directory', 'stateMode', 'stateSymlink', 'stateReplace'])('rejects unexpected CLI state before the next child: %s', condition => {
+        behavior = request => {
+            if (request.args[0] !== '--version') return;
+            const directory = request.env.SUPABASE_HOME;
+            const state = join(directory, 'telemetry.json');
+            if (condition === 'stateMode') { chmodSync(directory, 0o755); return; }
+            if (condition === 'stateSymlink' || condition === 'stateReplace') {
+                renameSync(directory, join(base, 'former-cli-state'));
+                if (condition === 'stateSymlink') symlinkSync(secure, directory); else mkdirSync(directory, { mode: 0o700 });
+                return;
+            }
+            if (condition === 'symlink') { symlinkSync(join(root, '.env.local'), state); return; }
+            if (condition === 'directory') { mkdirSync(state, { mode: 0o700 }); return; }
+            if (condition === 'traces') { mkdirSync(join(directory, 'traces'), { mode: 0o700 }); return; }
+            const filename = condition === 'token' ? 'access-token' : condition === 'profile' ? 'profile'
+                : condition === 'unknown' ? 'unknown.json' : condition === 'atomic' ? '.tmp.fixture' : 'telemetry.json';
+            writeFileSync(join(directory, filename), condition === 'oversize' ? 'x'.repeat(1025) : 'FAKE_OPAQUE_STATE_DO_NOT_INTERPRET', { mode: 0o600 });
+            if (condition === 'mode') chmodSync(state, 0o666);
+            if (condition === 'multiple') writeFileSync(join(directory, 'profile'), 'fixture', { mode: 0o600 });
+        };
+        return run('--dry-run').then(result => {
+            assertSafeFailure(result);
+            expect(calls).toHaveLength(1);
+            expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true, plannedMigrationCount: null });
+            expect(output.join('')).not.toContain('FAKE_OPAQUE_STATE_DO_NOT_INTERPRET');
+        });
+    });
+
+    it('checks isolated CLI state again after the final dry-run child', async () => {
+        behavior = request => {
+            if (request.args.includes('push') && !request.args.includes('--help')) writeFileSync(join(request.env.SUPABASE_HOME, 'access-token'), 'FAKE_RAW_SECRET', { mode: 0o600 });
+        };
+        const result = await run('--dry-run');
+        assertSafeFailure(result, 'SOURCE_MISMATCH');
+        expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true, plannedMigrationCount: null });
+    });
+
+    it.each([0o600, 0o644])('accepts only the bounded native linked-project cache and keeps its original mode %i', mode => {
+        let cache: string | undefined;
+        behavior = request => {
+            if (request.args.includes('query') && !request.args.includes('--help')) {
+                cache = join(request.env.TMPDIR, 'supabase', '.temp', 'linked-project.json');
+                writeFileSync(cache, JSON.stringify({ ref: REF, name: 'FAKE_PROJECT_METADATA',
+                    organization_id: 'organization_fixture', organization_slug: 'fixture-org' }), { mode });
+            }
+            if (request.args.includes('push') && !request.args.includes('--help')) {
+                expect(lstatSync(cache!).mode & 0o777).toBe(mode);
+                expect(request.args[request.args.indexOf('--project-ref') + 1]).toBe(REF);
+            }
+        };
+        return run('--dry-run').then(result => {
+            expect(result.exitCode).toBe(0);
+            expect(result.receipt).toMatchObject({ parityMatch: true, plannedMigrationCount: 0, originalsUnchanged: true, cleanupSucceeded: true });
+            expect(calls.filter(call => call.args.includes('push') && !call.args.includes('--help'))).toHaveLength(1);
+            expect(() => lstatSync(cache!)).toThrow();
+            for (const value of ['FAKE_PROJECT_METADATA', 'organization_fixture', 'fixture-org']) expect(output.join('')).not.toContain(value);
+        });
+    });
+
+    it('accepts the official four-string cache contract with empty non-ref fields', async () => {
+        behavior = request => {
+            if (request.args.includes('query') && !request.args.includes('--help')) {
+                writeFileSync(join(request.env.TMPDIR, 'supabase', '.temp', 'linked-project.json'),
+                    JSON.stringify({ ref: REF, name: '', organization_id: '', organization_slug: '' }), { mode: 0o600 });
+            }
+        };
+        expect((await run('--dry-run')).exitCode).toBe(0);
+        expect(calls.filter(call => call.args.includes('push') && !call.args.includes('--help'))).toHaveLength(1);
+    });
+
+    it.each(['unknown', 'duplicate', 'ref', 'mode', 'symlink', 'extraFile', 'oversize', 'longField', 'control', 'c1Control', 'null', 'missing'])('rejects contaminated native linked-project metadata before push: %s', condition => {
+        behavior = request => {
+            if (!request.args.includes('query') || request.args.includes('--help')) return;
+            const directory = join(request.env.TMPDIR, 'supabase', '.temp');
+            const cache = join(directory, 'linked-project.json');
+            const value: Record<string, unknown> = { ref: REF, name: 'FAKE_PROJECT_METADATA', organization_id: 'organization_fixture', organization_slug: 'fixture-org' };
+            if (condition === 'unknown') value.token = 'FAKE_RAW_SECRET';
+            if (condition === 'ref') value.ref = 'aaaaaaaaaaaaaaaaaaaa';
+            if (condition === 'oversize') value.name = 'x'.repeat(5 * 1024);
+            if (condition === 'longField') value.name = 'x'.repeat(257);
+            if (condition === 'control') value.organization_slug = 'unsafe\nvalue';
+            if (condition === 'c1Control') value.organization_slug = 'unsafe\u0085value';
+            if (condition === 'null') value.organization_slug = null;
+            if (condition === 'missing') delete value.organization_id;
+            if (condition === 'symlink') { symlinkSync(join(root, '.env.local'), cache); return; }
+            let raw = JSON.stringify(value);
+            if (condition === 'duplicate') raw = raw.replace('"ref":', `"r\\u0065f":"${REF}","ref":`);
+            writeFileSync(cache, raw, { mode: 0o600 });
+            if (condition === 'mode') chmodSync(cache, 0o666);
+            if (condition === 'extraFile') writeFileSync(join(directory, 'unexpected.json'), '{}', { mode: 0o600 });
+        };
+        return run('--dry-run').then(result => {
+            assertSafeFailure(result);
+            expect(result.receipt).toMatchObject({ parityMatch: true, originalsUnchanged: true, cleanupSucceeded: true });
+            expect(calls.some(call => call.args.includes('push') && !call.args.includes('--help'))).toBe(false);
+        });
+    });
+
+    it('rejects linked-project cache contamination created by the final dry-run child', async () => {
+        behavior = request => {
+            if (request.args.includes('push') && !request.args.includes('--help')) {
+                writeFileSync(join(request.env.TMPDIR, 'supabase', '.temp', 'linked-project.json'),
+                    JSON.stringify({ ref: REF, name: 'fixture', organization_id: 'fixture', organization_slug: 'fixture', secret: 'FAKE_RAW_SECRET' }), { mode: 0o600 });
+            }
+        };
+        const result = await run('--dry-run'); assertSafeFailure(result, 'SOURCE_MISMATCH');
+        expect(result.receipt).toMatchObject({ plannedMigrationCount: null, originalsUnchanged: true, cleanupSucceeded: true });
     });
 
     it.each(['ref', 'poolerPassword', 'poolerHost', 'poolerPort', 'poolerUser', 'origin', 'envMode', 'metadataMode', 'cliMode', 'cliSymlink'])('rejects invalid root identity, auth, or executable before any child: %s', condition => {
@@ -374,19 +523,36 @@ describe('private migration source verifier (fake fixtures and children only)', 
         expect(calls.every(call => call.command === realpathSync(cliPath))).toBe(true);
     });
 
-    it('allows the exact Darwin Homebrew Cellar administrator directory policy', () => {
+    it('allows only the exact Darwin Homebrew bin/Cellar administrator directory policy', () => {
         const stat = { uid: 501, gid: 80, mode: 0o40775, directory: true, symlink: false };
-        expect(isSafeSupabaseExecutableDirectory('/opt/homebrew/Cellar', stat, 501, 'darwin')).toBe(true);
-        expect(isSafeSupabaseExecutableDirectory('/opt/homebrew/Cellar', { ...stat, uid: 0 }, 501, 'darwin')).toBe(true);
-        for (const [path, change, platform] of [
-            ['/opt/homebrew/Cellar/other', {}, 'darwin'], ['/other/Cellar', {}, 'darwin'],
-            ['/opt/homebrew/Cellar', {}, 'linux'], ['/opt/homebrew/Cellar', { gid: 81 }, 'darwin'],
-            ['/opt/homebrew/Cellar', { mode: 0o777 }, 'darwin'], ['/opt/homebrew/Cellar', { mode: 0o2775 }, 'darwin'],
-            ['/opt/homebrew/Cellar', { uid: 0, mode: 0o1777 }, 'darwin'],
-            ['/opt/homebrew/Cellar', { uid: 502 }, 'darwin'], ['/opt/homebrew/Cellar', { directory: false }, 'darwin'],
-            ['/opt/homebrew/Cellar', { symlink: true }, 'darwin'],
-        ] as const) expect(isSafeSupabaseExecutableDirectory(path, { ...stat, ...change }, 501, platform)).toBe(false);
+        for (const path of ['/opt/homebrew/bin', '/opt/homebrew/Cellar']) {
+            expect(isSafeSupabaseExecutableDirectory(path, stat, 501, 'darwin')).toBe(true);
+            expect(isSafeSupabaseExecutableDirectory(path, { ...stat, uid: 0 }, 501, 'darwin')).toBe(true);
+            for (const [change, platform] of [
+                [{}, 'linux'], [{ gid: 81 }, 'darwin'], [{ mode: 0o777 }, 'darwin'],
+                [{ mode: 0o2775 }, 'darwin'], [{ uid: 0, mode: 0o1777 }, 'darwin'],
+                [{ uid: 502 }, 'darwin'], [{ directory: false }, 'darwin'], [{ symlink: true }, 'darwin'],
+            ] as const) expect(isSafeSupabaseExecutableDirectory(path, { ...stat, ...change }, 501, platform)).toBe(false);
+        }
+        for (const path of ['/opt/homebrew/bin/other', '/opt/homebrew/Cellar/other', '/other/Cellar', '/opt/homebrew/other']) {
+            expect(isSafeSupabaseExecutableDirectory(path, stat, 501, 'darwin')).toBe(false);
+        }
         expect(isSafeSupabaseExecutableDirectory('/ordinary', { ...stat, mode: 0o755 }, 501, 'linux')).toBe(true);
+    });
+
+    it('rechecks the final regular executable and identity before each child when its symlink changes', async () => {
+        const original = `${cliPath}.original`;
+        const replacement = `${cliPath}.replacement`;
+        renameSync(cliPath, original); symlinkSync(original, cliPath);
+        writeFileSync(replacement, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+        behavior = request => {
+            if (request.args[0] === '--version') { rmSync(cliPath); symlinkSync(replacement, cliPath); }
+        };
+        const result = await run('--dry-run');
+        assertSafeFailure(result, 'CLI_UNAVAILABLE');
+        expect(calls).toHaveLength(1);
+        expect(calls[0].command).toBe(original);
+        expect(result.receipt).toMatchObject({ cliVersion: '2.114.0', originalsUnchanged: true, cleanupSucceeded: true });
     });
 
     it.each(['missing', 'empty'])('root-env requires one usable token: %s', condition => {
@@ -394,25 +560,28 @@ describe('private migration source verifier (fake fixtures and children only)', 
         return run('--dry-run', true).then(result => { assertSafeFailure(result, 'ENV_INVALID'); expect(calls).toHaveLength(0); });
     });
 
-    it.each(['version', 'queryHelp', 'pushHelp'])('fails pinned version or capability checks: %s', boundary => {
+    it.each(['version', 'queryHelp', 'queryAgentHelp', 'queryProfileHelp', 'pushHelp', 'pushProfileHelp'])('fails pinned version or capability checks: %s', boundary => {
         dependencies.runChild = async request => {
             calls.push(request);
             if (request.args[0] === '--version') return { stdout: boundary === 'version' ? '2.102.0\n' : '2.114.0\n', stderr: '', exitCode: 0 };
-            return { stdout: request.args.includes('query') ? (boundary === 'queryHelp' ? '--linked' : QUERY_HELP) : (boundary === 'pushHelp' ? '--dry-run' : PUSH_HELP), stderr: '', exitCode: 0 };
+            return { stdout: request.args.includes('query') ? (boundary === 'queryHelp' ? '--linked' : boundary === 'queryAgentHelp' ? QUERY_HELP.replace(' --agent [auto|yes|no]', '') : boundary === 'queryProfileHelp' ? QUERY_HELP.replace(' --profile string', '') : QUERY_HELP) : (boundary === 'pushHelp' ? '--dry-run' : boundary === 'pushProfileHelp' ? PUSH_HELP.replace(' --profile string', '') : PUSH_HELP), stderr: '', exitCode: 0 };
         };
         return run('--dry-run').then(result => { assertSafeFailure(result); expect(calls.some(call => call.args.includes('push') && !call.args.includes('--help'))).toBe(false); });
     });
 
-    it.each(['missing', 'extra', 'metadata', 'rowExtra', 'envelopeExtra', 'duplicate', 'prefix', 'duplicateKey'])('fails remote parity or contaminated JSON and never pushes: %s', mismatch => {
+    it.each(['missing', 'extra', 'metadata', 'rowExtra', 'wrapper', 'agentEnvelope', 'envelopeExtra', 'duplicate', 'prefix', 'suffix', 'duplicateKey'])('fails remote parity or contaminated JSON and never pushes: %s', mismatch => {
         const remote = rows() as Record<string, unknown>[];
         if (mismatch === 'missing') remote.pop();
         if (mismatch === 'extra') remote.push({ version: '20260301000000', statement_count: null, canonical_length: null, canonical_md5: null });
         if (mismatch === 'metadata') remote.at(-1)!.canonical_md5 = '0'.repeat(32);
         if (mismatch === 'rowExtra') remote[0].sql = 'FAKE_RAW_SECRET';
         if (mismatch === 'duplicate') remote.push(remote[0]);
-        queryOverride = JSON.stringify(mismatch === 'envelopeExtra' ? { rows: remote, secret: 'FAKE_RAW_SECRET' } : { rows: remote });
+        queryOverride = JSON.stringify(mismatch === 'wrapper' ? { rows: remote }
+            : mismatch === 'agentEnvelope' ? { warning: 'fixture', boundary: 'fixture', rows: remote }
+                : mismatch === 'envelopeExtra' ? { rows: remote, secret: 'FAKE_RAW_SECRET' } : remote);
         if (mismatch === 'prefix') queryOverride = 'FAKE_RAW_SECRET\n' + queryOverride;
-        if (mismatch === 'duplicateKey') queryOverride = queryOverride.replace('"rows":', '"rows":[],"rows":');
+        if (mismatch === 'suffix') queryOverride += '\nFAKE_RAW_SECRET';
+        if (mismatch === 'duplicateKey') queryOverride = queryOverride.replace('"version":', `"v\\u0065rsion":"${remote[0].version}","version":`);
         return run('--dry-run').then(result => { assertSafeFailure(result); expect(calls.some(call => call.args.includes('push') && !call.args.includes('--help'))).toBe(false); });
     });
 
@@ -434,7 +603,33 @@ describe('private migration source verifier (fake fixtures and children only)', 
     it('enforces the timeout even when a fake transport never settles', async () => {
         dependencies.childTimeoutMs = 20;
         behavior = request => request.args[0] === '--version' ? new Promise<void>(() => undefined) : undefined;
-        const result = await run('--dry-run'); assertSafeFailure(result, 'CHILD_TIMEOUT'); expect(calls).toHaveLength(1);
+        const result = await run('--dry-run'); assertSafeFailure(result, 'CHILD_TERMINATION_UNCONFIRMED'); expect(calls).toHaveLength(1);
+        expect(result.receipt).toMatchObject({ originalsUnchanged: false, cleanupSucceeded: false });
+    });
+
+    it('finalizes only after an injected transport cooperates with timeout cancellation', async () => {
+        dependencies.childTimeoutMs = 20;
+        dependencies.runChild = async request => {
+            calls.push(request);
+            return new Promise((_resolve, reject) => request.signal.addEventListener('abort',
+                () => reject(new PrivateSourceError('CHILD_TIMEOUT')), { once: true }));
+        };
+        const result = await run('--dry-run'); assertSafeFailure(result, 'CHILD_TIMEOUT');
+        expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true });
+    });
+
+    it('waits for a definitive group probe after a transient denial', async () => {
+        let injected = false;
+        const originalKill = process.kill.bind(process);
+        const spy = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+            if (!injected && pid < 0 && signal === 0) {
+                injected = true;
+                throw Object.assign(new Error('fixture'), { code: 'EPERM' });
+            }
+            return originalKill(pid, signal);
+        });
+        try { expect((await run()).exitCode).toBe(0); expect(injected).toBe(true); }
+        finally { spy.mockRestore(); }
     });
 
     it.each(['timeout', 'output'])('bounds and terminates a real local fake child: %s', failure => {
@@ -447,6 +642,53 @@ describe('private migration source verifier (fake fixtures and children only)', 
             expect(Date.now() - started).toBeLessThan(3_000);
             expect(result.receipt?.cleanupSucceeded).toBe(true);
         });
+    });
+
+    it.each(['timeout', 'output', 'exit'])('terminates the isolated fake CLI group and inherited-pipe descendants before cleanup: %s', failure => {
+        const leaderFile = join(base, 'fake-leader.pid');
+        const descendantFile = join(base, 'fake-descendant.pid');
+        // PIDs are fixture-only control data in owner-only files, never emitted or added to the DTO.
+        const descendant = `require('node:fs').writeFileSync(${JSON.stringify(descendantFile)}, String(process.pid), {mode:0o600}); setInterval(() => {}, 100);`;
+        const body = `const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(leaderFile)}, String(process.pid), {mode:0o600});
+require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], {stdio:['ignore','inherit','inherit']});
+setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(descendantFile)})) return;
+    ${failure === 'output' ? "process.stdout.write('x'.repeat(600 * 1024));" : failure === 'exit' ? 'process.exit(7);' : ''}
+}, 10);`;
+        writeFileSync(cliPath, `#!${process.execPath}\n${body}\n`, { mode: 0o700 });
+        delete dependencies.runChild;
+        dependencies.childTimeoutMs = 1_500;
+        const started = Date.now();
+        return run('--dry-run').then(result => {
+            assertSafeFailure(result, failure === 'timeout' ? 'CHILD_TIMEOUT' : failure === 'output' ? 'CHILD_OUTPUT_LIMIT' : 'CHILD_FAILED');
+            expect(Date.now() - started).toBeLessThan(4_000);
+            for (const path of [leaderFile, descendantFile]) {
+                const pid = Number(readFileSync(path, 'utf8'));
+                expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+                let terminated = false;
+                try { process.kill(pid, 0); } catch (error) { terminated = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+                expect(terminated).toBe(true);
+            }
+            expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true });
+            expect(readdirSync(base).some(name => name.startsWith('supabase-private-source-'))).toBe(false);
+            for (const source of manifest.privateSources) {
+                expect(HASH(readFileSync(source.path))).toBe(source.sha256);
+                expect(lstatSync(source.path).mode & 0o777).toBe(0o600);
+            }
+        });
+    });
+
+    it('does not inspect originals or clean its workdir when child lifetime is unconfirmed', async () => {
+        const removeTemp = vi.fn(); dependencies.removeTemp = removeTemp;
+        behavior = request => {
+            if (request.args[0] === '--version') throw new PrivateSourceError('CHILD_TERMINATION_UNCONFIRMED');
+        };
+        const result = await run('--dry-run');
+        assertSafeFailure(result, 'CHILD_TERMINATION_UNCONFIRMED');
+        expect(result.receipt).toMatchObject({ originalsUnchanged: false, cleanupSucceeded: false, plannedMigrationCount: null });
+        expect(removeTemp).not.toHaveBeenCalled();
+        expect(readdirSync(base).some(name => name.startsWith('supabase-private-source-'))).toBe(true);
     });
 
     it.each(['source', 'tempSymlink', 'tempCopy', 'tempMetadata'])('revalidates before later children after a fake child race: %s', tamper => {
@@ -511,7 +753,7 @@ describe('private migration source verifier (fake fixtures and children only)', 
     });
 
     it('removes its temporary workdir on remote failure and preserves originals', async () => {
-        queryOverride = '{"rows":[]}';
+        queryOverride = '[]';
         const result = await run('--dry-run'); assertSafeFailure(result, 'REMOTE_MISMATCH');
         expect(result.receipt).toMatchObject({ originalsUnchanged: true, cleanupSucceeded: true });
         expect(readdirSync(base).sort()).toEqual(['fake-supabase', 'private', 'root']);

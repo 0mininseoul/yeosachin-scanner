@@ -21,6 +21,7 @@ const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES = 128 * 1024 * 1024;
 const MAX_ENV_BYTES = 1024 * 1024;
 const MAX_METADATA_BYTES = 4 * 1024;
+const MAX_CLI_STATE_BYTES = 1024;
 const MAX_CHILD_BYTES = 512 * 1024;
 const MAX_GIT_BYTES = 1024 * 1024;
 const CHILD_TIMEOUT_MS = 30_000;
@@ -40,7 +41,7 @@ export const PRIVATE_SOURCE_ERROR_CODES = [
     'INVALID_ARGUMENTS', 'ROOT_UNAVAILABLE', 'MANIFEST_INVALID', 'PATH_UNSAFE',
     'SOURCE_MISMATCH', 'BASE_GIT_MISMATCH', 'PROJECT_INVALID', 'ENV_INVALID',
     'CLI_UNAVAILABLE', 'CLI_VERSION_MISMATCH', 'CLI_CAPABILITY_MISMATCH',
-    'CHILD_FAILED', 'CHILD_TIMEOUT', 'CHILD_OUTPUT_LIMIT', 'REMOTE_INVALID',
+    'CHILD_FAILED', 'CHILD_TIMEOUT', 'CHILD_OUTPUT_LIMIT', 'CHILD_TERMINATION_UNCONFIRMED', 'REMOTE_INVALID',
     'REMOTE_MISMATCH', 'DRY_RUN_FAILED', 'PENDING_MIGRATIONS', 'ORIGINALS_CHANGED',
     'CLEANUP_FAILED', 'INTERNAL_FAILURE',
 ] as const;
@@ -287,17 +288,92 @@ function outsideRepository(path: string, root: string): void {
 /** Private pipes, no shell, no inherited env, fixed timeout and aggregate output cap. */
 async function nativeChild(request: PrivateSourceChildRequest): Promise<PrivateSourceChildResult> {
     return new Promise((resolveResult, reject) => {
+        if (process.platform !== 'darwin' && process.platform !== 'linux') { reject(new PrivateSourceError('CHILD_FAILED')); return; }
         const stdout: Buffer[] = [], stderr: Buffer[] = [];
         let size = 0; let settled = false; let failure: PrivateSourceErrorCode | undefined;
+        let spawned = false; let leaderExited = false; let leaderClosed = false;
+        let stdoutClosed = false; let stderrClosed = false; let exitCode: number | null = null;
+        let killRequested = false;
+        let probeUncertain = false;
+        let requestTimer: ReturnType<typeof setTimeout> | undefined;
+        let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+        let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        // POSIX detached creates a new session and process group whose leader is this exact child.
+        // Never derive a kill target from argv, env, returned output, or the parent's process group.
         const child = spawn(request.command, [...request.args], { cwd: request.cwd, env: { ...request.env } as NodeJS.ProcessEnv,
-            shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+            shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        const groupId = child.pid;
+        const groupAlive = (): boolean | undefined => {
+            if (!spawned) return false;
+            if (!Number.isSafeInteger(groupId) || groupId! <= 0 || groupId === process.pid) return undefined;
+            try { process.kill(-groupId!, 0); return true; }
+            catch (error) { return object(error) && error.code === 'ESRCH' ? false : undefined; }
+        };
+        const settle = (error?: PrivateSourceErrorCode): void => {
+            if (settled) return;
+            settled = true;
+            request.signal.removeEventListener('abort', abort);
+            if (requestTimer !== undefined) clearTimeout(requestTimer);
+            if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+            if (pollTimer !== undefined) clearTimeout(pollTimer);
+            if (error === 'CHILD_TERMINATION_UNCONFIRMED') {
+                // Lifetime could not be established. Drop references without claiming cleanup
+                // or allowing source/workdir finalization while a process might still use them.
+                child.stdout.destroy(); child.stderr.destroy(); child.unref();
+            }
+            if (error) { reject(new PrivateSourceError(error)); return; }
+            try { resolveResult({ stdout: text(Buffer.concat(stdout), 'CHILD_FAILED'),
+                stderr: text(Buffer.concat(stderr), 'CHILD_FAILED'), exitCode: exitCode! }); }
+            catch { reject(new PrivateSourceError('CHILD_FAILED')); }
+        };
+        const killGroup = (): void => {
+            if (!spawned || settled) return;
+            if (!Number.isSafeInteger(groupId) || groupId! <= 0 || groupId === process.pid) { settle('CHILD_TERMINATION_UNCONFIRMED'); return; }
+            try { process.kill(-groupId!, 'SIGKILL'); }
+            catch (error) { if (!object(error) || error.code !== 'ESRCH') settle('CHILD_TERMINATION_UNCONFIRMED'); }
+        };
+        const checkTermination = (): void => {
+            if (settled) return;
+            const alive = groupAlive();
+            if (alive === undefined) {
+                // Darwin can transiently deny a group probe while the last member is reaped.
+                // Observe within the same fixed grace; never equate denial with termination.
+                if (terminationTimer === undefined) {
+                    probeUncertain = true;
+                    terminationTimer = setTimeout(() => settle('CHILD_TERMINATION_UNCONFIRMED'), 1_000);
+                }
+                if (pollTimer === undefined) pollTimer = setTimeout(() => { pollTimer = undefined; checkTermination(); }, 25);
+                return;
+            }
+            if (probeUncertain && !killRequested) {
+                if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+                terminationTimer = undefined; probeUncertain = false;
+            }
+            if (alive) {
+                if (leaderExited && !killRequested) { finishError('CHILD_FAILED'); return; }
+                if (killRequested && pollTimer === undefined) pollTimer = setTimeout(() => {
+                    pollTimer = undefined; checkTermination();
+                }, 25);
+                return;
+            }
+            if (leaderClosed && stdoutClosed && stderrClosed) settle(failure ?? (exitCode === 0 ? undefined : 'CHILD_FAILED'));
+        };
         const finishError = (code: PrivateSourceErrorCode): void => {
-            if (settled || failure) return;
-            failure = code; child.kill('SIGKILL');
+            if (settled) return;
+            failure ??= code;
+            if (!killRequested) {
+                killRequested = true;
+                if (requestTimer !== undefined) clearTimeout(requestTimer);
+                if (terminationTimer !== undefined) clearTimeout(terminationTimer);
+                probeUncertain = false;
+                // Bounded failure never means the child was closed: an unconfirmed lifetime
+                // has its own enum and prevents original checks and workdir cleanup.
+                terminationTimer = setTimeout(() => settle('CHILD_TERMINATION_UNCONFIRMED'), 1_000);
+                killGroup();
+            }
+            checkTermination();
         };
         const abort = (): void => finishError('CHILD_TIMEOUT');
-        request.signal.addEventListener('abort', abort, { once: true });
-        if (request.signal.aborted) abort();
         const collect = (target: Buffer[], chunk: Buffer): void => {
             if (settled || failure) return;
             size += chunk.byteLength;
@@ -306,17 +382,23 @@ async function nativeChild(request: PrivateSourceChildRequest): Promise<PrivateS
         };
         child.stdout.on('data', (chunk: Buffer) => collect(stdout, chunk));
         child.stderr.on('data', (chunk: Buffer) => collect(stderr, chunk));
+        child.stdout.on('close', () => { stdoutClosed = true; checkTermination(); });
+        child.stderr.on('close', () => { stderrClosed = true; checkTermination(); });
+        child.stdout.on('error', () => finishError('CHILD_FAILED'));
+        child.stderr.on('error', () => finishError('CHILD_FAILED'));
+        child.on('spawn', () => { spawned = true; if (killRequested) killGroup(); checkTermination(); });
         child.on('error', () => finishError('CHILD_FAILED'));
-        child.on('close', code => {
-            request.signal.removeEventListener('abort', abort);
-            if (settled) return;
-            settled = true;
-            if (failure) { reject(new PrivateSourceError(failure)); return; }
-            if (code === null) { reject(new PrivateSourceError('CHILD_FAILED')); return; }
-            try { resolveResult({ stdout: text(Buffer.concat(stdout), 'CHILD_FAILED'),
-                stderr: text(Buffer.concat(stderr), 'CHILD_FAILED'), exitCode: code }); }
-            catch { reject(new PrivateSourceError('CHILD_FAILED')); }
+        child.on('exit', code => {
+            leaderExited = true; exitCode = code;
+            if (code !== 0) finishError('CHILD_FAILED'); else checkTermination();
         });
+        child.on('close', code => {
+            leaderClosed = true; leaderExited = true; exitCode = code;
+            if (code !== 0) finishError('CHILD_FAILED'); else checkTermination();
+        });
+        request.signal.addEventListener('abort', abort, { once: true });
+        requestTimer = setTimeout(abort, request.timeoutMs);
+        if (request.signal.aborted) abort();
     });
 }
 async function boundedChild(
@@ -326,23 +408,32 @@ async function boundedChild(
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     try {
+        const request = { ...input, signal: controller.signal };
+        // Native transport owns timeout, process-group termination, and pipe closure as one
+        // lifetime boundary; a wrapper race must never outrun its close confirmation.
+        if (transport === nativeChild) return await nativeChild(request);
         const timeout = new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
-                controller.abort();
-                if (transport === nativeChild) {
-                    // Wait for SIGKILL/close before finally inspects sources and deletes workdir.
-                    // A bounded grace also handles a broken child implementation without hanging.
-                    terminationTimer = setTimeout(() => reject(new PrivateSourceError('CHILD_TIMEOUT')), 1_000);
-                } else reject(new PrivateSourceError('CHILD_TIMEOUT'));
+                timedOut = true; controller.abort();
+                // An injected transport must also settle after abort. A promise that stays
+                // pending cannot establish lifetime, even though it is only a test seam.
+                terminationTimer = setTimeout(() => reject(new PrivateSourceError('CHILD_TERMINATION_UNCONFIRMED')), 1_000);
             }, input.timeoutMs);
         });
-        const result = await Promise.race([transport({ ...input, signal: controller.signal }), timeout]);
+        const result = await Promise.race([transport(request), timeout]);
+        if (timedOut) fail('CHILD_TIMEOUT');
         if (!exactKeys(result, ['stdout', 'stderr', 'exitCode']) || typeof result.stdout !== 'string'
             || typeof result.stderr !== 'string' || !Number.isInteger(result.exitCode)) fail('CHILD_FAILED');
         if (Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > input.maxOutputBytes) fail('CHILD_OUTPUT_LIMIT');
         return result as unknown as PrivateSourceChildResult;
-    } catch (error) { if (error instanceof PrivateSourceError) throw error; return fail('CHILD_FAILED'); }
+    } catch (error) {
+        if (error instanceof PrivateSourceError && error.code === 'CHILD_TERMINATION_UNCONFIRMED') throw error;
+        if (timedOut) fail('CHILD_TIMEOUT');
+        if (error instanceof PrivateSourceError) throw error;
+        return fail('CHILD_FAILED');
+    }
     finally { if (timer !== undefined) clearTimeout(timer); if (terminationTimer !== undefined) clearTimeout(terminationTimer); }
 }
 
@@ -385,7 +476,8 @@ export function isSafeSupabaseExecutableDirectory(
     if ((stat.mode & 0o022) === 0) return true;
     // Root-owned sticky temp ancestors preserve owner entries; user-owned writable ancestors do not.
     if (stat.uid === 0 && ['/tmp', '/private/tmp'].includes(path) && (stat.mode & 0o7777) === 0o1777) return true;
-    return platform === 'darwin' && path === '/opt/homebrew/Cellar' && stat.gid === 80 && (stat.mode & 0o7777) === 0o775;
+    return platform === 'darwin' && ['/opt/homebrew/bin', '/opt/homebrew/Cellar'].includes(path)
+        && stat.gid === 80 && (stat.mode & 0o7777) === 0o775;
 }
 function executableAncestors(path: string, uid: number): void {
     let current: string = sep;
@@ -463,12 +555,12 @@ function remoteProjection(manifest: PrivateSourceManifest): string {
 }
 function remoteParity(raw: string, manifest: PrivateSourceManifest): number {
     const value = strictJson(raw, 'REMOTE_INVALID');
-    if (!exactKeys(value, ['rows']) || !Array.isArray(value.rows) || value.rows.length > MAX_SOURCES) fail('REMOTE_INVALID');
+    if (!Array.isArray(value) || value.length > MAX_SOURCES) fail('REMOTE_INVALID');
     const excluded = new Set(manifest.excludedLocalSources.map(source => source.version));
     const expected = new Set([...manifest.localSources.filter(source => !excluded.has(source.version)), ...manifest.privateSources].map(source => source.version));
     const privateSources = new Map(manifest.privateSources.map(source => [source.version, source]));
     const seen = new Set<string>();
-    for (const row of value.rows) {
+    for (const row of value) {
         if (!exactKeys(row, ['version', 'statement_count', 'canonical_length', 'canonical_md5'])
             || typeof row.version !== 'string' || !VERSION.test(row.version) || seen.has(row.version)) fail('REMOTE_INVALID');
         seen.add(row.version);
@@ -507,18 +599,40 @@ function capabilities(raw: string, flags: readonly string[]): boolean {
 }
 
 function verifyTemporarySourceSet(
-    workdir: string, identity: string, uid: number, targets: ReadonlyMap<string, string>, metadata: { ref: Buffer; pooler: Buffer },
+    workdir: string, identity: string, cliStateIdentity: string, uid: number,
+    targets: ReadonlyMap<string, string>, metadata: { ref: Buffer; pooler: Buffer },
 ): void {
     const boundary = new SourceBoundary(uid);
+    const cliState = join(workdir, 'cli-state');
     const supabase = join(workdir, 'supabase');
     const migrations = join(supabase, 'migrations');
     const temporaryMetadata = join(supabase, '.temp');
-    for (const path of [workdir, supabase, migrations, temporaryMetadata]) boundary.directory(path, true);
+    for (const path of [workdir, cliState, supabase, migrations, temporaryMetadata]) boundary.directory(path, true);
+    const metadataNames = readdirSync(temporaryMetadata).sort();
+    const expectedMetadataNames = ['pooler-url', 'project-ref'];
+    if (metadataNames.includes('linked-project.json')) expectedMetadataNames.push('linked-project.json');
+    expectedMetadataNames.sort();
     if (directoryIdentity(lstatSync(workdir, { bigint: true })) !== identity
-        || JSON.stringify(readdirSync(workdir).sort()) !== JSON.stringify(['supabase'])
+        || directoryIdentity(lstatSync(cliState, { bigint: true })) !== cliStateIdentity
+        || JSON.stringify(readdirSync(workdir).sort()) !== JSON.stringify(['cli-state', 'supabase'])
         || JSON.stringify(readdirSync(supabase).sort()) !== JSON.stringify(['.temp', 'migrations'])
-        || JSON.stringify(readdirSync(temporaryMetadata).sort()) !== JSON.stringify(['pooler-url', 'project-ref'])
+        || JSON.stringify(metadataNames) !== JSON.stringify(expectedMetadataNames)
         || JSON.stringify(readdirSync(migrations).sort()) !== JSON.stringify([...targets.keys()].sort())) fail('SOURCE_MISMATCH');
+    const stateNames = readdirSync(cliState);
+    if (stateNames.length > 1 || (stateNames.length === 1 && stateNames[0] !== 'telemetry.json')) fail('SOURCE_MISMATCH');
+    if (stateNames.length === 1) {
+        // DO_NOT_TRACK permits a best-effort compact denied-consent state write. Inspect only
+        // file metadata; never read, parse, retain, or emit anonymous state contents.
+        const path = join(cliState, 'telemetry.json');
+        try {
+            const initial = lstatSync(path, { bigint: true });
+            if (!initial.isFile() || initial.isSymbolicLink() || initial.uid !== BigInt(uid)
+                || (initial.mode & BigInt(0o022)) !== BigInt(0) || initial.size > BigInt(MAX_CLI_STATE_BYTES)) fail('SOURCE_MISMATCH');
+            // lstat never dereferences the file or requires body-read permission.
+            if (fileIdentity(lstatSync(path, { bigint: true })) !== fileIdentity(initial)
+                || directoryIdentity(lstatSync(cliState, { bigint: true })) !== cliStateIdentity) fail('SOURCE_MISMATCH');
+        } catch { fail('SOURCE_MISMATCH'); }
+    }
     for (const [filename, target] of targets) {
         const path = join(migrations, filename);
         const stat = lstatSync(path, { bigint: true });
@@ -526,6 +640,16 @@ function verifyTemporarySourceSet(
     }
     if (!boundary.read(join(temporaryMetadata, 'project-ref'), 'private', MAX_METADATA_BYTES).equals(metadata.ref)
         || !boundary.read(join(temporaryMetadata, 'pooler-url'), 'private', MAX_METADATA_BYTES).equals(metadata.pooler)) fail('SOURCE_MISMATCH');
+    if (metadataNames.includes('linked-project.json')) {
+        // Native 2.114.0 generates only this noncredential cache after a linked query.
+        // It is validated, never copied or emitted, and never selects the connection.
+        const linked = strictJson(text(boundary.read(join(temporaryMetadata, 'linked-project.json'), 'public', MAX_METADATA_BYTES),
+            'SOURCE_MISMATCH'), 'SOURCE_MISMATCH');
+        if (!exactKeys(linked, ['ref', 'name', 'organization_id', 'organization_slug'])
+            || linked.ref !== oneLine(metadata.ref)
+            || ['name', 'organization_id', 'organization_slug'].some(key => typeof linked[key] !== 'string'
+                || linked[key].length > 256 || /[\u0000-\u001f\u007f-\u009f]/.test(linked[key]))) fail('SOURCE_MISMATCH');
+    }
 }
 
 export async function verifyPrivateSources(options: PrivateSourceOptions, deps: PrivateSourceDependencies = {}): Promise<PrivateSourceReceipt> {
@@ -585,6 +709,9 @@ export async function verifyPrivateSources(options: PrivateSourceOptions, deps: 
             const created = lstatSync(workdir, { bigint: true });
             if (!created.isDirectory() || created.uid !== BigInt(uid) || (created.mode & BigInt(0o777)) !== BigInt(0o700)) fail('PATH_UNSAFE');
             temporaryIdentity = directoryIdentity(created);
+            const cliState = join(workdir, 'cli-state');
+            mkdirSync(cliState, { mode: 0o700 });
+            const cliStateIdentity = directoryIdentity(lstatSync(cliState, { bigint: true }));
             const supabase = join(workdir, 'supabase');
             mkdirSync(supabase, { mode: 0o700 });
             mkdirSync(join(supabase, '.temp'), { mode: 0o700 });
@@ -601,15 +728,16 @@ export async function verifyPrivateSources(options: PrivateSourceOptions, deps: 
             const home = realpathSync(deps.homeDir ?? homedir());
             boundary.directory(home);
             const env = Object.freeze({ PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: home, TMPDIR: workdir, LANG: 'C', LC_ALL: 'C',
+                DO_NOT_TRACK: '1', SUPABASE_HOME: cliState,
                 ...(identity.token === undefined ? {} : { SUPABASE_ACCESS_TOKEN: identity.token }) });
             const timeoutMs = deps.childTimeoutMs ?? CHILD_TIMEOUT_MS;
             if (!positive(timeoutMs, CHILD_TIMEOUT_MS)) fail('INVALID_ARGUMENTS');
             const child = async (args: readonly string[]): Promise<PrivateSourceChildResult> => {
                 if (!boundary.unchanged()) fail('ORIGINALS_CHANGED');
-                verifyTemporarySourceSet(workdir!, temporaryIdentity!, uid, targets, identity.metadata);
+                verifyTemporarySourceSet(workdir!, temporaryIdentity!, cliStateIdentity, uid, targets, identity.metadata);
                 if (validatedExecutable(commandPath, uid) !== command
                     || fileIdentity(lstatSync(command, { bigint: true })) !== executableIdentity) fail('CLI_UNAVAILABLE');
-                return boundedChild(deps.runChild ?? nativeChild, { command, args, cwd: root, env, timeoutMs, maxOutputBytes: MAX_CHILD_BYTES });
+                return boundedChild(deps.runChild ?? nativeChild, { command, args, cwd: workdir!, env, timeoutMs, maxOutputBytes: MAX_CHILD_BYTES });
             };
             const version = await child(['--version']);
             if (version.exitCode !== 0 || version.stderr !== '' || !/^2\.114\.0\n?$/.test(version.stdout)) fail('CLI_VERSION_MISMATCH');
@@ -617,32 +745,42 @@ export async function verifyPrivateSources(options: PrivateSourceOptions, deps: 
             for (const subcommand of ['query', 'push']) {
                 const help = await child(['db', subcommand, '--help']);
                 if (help.exitCode !== 0 || help.stderr !== '' || !capabilities(help.stdout,
-                    subcommand === 'query' ? ['--linked', '--project-ref', '--workdir', '--output']
-                        : ['--linked', '--project-ref', '--workdir', '--dry-run', '--skip-vault'])) fail('CLI_CAPABILITY_MISMATCH');
+                    subcommand === 'query' ? ['--linked', '--project-ref', '--workdir', '--output', '--agent', '--profile']
+                        : ['--linked', '--project-ref', '--workdir', '--dry-run', '--skip-vault', '--profile'])) fail('CLI_CAPABILITY_MISMATCH');
             }
-            const query = await child(['db', 'query', '--linked', '--project-ref', identity.ref, '--workdir', workdir, '--output', 'json', remoteProjection(manifest)]);
+            const query = await child(['db', 'query', '--linked', '--project-ref', identity.ref, '--workdir', workdir,
+                '--output', 'json', '--agent=no', '--profile=supabase', remoteProjection(manifest)]);
             if (query.exitCode !== 0) fail('CHILD_FAILED');
             nativeStatus(query.stderr, workdir);
             receipt.remoteCount = remoteParity(query.stdout, manifest); receipt.parityMatch = true;
-            const dryRun = await child(['db', 'push', '--dry-run', '--skip-vault', '--linked', '--project-ref', identity.ref, '--workdir', workdir]);
+            const dryRun = await child(['db', 'push', '--dry-run', '--skip-vault', '--linked', '--project-ref', identity.ref,
+                '--workdir', workdir, '--profile=supabase']);
             if (dryRun.exitCode !== 0) fail('DRY_RUN_FAILED');
             if (/Would push these migrations:|Do you want to push these migrations|Applying migration|Finished supabase db push\./.test(dryRun.stdout + '\n' + dryRun.stderr)) fail('PENDING_MIGRATIONS');
             if (nativeStatus(dryRun.stdout, workdir, true) + nativeStatus(dryRun.stderr, workdir, true) !== 1) fail('DRY_RUN_FAILED');
+            verifyTemporarySourceSet(workdir, temporaryIdentity, cliStateIdentity, uid, targets, identity.metadata);
             receipt.plannedMigrationCount = 0;
         }
         receipt.status = 'verified';
     } catch (error) { receipt.errorCode = privateSourceErrorCode(error); }
     finally {
-        receipt.originalsUnchanged = sourcesVerified && boundary.unchanged();
+        let lifetimeEstablished = receipt.errorCode !== 'CHILD_TERMINATION_UNCONFIRMED';
+        receipt.originalsUnchanged = lifetimeEstablished && sourcesVerified && boundary.unchanged();
         if (receipt.originalsUnchanged && verifiedRoot && verifiedBase) {
             try {
                 const currentRoot = await (deps.resolveRoot ?? resolvePrimaryRepositoryRootForOwner)(deps.cwd ?? process.cwd());
                 const ancestry = await gitChild(verifiedRoot, ['merge-base', '--is-ancestor', verifiedBase, 'HEAD'], deps);
                 if (currentRoot !== verifiedRoot || ancestry.exitCode !== 0 || ancestry.stdout !== '' || ancestry.stderr !== '') receipt.originalsUnchanged = false;
-            } catch { receipt.originalsUnchanged = false; }
+            } catch (error) {
+                receipt.originalsUnchanged = false;
+                if (privateSourceErrorCode(error) === 'CHILD_TERMINATION_UNCONFIRMED') lifetimeEstablished = false;
+            }
         }
-        if (sourcesVerified && !receipt.originalsUnchanged) { receipt.status = 'failed'; receipt.errorCode = 'ORIGINALS_CHANGED'; }
-        if (workdir !== undefined) {
+        if (!lifetimeEstablished) {
+            receipt.status = 'failed'; receipt.errorCode = 'CHILD_TERMINATION_UNCONFIRMED';
+            receipt.originalsUnchanged = false; receipt.cleanupSucceeded = false; receipt.plannedMigrationCount = null;
+        } else if (sourcesVerified && !receipt.originalsUnchanged) { receipt.status = 'failed'; receipt.errorCode = 'ORIGINALS_CHANGED'; }
+        if (lifetimeEstablished && workdir !== undefined) {
             try {
                 const current = lstatSync(workdir, { bigint: true });
                 if (!temporaryIdentity || !current.isDirectory() || current.isSymbolicLink()
