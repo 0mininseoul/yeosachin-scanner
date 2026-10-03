@@ -1,0 +1,15 @@
+{
+  "observedAt": "2026-10-03T19:52:20.286Z",
+  "toolVersion": "private-migration-source-v1",
+  "cliVersion": null,
+  "status": "failed",
+  "localCount": 392,
+  "privateCount": 6,
+  "remoteCount": null,
+  "hashesMatch": true,
+  "parityMatch": null,
+  "plannedMigrationCount": null,
+  "originalsUnchanged": true,
+  "cleanupSucceeded": true,
+  "errorCode": "CLI_UNAVAILABLE"
+}

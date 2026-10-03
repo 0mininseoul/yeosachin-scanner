@@ -1,0 +1,15 @@
+{
+  "observedAt": "2026-10-03T20:27:36.737Z",
+  "toolVersion": "private-migration-source-v1",
+  "cliVersion": "2.114.0",
+  "status": "verified",
+  "localCount": 392,
+  "privateCount": 6,
+  "remoteCount": 392,
+  "hashesMatch": true,
+  "parityMatch": true,
+  "plannedMigrationCount": 0,
+  "originalsUnchanged": true,
+  "cleanupSucceeded": true,
+  "errorCode": null
+}
