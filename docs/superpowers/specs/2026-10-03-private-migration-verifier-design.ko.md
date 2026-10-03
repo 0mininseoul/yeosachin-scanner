@@ -18,7 +18,9 @@
 
 ## 입력과 명령
 
-metadata manifest는 저장소 밖에 두고 parent mode 700, file mode 600 및 동일 owner를 요구한다. 본문·사용자 식별자·token·password·cookie·project connection 값을 포함하지 않는다.
+metadata manifest는 저장소 밖에 두고 parent mode 700, file mode 600 및 동일 owner를 요구한다. private SQL 원본도 동일 owner·file 600·parent 700이며 symlink를 거절한다. 본문·사용자 식별자·token·password·cookie·project connection 값을 manifest에 포함하지 않는다.
+
+root의 비밀 없는 project-ref/pooler metadata는 동일 owner·regular file·symlink 없음·group/other 쓰기 없음이 기준이며 기존 0644를 허용한다. root `.env.local`은 동일 owner·regular file·mode 600·symlink 없음으로 검증한다. 이 파일들의 권한을 바꾸거나 feature 설정으로 대체하지 않는다.
 
 필수 내용은 schema version, attestation base Git SHA, 전체 local source의 filename/version/bytes/SHA-256, 제외할 local-only 여섯 파일의 identity/hash, private 여섯 원본의 path/bytes/SHA-256 및 검토된 statement count/canonical length/MD5다. 알 수 없는 키, 중복 version/path, count 불일치, 비정상 hash/크기는 거절한다. source의 실제 경로·소유권·권한·symlink 여부를 확인하며 경로 탈출과 저장소 내부 private 원본을 거절한다.
 
@@ -43,7 +45,7 @@ node --import tsx scripts/verify-supabase-private-source.ts verify --manifest <p
 8. `db push --dry-run --skip-vault`를 한 번만 실행한다. pending 0의 명확한 성공 결과만 통과시킨다.
 9. 모든 source와 root metadata가 실행 전후 그대로인지 확인하고 finally에서 해당 실행이 만든 임시 workdir를 제거한다. CLI 실패·timeout은 재시도하지 않는다.
 
-child 실행은 shell 없이 고정 command/argument, 최소 환경, timeout, output byte cap 및 private pipe를 사용한다. native CLI의 정상 인증 준비와 업무 데이터·스키마·migration 변경을 구분한다. raw stdout/stderr 및 exception message는 외부에 출력하지 않는다.
+child 실행은 shell 없이 고정 command/argument, 최소 환경, timeout, output byte cap 및 private pipe를 사용한다. native CLI가 공식 인증 절차에서 수행하는 임시 login-role 초기화만 인증 준비로 허용한다. 업무 데이터·스키마·migration 변경 SQL과 수동 auth-role SQL은 실행하지 않는다. raw stdout/stderr 및 exception message는 외부에 출력하지 않는다.
 
 ## 출력과 검증
 
@@ -56,7 +58,7 @@ child 실행은 shell 없이 고정 command/argument, 최소 환경, timeout, ou
 - 정상 fake 및 실제 read-only 검증에서 SQL 복사 0, exact source-set parity, pending 0, 원본 불변 및 cleanup을 확인한다.
 - root 환경이 feature 설정으로 대체되지 않고 token이 출력·argv·파일에 포함되지 않음을 확인한다.
 - 관련 검사와 타입체크, 구현자와 다른 agent의 리뷰, PR CI 이후에 main에 병합한다.
-- Apify API/actor·AI generation·사용자 분석·결제·운영 재활성화·DDL·history repair 호출은 0이다.
+- Apify API/actor·AI generation·사용자 분석·결제·운영 재활성화·업무 스키마 DDL·수동 auth-role SQL·history repair 호출은 0이다. 공식 CLI 인증 초기화는 위의 제한된 예외에 해당한다.
 
 ## 변경 범위와 미검증 사항
 
