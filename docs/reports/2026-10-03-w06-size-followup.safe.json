@@ -1,0 +1,254 @@
+{
+  "observedAtUtc": "2026-10-03T07:31:12.196Z",
+  "apifyCalls": 0,
+  "aiCalls": 0,
+  "metadata_columns": [
+    {
+      "column_name": "id",
+      "data_type": "uuid",
+      "table_name": "analysis_requests"
+    },
+    {
+      "column_name": "pipeline_version",
+      "data_type": "text",
+      "table_name": "analysis_requests"
+    },
+    {
+      "column_name": "policy_versions_snapshot",
+      "data_type": "jsonb",
+      "table_name": "analysis_requests"
+    },
+    {
+      "column_name": "cache_read_tokens",
+      "data_type": "integer",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "canonical_model_name",
+      "data_type": "character varying",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "completion_tokens",
+      "data_type": "integer",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "created_at",
+      "data_type": "timestamp with time zone",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "estimated_cost_usd",
+      "data_type": "numeric",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "location",
+      "data_type": "character varying",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "metered_estimated_cost_usd",
+      "data_type": "numeric",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "model_name",
+      "data_type": "character varying",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "pricing_version",
+      "data_type": "character varying",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "prompt_tokens",
+      "data_type": "integer",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "request_id",
+      "data_type": "uuid",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "stage",
+      "data_type": "text",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "status",
+      "data_type": "text",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "terminalized_at",
+      "data_type": "timestamp with time zone",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "thinking_tokens",
+      "data_type": "integer",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "total_tokens",
+      "data_type": "integer",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "usage_complete",
+      "data_type": "boolean",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "usage_metadata_status",
+      "data_type": "text",
+      "table_name": "analysis_v2_ai_attempts"
+    },
+    {
+      "column_name": "actual_cost_usd",
+      "data_type": "numeric",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "created_at",
+      "data_type": "timestamp with time zone",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "estimated_cost_usd",
+      "data_type": "numeric",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "input_tokens",
+      "data_type": "bigint",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "max_output_tokens",
+      "data_type": "integer",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "model_location",
+      "data_type": "text",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "model_name",
+      "data_type": "text",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "route",
+      "data_type": "text",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "run_id",
+      "data_type": "text",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "state",
+      "data_type": "text",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "updated_at",
+      "data_type": "timestamp with time zone",
+      "table_name": "vertex_ai_budget_reservations"
+    },
+    {
+      "column_name": "usage_unknown",
+      "data_type": "boolean",
+      "table_name": "vertex_ai_budget_reservations"
+    }
+  ],
+  "public_base_table_count": 150,
+  "public_base_total_bytes": 79781888,
+  "scope": "readonly pg_catalog sizes and column/type metadata; no business rows",
+  "tables": [
+    {
+      "index_bytes": 16384,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 8192,
+      "table_name": "account_lifecycle",
+      "total_bytes": 24576
+    },
+    {
+      "index_bytes": 49152,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 24576,
+      "table_name": "analysis_interaction_evidence",
+      "total_bytes": 73728
+    },
+    {
+      "index_bytes": 49152,
+      "main_bytes": 16384,
+      "relkind": "r",
+      "table_bytes": 24576,
+      "table_name": "analysis_interaction_jobs",
+      "total_bytes": 73728
+    },
+    {
+      "index_bytes": 49152,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 24576,
+      "table_name": "analysis_interaction_scores",
+      "total_bytes": 73728
+    },
+    {
+      "index_bytes": 16384,
+      "main_bytes": 8192,
+      "relkind": "r",
+      "table_bytes": 16384,
+      "table_name": "analysis_provider_runs",
+      "total_bytes": 32768
+    },
+    {
+      "index_bytes": 8192,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 8192,
+      "table_name": "analysis_v2_replay_capture_audit_events",
+      "total_bytes": 16384
+    },
+    {
+      "index_bytes": 24576,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 8192,
+      "table_name": "analysis_v2_replay_capture_authorizations",
+      "total_bytes": 32768
+    },
+    {
+      "index_bytes": 16384,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 8192,
+      "table_name": "analysis_v2_replay_capture_fragments",
+      "total_bytes": 24576
+    },
+    {
+      "index_bytes": 32768,
+      "main_bytes": 0,
+      "relkind": "r",
+      "table_bytes": 8192,
+      "table_name": "payment_events",
+      "total_bytes": 40960
+    }
+  ]
+}
