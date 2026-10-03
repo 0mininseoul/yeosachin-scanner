@@ -67,3 +67,17 @@ child 실행은 shell 없이 고정 command/argument, 최소 환경, timeout, ou
 W04는 저장된 비용·정책·usage coverage의 서버 집계를 별도로 진행하며 신규 replay/Apify/AI 호출은 없다. 실제 high-risk label·동일 cohort의 baseline/proposed 결과가 없다면 quality 승격은 계속 차단된다. W06는 현재 물리 저장공간 집계와 살아 있는 의존성으로 추가 축소 필요성을 판정한다.
 
 이 설계는 새로운 DB 초기화·restore 전체 범위·실제 migration 적용을 승인하지 않는다. source-set 검증 결과는 해당 manifest와 관측 시점에 한정되며 미래 변경을 자동 승인하지 않는다. 구현 전에 사용자가 이 검증 전용 도구 설계를 검토한다.
+
+## 승인 및 기존 identity 확인
+
+사용자가 **2026-10-04** 위 검증 전용 도구 설계를 승인했다. 초기 local/remote migration 열 개는 기존 `001`~`010` identity를 사용하므로 원본을 zero-pad·개명하지 않고 그 정확한 legacy 범위를 검증한다. private/excluded 여섯 버전은14자리다. 실제 적용·history repair·사용자 분석·Apify/유료 AI 호출의 승인으로 확대하지 않는다.
+
+Native 실행 파일의 설치 경계 확인: 설치 실행 파일은 Homebrew symlink chain과 최종 regular file의 owner(0 또는 실행 uid)·group/other 쓰기 없음·실행 권한을 검증한다. native executable ancestor에 한해서 macOS의 정확한 `/opt/homebrew/bin` 또는 `/opt/homebrew/Cellar` 경로가 owner0/uid·gid80(admin)·mode0775·정규 nonsymlink directory인 표준 설치 경계는 허용한다. 다른 경로·그룹·world-write는 거절한다. SQL/manifest/root 환경·연결 metadata의 no022 경계에는 이 예외를 적용하지 않는다. 기존 권한이나 설치 파일은 변경하지 않는다.
+
+CLI 임시 metadata 계약의 구현 확인: 같은2.114.0의 이전 실제 관측에 따라 이 실행이 만든 parent700 `.temp`의 optional `linked-project.json`만 허용한다. bounded same-owner regular/nonsymlink/no022(600/0644)·strict decoded-duplicate-key JSON·정확한 `ref`, `name`, `organization_id`, `organization_slug` 네 키·root ref 일치·bounded noncontrol string을 검증한다. 다른 파일/키·ref drift를 거절하며 cache 원문을 DTO·로그·문서에 복사하거나 연결 근거로 대체하지 않는다. 원본/manifest/env/입력 metadata의 권한 정책은 바꾸지 않는다.
+
+실제 CLI 출력 계약의 구현 확인: Bun2.114.0 query의 공식 human JSON은 bare array다. 지원 확인한 고정 `--agent=no`로 해당 형식을 선택하고 bounded strict array·행별 정확한4key/version/count/length/MD5만 검증한다. wrapper·unknown row key·추가 본문·duplicate key를 거절하며 새 공개 옵션이나 임의 SQL 경로는 추가하지 않는다.
+
+CLI 상태 격리의 구현 확인: native child의 HOME은 현재 owner로 유지하되 `DO_NOT_TRACK=1`과 이 실행의 parent700 임시 `cli-state`를 `SUPABASE_HOME`으로 고정한다. query/push는 지원 확인한 `--profile=supabase`를 명시하여 기존 profile 파일 대신 공식 Supabase origin을 사용한다. macOS Keychain의 기존 service/account 조회와 명시 root-env token의 메모리 전달은 유지하며 기존 token/profile/telemetry 파일을 복사하거나 수정하지 않는다. 모든 native child의 cwd는 만든 임시 workdir다. CLI가 만드는 새 anonymous state는 경로·타입·권한·크기 metadata만 확인하고 본문을 읽거나 DTO·로그로 복사하지 않으며 종료 확인 후 해당 임시 디렉터리와 함께 제거한다. 공식 Bun CLI의 opt-out만으로는 telemetry state 파일 재작성이 남기 때문에 격리를 함께 적용한다. 기본 인증을 다른 프로젝트나 파일 token fallback으로 우회하지 않는다.
+
+임시 CLI state의 정확한 수명 계약은 빈 디렉터리 또는 optional `telemetry.json` 1개, 최대1KiB·same-owner regular/nonsymlink/no022이며 owner directory700 identity를 각 child 전과 마지막 dry-run 후 확인한다. 본문은 open/read/parse/copy하지 않고 lstat metadata와 디렉터리 identity만 확인한다. 다른 token/profile/trace/atomic/temp 상태와 경로 교체는 거절한다.
