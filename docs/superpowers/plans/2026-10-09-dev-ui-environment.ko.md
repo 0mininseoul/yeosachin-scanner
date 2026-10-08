@@ -116,7 +116,7 @@ D2 검증: 2개 파일·30개 검사, 타입/ESLint/diff 및 독립 명세→품
 
 D3 구현 검증: 22개 파일·360검사 및 타입/ESLint/diff PASS. 독립 명세 리뷰 16개 파일·312검사 PASS, 별도 품질 리뷰 7개 파일·127검사 PASS. 원격 Next build가 발견한 GET Request 타입 오류는 556e579d에서 수정해 관련 79검사·명세/품질 리뷰와 실제 빌드 PASS를 확인했다. 실제 Dev 로그인에서 발견한 KOE205는 e21f823f에서 Dev 요청 scope 3개로 최소 수정했으며 관련 95검사·명세/품질 리뷰·새 배포의 실제 SSO/user-me 200·Dev 복귀를 확인했다. 운영 scope 7개는 유지한다. 전체 Aside UX 검증은 D5에서 진행한다.
 
-UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인·미리보기를 생략하는 것을 발견했다. 공유 Production 화면과 callback을 그대로 사용하고 API·cache·telemetry보다 먼저 순수 합성 표시 DTO를 반환하도록 4파일을 보완했다. 관련 11파일·216검사, 타입/ESLint/diff PASS와 서로 다른 agent의 명세·품질 리뷰(각 2파일·43검사)를 확인했다. 성별 확인은 고정 합성 DTO의 로컬 표시이며 실제 추론·영속 성별 정정을 검증하지 않는다. 주문은 명시적인 구매 클릭 이후에 생성하고, 전체 run은 모의 결제 성공 확정 이후에만 생성한다. 새 runtime 후보의 배포와 실제 화면 재검증은 D5의 미완료 항목이다.
+UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인·미리보기를 생략하는 것을 발견했다. 공유 Production 화면과 callback을 그대로 사용하고 API·cache·telemetry보다 먼저 순수 합성 표시 DTO를 반환하도록 4파일을 보완했다. 관련 11파일·216검사, 타입/ESLint/diff PASS와 서로 다른 agent의 명세·품질 리뷰(각 2파일·43검사)를 확인했다. 성별 확인은 고정 합성 DTO의 로컬 표시이며 실제 추론·영속 성별 정정을 검증하지 않는다. 주문은 명시적인 구매 클릭 이후에 생성하고, 전체 run은 모의 결제 성공 확정 이후에만 생성한다. a299 후보의 실제 성별 확인 예/아니오·미리보기·플랜·모의 결제 이후 failed/empty 결과를 D5에서 확인했다. 결과 시안 승인과 영향을 받는 최종 검증·승격은 아직 미완료다.
 
 ## D4: Vercel·OAuth·도메인 연결
 
@@ -128,17 +128,19 @@ UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인�
 - [x] `dev` subdomain의 필요한 새 DNS만 추가하고 native inspect로 프로젝트/도메인 일치를 확인한다. 권한/무료 quota 부족이면 해당 작업을 중단하고 정확한 blocker·재개 조건을 남긴다.
 - [x] 후보 브랜치를 고정 Dev 도메인에 배포한다. Dev 검증 전에 main merge를 하지 않는다.
 
-D4 검증: 새 Dev Auth 카카오 principal을 메모리에서 확인해 tester/admin/operator 3개 allowlist의 production/preview 6개 sensitive 기록을 별도 등록했다. e21f823f 후보의 dpl_AAFcY6JRdPyoHyir3p5w6BkSrNrZ가 exact Dev project·READY다. 처음 `--local-config vercel.dev.json`만 사용한 배포에 cron 2개가 남는 것을 native project에서 발견했다. Dev-only disable 후, 0700 임시 tracked archive의 표준 vercel.json에 승인된 Dev 설정을 적용해 재배포했다. 실제 cron disabled·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했으며 Production/source checkout의 vercel.json은 바꾸지 않았다. 원격 builder 내부 우선순위는 미확인이다. 후보 source SHA와 설정 overlay SHA를 함께 기록한다.
+D4 검증: 새 Dev Auth 카카오 principal을 메모리에서 확인해 tester/admin/operator 3개 allowlist의 production/preview 6개 sensitive 기록을 별도 등록했다. 최신 a299eb34 후보의 dpl_Aw1pZzD5WENkCKu7XoVx9C9EhF4Y가 exact Dev project·READY다. 처음 `--local-config vercel.dev.json`만 사용한 배포에 cron 2개가 남는 것을 native project에서 발견했다. Dev-only disable 후, 0700 임시 tracked archive의 표준 vercel.json에 승인된 Dev 설정을 적용해 재배포했다. 실제 cron disabled·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했으며 Production/source checkout의 vercel.json은 바꾸지 않았다. 원격 builder 내부 우선순위는 미확인이다. 후보 source SHA와 설정 overlay SHA를 함께 기록한다.
 
 ## D5: 통합·Aside·승격
 
-- [ ] 변경된 기능 경계의 검사·`npx tsc --noEmit`·대상 ESLint·`git diff --check`를 완료한다. 새 오류나 변경 없이 전체 suite를 반복하지 않는다.
-- [ ] Dev DB의 기준 schema parity·Dev control 권한/transaction과 운영 데이터 미복제를 확인한다. Auth 외 업무 데이터는 합성 데이터만이어야 한다.
+- [x] 현재 a299 후보의 기능 경계 검사·`npx tsc --noEmit`·대상 ESLint·`git diff --check`와 exact-head CI를 완료했다. 새 UI 구현 이후 영향을 받는 검사를 다시 수행한다. 새 오류나 변경 없이 전체 suite를 반복하지 않는다.
+- [x] D0/D2에서 Dev DB 기준 schema parity·Dev control 권한/transaction과 운영 데이터 미복제를 확인했다. 실제 브라우저 업무 데이터도 합성 fixture만 사용한다. Production 행 복제나 추가 DDL은 하지 않는다.
 - [ ] Aside CLI로 카카오 로그인/로그아웃·deep link·preflight ready·플랜·모의 checkout cancel/failure/success·진행·완료/부분/실패·result 재방문·archive·관리자 읽기를 확인한다. 모바일/데스크톱과 빈 결과/권한 부족/조회 실패를 포함한다. 원시 화면 행·UUID·cookie는 기록하지 않는다.
 - [ ] 10월 9일 추가 요청에 따라 실제 사용자가 흐름과 다음 행동을 이해할 수 있는지 UX·시각 감사를 함께 수행한다. 현재 실행에서 캡처한 안전한 화면을 직접 확인하고 단계별 상태·발견 사항·접근성 검증 한계를 기록한다. 재구성이 필요한 화면은 구현 전에 현재 디자인을 기반으로 시안을 만들고 한국어 검토본의 승인을 받는다. 기능 오류의 최소 수정과 시각 재설계를 구분한다.
-- [ ] provider/client 차단 검사와 Dev 구성에서 Apify·Vertex·실제 카드/메일/운영 telemetry/worker 호출이 없음을 확인한다. UI 성공을 실제 worker/provider 품질 성공으로 기록하지 않는다.
-- [ ] 후보 commit/tree·schema 기준점·Dev identity·검사/Aside safe receipt를 연결한다. 변경되면 영향을 받는 검증을 갱신한다.
+- [x] provider/client 차단 검사·금지 credential 없음·cron 정의 0개와 실제 브라우저 리소스 분류에서 Apify·Vertex·실제 카드/메일/운영 telemetry/worker 미호출을 확인했다. 브라우저 관측은 서버 egress/billing 전수 감사가 아니며 UI 성공을 실제 worker/provider 품질 성공으로 기록하지 않는다.
+- [x] a299 commit/tree·runtime/설정 hash·schema 기준점·Dev identity·검사/Aside safe receipt를 연결했다. runtime 변경 시 영향을 받는 검증과 배포를 갱신한다.
 - [ ] PR → exact-head 검사·구현자와 다른 agent의 명세/품질 리뷰 → main merge → root main/origin/main fetch/fast-forward 동기화로 마감한다. 기존 보호 파일·보존 refs/stash 불변을 확인한다.
+
+D5 실제 관측과 미결: [UX 감사](../../operations/2026-10-09-dev-ui-ux-audit.ko.md), [안전한 브라우저 영수증](../../operations/2026-10-09-dev-ui-browser.safe.json). 로그아웃·관리자 deep link·Kakao Dev 복귀, 모의 결제 취소/실패/성공, complete/partial/failed/empty 화면과 확인한 새로고침·복귀·dialog focus 동작을 기록했다. 부분 수집 안내·점수 의미·Dev 관리자 대비·상태/복귀의 공통 개선과 [결과 시안](../specs/2026-10-09-analysis-result-ux-review.ko.md)은 사용자 승인 대기다. 전체 UX PASS는 아니며 PR #603은 draft, #602도 미병합이다. Aside REPL은 request interception을 제공하지 않아 503/망단절 주입은 실제로 검증하지 않았고, 실패한 합성 실행의 결과404와 실패 화면/입력 복귀는 확인했다. 실제 계정·실물 기기·스크린리더·결제사/provider 품질은 별도 경계다.
 
 ## 별도 Vertex 최소 수정과 비용
 

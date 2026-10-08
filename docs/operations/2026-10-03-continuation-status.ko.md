@@ -50,8 +50,10 @@
 | D0 기준점·분리 DB | 완료 | public150·업무행복제0. strict2793+정규화136+명시환경예외6, 보강metadata3775일치·독립리뷰PASS. [초기화 자료](../../supabase/dev-ui/README.ko.md) |
 | D1 배포·외부동작 guard | 완료 | 정상Nextchunk와빌드/런타임DB불일치양방향검사를포함301검사·명세/품질PASS |
 | D2 모의 주문·합성 실행 저장 | 구현검증완료 | 30검사·독립명세/품질PASS, nativeCLI로Devcontrol적용·실제독립PG세션10동작및service-only권한PASS. 기준점보안3775개유지·새wrapper9개만추가 |
-| D3 화면/API 연결 | 품질 리뷰 중 | 구현 360검사·타입/ESLint PASS, 독립 명세 312검사 PASS. 별도 agent 품질 리뷰 후 배포 |
-| D4 Dev 도메인·OAuth | 진행중 | dev DNS A레코드·Vercel도메인verified, 별도카카오testapp생성·Devprovider구성확인. 실제SSO는D3후보배포후검증 |
-| D5 Dev 실제UI·PR승격 | 대기 | D3리뷰후후보배포·Aside데스크톱/모바일검증·exactheadPR검사/리뷰→main병합→동기화 |
+| D3 화면/API 연결 | 구현검증완료 | 구현360검사·독립명세312/품질127검사 PASS. build 타입·Dev OAuth scope 오류 수정 후 실제 READY/SSO 확인. 기존 immersive UI 재사용 보완216검사·별도 명세/품질 각43검사 PASS |
+| D4 Dev 도메인·OAuth | 연결검증완료 | dev DNS·Vercel 도메인verified, Dev Kakao SSO·fresh principal 별도allowlist6기록 확인. a299 후보 exact Dev READY·cron 비활성/정의0·Git자동배포없음; production 설정 보존 |
+| D5 Dev 실제UI·PR승격 | UX 승인·최종 검증 대기 | 로그인·deep link·모의 결제3결과·완료/부분/실패/빈결과·새로고침·보관함·관리자읽기 관측. 수집 범위/점수/관리자대비 등의 [감사](2026-10-09-dev-ui-ux-audit.ko.md)와 [시안](../superpowers/specs/2026-10-09-analysis-result-ux-review.ko.md) 승인 대기. PR #603 draft·#602 open, main 미병합 |
 
 [구현 계획](../superpowers/plans/2026-10-09-dev-ui-environment.ko.md)의 편집권과 선행 의존성을 따른다. Dev UI 성공은 실제 계정 분석·provider 품질·W04 gate 성공 근거로 사용하지 않는다. Apify·AI 생성·실제 카드 과금은 이 환경에서 0회로 유지한다.
+
+**D5 재개 조건:** 사용자가 결과 시안 1/2/3과 공통 최소 개선을 승인하면 선택한 UI를 구현하고 관련 검사·구현자 외 리뷰·새 Dev 배포/실제 화면 검증을 수행한다. 그 뒤 PR #602/#603의 exact-head 검사·리뷰와 main 병합·root main/origin/main 동기화로 마감한다. 승인 전 결과 재구성은 구현하지 않는다. 503/네트워크 차단·실물 모바일·스크린리더와 실제 provider/결제사 품질은 확인된 모의 사례로 대체하지 않는다.

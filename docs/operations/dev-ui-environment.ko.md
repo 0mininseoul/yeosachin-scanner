@@ -38,7 +38,9 @@ Dev 검증은 Production migration 적용 허가나 실제 worker/결제/provide
 
 Dev-only native `PATCH /v1/projects/{검증한 Dev project ID}/crons`의 stdin body `{"enabled":false}`로 자동 실행을 중단하고, 재배포 후 native project의 `crons.disabledAt`과 **`crons.definitions.length === 0`**를 각각 확인한다. 비활성화만으로 정의가 삭제되지는 않는다. 실제 production cron은 변경하지 않는다. [공식 cron 관리 문서](https://vercel.com/docs/cron-jobs/manage-cron-jobs), [공식 provider 구현](https://github.com/vercel/terraform-provider-vercel/blob/main/client/project_crons.go).
 
-e21f823f 후보를 Dev 설정 SHA `bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358`로 배포한 `dpl_AAFcY6JRdPyoHyir3p5w6BkSrNrZ`는 exact Dev project·READY·cron 비활성·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했다. 실제 SSO와 fresh Dev 계정의 별도 sensitive allowlist 등록도 확인했다. [Vercel 영수증](../../supabase/dev-ui/vercel-configuration.safe.json)과 [OAuth 영수증](../../supabase/dev-ui/kakao-configuration.safe.json)은 계정 식별자와 credential을 담지 않는다. 전체 화면 수용 검증과 최종 후보 승격은 구현 계획의 D5에서 관리한다.
+a299eb34 후보를 Dev 설정 SHA `bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358`로 배포한 `dpl_Aw1pZzD5WENkCKu7XoVx9C9EhF4Y`는 exact Dev project·READY·cron 비활성·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했다. 후보 source SHA·tree와 761개 runtime 파일의 source/effective hash를 함께 기록한다. 후속 문서만 바뀐 HEAD는 runtime hash 동등성을 확인해 이 배포와 연결하며, runtime 변경은 새 배포와 실제 검증을 요구한다.
+
+실제 SSO와 fresh Dev 계정의 별도 sensitive allowlist 등록을 확인했고, a299에서 로그아웃→관리자 deep link→카카오 로그인→Dev 콘솔 복귀·user-me/관리자 조회 HTTP 200을 재확인했다. [Vercel 영수증](../../supabase/dev-ui/vercel-configuration.safe.json)과 [OAuth 영수증](../../supabase/dev-ui/kakao-configuration.safe.json)은 계정 식별자와 credential을 담지 않는다. [실제 UX 감사](2026-10-09-dev-ui-ux-audit.ko.md)와 [브라우저 영수증](2026-10-09-dev-ui-browser.safe.json)에 확인 범위·남은 개선·검증 한계를 기록한다. 결과 화면 시안과 공통 개선은 사용자 승인 대기이며 PR #603은 draft다. 전체 화면 수용 검증과 최종 후보 승격은 구현 계획의 D5에서 관리한다.
 
 ## DB 기준점과 유지보수
 
