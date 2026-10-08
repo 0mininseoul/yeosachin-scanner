@@ -663,7 +663,7 @@ describe('/api/user/me profile persistence', () => {
             { data: privateUserRow(createdDto), error: null }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, createdDto);
         expect(routeMocks.rpc).toHaveBeenNthCalledWith(
@@ -711,7 +711,7 @@ describe('/api/user/me profile persistence', () => {
             { data: privateUserRow(createdDto), error: null }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, createdDto);
         expect(routeMocks.rpc).toHaveBeenNthCalledWith(
@@ -750,7 +750,7 @@ describe('/api/user/me profile persistence', () => {
             { data: privateUserRow(googleDto), error: null }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, googleDto);
         expect(routeMocks.rpc).toHaveBeenNthCalledWith(
@@ -788,7 +788,7 @@ describe('/api/user/me profile persistence', () => {
             { data: privateUserRow(), error: null }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
         expect(routeMocks.rpc).toHaveBeenNthCalledWith(
@@ -817,7 +817,7 @@ describe('/api/user/me profile persistence', () => {
         });
         installUserAdminResults({ data: privateUserRow(), error: null });
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
         expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
@@ -840,7 +840,7 @@ describe('/api/user/me profile persistence', () => {
             error: null,
         });
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
         expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
@@ -856,7 +856,7 @@ describe('/api/user/me profile persistence', () => {
         });
         installUserAdminResults({ data: privateUserRow(), error: null });
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         await expectSafeUserResponse(response, SAFE_USER_DTO);
         expect(routeMocks.rpc).toHaveBeenCalledTimes(1);
@@ -878,7 +878,7 @@ describe('/api/user/me profile persistence', () => {
             error: null,
         });
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         expect(response.status).toBe(403);
         await expect(response.json()).resolves.toEqual({
@@ -900,7 +900,7 @@ describe('/api/user/me profile persistence', () => {
             error: privateDatabaseError('PGRST500'),
         });
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         expect(response.status).toBe(500);
         expect(routeMocks.insert).not.toHaveBeenCalled();
@@ -925,7 +925,7 @@ describe('/api/user/me profile persistence', () => {
             { data: null, error: privateDatabaseError('23505') }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         expect(response.status).toBe(500);
         expect(errorSpy).toHaveBeenCalledWith(
@@ -951,7 +951,7 @@ describe('/api/user/me profile persistence', () => {
             { data: null, error: privateDatabaseError('PGRST204') }
         );
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         expect(response.status).toBe(500);
         expect(errorSpy).toHaveBeenCalledWith(
@@ -968,7 +968,7 @@ describe('/api/user/me profile persistence', () => {
             `unexpected ${PRIVATE_PHONE} Private Name`
         ));
 
-        const response = await getCurrentUser();
+        const response = await getCurrentUser(new Request('https://yeosachin.com/api/user/me'));
 
         expect(response.status).toBe(500);
         expect(errorSpy).toHaveBeenCalledWith(

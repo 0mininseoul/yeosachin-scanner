@@ -90,7 +90,7 @@ function bridgeDatabaseError(error: unknown) {
     };
 }
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
     if (request && shouldHandleDevUiRequest(request)) return handleDevUiUserMe(request);
     if (!request && isDevUiDeploymentContext()) return NextResponse.json({ error: '테스트 요청을 확인할 수 없습니다.' }, { status: 403 });
     try {
