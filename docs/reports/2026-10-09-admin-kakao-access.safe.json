@@ -1,0 +1,36 @@
+{
+  "verifiedAt": "2026-10-09T01:31:00+09:00",
+  "timeZone": "Asia/Seoul",
+  "pullRequest": "https://github.com/0mininseoul/yeosachin-scanner/pull/600",
+  "reviewedHead": "967320513dd0b09a5fb81809ca702ac664ffa261",
+  "mainMerge": "4075fb1d38db254ae0e4fd904bafa9227586b59d",
+  "nativeDeployment": {
+    "project": "yeosachin-scanner",
+    "sourceSha": "4075fb1d38db254ae0e4fd904bafa9227586b59d",
+    "target": "production",
+    "state": "READY",
+    "productionAliasMatches": true
+  },
+  "asideCli": {
+    "registeredSessionConsoleVisible": true,
+    "loggedOutConsoleLoginGateVisible": true,
+    "consoleKakaoButtonClicked": true,
+    "returnedOrigin": "https://yeosachin.com",
+    "returnedPath": "/admin/analysis-audit",
+    "freshLoginConsoleVisible": true,
+    "freshLoginReadChecks": [
+      { "path": "/api/admin/order-audit", "status": 200, "privateCache": true, "noStore": true },
+      { "path": "/api/admin/landing-leads", "status": 200, "privateCache": true, "noStore": true },
+      { "path": "/api/admin/apify-accounts", "status": 200, "privateCache": true, "noStore": true }
+    ]
+  },
+  "excludedActions": {
+    "paidAccountRefresh": false,
+    "dispatchToggle": false,
+    "analysis": false,
+    "payment": false,
+    "apifyActor": false,
+    "aiGeneration": false
+  },
+  "privateRowsOrCredentialsRecorded": false
+}

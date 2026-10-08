@@ -25,10 +25,22 @@
 - 타입체크·대상 ESLint·diff 공백 검사: PASS.
 - 구현자와 다른 reviewer: 직접 caller·권한/OAuth 경계 검토 PASS, 신규 19개 독립 재실행 PASS.
 
-변경 파일은 관리자 서버 페이지, 해당 인증 행동 테스트, 이 보고서다. PR 생성 후 exact-head CI·Vercel 검사를 확인하고 main에 병합한다. 병합 후 실제 aside CLI의 카카오 로그인 → 콘솔 복귀와 관리자 읽기 API 검증 결과는 해당 PR의 완료 기록에 남긴다. 이 문서는 그 이후 결과를 관측하기 전의 기록이다.
+변경 파일은 관리자 서버 페이지, 해당 인증 행동 테스트, 이 보고서다. [PR #600](https://github.com/0mininseoul/yeosachin-scanner/pull/600)의 exact head `967320513dd0b09a5fb81809ca702ac664ffa261`에서 CI 타입체크·Vercel 검사와 독립 리뷰를 통과하고 main merge `4075fb1d38db254ae0e4fd904bafa9227586b59d`로 병합했다. 상위 세션도 관련 7개 파일의 86개 검사를 재실행해 PASS를 확인했다.
+
+## 병합 후 실제 운영 검증
+
+2026-10-09 01:31 KST에 완료한 aside CLI 검증과 Vercel native 배포 관측은 다음과 같다. [안전한 검증 영수증](2026-10-09-admin-kakao-access.safe.json)에 식별자·원시 행 없이 결과를 남겼다.
+
+- Vercel native deployment list는 위 main merge를 source로 한 production 배포 `READY`를 반환했다. native `inspect yeosachin.com`은 같은 배포 URL에 production 도메인이 연결된 상태를 확인했다.
+- 등록 계정의 기존 세션에서 `/admin/analysis-audit`의 `판독 운영 콘솔`과 주문·Leads·계정 운영 영역이 표시됐다.
+- 사이트 UI에서 로그아웃한 뒤 콘솔 URL을 다시 열어 **관리자 콘솔 로그인**과 카카오 버튼을 확인했다. 그 버튼을 실제로 눌러 카카오 OAuth를 거친 후 `https://yeosachin.com/admin/analysis-audit`로 돌아와 콘솔이 표시됐다. 홈 redirect·권한 부족·설정 미비 화면은 나타나지 않았다.
+- 새 로그인 세션의 `/api/admin/order-audit`, `/api/admin/landing-leads`, `/api/admin/apify-accounts`는 모두 HTTP 200이며 `private`·`no-store` cache 정책을 유지했다. 응답 원시 행·사용자 식별자는 출력하거나 보존하지 않았다.
+- Apify 계정 GET은 기존 DB inventory 조회 경로다. 잔액 refresh·배차 toggle·분석·결제 버튼은 누르지 않았고 Apify actor·AI generation을 호출하지 않았다.
+
+사용자가 보고한 로그인 후 홈 이동 및 콘솔 접근 오류는 새 production 배포에서 해결을 확인했다.
 
 ## 남은 경계
 
-현재 설정 변경만으로 실행 중인 기존 웹 배포가 갱신되지는 않는다. 새 main 웹 배포에서 실제 로그인·콘솔 읽기를 확인하기 전에는 사용자 오류 해결을 완료로 판정하지 않는다. Apify 잔액 refresh·배차 toggle·분석 실행은 이번 검증 대상이 아니다.
+Apify 잔액 refresh·배차 toggle·분석 실행은 이번 검증 대상이 아니다. 읽기 콘솔 검증을 실제 provider 운영 성공으로 확대 해석하지 않는다.
 
 실제 계정 분석 성공과 Vertex 실제 품질 gate는 별도 미검증 경계다. 별도 Dev 환경 제안의 결제·더미 분석 설계도 이 관리자 수정에 포함하지 않는다.
