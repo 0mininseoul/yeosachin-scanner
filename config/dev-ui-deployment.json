@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "deployments": [
+    {
+      "vercelProjectId": "prj_wiOsyA9QzTWWckF5iPpsNd8UEoBO",
+      "supabaseProjectRef": "bgamojfpkxnnumfvkron"
+    }
+  ]
+}

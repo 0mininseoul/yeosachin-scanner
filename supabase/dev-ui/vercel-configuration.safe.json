@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "projectIdentityMatches": true,
+  "framework": "nextjs",
+  "nodeVersion": "24.x",
+  "systemEnvsExposed": true,
+  "productionEnvRecords": 6,
+  "previewEnvRecords": 6,
+  "paidProviderOrProductionTelemetryCredentialRecords": 0,
+  "automaticGitDeployment": false
+}

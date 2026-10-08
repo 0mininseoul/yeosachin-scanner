@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { ProgressFaces } from '@/components/progress-faces';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import {
     ANALYSIS_PROGRESS_STEPS,
     ANALYSIS_STEP_RECOVERY_DELAY_MS,
@@ -55,7 +56,8 @@ export default function ProgressPage({ params }: PageProps) {
     // 단계별 분석 실행 함수
     const runNextStep = useCallback(async () => {
         if (
-            data?.pipelineVersion === 'v2'
+            isDevUiPresentation()
+            || data?.pipelineVersion === 'v2'
             || data?.backgroundProcessing === true
             || isRunningStep.current
         ) return;
@@ -159,6 +161,7 @@ export default function ProgressPage({ params }: PageProps) {
     // pending 또는 processing 상태이면 분석 단계 실행
     useEffect(() => {
         if (
+            isDevUiPresentation() ||
             data?.pipelineVersion === 'v2' ||
             data?.backgroundProcessing === true ||
             data?.status === 'completed' ||
@@ -378,7 +381,8 @@ export default function ProgressPage({ params }: PageProps) {
                 {/* Who is being read right now, and how far in. */}
                 {data.pipelineVersion === 'v2' && (
                     <div data-amp-block>
-                        <ProgressFaces
+                    <ProgressFaces
+                        allowLocalAssets={isDevUiPresentation()}
                             key={requestId}
                             active={data.activeProfile}
                             candidateMedia={data.candidateMedia}

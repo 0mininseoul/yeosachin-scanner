@@ -4,6 +4,7 @@ import {
     scrubSentrySpan,
     scrubSentryTransaction,
 } from './sentry-scrubber';
+import { isDevUiTelemetryDisabled } from '../constants/dev-ui';
 
 function sampleRate(value: string | undefined, fallback: number): number {
     const parsed = Number(value);
@@ -24,7 +25,7 @@ export function sentryOptions(options: {
     const environment = sentryEnvironment();
     return {
         dsn: options.dsn,
-        enabled: Boolean(options.dsn) && options.enabled === 'true',
+        enabled: !isDevUiTelemetryDisabled() && Boolean(options.dsn) && options.enabled === 'true',
         environment,
         sendDefaultPii: false,
         tracesSampleRate: sampleRate(

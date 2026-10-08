@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "querySha256": "cfb6fdecade5de08e0316d1632bedd6076ccf848e208ab74fd8fa32a4121b6ee",
+  "sourceObjects": 3775,
+  "devObjects": 3775,
+  "matched": 3775,
+  "counts": {
+    "constraint_state": {
+      "source": 1464,
+      "dev": 1464,
+      "matched": 1464,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "default_acl": {
+      "source": 6,
+      "dev": 6,
+      "matched": 6,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "function_security": {
+      "source": 803,
+      "dev": 803,
+      "matched": 803,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "function_shape": {
+      "source": 803,
+      "dev": 803,
+      "matched": 803,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "index_state": {
+      "source": 386,
+      "dev": 386,
+      "matched": 386,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "publication_configuration": {
+      "source": 1,
+      "dev": 1,
+      "matched": 1,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "relation_security": {
+      "source": 156,
+      "dev": 156,
+      "matched": 156,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "relation_shape": {
+      "source": 156,
+      "dev": 156,
+      "matched": 156,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    }
+  },
+  "changed": [],
+  "missing": [],
+  "extra": []
+}

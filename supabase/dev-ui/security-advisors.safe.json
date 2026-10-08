@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "advisorNativeExit": 0,
+  "findings": 26,
+  "byCodeAndLevel": {
+    "pg_graphql_anon_table_exposed|WARN": 2,
+    "pg_graphql_authenticated_table_exposed|WARN": 8,
+    "anon_security_definer_function_executable|WARN": 6,
+    "authenticated_security_definer_function_executable|WARN": 10
+  },
+  "devControlFindings": 0,
+  "scope": "warnings on retained baseline object definitions; new Dev control findings 0; no overall security clearance or production changes"
+}

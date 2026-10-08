@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "kakaoTestAppId": 1602072,
+  "devSupabaseProjectRef": "bgamojfpkxnnumfvkron",
+  "enabled": true,
+  "siteUrlIsFixedDev": true,
+  "allowListIsFixedDevCallback": true,
+  "clientConfigured": true,
+  "clientDistinctFromProduction": true,
+  "secretConfigured": true,
+  "secretDistinctFromProduction": true,
+  "providerCallbackRegistered": true,
+  "actualSSOVerified": false,
+  "credentialFiles": 0,
+  "credentialOutput": 0
+}

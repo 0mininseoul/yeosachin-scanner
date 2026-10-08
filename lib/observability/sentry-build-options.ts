@@ -1,10 +1,13 @@
+import { isDevUiTelemetryDisabled } from '../constants/dev-ui';
+
 export type BuildEnvironment = Readonly<Record<string, string | undefined>>;
 
 /** Source-map upload is an explicit CI-only release action, never a local token side effect. */
 export function shouldConfigureSentryBuild(
     environment: BuildEnvironment = process.env,
 ): boolean {
-    return (environment.CI === 'true' || environment.CI === '1')
+    return !isDevUiTelemetryDisabled(environment)
+        && (environment.CI === 'true' || environment.CI === '1')
         && environment.SENTRY_SOURCEMAPS_UPLOAD === 'true'
         && Boolean(environment.SENTRY_AUTH_TOKEN);
 }

@@ -1,5 +1,6 @@
 import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { handleDevUiCheckoutCreate, shouldHandleDevUiRequest, withDevUiSession } from '@/lib/services/dev-ui/routes';
 import {
     earlybirdCheckoutRecoveryRequestSchema,
     earlybirdCheckoutRequestSchema,
@@ -437,6 +438,7 @@ async function handlePUT(request: Request): Promise<NextResponse> {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiCheckoutCreate(request);
     return observeRoute(
         request,
         '/api/earlybird/checkout',
@@ -445,6 +447,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 }
 
 export async function PUT(request: Request): Promise<NextResponse> {
+    if (shouldHandleDevUiRequest(request)) return withDevUiSession(request, async () => new NextResponse(null, { status: 403 }));
     return observeRoute(
         request,
         '/api/earlybird/checkout',

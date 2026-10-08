@@ -6,6 +6,10 @@ import {
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import { AnalysisAuditWorkbench } from './workbench';
+import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
+import { assertDevUiDeployment } from '@/lib/services/dev-ui/deployment';
+import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
+import { DevUiOrderList } from '@/components/dev-ui/order-list';
 import './console.css';
 
 export const dynamic = 'force-dynamic';
@@ -60,6 +64,12 @@ export default async function AnalysisAuditPage({
         ? `${CONSOLE_PATH}?${new URLSearchParams({ requestId })}`
         : CONSOLE_PATH;
 
+    const devContext = isDevUiDeploymentContext();
+    if (devContext) {
+        try { assertDevUiDeployment(); }
+        catch { return <ConsoleAccessState state="unavailable" destination={destination} />; }
+    }
+
     let user: { id: string } | null = null;
     let authState: 'login' | 'unavailable' | null = null;
     try {
@@ -75,6 +85,16 @@ export default async function AnalysisAuditPage({
     }
     if (authState) return <ConsoleAccessState state={authState} destination={destination} />;
     if (!user) return <ConsoleAccessState state="login" destination={destination} />;
+
+    if (devContext) {
+        try { assertDevUiAdministrator(user.id); }
+        catch { return <ConsoleAccessState state="forbidden" destination={destination} />; }
+        return <div className="operator-console"><main className="oc-wrap"><section className="oc-section">
+            <header className="oc-masthead"><div><p className="oc-kicker">Dev · 읽기 전용</p><h1>모의 주문 감사</h1><p>테스트 결제와 합성 분석의 연결을 확인하세요.</p></div></header>
+            <nav className="my-5 flex gap-5"><Link className="oc-link" href="/analyze">새 테스트</Link><Link className="oc-link" href="/mypage">보관함</Link></nav>
+            <DevUiOrderList administrator />
+        </section></main></div>;
+    }
 
     let decision: ReturnType<typeof getAnalysisAuditOperatorDecision>;
     try {

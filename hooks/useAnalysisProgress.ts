@@ -21,6 +21,7 @@ import {
     type ProgressDisplayState,
 } from '@/lib/services/analysis/v2-progress-display';
 import { createClient } from '@/lib/supabase/client';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import { captureExceptionSafely } from '@/lib/observability/sentry-capture';
 
 interface AnalysisProgress {
@@ -114,6 +115,7 @@ export function disposeAnalysisProgressChannel(
 }
 
 export function useAnalysisProgress(requestId: string) {
+    const devPresentation = isDevUiPresentation();
     const [data, setData] = useState<AnalysisProgress | null>(null);
     const [outcome, setOutcome] = useState<{
         requestId: string;
@@ -138,7 +140,7 @@ export function useAnalysisProgress(requestId: string) {
         promise: Promise<void>;
     } | null>(null);
     const fetchDataRef = useRef<() => Promise<void>>(() => Promise.resolve());
-    const supabase = useMemo(() => createClient(), []);
+    const supabase = useMemo(() => devPresentation ? null : createClient(), [devPresentation]);
 
     const fetchData = useCallback((): Promise<void> => {
         const current = fetchInFlightRef.current;
@@ -314,7 +316,7 @@ export function useAnalysisProgress(requestId: string) {
         activeRequestIdRef.current = requestId;
         fetchInFlightRef.current?.controller.abort();
         hasDataRef.current = false;
-        v2ProgressUrlRef.current = null;
+        v2ProgressUrlRef.current = devPresentation ? `/api/analysis/v2/progress/${encodeURIComponent(requestId)}` : null;
         v2EventsRef.current = [];
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
@@ -329,14 +331,15 @@ export function useAnalysisProgress(requestId: string) {
             const inFlight = fetchInFlightRef.current;
             if (inFlight?.requestId === requestId) inFlight.controller.abort();
         };
-    }, [fetchData, requestId]);
+    }, [devPresentation, fetchData, requestId]);
 
     const currentData = data?.id === requestId ? data : null;
     const currentOutcome = outcome.requestId === requestId ? outcome : null;
 
     useEffect(() => {
         if (
-            currentData?.pipelineVersion !== 'v2'
+            !supabase
+            || currentData?.pipelineVersion !== 'v2'
             || currentData.status === 'completed'
             || currentData.status === 'failed'
         ) return;

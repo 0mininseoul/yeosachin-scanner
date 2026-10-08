@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { emitAnalysisLifecycleEvent } from '../../lib/services/analytics-server';
 
 const REQUEST_ID = '123e4567-e89b-42d3-a456-426614174001';
@@ -6,6 +6,19 @@ const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174003';
 
 describe('server analysis lifecycle analytics', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
+    it.each(['DEPLOYMENT_ROLE', 'NEXT_PUBLIC_DEPLOYMENT_ROLE'])('does no ledger or HTTP work for a Dev marker: %s', async marker => {
+        vi.stubEnv(marker, 'dev');
+        const rpc = vi.fn().mockResolvedValue({ data: [], error: null });
+        const fetchImpl = vi.fn();
+        await expect(emitAnalysisLifecycleEvent({ requestId: REQUEST_ID, eventName: 'analysis_started' }, {
+            client: { rpc }, fetchImpl, apiKey: 'server-api-key',
+        })).resolves.toBe(false);
+        expect(rpc).not.toHaveBeenCalled();
+        expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
     it('claims a durable event and sends only allowlisted UUID properties', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({

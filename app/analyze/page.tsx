@@ -29,7 +29,10 @@ import {
     recoverOrRefreshStaleEarlybirdPricing,
     resolveEarlybirdPricingBoundary,
 } from '@/lib/services/earlybird/ui-state';
-import { isSafeEarlybirdDemoProgressUrl } from '@/lib/services/earlybird/checkout-continuation';
+import { isSafeDevUiCheckoutUrl, isSafeEarlybirdDemoProgressUrl } from '@/lib/services/earlybird/checkout-continuation';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
+import { DEV_UI_SCENARIO_LABELS } from '@/lib/services/dev-ui/client';
+import type { DevFixtureScenario } from '@/lib/services/dev-ui/contracts';
 import {
     availablePendingTargetStorage,
     bindPendingAnalysisTarget,
@@ -102,6 +105,8 @@ function relationshipCapacityLabel(
 }
 
 export default function AnalyzePage() {
+    const devPresentation = isDevUiPresentation();
+    const [fixtureScenario, setFixtureScenario] = useState<DevFixtureScenario>('complete');
     const [instagramId, setInstagramId] = useState('');
     const [girlfriendInstagramId, setGirlfriendInstagramId] = useState('');
     const [selectedPlan, setSelectedPlan] = useState<PlanId | null>(null);
@@ -176,7 +181,7 @@ const DISCLOSURE_ACCEPTED = true;
         && (preflight?.status === 'pending' || preflight?.status === 'ready')
         ? preflight
         : null;
-    const activePrecheckoutSurface = resolveActivePrecheckoutSurface(
+    const activePrecheckoutSurface = devPresentation ? 'legacy' : resolveActivePrecheckoutSurface(
         precheckoutSurface,
         immersivePreflight?.preflightId,
     );
@@ -402,7 +407,12 @@ const DISCLOSURE_ACCEPTED = true;
 
     const handleStartPreflight = async () => {
         clearAutoCheckoutContinuation();
-        const accepted = await startPreflight(instagramId);
+        if (devPresentation && !user) {
+            storePendingAnalysisTarget(sessionStorage, instagramId);
+            setLoginPromptOpen(true);
+            return;
+        }
+        const accepted = devPresentation ? await startPreflight(instagramId, fixtureScenario) : await startPreflight(instagramId);
         if (!accepted) {
             if (user) clearPendingAnalysisTarget(sessionStorage);
             return;
@@ -490,7 +500,7 @@ const DISCLOSURE_ACCEPTED = true;
         setBliteResultShown(false);
         setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });
         reset();
-        const accepted = await startPreflight(retryTarget);
+        const accepted = devPresentation ? await startPreflight(retryTarget, fixtureScenario) : await startPreflight(retryTarget);
         if (!accepted) {
             if (user) clearPendingAnalysisTarget(sessionStorage);
             return;
@@ -509,7 +519,7 @@ const DISCLOSURE_ACCEPTED = true;
         const next = new URLSearchParams({ preflight: accepted.preflightId });
         if (accepted.claimToken) next.set('claim', accepted.claimToken);
         router.replace(`/analyze?${next.toString()}`);
-    }, [clearAutoCheckoutContinuation, preflight?.preflightId, reset, router, startPreflight, targetInstagramId, user]);
+    }, [clearAutoCheckoutContinuation, devPresentation, fixtureScenario, preflight?.preflightId, reset, router, startPreflight, targetInstagramId, user]);
     useEffect(() => {
         // Fires once, exactly on the explicit CTA transition — whether the legacy surface
         // initially renders the pending status or the ready target/plans. A later readiness
@@ -697,6 +707,12 @@ const DISCLOSURE_ACCEPTED = true;
             // The operator-only synthetic checkout is the one compatibility
             // response that intentionally points at local progress. Keep it
             // strictly same-origin and do not count it as a payment redirect.
+            if (devPresentation && payload && typeof payload === 'object' && 'nextUrl' in payload
+                && typeof payload.nextUrl === 'string' && isSafeDevUiCheckoutUrl(payload.nextUrl)) {
+                checkoutRedirectStarted = true;
+                window.location.assign(payload.nextUrl);
+                return;
+            }
             if (
                 payload
                 && typeof payload === 'object'
@@ -729,6 +745,7 @@ const DISCLOSURE_ACCEPTED = true;
         }
     }, [
         DISCLOSURE_ACCEPTED,
+        devPresentation,
         analyticsEligible,
         effectiveSelectedCard,
         effectiveSelectedPlan,
@@ -862,7 +879,7 @@ const DISCLOSURE_ACCEPTED = true;
     if (!loginFallbackRequired && readyPreflight && effectiveSelectedPlan && selectedPlanAvailable) {
         loginRedirectParams.set(AUTO_CHECKOUT_QUERY_PARAM, '1');
     }
-    const loginRedirectTo = `/analyze?${loginRedirectParams.toString()}`;
+    const loginRedirectTo = devPresentation && !user ? '/analyze?autostart=1' : `/analyze?${loginRedirectParams.toString()}`;
 
     if (authLoading) {
         return (
@@ -889,6 +906,7 @@ const DISCLOSURE_ACCEPTED = true;
             />
 
             <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+                {devPresentation && <p className="mb-5 border-l-2 border-amber pl-3 text-[13px] text-fg-dim">Dev UI 검증 · 입력한 이름의 합성 프로필을 사용합니다. 모의 결제 후 더미 분석이 진행됩니다.</p>}
                 {autoCheckoutTransitionVisible && preflight?.status !== 'blocked' ? (
                     <CaseCard bracket="var(--color-blood)" className="mt-7 p-7 text-center">
                         <div role="status" aria-live="polite">
@@ -937,7 +955,13 @@ const DISCLOSURE_ACCEPTED = true;
                                     className="w-full border border-line bg-ink py-3.5 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
                                 />
                             </div>
-                            <InstagramLookupLink />
+                            {!devPresentation && <InstagramLookupLink />}
+                            {devPresentation && <div className="mt-5">
+                                <label htmlFor="dev-fixture-scenario" className="eyebrow mb-3 block">합성 분석 시나리오</label>
+                                <select id="dev-fixture-scenario" value={fixtureScenario} disabled={creating} onChange={event => setFixtureScenario(event.target.value as DevFixtureScenario)} className="min-h-12 w-full border border-line bg-ink px-3 text-[14px] text-fg">
+                                    {(Object.keys(DEV_UI_SCENARIO_LABELS) as DevFixtureScenario[]).map(scenario => <option key={scenario} value={scenario}>{DEV_UI_SCENARIO_LABELS[scenario]}</option>)}
+                                </select>
+                            </div>}
                             {/* Rails rather than nested boxes: a notice inside a panel
                                 is an annotation, not another surface. */}
                             <p className="mt-4 border-l-2 border-amber pl-3 text-[12px] leading-relaxed text-fg-dim">
@@ -993,7 +1017,7 @@ const DISCLOSURE_ACCEPTED = true;
                             </button>
                         </div>
 
-                        {!exclusionDecided && (
+                        {!exclusionDecided && !devPresentation && (
                             <Panel className="mt-6 p-5">
                                 <p className="text-[13px] leading-relaxed text-fg-dim">
                                     본인 계정은 위장여사친 후보에서 처음부터 제외합니다.

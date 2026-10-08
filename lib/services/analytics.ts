@@ -1,5 +1,6 @@
 'use client';
 
+import { isDevUiTelemetryDisabled } from '@/lib/constants/dev-ui';
 import {
     availableAnalyticsStorage,
     normalizeAttributionSource,
@@ -389,7 +390,7 @@ interface ReplayNavigator {
 }
 
 function configuredApiKey(): string | null {
-    if (typeof window === 'undefined') return null;
+    if (typeof window === 'undefined' || isDevUiTelemetryDisabled()) return null;
 
     const apiKey = process.env.NEXT_PUBLIC_AMPLITUDE_API_KEY?.trim() ?? '';
     if (!API_KEY_PATTERN.test(apiKey) || /^([0-9a-f])\1{31}$/i.test(apiKey)) return null;

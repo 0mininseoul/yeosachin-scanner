@@ -34,6 +34,7 @@ import {
     readOAuthRedirectIntent,
     selectOAuthRedirectIntent,
 } from '@/lib/services/auth/oauth-redirect-intent';
+import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -299,6 +300,10 @@ async function handleGET(
     request: Request,
     context: OperationalRequestContext,
 ): Promise<NextResponse> {
+    const deploymentBoundary = devUiRequestBoundary(request);
+    if (deploymentBoundary === 'invalid' || deploymentBoundary === 'forbidden') {
+        return NextResponse.json({ error: 'DEV_UI_DEPLOYMENT_REJECTED' }, { status: 503 });
+    }
     const { searchParams } = new URL(request.url);
     const code = searchParams.get('code');
     const appOrigin = appOriginForRequest(request.url);
@@ -415,7 +420,7 @@ async function handleGET(
 
     // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const provider = authProvider(authedUser?.app_metadata?.provider);
-    if (authedUser && provider === 'kakao') {
+    if (authedUser && provider === 'kakao' && deploymentBoundary !== 'dev') {
         const signedUpAt = new Date(authedUser.created_at ?? Date.now());
         // Some supported test/runtime cookie adapters expose only the Supabase
         // getAll/setAll surface; absence simply means no attribution label.

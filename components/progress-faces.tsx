@@ -195,21 +195,27 @@ function FaceTile({
     );
 }
 
+function safeProgressImageUrl(imageUrl: string | undefined, allowLocalAssets: boolean): string | undefined {
+    if (allowLocalAssets) return imageUrl && /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/.test(imageUrl) ? imageUrl : undefined;
+    const src = safeResultImageUrl(imageUrl);
+    return src?.startsWith('/api/image-proxy?') ? src : undefined;
+}
+
 function CandidateMediaTile({
     tile,
     copyIndex,
     current,
+    allowLocalAssets,
 }: {
     tile: ScreenedCandidateMediaTile;
     copyIndex: number;
     current: boolean;
+    allowLocalAssets: boolean;
 }) {
     /* Heartbeats contain signed, owner-scoped proxy paths. Keep the rendering
        boundary defensive too: a malformed heartbeat must not turn the browser
        into a raw Instagram-CDN client or a blank placeholder tile. */
-    const imageUrl = tile.imageUrl ?? undefined;
-    const src = safeResultImageUrl(imageUrl);
-    const safeSrc = src?.startsWith('/api/image-proxy?') ? src : undefined;
+    const safeSrc = safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets);
     if (!safeSrc) return null;
     return <FaceTile
         key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex)}
@@ -304,10 +310,12 @@ export function ProgressFaces({
     active,
     candidateMedia = [],
     publicationLagReset = false,
+    allowLocalAssets = false,
 }: {
     active: ActiveCandidateMedia | null;
     candidateMedia?: readonly ProgressCandidateMediaV1[];
     publicationLagReset?: boolean;
+    allowLocalAssets?: boolean;
 }) {
     const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
     const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
@@ -348,12 +356,15 @@ export function ProgressFaces({
         setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
     }
 
-    const mediaTiles = useMemo(() => (
-        flattenScreenedCandidateMedia(candidates).filter(tile => {
-            const imageUrl = tile.imageUrl ?? undefined;
-            return safeResultImageUrl(imageUrl)?.startsWith('/api/image-proxy?') ?? false;
-        })
-    ), [candidates]);
+    const mediaTiles = useMemo(() => {
+        // The production flattener deliberately excludes synthetic avatars.
+        // Dev uses an explicit local pool without weakening that default.
+        const pool = allowLocalAssets ? candidates.flatMap(({ candidateKey, username, occurrence, imageUrl, feedImageUrls }) => [imageUrl, ...feedImageUrls]
+            .filter((url): url is string => Boolean(safeProgressImageUrl(url ?? undefined, true)))
+            .map((imageUrl, mediaIndex) => ({ ...(candidateKey !== undefined ? { candidateKey } : {}), username,
+                occurrence, mediaIndex, imageUrl }))) : flattenScreenedCandidateMedia(candidates);
+        return pool.filter(tile => Boolean(safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets)));
+    }, [allowLocalAssets, candidates]);
     // Geometry, drift, and rendering all use the same safe real-media pool;
     // media-less or malformed candidates cannot create invisible gaps.
     const railRef = useFaceDrift(mediaTiles.length);
@@ -387,6 +398,7 @@ export function ProgressFaces({
                     >
                         {mediaTiles.map(tile => (
                             <CandidateMediaTile
+                                allowLocalAssets={allowLocalAssets}
                                 key={`${candidateCopyKey(tile.occurrence, copyIndex)}:${tile.mediaIndex}`}
                                 tile={tile}
                                 copyIndex={copyIndex}

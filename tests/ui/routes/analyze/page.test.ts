@@ -100,9 +100,10 @@ describe('/analyze precheckout plan gate', () => {
         expect(retryBody).toContain('clearAutoCheckoutContinuation();');
         expect(retryBody).toContain('reset();');
         expect(retryBody).toContain("setPrecheckoutSurface({ preflightId: null, surface: 'awaiting' });");
-        expect(retryBody).toContain('const accepted = await startPreflight(retryTarget);');
+        const retryCall = 'const accepted = devPresentation ? await startPreflight(retryTarget, fixtureScenario) : await startPreflight(retryTarget);';
+        expect(retryBody).toContain(retryCall);
         expect(retryBody.indexOf('reset();')).toBeLessThan(
-            retryBody.indexOf('const accepted = await startPreflight(retryTarget);'),
+            retryBody.indexOf(retryCall),
         );
         expect(page).toContain('onRetry={handleRetryPreflight}');
     });

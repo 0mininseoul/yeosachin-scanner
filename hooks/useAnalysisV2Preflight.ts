@@ -46,6 +46,8 @@ import {
 } from '@/lib/services/analytics-funnel';
 import { anonymousPreflightDeviceId } from '@/lib/services/analysis/anonymous-preflight-device';
 import { consumeLandingLeadCaptureToken, readLandingLeadCaptureToken } from '@/lib/services/landing-lead';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
+import type { DevFixtureScenario } from '@/lib/services/dev-ui/contracts';
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
@@ -395,6 +397,7 @@ export function useAnalysisV2Preflight({
     const [loginFallbackRequired, setLoginFallbackRequired] = useState(false);
     const [coordinator] = useState(() => new PreflightRequestCoordinator());
     const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
+    const fixtureScenarioRef = useRef<DevFixtureScenario>('complete');
     const claimTokenRef = useRef<string | null>(null);
     const entitlementScopeRef = useRef<PreflightRequestScope | null>(null);
     const preflightStartedAtRef = useRef<number | null>(null);
@@ -574,7 +577,7 @@ export function useAnalysisV2Preflight({
         }
     }, [coordinator, loadPreflight, trackPreflightAttemptFailure]);
 
-    const startPreflight = useCallback(async (rawTargetInstagramId: string) => {
+    const startPreflight = useCallback(async (rawTargetInstagramId: string, fixtureScenario: DevFixtureScenario = 'complete') => {
         const normalized = normalizeInstagramUsername(rawTargetInstagramId);
         if (!normalized) {
             setError('인스타그램 아이디를 확인해주세요.');
@@ -594,7 +597,10 @@ export function useAnalysisV2Preflight({
         preflightStartedAtRef.current = Date.now();
 
         try {
-            const testAdmission = flowConfig.acceptsTestCredentials
+            const devPresentation = isDevUiPresentation();
+            if (devPresentation && fixtureScenarioRef.current !== fixtureScenario) idempotencyRef.current = null;
+            fixtureScenarioRef.current = fixtureScenario;
+            const testAdmission = !devPresentation && flowConfig.acceptsTestCredentials
                 ? readTestAdmissionCredential(sessionStorage, normalized)
                 : null;
             idempotencyRef.current = getAnalysisStartIdempotency(
@@ -607,9 +613,9 @@ export function useAnalysisV2Preflight({
                 'Content-Type': 'application/json',
                 'Idempotency-Key': idempotencyRef.current.key,
             });
-            const deviceId = flow === 'standard' ? anonymousPreflightDeviceId() : null;
+            const deviceId = !devPresentation && flow === 'standard' ? anonymousPreflightDeviceId() : null;
             if (deviceId) headers.set('X-Anonymous-Device-Id', deviceId);
-            const landingCaptureToken = flow === 'standard'
+            const landingCaptureToken = !devPresentation && flow === 'standard'
                 ? readLandingLeadCaptureToken()
                 : null;
             if (landingCaptureToken) {
@@ -629,7 +635,7 @@ export function useAnalysisV2Preflight({
                 : await fetch('/api/analysis/preflight', {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ targetInstagramId: normalized }),
+                body: JSON.stringify({ targetInstagramId: normalized, ...(devPresentation ? { fixtureScenario } : {}) }),
                 signal: scope.signal,
             });
             const payload = await readPayload(response);

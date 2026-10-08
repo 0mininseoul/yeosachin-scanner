@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "projectRef": "bgamojfpkxnnumfvkron",
+  "status": "PASS",
+  "checks": {
+    "realIndependentSessionRowLock": true,
+    "atomicVisibility": true,
+    "concurrentCompletionExactlyOneRun": true,
+    "originalRunAndStartReplayed": true,
+    "unpaidExpiry31MinutesPastPreservesCompletedRun": true,
+    "cancelCreatesNoRun": true,
+    "failureCreatesNoRun": true,
+    "anonRpcDenied": true,
+    "authenticatedRpcDenied": true,
+    "serviceRoleRpcWorks": true
+  },
+  "syntheticFixtureCleanup": true,
+  "actualUserDataUsed": false,
+  "providerCalls": 0,
+  "errorCode": null,
+  "probeSha256": "2b7ad161142777a1133eb71c3ef6ca9c38b9e7faa3baa524420b59a7cf2c1fa9"
+}

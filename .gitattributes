@@ -1,0 +1,2 @@
+# Preserve schema-only pg_dump bytes and function-body fingerprints from the applied baseline.
+supabase/dev-ui/production-baseline.sql -whitespace

@@ -1,6 +1,8 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+afterEach(() => vi.unstubAllEnvs());
 
 const CANONICAL_ORIGIN = 'https://yeosachin.com';
 const PRIVATE_CRAWL_PATHS = [
@@ -20,6 +22,12 @@ const SEARCH_CRAWLERS = [
 ];
 
 describe('search discovery routes', () => {
+    it('disallows every crawler and publishes no sitemap in Dev', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        const { default: robots } = await import('@/app/robots');
+        expect(robots()).toEqual({ rules: { userAgent: '*', disallow: '/' } });
+    });
+
     it('publishes one consistent allow/disallow policy for search and AI crawlers', async () => {
         const { default: robots } = await import('@/app/robots');
 

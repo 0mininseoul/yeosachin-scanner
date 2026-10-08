@@ -1,5 +1,6 @@
 import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { handleDevUiPreflightCreate, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightAcceptedV1Schema,
@@ -761,6 +762,7 @@ async function handlePOST(
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiPreflightCreate(request);
     return observeRoute(
         request,
         '/api/analysis/preflight',

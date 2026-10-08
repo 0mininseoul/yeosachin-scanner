@@ -2,10 +2,13 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { Analytics } from "@vercel/analytics/next";
 import { AmplitudeProvider } from "@/components/amplitude-provider";
-import { CANONICAL_APP_ORIGIN } from "@/lib/constants/app-url";
+import { appOriginForServer } from "@/lib/constants/app-url";
+import { isDevUiDeploymentContext } from "@/lib/constants/dev-ui";
 import "./globals.css";
 
 const naverSiteVerification = process.env.NAVER_SITE_VERIFICATION?.trim();
+const devUi = isDevUiDeploymentContext();
+const appOrigin = appOriginForServer();
 
 const paperlogy = localFont({
   variable: "--font-paperlogy",
@@ -43,14 +46,15 @@ export const metadata: Metadata = {
         },
       }
     : {}),
-  metadataBase: new URL(CANONICAL_APP_ORIGIN),
+  metadataBase: new URL(appOrigin),
+  ...(devUi ? { robots: { index: false, follow: false } } : {}),
   alternates: {
     canonical: "/",
   },
   openGraph: {
     type: "website",
     locale: "ko_KR",
-    url: CANONICAL_APP_ORIGIN,
+    url: appOrigin,
     siteName: "위장여사친 판독기",
     title: "위장여사친 판독기 - 내 남친의 위험한 여사친 찾기",
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
@@ -80,10 +84,13 @@ export default function RootLayout({
   return (
     <html lang="ko" className={paperlogy.variable}>
       <body className="antialiased">
-        <AmplitudeProvider>
-          {children}
-        </AmplitudeProvider>
-        <Analytics />
+        {devUi && (
+          <div role="status" className="sticky top-0 z-[100] bg-amber-300 px-4 py-2 text-center text-xs font-bold text-amber-950">
+            테스트 환경 · 모의 결제 및 합성 분석 결과
+          </div>
+        )}
+        {devUi ? children : <AmplitudeProvider>{children}</AmplitudeProvider>}
+        {!devUi && <Analytics />}
       </body>
     </html>
   );

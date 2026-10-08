@@ -1,4 +1,5 @@
 import 'server-only';
+import { isDevUiTelemetryDisabled } from '../constants/dev-ui';
 
 import type {
     Formatter,
@@ -275,6 +276,7 @@ function lazyOperationalLogger(): OperationalLogger {
 
 export const operationalLogger: OperationalLogger = {
     emit(input) {
+        if (isDevUiTelemetryDisabled()) return;
         try {
             lazyOperationalLogger().emit(input);
         } catch {
@@ -282,6 +284,7 @@ export const operationalLogger: OperationalLogger = {
         }
     },
     async flush() {
+        if (isDevUiTelemetryDisabled()) return;
         try {
             await lazyOperationalLogger().flush();
         } catch {

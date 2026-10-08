@@ -1,5 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { NextResponse } from 'next/server';
+import { handleDevUiUserMe, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
+import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import type { User } from '@supabase/supabase-js';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
 import {
@@ -88,7 +90,9 @@ function bridgeDatabaseError(error: unknown) {
     };
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
+    if (request && shouldHandleDevUiRequest(request)) return handleDevUiUserMe(request);
+    if (!request && isDevUiDeploymentContext()) return NextResponse.json({ error: '테스트 요청을 확인할 수 없습니다.' }, { status: 403 });
     try {
         const supabase = await createClient();
 

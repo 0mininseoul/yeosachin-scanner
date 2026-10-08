@@ -4,6 +4,8 @@ import {
     appRedirectUrlForRequest,
     CANONICAL_APP_ORIGIN,
 } from '@/lib/constants/app-url';
+import { DEV_UI_ROBOTS_HEADER } from '@/lib/constants/dev-ui';
+import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
@@ -13,6 +15,16 @@ const LEGACY_PUBLIC_HOSTNAMES = new Set([
 ]);
 
 export async function proxy(request: NextRequest) {
+    const deploymentBoundary = devUiRequestBoundary(request);
+    const withDevHeaders = (response: NextResponse): NextResponse => {
+        if (deploymentBoundary !== 'production') response.headers.set('X-Robots-Tag', DEV_UI_ROBOTS_HEADER);
+        return response;
+    };
+    if (deploymentBoundary === 'invalid' || deploymentBoundary === 'forbidden') {
+        return withDevHeaders(NextResponse.json({
+            error: deploymentBoundary === 'invalid' ? 'DEV_UI_DEPLOYMENT_REJECTED' : 'DEV_UI_ROUTE_DISABLED',
+        }, { status: deploymentBoundary === 'invalid' ? 503 : 403 }));
+    }
     // Keep the old webhook/API endpoints reachable while external providers
     // switch to the canonical domain. Browser navigations are permanently
     // redirected so one public URL is indexed and shared.
@@ -35,7 +47,7 @@ export async function proxy(request: NextRequest) {
         request.nextUrl.pathname.startsWith('/share') ||
         request.nextUrl.pathname.startsWith('/_next') ||
         request.nextUrl.pathname.startsWith('/static')) {
-        return supabaseResponse;
+        return withDevHeaders(supabaseResponse);
     }
 
     // Capture first touch once on a real page navigation only. The server never
@@ -89,7 +101,7 @@ export async function proxy(request: NextRequest) {
         });
         const attribution = supabaseResponse.cookies.get(KAKAO_ATTRIBUTION_COOKIE);
         if (attribution) redirectResponse.cookies.set(attribution);
-        return redirectResponse;
+        return withDevHeaders(redirectResponse);
     };
 
     // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
@@ -110,10 +122,8 @@ export async function proxy(request: NextRequest) {
 
     // 보호된 경로인데 로그인 안 된 경우 → 로그인 페이지로
     if (isProtectedPath && !user) {
-        const url = request.nextUrl.clone();
+        const url = appRedirectUrlForRequest(request.url, '/login');
         const redirectTo = `${request.nextUrl.pathname}${request.nextUrl.search}`;
-        url.pathname = '/login';
-        url.search = '';
         url.searchParams.set('redirectTo', redirectTo);
         return redirectWithAuthCookies(url);
     }
@@ -127,11 +137,26 @@ export async function proxy(request: NextRequest) {
         return redirectWithAuthCookies(redirectUrl);
     }
 
-    return supabaseResponse;
+    return withDevHeaders(supabaseResponse);
 }
 
 export const config = {
     matcher: [
+        // An encoded API prefix can also end in an image suffix. Its raw URL
+        // must reach the guard before Next decodes it into a dynamic handler.
+        // Next's encoded dynamic-page chunks retain the static asset bypass.
+        '/((?!_next/static|_next/image|favicon.ico).*%.*)',
+        // Dynamic API/owned page parameters can resemble image filenames. They
+        // must still pass the deployment boundary instead of the static bypass.
+        '/api/:path*',
+        '/auth/:path*',
+        '/admin/:path*',
+        '/progress/:path*',
+        '/result/:path*',
+        '/earlybird/:path*',
+        '/mypage/:path*',
+        '/share/:path*',
+        '/dev-ui/:path*',
         '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
     ],
 };

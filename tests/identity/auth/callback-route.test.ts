@@ -35,6 +35,9 @@ vi.mock('@/lib/observability/server', () => ({
 vi.mock('@/lib/services/analysis/anonymous-preflight', () => ({
     claimAnonymousAnalysisV2Preflight: mocks.claimAnonymousPreflight,
 }));
+vi.mock('@/config/dev-ui-deployment.json', () => ({
+    default: { version: 1, deployments: [{ vercelProjectId: 'prj_dev_ui_test', supabaseProjectRef: 'devuitestproject' }] },
+}));
 
 import { GET } from '@/app/auth/callback/route';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
@@ -67,6 +70,35 @@ describe('OAuth callback redirects', () => {
 
     afterEach(() => {
         vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
+    });
+
+    it('keeps Dev OAuth on Dev without staging notifications or fetching a provider profile', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_dev_ui_test');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://devuitestproject.supabase.co');
+        mocks.exchangeCodeForSession.mockResolvedValue({
+            data: { session: { provider_token: 'synthetic-provider-token' }, user: {
+                id: '123e4567-e89b-42d3-a456-426614174000', app_metadata: { provider: 'kakao' },
+            } }, error: null,
+        });
+        const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+        vi.stubGlobal('fetch', fetchSpy);
+        const response = await GET(new Request('https://dev.yeosachin.com/auth/callback?code=oauth-code&next=%2Fanalyze'));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/analyze?verified=true');
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(mocks.accountRpc.mock.calls.every(([name]) => name === 'load_account_classification_v1')).toBe(true);
+    });
+
+    it('rejects the wrong Dev identity before OAuth session exchange', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_production_test');
+        const response = await GET(new Request('https://dev.yeosachin.com/auth/callback?code=oauth-code'));
+        expect(response.status).toBe(503);
+        expect(mocks.cookies).not.toHaveBeenCalled();
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+        expect(mocks.exchangeCodeForSession).not.toHaveBeenCalled();
     });
 
     it('uses the canonical origin and ignores a forwarded host in production', async () => {

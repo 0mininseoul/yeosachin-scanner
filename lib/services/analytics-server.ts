@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { isDevUiTelemetryDisabled } from '@/lib/constants/dev-ui';
 import type { AnalyticsErrorCode } from './analytics-funnel';
 
 export type AnalysisLifecycleEventName =
@@ -117,6 +118,7 @@ export async function emitAnalysisLifecycleEvent(
     input: AnalysisLifecycleEventInput,
     dependencies: ServerAnalyticsDependencies = {},
 ): Promise<boolean> {
+    if (isDevUiTelemetryDisabled()) return false;
     if (!UUID_PATTERN.test(input.requestId) || !EVENT_NAMES.has(input.eventName)) return false;
 
     const client = dependencies.client ?? supabaseAdmin;
