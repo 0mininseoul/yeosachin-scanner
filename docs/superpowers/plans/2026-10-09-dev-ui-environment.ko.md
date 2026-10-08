@@ -112,9 +112,11 @@ D2 검증: 2개 파일·30개 검사, 타입/ESLint/diff 및 독립 명세→품
 - [x] 성공/취소/실패 UI를 제공하고, 성공 확정 응답의 run으로 기존 progress 화면을 연다. double submit·새로고침·재방문은 같은 실행을 복구한다. 완료 전 result는 거절하고 소유자 외 상세 조회도 거절한다.
 - [x] archive와 관리자에는 모의 주문/실행 표시를 제공한다. 읽기 감사만 허용하고 provider refresh/실제 dispatch/action은 Dev에서 차단한다. 운영자 목록은 Dev Auth 계정으로 별도 등록한다.
 - [x] 기존 preflight/checkout/progress/result/demo capability 검사를 실행하고 필요한 Dev 행동 검사만 추가한다. 모바일/데스크톱 실제 UI 확인은 D5에서 수행한다.
-- [ ] 명세 리뷰 후 코드 품질 리뷰를 받는다.
+- [x] 명세 리뷰 후 코드 품질 리뷰를 받는다.
 
-D3 구현 검증: 22개 파일·360검사 및 타입/ESLint/diff PASS. 독립 명세 리뷰 16개 파일·312검사 PASS. 별도 품질 리뷰와 실제 Dev 배포/SSO/Aside UX는 진행 중이다.
+D3 구현 검증: 22개 파일·360검사 및 타입/ESLint/diff PASS. 독립 명세 리뷰 16개 파일·312검사 PASS, 별도 품질 리뷰 7개 파일·127검사 PASS. 원격 Next build가 발견한 GET Request 타입 오류는 556e579d에서 수정해 관련 79검사·명세/품질 리뷰와 실제 빌드 PASS를 확인했다. 실제 Dev 로그인에서 발견한 KOE205는 e21f823f에서 Dev 요청 scope 3개로 최소 수정했으며 관련 95검사·명세/품질 리뷰·새 배포의 실제 SSO/user-me 200·Dev 복귀를 확인했다. 운영 scope 7개는 유지한다. 전체 Aside UX 검증은 D5에서 진행한다.
+
+UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인·미리보기를 생략하는 것을 발견했다. 공유 Production 화면과 callback을 그대로 사용하고 API·cache·telemetry보다 먼저 순수 합성 표시 DTO를 반환하도록 4파일을 보완했다. 관련 11파일·216검사, 타입/ESLint/diff PASS와 서로 다른 agent의 명세·품질 리뷰(각 2파일·43검사)를 확인했다. 성별 확인은 고정 합성 DTO의 로컬 표시이며 실제 추론·영속 성별 정정을 검증하지 않는다. 주문은 명시적인 구매 클릭 이후에 생성하고, 전체 run은 모의 결제 성공 확정 이후에만 생성한다. 새 runtime 후보의 배포와 실제 화면 재검증은 D5의 미완료 항목이다.
 
 ## D4: Vercel·OAuth·도메인 연결
 
@@ -124,7 +126,9 @@ D3 구현 검증: 22개 파일·360검사 및 타입/ESLint/diff PASS. 독립 �
 - [x] Dev Supabase의 URL·publishable/anon·service key만 메모리에서 native Vercel stdin으로 전달한다. root `.env.local` 전체 복사·local secret 파일·credential argument/출력은 만들지 않는다. 등록한 non-secret identity를 후보 코드에 고정한다.
 - [x] Dev Site URL·app callback을 `dev.yeosachin.com`으로 설정한다. 카카오 provider callback은 Dev Supabase의 `/auth/v1/callback`이다. 허가된 Dev OAuth 설정만 적용하고 Production 설정을 대체하지 않는다.
 - [x] `dev` subdomain의 필요한 새 DNS만 추가하고 native inspect로 프로젝트/도메인 일치를 확인한다. 권한/무료 quota 부족이면 해당 작업을 중단하고 정확한 blocker·재개 조건을 남긴다.
-- [ ] 후보 브랜치를 고정 Dev 도메인에 배포한다. Dev 검증 전에 main merge를 하지 않는다.
+- [x] 후보 브랜치를 고정 Dev 도메인에 배포한다. Dev 검증 전에 main merge를 하지 않는다.
+
+D4 검증: 새 Dev Auth 카카오 principal을 메모리에서 확인해 tester/admin/operator 3개 allowlist의 production/preview 6개 sensitive 기록을 별도 등록했다. e21f823f 후보의 dpl_AAFcY6JRdPyoHyir3p5w6BkSrNrZ가 exact Dev project·READY다. 처음 `--local-config vercel.dev.json`만 사용한 배포에 cron 2개가 남는 것을 native project에서 발견했다. Dev-only disable 후, 0700 임시 tracked archive의 표준 vercel.json에 승인된 Dev 설정을 적용해 재배포했다. 실제 cron disabled·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했으며 Production/source checkout의 vercel.json은 바꾸지 않았다. 원격 builder 내부 우선순위는 미확인이다. 후보 source SHA와 설정 overlay SHA를 함께 기록한다.
 
 ## D5: 통합·Aside·승격
 

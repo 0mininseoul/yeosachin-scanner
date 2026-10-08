@@ -10,10 +10,15 @@ import { projectDevUiResult } from '@/lib/services/dev-ui/projection';
 import { buildDevUiPlanSnapshot } from '@/lib/services/dev-ui/contracts';
 import { AuthButtons } from '@/components/auth-buttons';
 import * as authAnalytics from '@/lib/services/analytics-auth';
+import * as analytics from '@/lib/services/analytics';
+import AnalyzePage from '@/app/analyze/page';
+import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
+import { PRECHECKOUT_DEMO_DURATION_MS } from '@/components/precheckout-demo';
 
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), readyKakao: vi.fn() }));
 const oauth = vi.hoisted(() => ({ signInWithOAuth: vi.fn() }));
 vi.mock('@/lib/supabase/client', () => ({ createClient: () => ({ auth: oauth }) }));
+vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: { id: '123e4567-e89b-42d3-a456-426614174005' }, loading: false }) }));
 vi.mock('next/navigation', () => ({ useRouter: () => router, useSearchParams: () => new URLSearchParams() }));
 vi.mock('@/lib/services/kakao-share', () => ({ kakaoJavascriptKey: () => null, readyKakao: router.readyKakao, shareResultToKakao: vi.fn(), shareToKakaoNow: vi.fn() }));
 vi.mock('next/link', () => ({ default: ({ href, children, ...props }: React.PropsWithChildren<{ href: string }>) => <a href={href} {...props}>{children}</a> }));
@@ -35,7 +40,7 @@ beforeEach(() => {
     vi.clearAllMocks(); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
 });
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); browser.jsdom.reconfigure({ url: initialBrowserUrl }); });
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); browser.jsdom.reconfigure({ url: initialBrowserUrl }); });
 async function render(element: React.ReactNode) { await act(async () => { root.render(element); await Promise.resolve(); await Promise.resolve(); }); }
 async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(button => button.textContent?.includes(label));
@@ -46,7 +51,97 @@ function PreflightHarness() {
     return <button onClick={() => void flow.startPreflight('dev_synthetic', 'partial')}>합성 사전 점검</button>;
 }
 
+function presentationClock() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-09T00:00:00.000Z'));
+    vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    return vi.spyOn(analytics, 'trackPrecheckoutEvent').mockReturnValue(false);
+}
+async function settlePresentation() {
+    await act(async () => { for (let count = 0; count < 10; count += 1) await Promise.resolve(); });
+}
+async function advancePresentation(ms: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    await settlePresentation();
+}
+function readySnapshot() {
+    const plans = buildDevUiPlanSnapshot();
+    return { schemaVersion: 1, preflightId: orderId, status: 'ready', exclusionDecision: 'skip', expiresAt: '2099-01-01T00:00:00.000Z',
+        target: { username: 'dev_synthetic', fullName: '합성 테스트 프로필', bio: '합성 프로필입니다.', profileImage: '/demo-avatars/synthetic-blurred-avatar-1-v1.png', followersCount: 320, followingCount: 300, isPrivate: false },
+        accessMode: 'production', capacityRequiredPlan: 'basic', requiredPlan: 'basic', plans: Object.values(plans), pricingVersion: plans.basic.pricingVersion };
+}
+
 describe('Dev mock checkout and order reading UI', () => {
+    it('reuses Analyze immersive waiting, gender confirmation, preview, and the existing plan purchase callback without provider work', async () => {
+        const telemetry = presentationClock();
+        browser.jsdom.reconfigure({ url: `https://dev.yeosachin.com/analyze?preflight=${orderId}` });
+        window.sessionStorage.clear();
+        const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            if (input === `/api/analysis/preflight/${orderId}` && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify(readySnapshot()), { headers: { 'content-type': 'application/json', 'x-analytics-eligible': '0' } });
+            if (input === '/api/earlybird/checkout' && init?.method === 'POST') return response({ error: 'synthetic checkout response', code: 'DEV_UI_STORE_UNAVAILABLE' }, 503);
+            throw new Error('Unexpected API or provider call');
+        });
+        vi.stubGlobal('fetch', fetchSpy);
+
+        await render(<AnalyzePage />); await settlePresentation();
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        expect(container.querySelector('#plan-selection')).toBeNull();
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS - 1);
+        expect(container.textContent).not.toContain('이 계정의 인물이 남자가 맞나요?');
+        await advancePresentation(1);
+        expect(container.textContent).toContain('이 계정의 인물이 남자가 맞나요?');
+        await click('예');
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
+        expect(container.textContent).toContain('dev_synthetic');
+        expect(container.querySelector('#plan-selection')).toBeNull();
+        expect(fetchSpy.mock.calls.map(call => call[0])).toEqual([`/api/analysis/preflight/${orderId}`]);
+        await click('상세 분석 보기'); await settlePresentation();
+        expect(container.querySelector('#plan-selection')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-result]')).toBeNull();
+        expect([...container.querySelectorAll('img')].every(img => /^\/demo-avatars\/synthetic-blurred-avatar-[1-4]-v1\.png$/.test(img.getAttribute('src') ?? ''))).toBe(true);
+        await click('지금 분석하기');
+        expect(fetchSpy.mock.calls.map(call => call[0])).toEqual([`/api/analysis/preflight/${orderId}`, '/api/earlybird/checkout']);
+        expect(JSON.parse(fetchSpy.mock.calls[1][1]!.body as string)).toEqual({ preflightId: orderId, planId: 'basic', disclosureAccepted: true });
+        expect(router.push).not.toHaveBeenCalled();
+        expect(telemetry).not.toHaveBeenCalled();
+    });
+    it('keeps the existing negative gender confirmation and neutral plan CTA without API, run, or telemetry calls', async () => {
+        const telemetry = presentationClock();
+        const fetchSpy = vi.fn(() => { throw new Error('Unexpected API or provider call'); });
+        vi.stubGlobal('fetch', fetchSpy);
+        const goToPlans = vi.fn();
+        await render(<PrecheckoutImmersive preflightId={orderId} claimToken={null} targetUsername="dev_synthetic" onGoToPlans={goToPlans} />);
+        await settlePresentation();
+        expect(fetchSpy).not.toHaveBeenCalled();
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+        await click('아니오');
+        expect(container.querySelector('[data-precheckout-result]')).toBeNull();
+        expect(container.querySelector('[data-precheckout-fallback]')).not.toBeNull();
+        expect(goToPlans).not.toHaveBeenCalled();
+        await click('상세 분석 보기');
+        expect(goToPlans).toHaveBeenCalledTimes(1);
+        expect(fetchSpy).not.toHaveBeenCalled(); expect(telemetry).not.toHaveBeenCalled();
+    });
+    it('replays the existing four-stage wait on a Dev presentation remount without creating a run', async () => {
+        const telemetry = presentationClock();
+        const fetchSpy = vi.fn(() => { throw new Error('Unexpected API or provider call'); });
+        vi.stubGlobal('fetch', fetchSpy);
+        const goToPlans = vi.fn();
+        await render(<PrecheckoutImmersive key="first" preflightId={orderId} claimToken={null} targetUsername="dev_synthetic" onGoToPlans={goToPlans} />);
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+        await click('예');
+        expect(container.querySelector('[data-precheckout-result]')).not.toBeNull();
+        await render(<PrecheckoutImmersive key="reload" preflightId={orderId} claimToken={null} targetUsername="dev_synthetic" onGoToPlans={goToPlans} />);
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        expect(container.querySelector('[data-precheckout-result]')).toBeNull();
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+        expect(container.textContent).toContain('이 계정의 인물이 남자가 맞나요?');
+        expect(goToPlans).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled(); expect(telemetry).not.toHaveBeenCalled();
+    });
     it.each([
         { role: 'dev', origin: 'https://dev.yeosachin.com', scopes: 'account_email profile_nickname profile_image' },
         { role: 'production', origin: 'https://yeosachin.com', scopes: 'account_email profile_nickname profile_image name gender birthyear phone_number' },

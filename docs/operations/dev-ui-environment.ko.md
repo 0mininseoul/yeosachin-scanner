@@ -24,13 +24,21 @@ Dev 전용 카카오 테스트 앱과 Dev Supabase provider를 사용한다. 앱
 
 1. 최신 `origin/main`에서 후보를 준비하고 PR을 생성한다. 대상 기능 검사·독립 명세 리뷰·다른 agent의 품질 리뷰를 수행한다.
 2. 후보 worktree에서 `npx vercel project inspect --non-interactive`로 owner와 프로젝트 `yeosachin-dev`를 확인한다. root Production link나 전체 `.env.local`을 복사하지 않는다.
-3. `npx vercel deploy --prod --local-config vercel.dev.json --scope 0minseouls-projects --non-interactive`로 **Dev 프로젝트의 production 슬롯**에 배포한다. `--prod`는 연결된 Dev 프로젝트를 뜻하며 운영 웹으로 승격하는 명령이 아니다. 대상이 다르면 중단한다.
-4. `vercel.dev.json`은 Dev cron과 Git 자동 배포를 등록하지 않는다. `.vercelignore`는 credential·브라우저·로컬 실행 자료를 manual upload에서 제외한다. Dev 환경변수에는 Dev DB/Auth와 역할/allowlist만 등록한다.
+3. clean 후보 HEAD의 tracked 파일만 `git archive`로 새 0700 임시 업로드 디렉터리에 추출한다. **그 임시 디렉터리에서만** 승인된 `vercel.dev.json` 바이트를 표준 `vercel.json`으로 적용하고, 검증한 후보의 Dev `.vercel/project.json`만 0600으로 넣는다. 실제 checkout의 Production `vercel.json`과 root link는 유지한다. `.env.local`·브라우저/비추적/ignored 자료를 복사하지 않는다. 후보 SHA와 Dev 설정 SHA256을 별도로 기록한다.
+4. 임시 디렉터리에서 native project inspect로 정확한 `yeosachin-dev` project/owner를 다시 확인한 뒤 `npx vercel deploy --prod --local-config vercel.json --scope 0minseouls-projects --non-interactive`로 **Dev 프로젝트의 production 슬롯**에 배포한다. `--prod`는 연결된 Dev 프로젝트를 뜻한다. 등록 결과가 불명확하면 같은 배포를 반복하지 않고 native 상태·metadata부터 확인한다. 업로드가 끝나면 자신이 만든 임시 디렉터리만 정리한다. `.vercelignore`는 credential·브라우저·로컬 실행 자료를 제외한다. Dev 환경변수는 Dev DB/Auth와 역할/allowlist만 사용한다.
 5. Aside CLI에서 로그인·사전 점검·모의 결제·진행·결과·보관함·관리자, 모바일/데스크톱, 실패/빈 결과/권한 부족을 확인한다. 후보 commit/tree와 런타임 소스 fingerprint, 배포 identity, DB 기준점, 안전한 검증 영수증을 연결한다.
 6. 코드/SQL이 바뀌면 관련 검사를 다시 하고 새 후보를 배포해 영향을 받는 UI를 재검증한다. 문서만 달라진 경우 동일 런타임 fingerprint와 배포 원본 commit을 명시한다.
 7. exact-head PR 검사와 독립 리뷰 통과 뒤 main에 병합한다. main은 직접 push하지 않는다. canonical root main을 fetch/fast-forward하고 `main == origin/main`을 확인한다.
 
 Dev 검증은 Production migration 적용 허가나 실제 worker/결제/provider 검증을 대체하지 않는다. 운영 schema 변경은 정확한 migration allowlist·dry-run·독립 리뷰·원격 history 검증을 별도로 수행한다.
+
+### 원격 빌드 설정과 cron 확인
+
+10월 9일 CLI 54.7.1에서 `--local-config vercel.dev.json`만 사용한 첫 배포는 native project에 기존 cron 2개를 남겼다. CLI가 빈 배열을 제거했다는 증거는 없고, 업로드된 표준 파일과 원격 builder 선택의 차이가 원인이라는 가설을 뒷받침한다. 서버 내부 우선순위는 직접 확인하지 못했다. 위 절차는 업로드 표준 파일 자체를 Dev 설정으로 맞춘다.
+
+Dev-only native `PATCH /v1/projects/{검증한 Dev project ID}/crons`의 stdin body `{"enabled":false}`로 자동 실행을 중단하고, 재배포 후 native project의 `crons.disabledAt`과 **`crons.definitions.length === 0`**를 각각 확인한다. 비활성화만으로 정의가 삭제되지는 않는다. 실제 production cron은 변경하지 않는다. [공식 cron 관리 문서](https://vercel.com/docs/cron-jobs/manage-cron-jobs), [공식 provider 구현](https://github.com/vercel/terraform-provider-vercel/blob/main/client/project_crons.go).
+
+e21f823f 후보를 Dev 설정 SHA `bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358`로 배포한 `dpl_AAFcY6JRdPyoHyir3p5w6BkSrNrZ`는 exact Dev project·READY·cron 비활성·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했다. 실제 SSO와 fresh Dev 계정의 별도 sensitive allowlist 등록도 확인했다. [Vercel 영수증](../../supabase/dev-ui/vercel-configuration.safe.json)과 [OAuth 영수증](../../supabase/dev-ui/kakao-configuration.safe.json)은 계정 식별자와 credential을 담지 않는다. 전체 화면 수용 검증과 최종 후보 승격은 구현 계획의 D5에서 관리한다.
 
 ## DB 기준점과 유지보수
 

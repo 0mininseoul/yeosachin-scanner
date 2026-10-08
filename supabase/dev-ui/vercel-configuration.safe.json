@@ -5,8 +5,17 @@
   "framework": "nextjs",
   "nodeVersion": "24.x",
   "systemEnvsExposed": true,
-  "productionEnvRecords": 6,
-  "previewEnvRecords": 6,
+  "productionEnvRecords": 9,
+  "previewEnvRecords": 9,
+  "sensitiveAllowlistRecords": 6,
   "paidProviderOrProductionTelemetryCredentialRecords": 0,
-  "automaticGitDeployment": false
+  "automaticGitDeployment": false,
+  "cronDisabled": true,
+  "cronDefinitionCount": 0,
+  "candidateSha": "e21f823fbe5182b3cc529f189f02c61e86eb2f66",
+  "deploymentId": "dpl_AAFcY6JRdPyoHyir3p5w6BkSrNrZ",
+  "deploymentReadyState": "READY",
+  "devConfigOverlaySha": "bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358",
+  "sourceCheckoutUntouched": true,
+  "temporaryUploadCleaned": true
 }

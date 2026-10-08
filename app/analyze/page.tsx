@@ -181,7 +181,7 @@ const DISCLOSURE_ACCEPTED = true;
         && (preflight?.status === 'pending' || preflight?.status === 'ready')
         ? preflight
         : null;
-    const activePrecheckoutSurface = devPresentation ? 'legacy' : resolveActivePrecheckoutSurface(
+    const activePrecheckoutSurface = resolveActivePrecheckoutSurface(
         precheckoutSurface,
         immersivePreflight?.preflightId,
     );

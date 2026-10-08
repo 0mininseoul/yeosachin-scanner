@@ -11,7 +11,14 @@
   "secretConfigured": true,
   "secretDistinctFromProduction": true,
   "providerCallbackRegistered": true,
-  "actualSSOVerified": false,
+  "actualSSOVerified": true,
+  "actualUserMeStatus": 200,
+  "actualProviderIsKakao": true,
+  "actualReturnOriginIsDev": true,
+  "requestScopes": ["account_email", "profile_nickname", "profile_image"],
+  "freshDevPrincipalVerifiedBeforeRegistration": true,
+  "sensitiveAllowlistRecordsCreated": 6,
+  "allowlistKeyTargetTypeMetadataVerified": true,
   "credentialFiles": 0,
   "credentialOutput": 0
 }
