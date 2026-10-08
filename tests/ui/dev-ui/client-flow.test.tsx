@@ -8,8 +8,12 @@ import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
 import ResultPage from '@/app/result/[requestId]/page';
 import { projectDevUiResult } from '@/lib/services/dev-ui/projection';
 import { buildDevUiPlanSnapshot } from '@/lib/services/dev-ui/contracts';
+import { AuthButtons } from '@/components/auth-buttons';
+import * as authAnalytics from '@/lib/services/analytics-auth';
 
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), readyKakao: vi.fn() }));
+const oauth = vi.hoisted(() => ({ signInWithOAuth: vi.fn() }));
+vi.mock('@/lib/supabase/client', () => ({ createClient: () => ({ auth: oauth }) }));
 vi.mock('next/navigation', () => ({ useRouter: () => router, useSearchParams: () => new URLSearchParams() }));
 vi.mock('@/lib/services/kakao-share', () => ({ kakaoJavascriptKey: () => null, readyKakao: router.readyKakao, shareResultToKakao: vi.fn(), shareToKakaoNow: vi.fn() }));
 vi.mock('next/link', () => ({ default: ({ href, children, ...props }: React.PropsWithChildren<{ href: string }>) => <a href={href} {...props}>{children}</a> }));
@@ -24,12 +28,14 @@ const response = (body: unknown, status = 200) => new Response(JSON.stringify(bo
 
 let root: Root;
 let container: HTMLDivElement;
+const initialBrowserUrl = window.location.href;
+const browser = globalThis as typeof globalThis & { jsdom: { reconfigure: (options: { url: string }) => void } };
 beforeEach(() => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks(); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
 });
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); browser.jsdom.reconfigure({ url: initialBrowserUrl }); });
 async function render(element: React.ReactNode) { await act(async () => { root.render(element); await Promise.resolve(); await Promise.resolve(); }); }
 async function click(label: string) {
     const button = [...container.querySelectorAll('button')].find(button => button.textContent?.includes(label));
@@ -41,6 +47,27 @@ function PreflightHarness() {
 }
 
 describe('Dev mock checkout and order reading UI', () => {
+    it.each([
+        { role: 'dev', origin: 'https://dev.yeosachin.com', scopes: 'account_email profile_nickname profile_image' },
+        { role: 'production', origin: 'https://yeosachin.com', scopes: 'account_email profile_nickname profile_image name gender birthyear phone_number' },
+    ])('passes the configured Kakao scopes from the actual $role login CTA', async ({ role, origin, scopes }) => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', role);
+        browser.jsdom.reconfigure({ url: `${origin}/admin/analysis-audit` });
+        vi.spyOn(authAnalytics, 'beginPendingAuthEvent').mockReturnValue(false);
+        oauth.signInWithOAuth.mockResolvedValue({ error: null });
+
+        await render(<AuthButtons redirectTo="/admin/analysis-audit" />);
+        await click('카카오로 3초 만에 시작하기');
+
+        expect(oauth.signInWithOAuth).toHaveBeenCalledTimes(1);
+        const input = oauth.signInWithOAuth.mock.calls[0][0];
+        expect(input.provider).toBe('kakao');
+        expect(input.options.scopes).toBe(scopes);
+        const callback = new URL(input.options.redirectTo);
+        expect(callback.origin).toBe(origin);
+        expect(callback.pathname).toBe('/auth/callback');
+        expect(callback.searchParams.get('next')).toBe('/admin/analysis-audit');
+    });
     it('loads the existing result UI through Dev V2 without auto sharing, feedback, or deletion calls', async () => {
         const snapshot = buildDevUiPlanSnapshot().basic;
         const fixture = projectDevUiResult({ runId, orderId, preflightId: orderId, targetInstagramId: 'dev_synthetic', planId: 'basic', pricingVersion: snapshot.pricingVersion,

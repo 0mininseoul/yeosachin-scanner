@@ -6,6 +6,7 @@ import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import {
     addAnonymousPreflightOAuthContinuation,
     writeOAuthRedirectIntentCookie,
@@ -88,11 +89,13 @@ export function AuthButtons({
                 nextPath
             );
             addAnonymousPreflightOAuthContinuation(callbackUrl, nextUrl);
-            // 카카오는 승인된 동의항목(이름·성별·출생연도·전화번호 등)을 받기 위해 scope를 명시.
+            // Dev 앱은 기본 프로필 동의항목만, 운영 앱은 기존 승인 항목을 요청한다.
             // 구글은 기본 scope(email·profile) 사용.
             const scopes =
                 provider === 'kakao'
-                    ? 'account_email profile_nickname profile_image name gender birthyear phone_number'
+                    ? isDevUiPresentation()
+                        ? 'account_email profile_nickname profile_image'
+                        : 'account_email profile_nickname profile_image name gender birthyear phone_number'
                     : undefined;
             const { error } = await performOAuthSignIn({
                 provider,
