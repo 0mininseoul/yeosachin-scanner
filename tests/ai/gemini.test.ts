@@ -669,6 +669,84 @@ describe('analyzeWithGemini stage request policy', () => {
         vi.restoreAllMocks();
     });
 
+    function undispatchedBudgetGuard() {
+        return {
+            reserve: vi.fn().mockRejectedValue(new Error('test: budget must not be reserved')),
+            settle: vi.fn(),
+            cancel: vi.fn(),
+            snapshot: vi.fn(),
+        };
+    }
+
+    async function expectUnsupportedThinking(options: {
+        model?: string;
+        stage?: 'genderTriage' | 'featureAnalysis' | 'privateAccountName';
+        thinkingLevel?: 'MINIMAL';
+    }) {
+        const audit = stageAuditOptions();
+        const budgetGuard = undispatchedBudgetGuard();
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V212_VERSION,
+            budgetRoute: 'high_value',
+            budgetGuard: budgetGuard as unknown as VertexAiBudgetGuard,
+            ...audit,
+            ...options,
+        })).rejects.toThrow('VERTEX_AI_THINKING_LEVEL_UNSUPPORTED');
+
+        expect(mocks.prepareGoogleApplicationCredentials).not.toHaveBeenCalled();
+        expect(budgetGuard.reserve).not.toHaveBeenCalled();
+        expect(budgetGuard.settle).not.toHaveBeenCalled();
+        expect(budgetGuard.cancel).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+    }
+
+    it.each([
+        'gemini-3.7-flash',
+        'gemini-3.7-flash-001',
+        'publishers/google/models/gemini-3.7-flash-001',
+        'projects/test-project/locations/global/publishers/google/models/gemini-3.7-flash',
+    ])('rejects explicit MINIMAL for %s before credential, budget, audit, or SDK work', async model => {
+        await expectUnsupportedThinking({ model, stage: 'featureAnalysis', thinkingLevel: 'MINIMAL' });
+    });
+
+    it.each(['genderTriage', 'privateAccountName'] as const)(
+        'rejects inherited MINIMAL when the %s model is overridden to 3.7',
+        async stage => {
+            await expectUnsupportedThinking({ model: 'gemini-3.7-flash', stage });
+        },
+    );
+
+    it('rejects cost-optimized legacy MINIMAL when the configured model resolves to 3.7', async () => {
+        vi.stubEnv('VERTEX_AI_MODEL', 'gemini-3.7-flash');
+
+        await expectUnsupportedThinking({});
+    });
+
+    it.each(['LOW', 'MEDIUM', 'HIGH'] as const)(
+        'dispatches supported 3.7 %s without changing audit or SDK thinking',
+        async thinkingLevel => {
+            const audit = stageAuditOptions();
+            await expect(analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                model: 'publishers/google/models/gemini-3.7-flash-001',
+                thinkingLevel,
+                ...audit,
+            })).resolves.toEqual({ value: 'ok' });
+
+            expect(audit.onBeforeAttempt).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel }));
+            expect(mocks.generateContent).toHaveBeenCalledOnce();
+            expect(mocks.generateContent.mock.calls[0][0]).toMatchObject({
+                model: 'publishers/google/models/gemini-3.7-flash-001',
+                config: { thinkingConfig: { thinkingLevel: thinkingLevel.toLowerCase() } },
+            });
+        },
+    );
+
     it('resumes a durable stage at the supplied absolute attempt and keeps retries contiguous', async () => {
         vi.useFakeTimers();
         vi.spyOn(console, 'error').mockImplementation(() => undefined);

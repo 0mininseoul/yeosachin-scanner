@@ -136,6 +136,9 @@ export function selectVertexAiRoute(input: {
         route: reason ?? 'default',
         escalationReason: reason,
         modelName: escalated ? VERTEX_AI_ESCALATION_MODEL : VERTEX_AI_DEFAULT_MODEL,
+        thinkingLevel: escalated && STAGE_DEFAULTS[input.stage].thinkingLevel === 'MINIMAL'
+            ? 'LOW'
+            : STAGE_DEFAULTS[input.stage].thinkingLevel,
         maxOutputTokens: escalated
             ? ESCALATION_OUTPUT_TOKENS[input.stage]
             : STAGE_DEFAULTS[input.stage].maxOutputTokens,

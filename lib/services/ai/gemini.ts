@@ -989,6 +989,11 @@ export async function analyzeWithGemini<T>(
         ?? (costOptimized && modelName.startsWith('gemini-3')
             ? 'MINIMAL'
             : null);
+    // Reject instead of changing thinking after the caller has bound a result identity.
+    // The 3.7 family supports LOW/MEDIUM/HIGH; Flash-Lite can retain MINIMAL.
+    if (resolvedThinkingLevel === 'MINIMAL' && isVertexAiEscalationModel(modelName)) {
+        throw new Error('VERTEX_AI_THINKING_LEVEL_UNSUPPORTED');
+    }
     const resolvedMediaResolution = mediaResolution
         ?? stagePolicy?.mediaResolution
         ?? (costOptimized ? 'LOW' : null);
