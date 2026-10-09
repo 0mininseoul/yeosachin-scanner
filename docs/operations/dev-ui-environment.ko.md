@@ -40,7 +40,11 @@ Dev-only native `PATCH /v1/projects/{검증한 Dev project ID}/crons`의 stdin b
 
 a299eb34 후보를 Dev 설정 SHA `bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358`로 배포한 `dpl_Aw1pZzD5WENkCKu7XoVx9C9EhF4Y`는 exact Dev project·READY·cron 비활성·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했다. 후보 source SHA·tree와 761개 runtime 파일의 source/effective hash를 함께 기록한다. 후속 문서만 바뀐 HEAD는 runtime hash 동등성을 확인해 이 배포와 연결하며, runtime 변경은 새 배포와 실제 검증을 요구한다.
 
-실제 SSO와 fresh Dev 계정의 별도 sensitive allowlist 등록을 확인했고, a299에서 로그아웃→관리자 deep link→카카오 로그인→Dev 콘솔 복귀·user-me/관리자 조회 HTTP 200을 재확인했다. [Vercel 영수증](../../supabase/dev-ui/vercel-configuration.safe.json)과 [OAuth 영수증](../../supabase/dev-ui/kakao-configuration.safe.json)은 계정 식별자와 credential을 담지 않는다. [실제 UX 감사](2026-10-09-dev-ui-ux-audit.ko.md)와 [브라우저 영수증](2026-10-09-dev-ui-browser.safe.json)에 확인 범위·남은 개선·검증 한계를 기록한다. 결과 화면 시안과 공통 개선은 사용자 승인 대기이며 PR #603은 draft다. 전체 화면 수용 검증과 최종 후보 승격은 구현 계획의 D5에서 관리한다.
+실제 SSO와 fresh Dev 계정의 별도 sensitive allowlist 등록을 확인했고, a299에서 로그아웃→관리자 deep link→카카오 로그인→Dev 콘솔 복귀·user-me/관리자 조회 HTTP 200을 재확인했다. [Vercel 영수증](../../supabase/dev-ui/vercel-configuration.safe.json)과 [OAuth 영수증](../../supabase/dev-ui/kakao-configuration.safe.json)은 계정 식별자와 credential을 담지 않는다. [실제 UX 감사](2026-10-09-dev-ui-ux-audit.ko.md)와 [브라우저 영수증](2026-10-09-dev-ui-browser.safe.json)에 확인 범위·미적용 후속 제안·검증 한계를 기록한다.
+
+2026-10-09 사용자 결정으로 **결과 페이지는 기존 버전을 유지하고 결과 시안 1/2/3은 미채택**한다. 검토 대상은 분석 중(progress) 화면이며 해당 UX 검토는 별도 후속으로 분리한다. [결과 시안 문서](../superpowers/specs/2026-10-09-analysis-result-ux-review.ko.md)는 미채택 참고 제안으로 보존한다. 기존 5개 finding과 공통 개선은 미승인·미적용 후속 제안이며 삭제·해결 처리하지 않는다. 결과 점수·수집 문구 변경도 승인되지 않았다. 결과 시안이나 공통 제안의 승인을 기다리는 조건은 폐기하며 이 미채택을 Dev 인프라 PR의 병합 blocker로 두지 않는다.
+
+Root 전달 기준 PR #602는 사용자가 main `cdf3c4ed10c3f9a793ca7758eeb1d354b9e13e05`에 병합했고 Root가 Dev 후보 브랜치에도 merge했다. 런타임 변경은 없다. D5 기본 흐름 검증은 존재하지 않는 주문 조회404·안전한 입력 복귀까지 완료했다. 문서 관측 시점에는 PR #603이 Draft·기존 검사 PASS·최종 출하 조건 독립 검토 중이며 병합은 아직 수행하지 않았다. D5의 현재 상태는 **Dev 구축 최종 검토·PR 승격 진행**이다. 실제 병합·동기화의 최종 상태는 [PR #603 최종 기록](https://github.com/0mininseoul/yeosachin-scanner/pull/603)과 상위의 종료 검증으로 확인한다. 이 기록은 영구적인 Draft blocker나 기능 미완료를 뜻하지 않으며 전체 UX PASS도 선언하지 않는다.
 
 ## DB 기준점과 유지보수
 

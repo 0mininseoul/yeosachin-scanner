@@ -52,8 +52,10 @@
 | D2 모의 주문·합성 실행 저장 | 구현검증완료 | 30검사·독립명세/품질PASS, nativeCLI로Devcontrol적용·실제독립PG세션10동작및service-only권한PASS. 기준점보안3775개유지·새wrapper9개만추가 |
 | D3 화면/API 연결 | 구현검증완료 | 구현360검사·독립명세312/품질127검사 PASS. build 타입·Dev OAuth scope 오류 수정 후 실제 READY/SSO 확인. 기존 immersive UI 재사용 보완216검사·별도 명세/품질 각43검사 PASS |
 | D4 Dev 도메인·OAuth | 연결검증완료 | dev DNS·Vercel 도메인verified, Dev Kakao SSO·fresh principal 별도allowlist6기록 확인. a299 후보 exact Dev READY·cron 비활성/정의0·Git자동배포없음; production 설정 보존 |
-| D5 Dev 실제UI·PR승격 | UX 승인·최종 검증 대기 | 로그인·deep link·모의 결제3결과·완료/부분/실패/빈결과·새로고침·보관함·관리자읽기 관측. 수집 범위/점수/관리자대비 등의 [감사](2026-10-09-dev-ui-ux-audit.ko.md)와 [시안](../superpowers/specs/2026-10-09-analysis-result-ux-review.ko.md) 승인 대기. PR #603 draft·#602 open, main 미병합 |
+| D5 Dev 실제UI·PR승격 | Dev 구축 최종 검토·PR 승격 진행 | 로그인·deep link·모의 결제3결과·완료/부분/실패/빈결과·새로고침·보관함·관리자읽기·조회실패 복귀의 기본 흐름 수용 검증 완료. [감사](2026-10-09-dev-ui-ux-audit.ko.md)의 기존 5개 finding은 미적용 후속 제안으로 보존한다. 2026-10-09 사용자 결정으로 결과 페이지는 기존 버전 유지·[결과 시안](../superpowers/specs/2026-10-09-analysis-result-ux-review.ko.md) 1/2/3 미채택. PR #602는 사용자 main 병합 완료, 문서 관측 시점의 PR #603은 최종 출하 검토 중 |
 
 [구현 계획](../superpowers/plans/2026-10-09-dev-ui-environment.ko.md)의 편집권과 선행 의존성을 따른다. Dev UI 성공은 실제 계정 분석·provider 품질·W04 gate 성공 근거로 사용하지 않는다. Apify·AI 생성·실제 카드 과금은 이 환경에서 0회로 유지한다.
 
-**D5 재개 조건:** 사용자가 결과 시안 1/2/3과 공통 최소 개선을 승인하면 선택한 UI를 구현하고 관련 검사·구현자 외 리뷰·새 Dev 배포/실제 화면 검증을 수행한다. 그 뒤 PR #602/#603의 exact-head 검사·리뷰와 main 병합·root main/origin/main 동기화로 마감한다. 승인 전 결과 재구성은 구현하지 않는다. 503/네트워크 차단·실물 모바일·스크린리더와 실제 provider/결제사 품질은 확인된 모의 사례로 대체하지 않는다.
+**2026-10-09 사용자 결정:** 검토 대상은 분석 중(progress) 화면이었다. 결과 페이지는 기존 버전을 유지하며 시안 1/2/3은 미채택 참고 제안으로 남긴다. 기존 5개 finding을 삭제하거나 해결 처리하지 않으며 공통 개선도 자동 승인되지 않았다. 특히 결과 점수·수집 문구 변경 허가로 해석하지 않는다. 진행 화면 UX 검토는 별도 후속이며 결과 시안 미채택이나 공통 제안 미적용은 Dev 인프라 구축 PR의 병합 blocker가 아니다.
+
+**PR 상태와 D5 종료 조건:** Root 전달 기준 [PR #602](https://github.com/0mininseoul/yeosachin-scanner/pull/602)는 사용자가 main `cdf3c4ed10c3f9a793ca7758eeb1d354b9e13e05`에 병합했고 Root가 이를 Dev 후보 브랜치에 merge했다. 런타임 변경은 없다. 문서 관측 시점에는 PR #603이 Draft·기존 검사 PASS·최종 출하 조건 독립 검토 중이며 병합은 아직 수행하지 않았다. D5는 결과 시안 승인을 기다리지 않고 Dev 구축 최종 검토·PR 승격을 진행한다. 기본 흐름 검증 완료와 Git 출하를 구분하고, 실제 병합·root main/origin/main 동기화의 최종 상태는 [PR #603 최종 기록](https://github.com/0mininseoul/yeosachin-scanner/pull/603)과 상위의 종료 검증으로 확인한다. 이 관측을 영구적인 Draft blocker나 기능 미완료로 해석하지 않으며 전체 UX PASS도 주장하지 않는다. 503/네트워크 차단·실물 모바일·스크린리더와 실제 provider/결제사 품질은 확인된 모의 사례로 대체하지 않는다.

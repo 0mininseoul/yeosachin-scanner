@@ -116,7 +116,7 @@ D2 검증: 2개 파일·30개 검사, 타입/ESLint/diff 및 독립 명세→품
 
 D3 구현 검증: 22개 파일·360검사 및 타입/ESLint/diff PASS. 독립 명세 리뷰 16개 파일·312검사 PASS, 별도 품질 리뷰 7개 파일·127검사 PASS. 원격 Next build가 발견한 GET Request 타입 오류는 556e579d에서 수정해 관련 79검사·명세/품질 리뷰와 실제 빌드 PASS를 확인했다. 실제 Dev 로그인에서 발견한 KOE205는 e21f823f에서 Dev 요청 scope 3개로 최소 수정했으며 관련 95검사·명세/품질 리뷰·새 배포의 실제 SSO/user-me 200·Dev 복귀를 확인했다. 운영 scope 7개는 유지한다. 전체 Aside UX 검증은 D5에서 진행한다.
 
-UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인·미리보기를 생략하는 것을 발견했다. 공유 Production 화면과 callback을 그대로 사용하고 API·cache·telemetry보다 먼저 순수 합성 표시 DTO를 반환하도록 4파일을 보완했다. 관련 11파일·216검사, 타입/ESLint/diff PASS와 서로 다른 agent의 명세·품질 리뷰(각 2파일·43검사)를 확인했다. 성별 확인은 고정 합성 DTO의 로컬 표시이며 실제 추론·영속 성별 정정을 검증하지 않는다. 주문은 명시적인 구매 클릭 이후에 생성하고, 전체 run은 모의 결제 성공 확정 이후에만 생성한다. a299 후보의 실제 성별 확인 예/아니오·미리보기·플랜·모의 결제 이후 failed/empty 결과를 D5에서 확인했다. 결과 시안 승인과 영향을 받는 최종 검증·승격은 아직 미완료다.
+UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인·미리보기를 생략하는 것을 발견했다. 공유 Production 화면과 callback을 그대로 사용하고 API·cache·telemetry보다 먼저 순수 합성 표시 DTO를 반환하도록 4파일을 보완했다. 관련 11파일·216검사, 타입/ESLint/diff PASS와 서로 다른 agent의 명세·품질 리뷰(각 2파일·43검사)를 확인했다. 성별 확인은 고정 합성 DTO의 로컬 표시이며 실제 추론·영속 성별 정정을 검증하지 않는다. 주문은 명시적인 구매 클릭 이후에 생성하고, 전체 run은 모의 결제 성공 확정 이후에만 생성한다. a299 후보의 실제 성별 확인 예/아니오·미리보기·플랜·모의 결제 이후 failed/empty 결과를 D5에서 확인했다. 2026-10-09 사용자 결정으로 결과 페이지는 기존 버전을 유지하고 시안 1/2/3은 미채택한다. Dev 구축 최종 검토·PR 승격은 진행 중이며 결과 시안 승인은 선행 조건이 아니다.
 
 ## D4: Vercel·OAuth·도메인 연결
 
@@ -130,17 +130,27 @@ UI fidelity 보완: e21 후보의 Dev가 기존 immersive 대기·성별 확인�
 
 D4 검증: 새 Dev Auth 카카오 principal을 메모리에서 확인해 tester/admin/operator 3개 allowlist의 production/preview 6개 sensitive 기록을 별도 등록했다. 최신 a299eb34 후보의 dpl_Aw1pZzD5WENkCKu7XoVx9C9EhF4Y가 exact Dev project·READY다. 처음 `--local-config vercel.dev.json`만 사용한 배포에 cron 2개가 남는 것을 native project에서 발견했다. Dev-only disable 후, 0700 임시 tracked archive의 표준 vercel.json에 승인된 Dev 설정을 적용해 재배포했다. 실제 cron disabled·정의 0개·Git 자동 배포 없음·임시 자료 정리를 확인했으며 Production/source checkout의 vercel.json은 바꾸지 않았다. 원격 builder 내부 우선순위는 미확인이다. 후보 source SHA와 설정 overlay SHA를 함께 기록한다.
 
-## D5: 통합·Aside·승격
+## D5: Dev 구축 최종 검토·PR 승격 진행
+
+기본 흐름 수용 검증은 완료했다. 아래 Git 출하 체크는 문서 관측 시점의 최종 PR 검토·병합·동기화 절차이며 기능 미완료나 결과 시안 승인 대기를 뜻하지 않는다. 실제 최종 상태는 PR #603의 GitHub 기록과 상위 종료 검증으로 확인한다.
 
 - [x] 현재 a299 후보의 기능 경계 검사·`npx tsc --noEmit`·대상 ESLint·`git diff --check`와 exact-head CI를 완료했다. 새 UI 구현 이후 영향을 받는 검사를 다시 수행한다. 새 오류나 변경 없이 전체 suite를 반복하지 않는다.
 - [x] D0/D2에서 Dev DB 기준 schema parity·Dev control 권한/transaction과 운영 데이터 미복제를 확인했다. 실제 브라우저 업무 데이터도 합성 fixture만 사용한다. Production 행 복제나 추가 DDL은 하지 않는다.
-- [ ] Aside CLI로 카카오 로그인/로그아웃·deep link·preflight ready·플랜·모의 checkout cancel/failure/success·진행·완료/부분/실패·result 재방문·archive·관리자 읽기를 확인한다. 모바일/데스크톱과 빈 결과/권한 부족/조회 실패를 포함한다. 원시 화면 행·UUID·cookie는 기록하지 않는다.
-- [ ] 10월 9일 추가 요청에 따라 실제 사용자가 흐름과 다음 행동을 이해할 수 있는지 UX·시각 감사를 함께 수행한다. 현재 실행에서 캡처한 안전한 화면을 직접 확인하고 단계별 상태·발견 사항·접근성 검증 한계를 기록한다. 재구성이 필요한 화면은 구현 전에 현재 디자인을 기반으로 시안을 만들고 한국어 검토본의 승인을 받는다. 기능 오류의 최소 수정과 시각 재설계를 구분한다.
+- [x] Aside CLI로 카카오 로그인/로그아웃·deep link·preflight ready·플랜·모의 checkout cancel/failure/success·진행·완료/부분/실패·result 재방문·archive·관리자 읽기를 확인했다. 모바일/데스크톱과 빈 결과/권한 부족을 관측했고, 존재하지 않는 Dev 주문의 HTTP404·DEV_UI_NOT_FOUND 안내·결제 조작 부재·새 사전 점검 Enter 복귀로 별도 조회 실패 수용 근거도 확보했다. 원시 화면 행·UUID·cookie는 기록하지 않는다. 이는 기본 흐름의 확인된 범위이며 전체 UX·503/네트워크 주입·모든 복구 경로 PASS를 뜻하지 않는다.
+- [x] 실제 사용자가 흐름과 다음 행동을 이해할 수 있는지 현재 실행의 안전한 캡처로 UX·시각 감사를 수행하고 단계별 상태·발견 사항·접근성 검증 한계를 기록했다. 2026-10-09 사용자는 검토 대상을 분석 중(progress) 화면으로 정정하고 결과 페이지 기존 버전 유지·결과 시안 1/2/3 미채택을 결정했다. 기존 5개 finding과 공통 개선은 미승인·미적용 후속 제안으로 보존한다. 이 기록은 전체 UX PASS를 뜻하지 않는다.
 - [x] provider/client 차단 검사·금지 credential 없음·cron 정의 0개와 실제 브라우저 리소스 분류에서 Apify·Vertex·실제 카드/메일/운영 telemetry/worker 미호출을 확인했다. 브라우저 관측은 서버 egress/billing 전수 감사가 아니며 UI 성공을 실제 worker/provider 품질 성공으로 기록하지 않는다.
 - [x] a299 commit/tree·runtime/설정 hash·schema 기준점·Dev identity·검사/Aside safe receipt를 연결했다. runtime 변경 시 영향을 받는 검증과 배포를 갱신한다.
 - [ ] PR → exact-head 검사·구현자와 다른 agent의 명세/품질 리뷰 → main merge → root main/origin/main fetch/fast-forward 동기화로 마감한다. 기존 보호 파일·보존 refs/stash 불변을 확인한다.
 
-D5 실제 관측과 미결: [UX 감사](../../operations/2026-10-09-dev-ui-ux-audit.ko.md), [안전한 브라우저 영수증](../../operations/2026-10-09-dev-ui-browser.safe.json). 로그아웃·관리자 deep link·Kakao Dev 복귀, 모의 결제 취소/실패/성공, complete/partial/failed/empty 화면과 확인한 새로고침·복귀·dialog focus 동작을 기록했다. 부분 수집 안내·점수 의미·Dev 관리자 대비·상태/복귀의 공통 개선과 [결과 시안](../specs/2026-10-09-analysis-result-ux-review.ko.md)은 사용자 승인 대기다. 전체 UX PASS는 아니며 PR #603은 draft, #602도 미병합이다. Aside REPL은 request interception을 제공하지 않아 503/망단절 주입은 실제로 검증하지 않았고, 실패한 합성 실행의 결과404와 실패 화면/입력 복귀는 확인했다. 실제 계정·실물 기기·스크린리더·결제사/provider 품질은 별도 경계다.
+D5 실제 관측과 미결: [UX 감사](../../operations/2026-10-09-dev-ui-ux-audit.ko.md), [안전한 브라우저 영수증](../../operations/2026-10-09-dev-ui-browser.safe.json). 로그아웃·관리자 deep link·Kakao Dev 복귀, 모의 결제 취소/실패/성공, complete/partial/failed/empty 화면과 확인한 새로고침·복귀·dialog focus 동작을 기록했다. 2026-10-09 사용자 결정에 따라 결과 페이지는 기존 버전을 유지하고 [결과 시안](../specs/2026-10-09-analysis-result-ux-review.ko.md) 1/2/3은 미채택 참고 제안으로 보존한다. 부분 수집 안내·점수 의미·Dev 관리자 대비·상태/복귀의 기존 5개 finding과 공통 제안은 미적용 후속 제안이며 삭제·해결 처리하거나 자동 승인하지 않는다. 특히 결과 점수·수집 문구 변경은 승인되지 않았다. 결과 재구성과 공통 개선 승인을 기다리는 재개 조건은 폐기하며 시안 미채택을 Dev 인프라 PR의 병합 blocker로 두지 않는다.
+
+Root 전달 기준 PR #602는 사용자가 main `cdf3c4ed10c3f9a793ca7758eeb1d354b9e13e05`에 병합했고 Root가 Dev 후보 브랜치에 merge했다. 런타임 변경은 없다. 문서 관측 시점에는 PR #603이 Draft·기존 검사 PASS·최종 출하 조건 독립 검토 중이며 병합은 아직 수행하지 않았다. D5는 Dev 구축 최종 검토·PR 승격 진행 상태다. 기본 흐름 검증과 Git 출하를 구분하고 실제 병합·root main/origin/main 동기화의 최종 상태는 [PR #603 최종 기록](https://github.com/0mininseoul/yeosachin-scanner/pull/603)과 상위 종료 검증으로 확인한다. 이 관측 기록을 영구적인 Draft blocker나 기능 미완료로 해석하지 않으며 전체 UX PASS도 주장하지 않는다. 조회 실패 사례 32는 reviewer가 남긴 원래 설계의 실제 조회 실패 수용 근거를 채우며, Root 전달 기준 나머지 새 기능·안전 blocker는 0이다. Aside REPL은 request interception을 제공하지 않아 503/망단절 주입은 실제로 검증하지 않았고, 실패한 합성 실행의 결과404와 실패 화면/입력 복귀는 확인했다. 실제 계정·실물 기기·스크린리더·결제사/provider 품질은 별도 경계다.
+
+추가 조회 실패 수용 사례: a299에서 존재하지 않는 Dev 주문을 읽기 전용 GET으로 조회해 HTTP404·DEV_UI_NOT_FOUND와 role=alert 안내, 다시 조회·새 사전 점검·모의 주문 보관함 링크, 결제 조작 버튼 부재를 확인했다. 새 사전 점검 Enter 뒤 fresh snapshot의 `/analyze` 입력·시나리오·기본 CTA 비활성을 확인했다. 1440×900·가로 overflow 없음이며 주문 생성·결제·run은 없었고 Apify·AI·실제 카드 호출도 수행하지 않았다. [32 캡처](/Users/youngminpark/.codex/visualizations/2026/10/09/yeosachin-dev-ux-audit/32-missing-order-lookup-desktop.png)는 failed run의 terminal 결과 복구와 다른 조회 실패 증거다. resource UUID는 Root의 메모리에서만 사용했으며 출력·저장하지 않았다.
+
+### 별도 후속: 분석 중(progress) 화면 UX 검토
+
+사용자가 검토하려던 분석 중(progress) 화면의 이해·가독성·다음 행동을 별도로 검토한다. 실제 진행 화면 11·27과 확인된 새로고침 사례를 근거로 필요한 제안을 좁히고, 시각 재구성이 필요하면 해당 화면의 시안과 한국어 검토 범위를 먼저 제시한다. 결과 페이지 재구성·점수·수집 문구 변경으로 확대하지 않는다. 이 후속과 미채택 결과 시안은 Dev 인프라 구축 PR의 병합 blocker가 아니다.
 
 ## 별도 Vertex 최소 수정과 비용
 
