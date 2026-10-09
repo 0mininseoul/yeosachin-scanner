@@ -39,6 +39,35 @@ describe('Vertex AI cost routing', () => {
         }).retryResponseRejections).toBe(true);
     });
 
+    it.each(([
+        'genderTriage',
+        'featureAnalysis',
+        'partnerSafety',
+        'highRiskNarrative',
+        'privateAccountName',
+        'genderResolution',
+    ] as const).flatMap(stage => (['high_value', 'ambiguous'] as const).map(escalationReason => ({
+        stage,
+        escalationReason,
+    }))))('selects supported 3.7 thinking for $stage/$escalationReason', input => {
+        const route = selectVertexAiRoute(input);
+
+        expect(route.modelName).toBe('gemini-3.7-flash');
+        expect(route.thinkingLevel).toBe('LOW');
+        expect(route.route).toBe(input.escalationReason);
+    });
+
+    it.each(['genderTriage', 'privateAccountName'] as const)(
+        'preserves MINIMAL for the default Flash-Lite %s route',
+        stage => {
+            expect(selectVertexAiRoute({ stage })).toMatchObject({
+                modelName: 'gemini-3.1-flash-lite',
+                route: 'default',
+                thinkingLevel: 'MINIMAL',
+            });
+        },
+    );
+
     it('estimates a bounded, known cost before dispatch', () => {
         expect(estimateVertexAiPreDispatchCost({
             modelName: 'gemini-3.7-flash',

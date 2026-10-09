@@ -1244,10 +1244,12 @@ describe('V2 staged AI services', () => {
 
         expect(defaultIdentity).toMatchObject({
             modelName: 'gemini-3.1-flash-lite',
+            thinkingLevel: 'LOW',
             maxOutputTokens: 1_024,
         });
         expect(ambiguousIdentity).toMatchObject({
             modelName: 'gemini-3.7-flash',
+            thinkingLevel: 'LOW',
             maxOutputTokens: 4_096,
         });
         expect(ambiguousIdentity.operationKey).not.toBe(defaultIdentity.operationKey);
@@ -1266,6 +1268,7 @@ describe('V2 staged AI services', () => {
         );
         expect(mocks.analyzeWithGemini.mock.calls[0]?.[2]).toMatchObject({
             model: 'gemini-3.7-flash',
+            thinkingLevel: ambiguousIdentity.thinkingLevel,
             budgetRoute: 'ambiguous',
             maxOutputTokens: 4_096,
             maxAttempts: 2,
