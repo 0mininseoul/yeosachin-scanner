@@ -1,6 +1,6 @@
 # 2026-10-09 진행 화면 개선 승인안
 
-사용자 검토용 한국어 명세다. 대상은 **분석 중 화면과 그 오류 화면의 행동 표현**이다. 결과 페이지는 기존 버전을 유지한다. 근거는 [실제 진행 화면 감사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/docs/operations/2026-10-09-progress-ux-audit.ko.md)이며, 아래 1·2·3안은 표시 순서대로 이미 제안된 생성 시안이다. **현재 모두 미승인·미구현**이다. 이 문서가 PR로 병합되어도 사용자 선택·디자인 승인·구현 완료로 처리하지 않는다.
+사용자 검토용 한국어 명세다. 대상은 **분석 중 화면과 그 오류 화면의 행동 표현**이다. 결과 페이지는 기존 버전을 유지한다. 근거는 [실제 진행 화면 감사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/docs/operations/2026-10-09-progress-ux-audit.ko.md)이며, 아래 1·2·3안은 표시 순서대로 이미 제안된 생성 시안이다. **2026-10-09 사용자가 공통 요구와 오류 행동을 포함한 1안을 승인했다. 구현 진행 중이다.** 사용자는 이어 기존 수집 계정 이미지 슬라이딩 유지를 명시했다. 1안의 단일 사진 부분은 기존 `ProgressFaces` 슬라이딩으로 적용하며 결과 페이지는 변경하지 않는다.
 
 ## 세 시안 비교
 
@@ -54,8 +54,8 @@
 - 승인 후 실제 Dev 데스크톱과 크기를 확인한 모바일 화면에서 줄바꿈·가로 넘침·주요 설명·현재 활동·보관함 CTA를 다시 검수한다. 이번 생성 이미지나 이전 모바일 검수를 새 구현의 PASS 근거로 대체하지 않는다.
 - 기존 [owner 표현 검사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/tests/analysis/results/owner-view-presentation.test.ts), [진행 표시 검사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/tests/analysis/results/v2-progress-display.test.ts), [요청 계약 검사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/tests/analysis/results/use-analysis-progress-request-contract.test.ts), [프로필 표시 검사](/Users/youngminpark/.codex/worktrees/continuation-20261003/yeosachin_scanner/tests/analysis/results/components/progress-faces.test.tsx) 등을 우선 재사용한다. 구현 후 변경에 필요한 타입·UI·회귀 검사와 독립 리뷰는 Root가 진행한다.
 
-## 미결 선택과 검증 한계
+## 선택 결과와 검증 한계
 
-사용자가 1·2·3안 중 하나 또는 수정 방향을 선택하고 위 공통 요구·오류 행동 범위를 승인해야 구현에 들어간다. 한 항목만 선택·승인한 경우 나머지가 자동 승인된 것으로 해석하지 않는다. 이전 결과 시안 1·2·3은 미채택 참고 제안이며 이번 진행 시안과 별개다. 이전 UX finding 5건과 결과 점수/수집 문구를 해결·변경하는 승인이 아니다.
+사용자가 공통 요구를 포함한 선택 질문에 `1`로 답했고 기존 이미지 슬라이딩 유지 방향을 덧붙였다. 2·3안은 미채택 대안으로 보존한다. [구현 계획](../plans/2026-10-09-progress-ux-implementation.ko.md)에 따라 구현·검증한다. 이전 결과 시안 1·2·3은 미채택 참고 제안이며 이번 진행 시안과 별개다. 이전 UX finding 5건과 결과 점수/수집 문구를 해결·변경하는 승인이 아니다.
 
-실물 모바일·스크린리더·HTTP503/네트워크 중단·Production 실제 분석 시간은 미검증이다. 합성 성공은 실제 AI 품질·provider·실제 결제사의 증거가 아니며, 청구·전체 egress 감사를 주장하지 않는다. 이번 변경은 문서뿐이므로 새 앱 검사는 실행하지 않았다. 시안 미승인은 이미 완료된 Dev 인프라 구축의 미완료를 뜻하지 않는다.
+실물 모바일·스크린리더·HTTP503/네트워크 중단·Production 실제 분석 시간은 미검증이다. 합성 성공은 실제 AI 품질·provider·실제 결제사의 증거가 아니며, 청구·전체 egress 감사를 주장하지 않는다. 시안 작성 시점에는 문서만 변경했고 앱 검사를 실행하지 않았다. 후속 구현 검증은 별도 실제 증거로 갱신한다. Dev 인프라 구축은 이미 완료됐다.
