@@ -8,8 +8,10 @@ import {
     operationalLogger,
 } from './lib/observability/server';
 import { isBenignImageProxyRequestError } from './lib/observability/image-proxy-request-error';
+import { isDevUiTelemetryDisabled } from './lib/constants/dev-ui';
 
 export async function register(): Promise<void> {
+    if (isDevUiTelemetryDisabled()) return;
     try {
         if (process.env.NEXT_RUNTIME === 'nodejs') {
             await import('./sentry.server.config');
@@ -26,6 +28,7 @@ export const onRequestError: Instrumentation.onRequestError = async (
     errorRequest,
     errorContext,
 ) => {
+    if (isDevUiTelemetryDisabled()) return;
     let benignImageProxyError = false;
     try {
         benignImageProxyError = isBenignImageProxyRequestError({

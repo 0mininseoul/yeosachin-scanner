@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
+import { handleDevUiAdminOrders, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     classifyOperatorAuthError,
     getAnalysisAuditOperatorDecision,
@@ -20,6 +21,7 @@ function privateJson(body: unknown, status = 200) {
 const uuidSchema = z.string().uuid();
 
 export async function GET(request: Request) {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiAdminOrders(request);
     let supabase: Awaited<ReturnType<typeof createClient>>;
     let user: { id: string } | null = null;
     try {

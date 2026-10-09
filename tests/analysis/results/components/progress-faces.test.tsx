@@ -108,6 +108,23 @@ describe('ProgressFaces stable rail identity', () => {
         renderSnapshot(root, active(imageUrl), media(imageUrl));
     }
 
+    it('renders only owned Dev avatars when local assets are explicitly enabled', () => {
+        const imageUrl = '/demo-avatars/synthetic-blurred-avatar-1-v1.png';
+        act(() => root.render(<ProgressFaces active={active(imageUrl)} candidateMedia={media(imageUrl)} allowLocalAssets />));
+        expect(imageLoadHandlers.get(imageUrl)?.length).toBeGreaterThan(0);
+        act(() => imageLoadHandlers.get(imageUrl)?.[0]?.());
+        expect(container.querySelector('[data-progress-image]')?.getAttribute('data-progress-image')).toBe(imageUrl);
+    });
+
+    it('keeps local avatars disabled by default and denies remote/proxy/path bypasses in Dev', () => {
+        render('/demo-avatars/synthetic-blurred-avatar-1-v1.png');
+        expect(container.querySelector('[data-progress-copy]')).toBeNull();
+        for (const imageUrl of ['https://example.com/avatar.png', '//example.com/avatar.png', '/api/image-proxy?token=unexpected', '/demo-avatars/%73ynthetic-blurred-avatar-1-v1.png', '/demo-avatars/../avatar.png', '/demo-avatars/synthetic-blurred-avatar-1-v1.png?x=1', '/avatar.png']) {
+            act(() => root.render(<ProgressFaces key={imageUrl} active={active(imageUrl)} candidateMedia={media(imageUrl)} allowLocalAssets />));
+            expect(container.querySelector('[data-progress-copy]')).toBeNull();
+        }
+    });
+
     it('renders enough one-tile copies for one full wrap to remain scrollable', () => {
         const imageUrl = '/api/image-proxy?token=one-tile';
         const candidateMedia = [{

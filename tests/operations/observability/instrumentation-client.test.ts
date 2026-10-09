@@ -21,4 +21,12 @@ describe('Next App Router client instrumentation', () => {
         expect(mocks.init).toHaveBeenCalledOnce();
         expect(client.onRouterTransitionStart).toBe(mocks.captureRouterTransitionStart);
     });
+
+    it('does not initialize the client SDK or capture transitions in Dev', async () => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        const client = await import('../../../instrumentation-client');
+        expect(mocks.init).not.toHaveBeenCalled();
+        client.onRouterTransitionStart('/analyze', 'push');
+        expect(mocks.captureRouterTransitionStart).not.toHaveBeenCalled();
+    });
 });

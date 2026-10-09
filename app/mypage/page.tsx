@@ -25,6 +25,10 @@ import {
     listAwaitingEarlybirdDeliveries,
 } from '@/lib/services/earlybird/awaiting-delivery';
 import { AccountDeletionPanel } from './account-deletion-panel';
+import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
+import { assertDevUiDeployment } from '@/lib/services/dev-ui/deployment';
+import { assertDevUiTester } from '@/lib/services/dev-ui/access';
+import { DevUiOrderList } from '@/components/dev-ui/order-list';
 
 export const metadata: Metadata = {
     ...NOINDEX_METADATA,
@@ -32,6 +36,11 @@ export const metadata: Metadata = {
 };
 
 export default async function MyPage() {
+    const devContext = isDevUiDeploymentContext();
+    if (devContext) {
+        try { assertDevUiDeployment(); }
+        catch { return <main className="p-6"><p role="alert">테스트 환경 구성을 확인할 수 없습니다.</p></main>; }
+    }
     const supabase = await createClient();
 
     // 1. 사용자 인증 확인
@@ -39,6 +48,14 @@ export default async function MyPage() {
 
     if (authError || !user) {
         redirect('/login');
+    }
+
+    if (devContext) {
+        try { assertDevUiTester(user.id); }
+        catch { return <div><TopBar right={<LogoutButton />} /><main className="mx-auto max-w-[500px] p-6"><p role="alert">등록된 테스트 계정만 보관함을 이용할 수 있습니다.</p></main></div>; }
+        return <div className="min-h-dvh"><TopBar right={<LogoutButton />} /><main className="mx-auto max-w-[500px] px-5 pb-12 pt-7">
+            <Eyebrow>Dev · 모의 주문 보관함</Eyebrow><h1 className="mb-6 mt-3 text-[26px] font-extrabold text-fg">보관함</h1><DevUiOrderList />
+        </main></div>;
     }
 
     let accountClassification;

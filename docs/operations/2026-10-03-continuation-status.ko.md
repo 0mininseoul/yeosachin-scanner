@@ -7,7 +7,7 @@
 - 사용자는 9월 16일 이후 실제 계정 분석/관리자 확인을 **아직 실행하지 않았다**고 답변했다. 에이전트는 실제 분석·결제·유료 provider 작업을 시작하지 않는다.
 - 후속 시작 fetch 확인: `main = origin/main = 4638b2251429e87ddd141ea940e414cb3b85496c` (PR #597 병합). 이번 16시 후속은 사용자 테스트를 제외하며 Apify API·actor와 AI generation 호출을 모두 0회로 유지한다.
 - 2026-10-04 사용자가 W05 한국어 설계를 승인했다. 시작 fetch에서 `main = origin/main = a46a0e1ba5fc4d5379de510c48ed3116e5a3d4b9`를 확인하고 `codex/private-migration-verifier-20261004`에서 검증 전용 CLI를 구현한다. 사용자 테스트·Apify·유료 AI는 계속 제외한다.
-- 2026-10-09 관리자 접근 오류는 [PR #600](https://github.com/0mininseoul/yeosachin-scanner/pull/600)·merge `4075fb1d`에서 수정했다. 사용자 지정 계정을 운영자로 등록하고 새 production 배포에서 aside CLI의 콘솔 카카오 로그인·복귀·관리자 읽기 API를 확인했다. 사용자 실제 분석은 계속 미실행이며, 별도 Vertex 비용은 사전 금액 승인 이후에만 허용된다. Dev UI 환경은 별도 설계·승인 단계다.
+- 2026-10-09 관리자 접근 오류는 [PR #600](https://github.com/0mininseoul/yeosachin-scanner/pull/600)·merge `4075fb1d`에서 수정했다. 사용자 지정 계정을 운영자로 등록하고 새 production 배포에서 aside CLI의 콘솔 카카오 로그인·복귀·관리자 읽기 API를 확인했다. 사용자 실제 분석은 계속 미실행이며, 별도 Vertex 비용은 사전 금액 승인 이후에만 허용된다. Dev UI 설계와 추천 후보 브랜치 방식은 사용자 승인 후 구현 중이다.
 - 보존 원본·기존 refs/stash·root `.env.local`·`.playwright-mcp/`·보호 migration을 유지한다.
 - 새 변경은 PR → 관련 검사와 독립 리뷰 → main 병합으로 반영한다. 운영 재활성화, history repair, include-all, 무근거 DDL은 실행하지 않는다.
 
@@ -41,4 +41,21 @@
 
 관리자 수정은 구현자와 다른 agent의 코드 리뷰·별도 검사를 통과했고, 새 production 배포의 실제 카카오 로그인·읽기 접근을 상위 세션이 aside CLI로 확인했다. 후속 보고서·안전한 영수증·이 상태판도 별도 agent가 검토한다. W08은 각 후속 PR의 exact-head 검사와 독립 리뷰를 계속 요구한다.
 
-[Dev UI 환경 설계](../superpowers/specs/2026-10-09-dev-ui-environment-design.ko.md)는 지정 Supabase 계정의 별도 Free 프로젝트·별도 Vercel 프로젝트·모의 결제 후 합성 진행을 제안하며 구현/프로젝트 생성 승인 대기다. [Vertex 연결 예산안](../superpowers/specs/2026-10-09-vertex-connectivity-budget.ko.md)은 별도 US$1·최대 2회 승인 대기다. 어느 제안도 실제 분석 성공·W04 품질 gate PASS 또는 유료 호출 완료를 뜻하지 않는다.
+[Dev UI 환경 설계](../superpowers/specs/2026-10-09-dev-ui-environment-design.ko.md)는 사용자가 전체 설계와 추천 후보 브랜치 방식을 승인했다. 지정 계정의 별도 Free Supabase·별도 Vercel 프로젝트를 생성하고 Dev DNS를 확인했으며 모의 결제 후 합성 진행을 구현 중이다. [Vertex 연결 예산안](../superpowers/specs/2026-10-09-vertex-connectivity-budget.ko.md)은 별도 US$1·최대 2회 승인 대기다. 어느 제안도 실제 분석 성공·W04 품질 gate PASS 또는 유료 호출 완료를 뜻하지 않는다.
+
+## 승인된 Dev 환경 진행 상태
+
+| 단계 | 상태 | 증거/다음 행동 |
+| --- | --- | --- |
+| D0 기준점·분리 DB | 완료 | public150·업무행복제0. strict2793+정규화136+명시환경예외6, 보강metadata3775일치·독립리뷰PASS. [초기화 자료](../../supabase/dev-ui/README.ko.md) |
+| D1 배포·외부동작 guard | 완료 | 정상Nextchunk와빌드/런타임DB불일치양방향검사를포함301검사·명세/품질PASS |
+| D2 모의 주문·합성 실행 저장 | 구현검증완료 | 30검사·독립명세/품질PASS, nativeCLI로Devcontrol적용·실제독립PG세션10동작및service-only권한PASS. 기준점보안3775개유지·새wrapper9개만추가 |
+| D3 화면/API 연결 | 구현검증완료 | 구현360검사·독립명세312/품질127검사 PASS. build 타입·Dev OAuth scope 오류 수정 후 실제 READY/SSO 확인. 기존 immersive UI 재사용 보완216검사·별도 명세/품질 각43검사 PASS |
+| D4 Dev 도메인·OAuth | 연결검증완료 | dev DNS·Vercel 도메인verified, Dev Kakao SSO·fresh principal 별도allowlist6기록 확인. a299 후보 exact Dev READY·cron 비활성/정의0·Git자동배포없음; production 설정 보존 |
+| D5 Dev 실제UI·PR승격 | Dev 구축 최종 검토·PR 승격 진행 | 로그인·deep link·모의 결제3결과·완료/부분/실패/빈결과·새로고침·보관함·관리자읽기·조회실패 복귀의 기본 흐름 수용 검증 완료. [감사](2026-10-09-dev-ui-ux-audit.ko.md)의 기존 5개 finding은 미적용 후속 제안으로 보존한다. 2026-10-09 사용자 결정으로 결과 페이지는 기존 버전 유지·[결과 시안](../superpowers/specs/2026-10-09-analysis-result-ux-review.ko.md) 1/2/3 미채택. PR #602는 사용자 main 병합 완료, 문서 관측 시점의 PR #603은 최종 출하 검토 중 |
+
+[구현 계획](../superpowers/plans/2026-10-09-dev-ui-environment.ko.md)의 편집권과 선행 의존성을 따른다. Dev UI 성공은 실제 계정 분석·provider 품질·W04 gate 성공 근거로 사용하지 않는다. Apify·AI 생성·실제 카드 과금은 이 환경에서 0회로 유지한다.
+
+**2026-10-09 사용자 결정:** 검토 대상은 분석 중(progress) 화면이었다. 결과 페이지는 기존 버전을 유지하며 시안 1/2/3은 미채택 참고 제안으로 남긴다. 기존 5개 finding을 삭제하거나 해결 처리하지 않으며 공통 개선도 자동 승인되지 않았다. 특히 결과 점수·수집 문구 변경 허가로 해석하지 않는다. 진행 화면 UX 검토는 별도 후속이며 결과 시안 미채택이나 공통 제안 미적용은 Dev 인프라 구축 PR의 병합 blocker가 아니다.
+
+**PR 상태와 D5 종료 조건:** Root 전달 기준 [PR #602](https://github.com/0mininseoul/yeosachin-scanner/pull/602)는 사용자가 main `cdf3c4ed10c3f9a793ca7758eeb1d354b9e13e05`에 병합했고 Root가 이를 Dev 후보 브랜치에 merge했다. 런타임 변경은 없다. 문서 관측 시점에는 PR #603이 Draft·기존 검사 PASS·최종 출하 조건 독립 검토 중이며 병합은 아직 수행하지 않았다. D5는 결과 시안 승인을 기다리지 않고 Dev 구축 최종 검토·PR 승격을 진행한다. 기본 흐름 검증 완료와 Git 출하를 구분하고, 실제 병합·root main/origin/main 동기화의 최종 상태는 [PR #603 최종 기록](https://github.com/0mininseoul/yeosachin-scanner/pull/603)과 상위의 종료 검증으로 확인한다. 이 관측을 영구적인 Draft blocker나 기능 미완료로 해석하지 않으며 전체 UX PASS도 주장하지 않는다. 503/네트워크 차단·실물 모바일·스크린리더와 실제 provider/결제사 품질은 확인된 모의 사례로 대체하지 않는다.

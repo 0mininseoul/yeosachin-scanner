@@ -12,6 +12,8 @@ import { PrecheckoutDemo } from '@/components/precheckout-demo';
 import { PRECHECKOUT_DEMO_DURATION_MS } from '@/components/precheckout-stage-graphs';
 import { PrecheckoutDelayedStatus } from '@/components/preflight-pending-status';
 import { PRECHECKOUT_EVENTS, trackPrecheckoutEvent } from '@/lib/services/analytics';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
+import { createDevUiPrecheckoutPresentation } from '@/lib/services/dev-ui/precheckout-presentation';
 import {
     canRetryPrecheckout,
     resolvePrecheckoutFallbackAction,
@@ -64,6 +66,7 @@ async function fetchPrecheckoutBlite(
     preflightId: string,
     claimToken: string | null,
 ): Promise<BrowserBliteStatus> {
+    if (isDevUiPresentation()) return { state: 'complete', dto: createDevUiPrecheckoutPresentation() };
     const key = `${preflightId}:${claimToken ?? ''}`;
     const existing = browserBliteRequests.get(key);
     if (existing) return existing;
@@ -175,6 +178,7 @@ export function PrecheckoutImmersive({
     onDemoError,
     onBliteResultShown,
 }: PrecheckoutImmersiveProps) {
+    const devPresentation = isDevUiPresentation();
     /** Mount-local clock, always fresh, so every mount/remount/reload plays S1 first. */
     const [visibleEntryAtMs] = useState(() => Date.now());
     const [view, setView] = useState<ImmersiveView>('demo');
@@ -198,13 +202,14 @@ export function PrecheckoutImmersive({
         eventName: PrecheckoutEventName,
         properties?: Record<string, unknown>,
     ): boolean => {
+        if (devPresentation) return false;
         const key = `${eventName}:${preflightId}`;
         if (emittedEventKeysRef.current.has(key)) return false;
         emittedEventKeysRef.current.add(key);
         return properties === undefined
             ? trackPrecheckoutEvent(eventName, preflightId)
             : trackPrecheckoutEvent(eventName, preflightId, properties);
-    }, [preflightId]);
+    }, [devPresentation, preflightId]);
 
     const finishExit = useCallback((finalExit: DemoExit) => {
         if (settledExitRef.current) return;

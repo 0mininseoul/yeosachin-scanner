@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { handleDevUiPreflightRead, shouldHandleDevUiRequest, withDevUiSession } from '@/lib/services/dev-ui/routes';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightExclusionRequestV1Schema,
@@ -217,6 +218,7 @@ export async function GET(
     request: Request,
     routeContext: { params: Promise<{ preflightId: string }> }
 ): Promise<NextResponse> {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiPreflightRead(request, (await routeContext.params).preflightId);
     return observeRoute(
         request,
         '/api/analysis/preflight/[preflightId]',
@@ -438,6 +440,7 @@ export async function PATCH(
     request: Request,
     routeContext: { params: Promise<{ preflightId: string }> }
 ): Promise<NextResponse> {
+    if (shouldHandleDevUiRequest(request)) return withDevUiSession(request, async () => new NextResponse(null, { status: 403 }));
     return observeRoute(
         request,
         '/api/analysis/preflight/[preflightId]',

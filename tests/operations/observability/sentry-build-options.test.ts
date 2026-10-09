@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { sentryBuildOptions } from '../../../lib/observability/sentry-build-options';
 
 describe('Sentry build source-map upload gate', () => {
+    it('disables the CI upload gate for a Dev build', () => {
+        const options = sentryBuildOptions({ DEPLOYMENT_ROLE: 'dev', CI: '1', SENTRY_SOURCEMAPS_UPLOAD: 'true', SENTRY_AUTH_TOKEN: 'ci-build-token' });
+        expect(options.authToken).toBeUndefined();
+        expect(options.webpack.disableSentryConfig).toBe(true);
+    });
+
     it('does not pass a locally present auth token outside the explicit CI upload gate', () => {
         const options = sentryBuildOptions({
             SENTRY_AUTH_TOKEN: 'local-token-must-not-upload',

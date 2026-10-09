@@ -106,6 +106,18 @@ describe('Amplitude analytics adapter', () => {
         vi.unstubAllGlobals();
     });
 
+    it('never loads or initializes Amplitude for the public Dev marker even with a configured key', async () => {
+        enableBrowser();
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        const analytics = await loadAnalytics();
+        await expect(analytics.initAmplitude(VALID_USER_ID)).resolves.toBe(false);
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED);
+        await analytics.flushAnalytics();
+        expect(amplitudeMocks.moduleLoads).toBe(0);
+        expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
+        expect(amplitudeMocks.track).not.toHaveBeenCalled();
+    });
+
     it('exports only canonical approved events with no legacy aliases', async () => {
         const { EVENTS } = await loadAnalytics();
 

@@ -189,6 +189,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         act(() => root.unmount());
         container.remove();
         vi.unstubAllGlobals();
+        vi.unstubAllEnvs();
         vi.useRealTimers();
         vi.clearAllMocks();
     });
@@ -208,6 +209,15 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
     function displayed(): string {
         return container.querySelector('[data-testid="progress"]')?.textContent ?? '';
     }
+
+    it('polls the exact Dev resource directly without production discovery or Realtime clients', async () => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        await render();
+        expect(fetchUrls[0]).toBe(`/api/analysis/v2/progress/${REQUEST_A}?afterSeq=0&limit=200`);
+        expect(fetchUrls.every(url => url.startsWith('/api/analysis/v2/progress/'))).toBe(true);
+        expect(mocks.createClient).not.toHaveBeenCalled();
+        expect(displayed()).toContain('processing:');
+    });
 
     it('moves through initial and later visible plateaus and responds to phase and ordinal signals', async () => {
         await render();

@@ -58,6 +58,12 @@ export function isSafeEarlybirdDemoProgressUrl(value: string): boolean {
         && value === value.toLowerCase();
 }
 
+/** The Dev caller separately checks its compiled presentation role. */
+export function isSafeDevUiCheckoutUrl(value: string): boolean {
+    return typeof value === 'string'
+        && /^\/dev-ui\/checkout\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
 export function parseEarlybirdCheckoutContinuationQuery(
     orderId: string | null,
     planId: string | null,

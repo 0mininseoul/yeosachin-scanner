@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "querySha256": "cfb6fdecade5de08e0316d1632bedd6076ccf848e208ab74fd8fa32a4121b6ee",
+  "sourceObjects": 3775,
+  "devObjects": 3793,
+  "matched": 3775,
+  "counts": {
+    "constraint_state": {
+      "source": 1464,
+      "dev": 1464,
+      "matched": 1464,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "default_acl": {
+      "source": 6,
+      "dev": 6,
+      "matched": 6,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "function_security": {
+      "source": 803,
+      "dev": 812,
+      "matched": 803,
+      "changed": 0,
+      "missing": 0,
+      "extra": 9
+    },
+    "function_shape": {
+      "source": 803,
+      "dev": 812,
+      "matched": 803,
+      "changed": 0,
+      "missing": 0,
+      "extra": 9
+    },
+    "index_state": {
+      "source": 386,
+      "dev": 386,
+      "matched": 386,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "publication_configuration": {
+      "source": 1,
+      "dev": 1,
+      "matched": 1,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "relation_security": {
+      "source": 156,
+      "dev": 156,
+      "matched": 156,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    },
+    "relation_shape": {
+      "source": 156,
+      "dev": 156,
+      "matched": 156,
+      "changed": 0,
+      "missing": 0,
+      "extra": 0
+    }
+  },
+  "changed": [],
+  "missing": [],
+  "extra": [
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_complete_checkout(p_user_id uuid, p_order_id uuid, p_outcome text)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_create_checkout(p_user_id uuid, p_preflight_id uuid, p_plan_id text, p_disclosure_accepted boolean)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_create_preflight(p_user_id uuid, p_target_instagram_id text, p_idempotency_key text, p_fixture_scenario text)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_list_admin_orders(p_limit integer)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_list_owner_orders(p_user_id uuid, p_limit integer)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_read_admin_order(p_order_id uuid)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_read_checkout(p_user_id uuid, p_order_id uuid)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_read_preflight(p_user_id uuid, p_preflight_id uuid)"
+    },
+    {
+      "kind": "function_security",
+      "name": "public.dev_ui_read_run(p_user_id uuid, p_run_id uuid)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_complete_checkout(p_user_id uuid, p_order_id uuid, p_outcome text)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_create_checkout(p_user_id uuid, p_preflight_id uuid, p_plan_id text, p_disclosure_accepted boolean)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_create_preflight(p_user_id uuid, p_target_instagram_id text, p_idempotency_key text, p_fixture_scenario text)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_list_admin_orders(p_limit integer)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_list_owner_orders(p_user_id uuid, p_limit integer)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_read_admin_order(p_order_id uuid)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_read_checkout(p_user_id uuid, p_order_id uuid)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_read_preflight(p_user_id uuid, p_preflight_id uuid)"
+    },
+    {
+      "kind": "function_shape",
+      "name": "public.dev_ui_read_run(p_user_id uuid, p_run_id uuid)"
+    }
+  ],
+  "expectedDevAdditionsOnly": true,
+  "existingBaselineUnchanged": true
+}

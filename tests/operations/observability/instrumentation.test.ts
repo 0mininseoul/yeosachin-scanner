@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const observabilityMocks = vi.hoisted(() => ({
     captureRequestError: vi.fn(),
@@ -22,8 +22,19 @@ import { sanitizeOperationalEvent, type OperationalEvent } from '../../../lib/ob
 beforeEach(() => {
     vi.resetAllMocks();
 });
+afterEach(() => vi.unstubAllEnvs());
 
 describe('onRequestError', () => {
+    it('does not send request error telemetry in Dev', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        await onRequestError(new Error('synthetic failure'), { method: 'GET', path: '/analyze', headers: {} }, {
+            routerKind: 'App Router', routePath: '/analyze', routeType: 'render', revalidateReason: undefined,
+        });
+        expect(observabilityMocks.captureRequestError).not.toHaveBeenCalled();
+        expect(observabilityMocks.emit).not.toHaveBeenCalled();
+        expect(observabilityMocks.flush).not.toHaveBeenCalled();
+    });
+
     it('suppresses only nested EPIPE for the GET image-proxy request boundary', async () => {
         const imageProxyEpipe = Object.assign(new Error('response write failed'), {
             cause: { code: 'EPIPE' },

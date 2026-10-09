@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
+import { handleDevUiResultRead, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 import {
     RESULT_PAGE_SIZE_DEFAULT,
@@ -198,6 +199,7 @@ export async function GET(
     request: Request,
     routeContext: { params: Promise<{ requestId: string }> },
 ) {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiResultRead(request, (await routeContext.params).requestId);
     return observeRoute(
         request,
         '/api/analysis/v2/result/[requestId]',

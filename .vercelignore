@@ -1,0 +1,18 @@
+# Manual candidate uploads must exclude credentials and local browser/runtime state.
+.git/
+.env*
+.secrets/
+.playwright-mcp/
+.playwright-cli/
+.gstack/
+.worktrees/
+.vercel/
+node_modules/
+.next/
+coverage/
+output/
+supabase/.temp/
+.analysis-v2-replay-*.enc
+.analysis-v2-replay-*.key
+*.tsbuildinfo
+*.pem

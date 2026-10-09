@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import registry from '@/config/dev-ui-deployment.json';
 
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock('@/lib/services/demo-analysis/archive', () => ({
 import MyPage from '@/app/mypage/page';
 
 const USER_ID = '123e4567-e89b-42d3-a456-426614174000';
+afterEach(() => vi.unstubAllEnvs());
 
 describe('mypage owner admission', () => {
     beforeEach(() => {
@@ -83,5 +85,14 @@ describe('mypage owner admission', () => {
             expect.objectContaining({ id: USER_ID }),
         );
         expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('renders the Dev archive without production admission or history reads', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev'); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', registry.deployments[0].vercelProjectId);
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${registry.deployments[0].supabaseProjectRef}.supabase.co`);
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', USER_ID);
+        const result = await MyPage();
+        expect(result).toBeTruthy(); expect(mocks.rpc).not.toHaveBeenCalled(); expect(mocks.requireActiveAccountSession).not.toHaveBeenCalled();
     });
 });

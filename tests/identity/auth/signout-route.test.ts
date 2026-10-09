@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/config/dev-ui-deployment.json', () => ({
+    default: { version: 1, deployments: [{ vercelProjectId: 'prj_dev_ui_test', supabaseProjectRef: 'devuitestproject' }] },
+}));
 
 import { POST } from '@/app/api/auth/signout/route';
 
@@ -19,6 +22,25 @@ describe('server signout compatibility route', () => {
 
     afterEach(() => {
         vi.restoreAllMocks();
+        vi.unstubAllEnvs();
+    });
+
+    it('keeps signout in the verified Dev environment', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_dev_ui_test');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://devuitestproject.supabase.co');
+        const response = await POST(new Request('https://dev.yeosachin.com/api/auth/signout', { method: 'POST' }));
+        expect(response.status).toBe(302);
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/');
+    });
+
+    it('rejects a Dev mismatch before creating the auth client', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_production_test');
+        const response = await POST(new Request('https://dev.yeosachin.com/api/auth/signout', { method: 'POST' }));
+        expect(response.status).toBe(503);
+        expect(mocks.createClient).not.toHaveBeenCalled();
     });
 
     it('redirects after Supabase confirms server sign out', async () => {

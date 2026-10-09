@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import registry from '@/config/dev-ui-deployment.json';
 
 const boundary = vi.hoisted(() => ({
     createClient: vi.fn(),
@@ -98,6 +99,23 @@ afterEach(async () => {
 });
 
 describe('operator console page authentication boundary', () => {
+    it('requires a matching actual Dev identity before opening any Auth client', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev'); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_wrong');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${registry.deployments[0].supabaseProjectRef}.supabase.co`);
+        await unavailablePage(); expect(boundary.createClient).not.toHaveBeenCalled();
+    });
+
+    it('renders only the mock read pane for a Dev admin and denies a non-tester operator', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev'); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.stubEnv('VERCEL_PROJECT_ID', registry.deployments[0].vercelProjectId);
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${registry.deployments[0].supabaseProjectRef}.supabase.co`);
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', operatorId); vi.stubEnv('DEV_UI_ADMIN_USER_IDS', operatorId);
+        const html = renderToStaticMarkup(await page());
+        expect(html).toContain('모의 주문 감사'); expect(html).not.toContain('Apify');
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', otherUserId);
+        expect(renderToStaticMarkup(await page())).toContain('접근 권한이 없습니다');
+    });
     it('offers Kakao login in the console and returns to the console after OAuth', async () => {
         boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
 

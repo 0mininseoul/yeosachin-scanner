@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
+import { handleDevUiAdminOrder, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     classifyOperatorAuthError,
     getAnalysisAuditOperatorDecision,
@@ -26,6 +27,7 @@ export async function GET(
     request: Request,
     context: { params: Promise<{ requestId: string }> },
 ) {
+    if (shouldHandleDevUiRequest(request)) return handleDevUiAdminOrder(request, (await context.params).requestId);
     let supabase: Awaited<ReturnType<typeof createClient>>;
     let user: { id: string } | null = null;
     try {

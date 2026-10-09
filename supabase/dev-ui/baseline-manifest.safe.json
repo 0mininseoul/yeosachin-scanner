@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "capturedOn": "2026-10-09",
+  "source": "canonical main linked production; schema-only pg_dump 17",
+  "baselineSha256": "cf5fe24907a21af7b85e76fd891fd20438afdbb3892d015c1bc2d4856e83a98d",
+  "baselineBytes": 4528724,
+  "sourcePublicTables": 150,
+  "sourcePrivateFunctions": 1,
+  "rowsCopied": 0,
+  "exceptions": [
+    {
+      "kind": "disabled-repair-function",
+      "schema": "public",
+      "name": "publish_incident_gender_review_correction",
+      "sourceBodySha256": "e258d50fca5e4548731bf2816d32850bac75b24ad26843a7599c72128b08b8b7",
+      "reason": "production-only fixed order/request incident repair"
+    },
+    {
+      "kind": "disabled-repair-function",
+      "schema": "public",
+      "name": "publish_incident_reviewed_result_copy",
+      "sourceBodySha256": "7de4b8d6914e69ed91265276863d3880c48e639b80161393c8443ac3eba94d39",
+      "reason": "production-only fixed order/request incident repair"
+    },
+    {
+      "kind": "disabled-repair-function",
+      "schema": "public",
+      "name": "publish_incident_reviewed_result_copy_nfkc",
+      "sourceBodySha256": "915e7f1bbd57f90462d178bd24d244749586e0d8f47298558d8d4261fb16c9fe",
+      "reason": "production-only fixed order/request incident repair"
+    },
+    {
+      "kind": "disabled-repair-function",
+      "schema": "public",
+      "name": "publish_incident_media_reviewed_result_copy",
+      "sourceBodySha256": "07b9bd85c491e0da2c3cc14ae16e7ed6eb558fa7e20540962fe99c1cdcf71c51",
+      "reason": "production-only fixed order/request incident repair"
+    },
+    {
+      "kind": "omitted-auth-trigger",
+      "schema": "auth",
+      "name": "on_kakao_auth_user_created_discord_outbox",
+      "reason": "Dev login must not create production notification outbox"
+    },
+    {
+      "kind": "managed-system-objects",
+      "schemas": [
+        "auth",
+        "storage",
+        "realtime",
+        "vault",
+        "graphql",
+        "graphql_public",
+        "supabase_migrations"
+      ],
+      "reason": "fresh managed definitions retained; no historical partitions, credentials, rows or migration data copied"
+    },
+    {
+      "kind": "preserved-managed-default-acl",
+      "role": "supabase_admin",
+      "schema": "public",
+      "statementsOmitted": 12,
+      "sourceAndFreshDevAclMatch": true,
+      "reason": "postgres is not a member of managed role; retain identical fresh managed default ACL"
+    }
+  ],
+  "aclRestoration": {
+    "neutralizeFreshPostgresPublicDefaultsBeforeCreate": true,
+    "restoreSourceDefaultsAfterObjectAcl": true
+  },
+  "extensions": {
+    "requiredSourceVersions": {
+      "plpgsql": "1.0",
+      "pg_stat_statements": "1.11",
+      "uuid-ossp": "1.1",
+      "pgcrypto": "1.3",
+      "supabase_vault": "0.3.1",
+      "pg_graphql": "1.5.11"
+    },
+    "versionAvailableVerified": true,
+    "verifiedDevVersions": {
+      "plpgsql": "1.0",
+      "pg_stat_statements": "1.11",
+      "uuid-ossp": "1.1",
+      "pgcrypto": "1.3",
+      "supabase_vault": "0.3.1",
+      "pg_graphql": "1.6.2"
+    },
+    "managedVersionExceptions": [
+      {
+        "name": "pg_graphql",
+        "sourceVersion": "1.5.11",
+        "devVersion": "1.6.2",
+        "reason": "retain fresh managed extension; no downgrade or managed-schema overwrite",
+        "applicationGraphqlCalls": 0
+      }
+    ],
+    "preflightObservedMissing": [
+      "pg_graphql"
+    ],
+    "requestedInstallVersion": "1.5.11",
+    "installationObservation": "initially absent; 1.5.11 requested with IF NOT EXISTS; post-apply managed version verified as 1.6.2; no forced downgrade"
+  },
+  "application": {
+    "transaction": true,
+    "emptyPublicTablePrecondition": true,
+    "apiProjectRef": "bgamojfpkxnnumfvkron",
+    "rootProductionLinkUnchanged": true
+  }
+}

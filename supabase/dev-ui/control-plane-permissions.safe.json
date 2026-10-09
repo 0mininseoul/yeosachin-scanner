@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "projectRef": "bgamojfpkxnnumfvkron",
+  "rlsTables": 3,
+  "schemaOwner": "postgres",
+  "privateTables": 3,
+  "wrapperOwners": [
+    "postgres"
+  ],
+  "anonExecutable": 0,
+  "wrapperFunctions": 9,
+  "serviceExecutable": 9,
+  "serviceTableWrites": 0,
+  "authenticatedExecutable": 0
+}

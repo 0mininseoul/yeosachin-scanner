@@ -20,6 +20,7 @@ import { EARLYBIRD_DISCLOSURE_TEXT } from '@/lib/domain/earlybird/catalog';
 import {
     buildEarlybirdCheckoutContinuationUrl,
     isSafeEarlybirdDemoProgressUrl,
+    isSafeDevUiCheckoutUrl,
 } from '@/lib/services/earlybird/checkout-continuation';
 import type { PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 import { earlybirdCheckoutRecoveryRequestSchema } from '../../../lib/services/earlybird/contracts';
@@ -29,6 +30,14 @@ const planCards = [
     { planId: 'standard', selectionState: 'required' },
     { planId: 'plus', selectionState: 'available_upgrade' },
 ] as const;
+
+it('accepts only the exact relative Dev checkout path', () => {
+    const id = '10000000-0000-4000-8000-000000000001';
+    expect(isSafeDevUiCheckoutUrl(`/dev-ui/checkout/${id}`)).toBe(true);
+    for (const path of [`https://dev.yeosachin.com/dev-ui/checkout/${id}`, `//dev.yeosachin.com/dev-ui/checkout/${id}`, `/dev-ui/checkout/${id}?outcome=success`, `/dev-ui/checkout/${id}#x`, `/dev-ui/checkout/%31${id.slice(1)}`, `/dev-ui/checkout/${id}/`, '/dev-ui/checkout/not-an-id']) {
+        expect(isSafeDevUiCheckoutUrl(path)).toBe(false);
+    }
+});
 
 function readyPreflight(
     pricingVersion: string,

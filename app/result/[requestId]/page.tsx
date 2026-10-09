@@ -20,6 +20,7 @@ import {
     type ResultShareContent,
 } from '@/lib/services/kakao-share';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import {
     availablePendingTargetStorage,
     clearPendingAnalysisTargetForTerminalState,
@@ -192,7 +193,9 @@ export default function ResultPage({ params }: PageProps) {
     const [externalProfileLinks, setExternalProfileLinks] = useState(true);
     const [profilePreview, setProfilePreview] = useState<InternalProfilePreview | null>(null);
     const router = useRouter();
-    const requestedPipeline = useSearchParams().get('pipeline');
+    const devPresentation = isDevUiPresentation();
+    const searchParams = useSearchParams();
+    const requestedPipeline = devPresentation ? 'v2' : searchParams.get('pipeline');
 
     useEffect(() => {
         const abortController = new AbortController();
@@ -236,7 +239,7 @@ export default function ResultPage({ params }: PageProps) {
                         let progressStatus: OwnerProgressStatus | null = null;
                         if (response.status === 404) {
                             const progressResponse = await fetch(
-                                `/api/analysis/progress/${encodeURIComponent(requestId)}?limit=1`,
+                                `${devPresentation ? '/api/analysis/v2/progress' : '/api/analysis/progress'}/${encodeURIComponent(requestId)}?limit=1`,
                                 { cache: 'no-store', signal: abortController.signal }
                             );
                             if (progressResponse.ok) {
@@ -295,7 +298,7 @@ export default function ResultPage({ params }: PageProps) {
 
         void fetchResult();
         return () => abortController.abort();
-    }, [requestId, requestedPipeline, resultRetry, router]);
+    }, [devPresentation, requestId, requestedPipeline, resultRetry, router]);
 
     const goToResultPage = async (
         kind: ResultAccountKind,
@@ -445,6 +448,7 @@ export default function ResultPage({ params }: PageProps) {
        revoke followed by a revisit re-mints one. Nothing exposes revoke today,
        and a re-mint issues a *new* token, so an old link stays dead either way. */
     const prepareShare = useCallback(() => {
+        if (devPresentation) return Promise.resolve(null);
         if (sharePrepRef.current) return sharePrepRef.current;
         sharePrepRef.current = (async () => {
             // The SDK download and the token round trip are independent, so they
@@ -481,7 +485,7 @@ export default function ResultPage({ params }: PageProps) {
             return link;
         })();
         return sharePrepRef.current;
-    }, [requestId]);
+    }, [devPresentation, requestId]);
 
     // Only once the report exists: a link to a result that failed to load would
     // be worse than a moment of latency.
@@ -564,6 +568,7 @@ export default function ResultPage({ params }: PageProps) {
     };
 
     const handleDelete = async () => {
+        if (devPresentation) return;
         if (!confirm('정말 이 판독 기록을 삭제하시겠습니까? 복구할 수 없습니다.')) return;
         setDeleting(true);
         try {
@@ -679,7 +684,7 @@ export default function ResultPage({ params }: PageProps) {
                     "share this result". */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
-                    <ResultActions
+                    {!devPresentation && <ResultActions
                         onKakaoShare={handleKakaoShare}
                         onPrepare={prepareShare}
                         onShare={(channel) => {
@@ -691,7 +696,7 @@ export default function ResultPage({ params }: PageProps) {
                         kakaoBusy={kakaoShareLoading}
                         kakaoAvailable={kakaoJavascriptKey() !== null}
                         shareUrl={shareTarget?.url ?? null}
-                    />
+                    />}
                 </div>
                 {/* result subject header */}
                 {/* Profile lockup: the page needs a subject before it states a
@@ -962,9 +967,9 @@ export default function ResultPage({ params }: PageProps) {
                     AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.
                 </p>
 
-                <ResultFeedback requestId={requestId} />
+                {!devPresentation && <ResultFeedback requestId={requestId} />}
 
-                <div className="mt-8 border-t border-line pt-6 text-center">
+                {!devPresentation && <div className="mt-8 border-t border-line pt-6 text-center">
                     <button
                         type="button"
                         onClick={handleDelete}
@@ -980,7 +985,7 @@ export default function ResultPage({ params }: PageProps) {
                         )}
                         {deleting ? '삭제 중…' : '이 판독 기록 삭제'}
                     </button>
-                </div>
+                </div>}
             </main>
         </div>
     );

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "baselineSha256": "cf5fe24907a21af7b85e76fd891fd20438afdbb3892d015c1bc2d4856e83a98d",
+  "sourceObjects": 2935,
+  "devObjects": 2934,
+  "strictMatched": 2793,
+  "normalizedMatched": 136,
+  "explicitExceptions": {
+    "disabledProductionRepairFunctions": 4,
+    "omittedProductionAuthNotificationTrigger": 1,
+    "retainedManagedGraphqlVersion": 1
+  },
+  "securityAndShapeStrictMatched": 3775,
+  "securityQuerySha256": "cfb6fdecade5de08e0316d1632bedd6076ccf848e208ab74fd8fa32a4121b6ee",
+  "normalizedInputSha256": "c6abf2835677ce33ad9f6bb4b51044d7d91a9b1e72e671143354666a0fc8fba1",
+  "rowsCopied": 0,
+  "unresolved": 0,
+  "decision": "APPROVED_DEV_BASELINE_WITH_EXPLICIT_ENVIRONMENT_EXCEPTIONS",
+  "decisionScope": "user-approved fresh managed schema policy; user-defined schema and security parity; no production DDL",
+  "independentReviews": {
+    "staticBaseline": "PASS",
+    "reparseVerifier": "root PASS",
+    "integratedMetadata": "PASS"
+  }
+}

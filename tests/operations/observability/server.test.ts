@@ -94,6 +94,7 @@ beforeEach(() => {
 
 afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
     for (const name of AXIOM_ENV_NAMES) {
         const original = ORIGINAL_AXIOM_ENV[name];
         if (original === undefined) delete process.env[name];
@@ -346,6 +347,20 @@ describe('emitBatchOutcome', () => {
 });
 
 describe('operationalLogger runtime transport', () => {
+    it('never initializes or flushes Axiom for a Dev deployment despite configured runtime credentials', async () => {
+        vi.resetModules();
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        process.env.AXIOM_TOKEN = 'test-token';
+        process.env.AXIOM_DATASET = 'test-dataset';
+        process.env.AXIOM_ORG_ID = 'test-org';
+        const { operationalLogger, flushOperationalLogs } = await import('../../../lib/observability/server');
+        operationalLogger.emit({ event: 'analysis.started', severity: 'info', fields: {} });
+        await flushOperationalLogs();
+        expect(axiomMocks.axiomConstructor).not.toHaveBeenCalled();
+        expect(axiomMocks.loggerLog).not.toHaveBeenCalled();
+        expect(axiomMocks.loggerFlush).not.toHaveBeenCalled();
+    });
+
     it('writes the same sanitized lifecycle event to Vercel runtime logs without Axiom', async () => {
         process.env.VERCEL = '1';
         process.env.VERCEL_ENV = 'production';
