@@ -53,3 +53,7 @@ Root 전달 기준 PR #602는 사용자가 main `cdf3c4ed10c3f9a793ca7758eeb1d35
 기존 schema 보안 metadata는 유지된다. 현재 advisor가 보고한 기존 정의의 WARN 26개는 이번 Dev control의 새 경고가 아니며 전체 보안 PASS로 표현하지 않는다. 과거 6대6 migration 이력 차이, 원본 보존 자료와 보호 파일은 유지한다. `history repair`, `--include-all`, Production reset은 실행하지 않는다.
 
 Free Supabase는 휴면으로 pause될 수 있다. 재개 때 Dev identity·Auth·배포/도메인 상태와 필요한 UI 검사를 새로 확인한다. 무료 quota 초과 또는 유료 전환은 별도 비용 승인 대상이다. 실제 계정 분석은 사용자가 Production에서 수행하며 Vertex 실측은 별도 예산·과금 상한 검증 후 진행한다.
+
+## 진행 UI 후보 갱신 · 2026-10-09
+
+[진행 UI 구현 기록](2026-10-09-progress-implementation.ko.md)의 후보309e1813을 Dev에 배포했다. native deployment `dpl_EGt3uwR6Mu4nETm2ky8MQkkLNDUg`는 READY·정확한 Dev project/owner·도메인 연결·cron 비활성/정의0을 확인했다. 기존 a299 배포 기록은 이전 검증 이력이다. 1안 큰 원형·기존 이미지 슬라이딩 유지, 조회 오류 개선과 보관함 이동을 실제 Aside에서 검증했다. 모바일은 사용자 승인 격리 실제 컴포넌트 검증이며 Dev 인증/서버 모바일 E2E를 뜻하지 않는다. 결과 UI는 유지한다. [PR #605](https://github.com/0mininseoul/yeosachin-scanner/pull/605)의 exact-head 검사와 병합 기록으로 후보 승격을 확인한다.

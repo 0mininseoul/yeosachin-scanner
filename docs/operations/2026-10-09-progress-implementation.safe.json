@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "verifiedOn": "2026-10-09",
+  "candidateSha": "309e181313f3408e964c78de49af918c81441247",
+  "candidateTree": "ed872d064f0660606bc8585f67784d89c5839acf",
+  "pr": 605,
+  "origin": "https://dev.yeosachin.com",
+  "deployment": {
+    "id": "dpl_EGt3uwR6Mu4nETm2ky8MQkkLNDUg",
+    "state": "READY",
+    "projectIdentityMatches": true,
+    "devDomainAttached": true,
+    "devConfigOverlaySha": "bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358",
+    "sourceCheckoutUntouched": true,
+    "temporaryUploadCleaned": true,
+    "cronDisabled": true,
+    "cronDefinitionCount": 0,
+    "automaticGitDeployment": false
+  },
+  "sourceEquivalence": {
+    "scheme": "sha256(sorted path NUL sha256(blob) NUL), tracked excluding docs/tests/.github and *.md; effective replaces vercel.json with vercel.dev.json",
+    "fileCount": 1373,
+    "sourceFingerprint": "1dcd814238733794bc817e05ceb12fa66daf30e2fa4ed8dc415b79772ea552e0",
+    "effectiveDevFingerprint": "6a8b0c2bb2c56b4e6e504c35f4157b025ccd4c855cef4f422cd38bbf5073577e"
+  },
+  "tests": {
+    "files": 9,
+    "passed": 140,
+    "typecheck": true,
+    "eslint": true,
+    "diffCheck": true
+  },
+  "reviews": {
+    "spec": "PASS 309e1813 by dev_schema_bootstrap",
+    "quality": "PASS 309e1813 by non-implementing dev_schema_bootstrap",
+    "visual": "passed",
+    "implementer": "progress_ux_implementation",
+    "mobileReviewer": "progress_mobile_validation",
+    "integrator": "root"
+  },
+  "aside": {
+    "aside": true,
+    "viewport": {
+      "width": 1440,
+      "height": 900,
+      "dpr": 2
+    },
+    "completeFixture": true,
+    "failureFixture": true,
+    "firstParallelLast": true,
+    "progressH1": 1,
+    "progressbar": 1,
+    "horizontalOverflow": false,
+    "sameRunReload": true,
+    "transientSeenDuringReload": true,
+    "transientHttpCaptured": false,
+    "transientAutoRecovered": true,
+    "completedProgressHttp": 200,
+    "completedRequestMatches": true,
+    "autoResult": true,
+    "archiveEnter": true,
+    "archiveReturnSameRun": true,
+    "failedEnterToAnalyze": true,
+    "missingProgressHttp": 404,
+    "missingEnterToAnalyze": true,
+    "resourceIdentifiersRecorded": false,
+    "asideSessionClosed": true,
+    "mobileIsolated": true,
+    "mobileRealDevAuth": false
+  },
+  "mobile": {
+    "type": "isolated actual components and synthetic responses",
+    "viewports": [
+      {
+        "width": 390,
+        "height": 844,
+        "dpr": 1
+      },
+      {
+        "width": 320,
+        "height": 844,
+        "dpr": 1
+      }
+    ],
+    "horizontalOverflow": false,
+    "cta390FullyVisible": true,
+    "cta320KeyboardScrollAndEnter": true,
+    "slidingVerified": true,
+    "reducedMotionVerified": true,
+    "initialAndIntermittent503AndNetworkRecovery": true,
+    "recoveryUsesExistingGet": true,
+    "unexpectedApiEndpoints": 0,
+    "unexpectedConsoleErrors": 0,
+    "expectedInjectedConsoleErrors": 10,
+    "actualDevAuthenticationOrServer": false
+  },
+  "boundaries": {
+    "resultUiUnchanged": true,
+    "landingCopyUnchanged": true,
+    "progressCalculationUnchanged": true,
+    "progressFacesUnchanged": true,
+    "liveApifyOrVertexAnalysisExecuted": false,
+    "realCardPaymentExecuted": false,
+    "productionDbOrSettingsChanged": false,
+    "secretsOrUserIdentifiersRecorded": false
+  },
+  "limitations": [
+    "Actual Dev reload transient failure recovered automatically; failing response HTTP/cause not captured, not labeled a live injected503 test.",
+    "Isolated mobile uses Next navigation/image and auth/telemetry doubles; does not validate actual Dev mobile auth or navigation destination rendering.",
+    "No physical mobile, iOS Safari, actual screen-reader or real provider/payment/time verification.",
+    "No full egress or billing audit."
+  ]
+}

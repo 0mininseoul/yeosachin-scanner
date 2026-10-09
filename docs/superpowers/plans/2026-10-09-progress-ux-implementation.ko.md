@@ -19,30 +19,34 @@
 
 ## 1. 진행 표현과 오류 구현
 
-- [ ] 전체 진행률 이름/현재값/0~100 범위를 제공하고 기존 계산을 유지한다.
-- [ ] 큰 원형, 의미 있는 h1, 기존 슬라이딩, 본문 14~16px, 세 작업의 완료/진행 중/대기를 적용한다. 병렬 작업과 Dev 배너는 유지한다.
-- [ ] 현재 순번과 대상 개수가 모두 있을 때만 `현재 n번째 / 대상 N개`를 표시한다. track n/100이나 중복 %는 제거한다.
-- [ ] Dev는 설정된 약 45초 합성 안내, Production은 변동 가능한 처리 시간 안내를 사용한다. 실측 ETA를 만들지 않는다.
-- [ ] backgroundProcessing 조건을 보존하고 지원되는 경우 /mypage 보관함 CTA를 제공한다.
-- [ ] 종료 실패/확정404는 새 분석 시작하기, 일시 조회 장애는 다시 조회를 제공한다. 기존 snapshot은 일시 장애 동안 유지하며 장애 안내를 숨기지 않는다.
-- [ ] 조회 중 중복 버튼 입력·요청 전환·낮은 revision·복구·권한 오류를 고려하고 원시 오류를 표시하지 않는다.
+- [x] 전체 진행률 이름/현재값/0~100 범위를 제공하고 기존 계산을 유지한다.
+- [x] 큰 원형, 의미 있는 h1, 기존 슬라이딩, 본문 14~16px, 세 작업의 완료/진행 중/대기를 적용한다. 병렬 작업과 Dev 배너는 유지한다.
+- [x] 현재 순번과 대상 개수가 모두 있을 때만 `현재 n번째 / 대상 N개`를 표시한다. track n/100이나 중복 %는 제거한다.
+- [x] Dev는 설정된 약 45초 합성 안내, Production은 변동 가능한 처리 시간 안내를 사용한다. 실측 ETA를 만들지 않는다.
+- [x] backgroundProcessing 조건을 보존하고 지원되는 경우 /mypage 보관함 CTA를 제공한다.
+- [x] 종료 실패/확정404는 새 분석 시작하기, 일시 조회 장애는 다시 조회를 제공한다. 기존 snapshot은 일시 장애 동안 유지하며 장애 안내를 숨기지 않는다.
+- [x] 조회 중 중복 버튼 입력·요청 전환·낮은 revision·복구·권한 오류를 고려하고 원시 오류를 표시하지 않는다.
 
 ## 2. 관련 검사와 독립 검토
 
-- [ ] 기존 owner-view-presentation, v2-progress-display, request-contract, ProgressFaces, useAnalysisProgress 및 Dev client-flow 검사를 우선 재사용한다.
-- [ ] 의미 있는 회귀: 초기/중간503·네트워크 오류→GET 재조회→복구, 확정404, 요청 전환, Dev/Production 시간, 순번 의미와 CTA. 새 분석/provider 호출이 없는지 확인한다.
-- [ ] 변경 파일 eslint와 `npx tsc --noEmit --pretty false`를 수행한다.
-- [ ] 독립 명세 리뷰 후 품질 리뷰를 받고 P1/P2를 해결한다. 각 agent는 변경 파일·검사·blocker를 보고한다.
+- [x] 기존 owner-view-presentation, v2-progress-display, request-contract, ProgressFaces, useAnalysisProgress 및 Dev client-flow 검사를 우선 재사용한다.
+- [x] 의미 있는 회귀: 초기/중간503·네트워크 오류→GET 재조회→복구, 확정404, 요청 전환, Dev/Production 시간, 순번 의미와 CTA. 새 분석/provider 호출이 없는지 확인한다.
+- [x] 변경 파일 eslint와 `npx tsc --noEmit --pretty false`를 수행한다.
+- [x] 독립 명세 리뷰 후 품질 리뷰를 받고 P1/P2를 해결한다. 각 agent는 변경 파일·검사·blocker를 보고한다.
 
 ## 3. Dev 실제 검수와 승격
 
-- [ ] clean 후보 commit으로 PR을 생성한다. 기존 승인된 tracked-only 임시 archive·Dev vercel.json overlay 절차로 정확한 Dev 프로젝트에 배포한다.
-- [ ] native READY·후보 identity·cron 비활성/정의0과 source/effective runtime fingerprint를 기록한다.
-- [ ] Aside 실제 Dev 데스크톱 및 승인된 격리 Playwright의 측정한 모바일 viewport로 초기/중간/병렬/마지막·슬라이딩·재방문·보관함·완료 자동 이동·실패·미존재·키보드 CTA를 확인한다.
-- [ ] 503/네트워크 주입은 통제된 검사 증거와 실제 브라우저 증거를 구분한다. 전체 접근성·실제 AI/provider 품질·실제 소요시간을 주장하지 않는다.
-- [ ] 선택 시안과 실제 캡처를 동일 입력에서 비교하고 `design-qa.md`에 크기·밀도·의도된 슬라이딩 차이·판정·남은 한계를 남긴다.
-- [ ] exact-head PR 검사·독립 리뷰·Dev 검수를 통과한 뒤 PR 병합, root main fast-forward, main/origin/main 일치와 Production native 배포를 확인한다.
+- [x] clean 후보 commit으로 PR을 생성한다. 기존 승인된 tracked-only 임시 archive·Dev vercel.json overlay 절차로 정확한 Dev 프로젝트에 배포한다.
+- [x] native READY·후보 identity·cron 비활성/정의0과 source/effective runtime fingerprint를 기록한다.
+- [x] Aside 실제 Dev 데스크톱 및 승인된 격리 Playwright의 측정한 모바일 viewport로 초기/중간/병렬/마지막·슬라이딩·재방문·보관함·완료 자동 이동·실패·미존재·키보드 CTA를 확인한다.
+- [x] 503/네트워크 주입은 통제된 검사 증거와 실제 브라우저 증거를 구분한다. 전체 접근성·실제 AI/provider 품질·실제 소요시간을 주장하지 않는다.
+- [x] 선택 시안과 실제 캡처를 동일 입력에서 비교하고 `design-qa.md`에 크기·밀도·의도된 슬라이딩 차이·판정·남은 한계를 남긴다.
+- [ ] 최종 문서 포함 exact-head PR 검사 후 PR 병합, root main fast-forward, main/origin/main 일치와 Production native 배포를 확인한다. 이 체크박스는 문서 commit 시점의 관찰이며 영구 blocker가 아니다. 실제 완료는 [PR #605](https://github.com/0mininseoul/yeosachin-scanner/pull/605)와 Root 종료 검증에서 확인한다.
 
 ## 유지하는 경계
 
 Apify·AI·실제 카드 과금은 실행하지 않는다. 결과·랜딩 카피·DB·migration·Production 운영 설정은 바꾸지 않는다. 비밀·사용자 식별자·원시 행을 기록하지 않는다. 보존 경로와 과거 브랜치/stash를 유지한다. 실물 기기·스크린리더·실제 장기 지연·사용자 계정 분석은 합성 UI 검수와 별개다.
+
+## 검증 결과
+
+[구현·검증 보고서](../../operations/2026-10-09-progress-implementation.ko.md)에 코드309e1813·140검사·독립 명세/품질·새 Dev native READY·Aside 실제 흐름·승인된 격리 모바일·오류 주입의 증거와 한계를 기록했다.
