@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, Suspense } from 'react';
+import ProgressPage from '@/app/progress/[requestId]/page';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAnalysisProgress } from '../../../hooks/useAnalysisProgress';
@@ -10,7 +11,11 @@ const REQUEST_B = '223e4567-e89b-42d3-a456-426614174000';
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     captureExceptionSafely: vi.fn(),
+    push: vi.fn(),
 }));
+
+vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock('next/link', () => ({ default: ({ href, children, ...props }: React.PropsWithChildren<{ href: string }>) => <a href={href} {...props}>{children}</a> }));
 
 vi.mock('@/lib/supabase/client', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/observability/sentry-capture', () => ({
@@ -97,12 +102,15 @@ function Harness({
     onRefetch?: (refetch: () => Promise<void>) => void;
     onRender?: () => void;
 }) {
-    const { data, loading, refetch } = useAnalysisProgress(requestId);
+    const { data, loading, refetch, error, errorKind, refreshing } = useAnalysisProgress(requestId);
     onRefetch?.(refetch);
     onRender?.();
     return <>
         <output data-testid="progress">{loading ? 'loading' : `${data?.status}:${data?.progress}`}</output>
         <output data-testid="history">{data?.events.length ?? -1}</output>
+        <output data-testid="error-kind">{errorKind}</output>
+        <output data-testid="error">{error}</output>
+        <output data-testid="refreshing">{String(refreshing)}</output>
     </>;
 }
 
@@ -209,6 +217,245 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
     function displayed(): string {
         return container.querySelector('[data-testid="progress"]')?.textContent ?? '';
     }
+
+    function errorKind(): string {
+        return container.querySelector('[data-testid="error-kind"]')?.textContent ?? '';
+    }
+
+    async function renderPage(): Promise<void> {
+        const params = Promise.resolve({ requestId: REQUEST_A });
+        await act(async () => {
+            root.render(<Suspense fallback="loading"><ProgressPage params={params} /></Suspense>);
+            for (let count = 0; count < 10; count += 1) await Promise.resolve();
+        });
+    }
+
+    async function clickPage(label: string): Promise<void> {
+        const button = [...container.querySelectorAll('button')].find(item => item.textContent === label);
+        expect(button).toBeDefined();
+        await act(async () => { button!.click(); for (let count = 0; count < 10; count += 1) await Promise.resolve(); });
+    }
+
+    it.each(['gateway', 'network'] as const)('recovers an initial %s error with a shared GET retry and no new execution', async failure => {
+        const fetchSpy = vi.mocked(fetch);
+        if (failure === 'gateway') fetchSpy.mockResolvedValueOnce(new Response('temporarily unavailable', { status: 503 }));
+        else fetchSpy.mockRejectedValueOnce(new TypeError('raw network details'));
+        await render();
+        expect(errorKind()).toBe('transient');
+        expect(displayed()).not.toContain('loading');
+        expect(container.textContent).not.toContain('raw network details');
+        let resolveRead!: (value: Response) => void;
+        fetchSpy.mockImplementationOnce(() => new Promise(resolve => { resolveRead = resolve; }));
+        const callsBeforeRetry = fetchSpy.mock.calls.length;
+        let first!: Promise<void>;
+        await act(async () => { first = refetch!(); expect(refetch!()).toBe(first); });
+        expect(container.querySelector('[data-testid="refreshing"]')?.textContent).toBe('true');
+        await act(async () => {
+            resolveRead(response({ code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2', progressUrl: `/api/analysis/progress/${REQUEST_A}` }, 409));
+            await first;
+        });
+        expect(errorKind()).toBe('');
+        expect(displayed()).toContain('processing:');
+        expect(container.querySelector('[data-testid="refreshing"]')?.textContent).toBe('false');
+        expect(fetchSpy.mock.calls.length - callsBeforeRetry).toBe(2);
+        expect(fetchSpy.mock.calls.every(([url, init]) => String(url).startsWith('/api/analysis/') && (init?.method ?? 'GET') === 'GET')).toBe(true);
+    });
+
+    it.each([1, 2])('clears a later transient notice after revision %i without regressing retained progress', async revision => {
+        current.set(REQUEST_A, snapshot(REQUEST_A, { revision: 2, progressBp: 1200, lastEventSeq: 1 }));
+        await render();
+        const before = displayed();
+        vi.mocked(fetch).mockRejectedValueOnce(new TypeError('network disconnected'));
+        await act(async () => { await refetch!(); });
+        expect(errorKind()).toBe('transient');
+        expect(displayed()).toBe(before);
+        current.set(REQUEST_A, snapshot(REQUEST_A, { revision, progressBp: revision === 1 ? 0 : 1200 }));
+        await act(async () => { await refetch!(); });
+        expect(errorKind()).toBe('');
+        expect(displayed()).toBe(before);
+        expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('1');
+    });
+
+    it.each([[404, 'not_found'], [401, 'unauthorized'], [403, 'forbidden']] as const)('clears owner data on HTTP %i and stops automatic retries', async (status, kind) => {
+        await render();
+        vi.mocked(fetch).mockResolvedValueOnce(new Response('private raw body', { status }));
+        await act(async () => { await refetch!(); });
+        expect(errorKind()).toBe(kind);
+        expect(displayed()).toBe('undefined:undefined');
+        expect(container.textContent).not.toContain('private raw body');
+        const callCount = vi.mocked(fetch).mock.calls.length;
+        await act(async () => { vi.advanceTimersByTime(10_000); document.dispatchEvent(new Event('visibilitychange')); });
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(callCount);
+    });
+
+    it('ignores a late old response and an old retry callback after switching requests', async () => {
+        await render();
+        const oldRefetch = refetch!;
+        let resolveRead!: (value: Response) => void;
+        vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { resolveRead = resolve; }));
+        let pending!: Promise<void>;
+        await act(async () => { pending = oldRefetch(); });
+        await render(REQUEST_B);
+        const before = displayed();
+        const calls = vi.mocked(fetch).mock.calls.length;
+        await act(async () => {
+            resolveRead(response({ schemaVersion: 1, snapshot: snapshot(REQUEST_A, { revision: 999, status: 'failed' }), events: [] }));
+            await pending;
+            await oldRefetch();
+        });
+        expect(displayed()).toBe(before);
+        expect(errorKind()).toBe('');
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(calls);
+        await act(async () => { await refetch!(); });
+        expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).toContain(REQUEST_B);
+    });
+
+    it('ignores stale route discovery after its JSON body resolves for a previous request', async () => {
+        let resolveBody!: (value: unknown) => void;
+        vi.mocked(fetch).mockResolvedValueOnce({
+            ok: false, status: 409, headers: new Headers(),
+            json: () => new Promise(resolve => { resolveBody = resolve; }),
+        } as Response);
+        await render();
+        expect(displayed()).toBe('loading');
+        await render(REQUEST_B);
+        const calls = vi.mocked(fetch).mock.calls.length;
+        await act(async () => {
+            resolveBody({ code: 'V2_ROUTE_REQUIRED', pipelineVersion: 'v2', progressUrl: `/api/analysis/progress/${REQUEST_A}` });
+            for (let count = 0; count < 5; count += 1) await Promise.resolve();
+        });
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(calls);
+        await act(async () => { await refetch!(); });
+        expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).toContain(REQUEST_B);
+        expect(displayed()).toContain('processing:');
+    });
+
+    it('rejects a snapshot for a different request without publishing its owner data', async () => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        vi.mocked(fetch).mockResolvedValueOnce(response({ schemaVersion: 1, snapshot: snapshot(REQUEST_B), events: [] }));
+        await render();
+        expect(errorKind()).toBe('transient');
+        expect(displayed()).toBe('undefined:undefined');
+    });
+
+    it('presents parallel work, accessible overall progress and explicit profile ordinal without track counts', async () => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        const base = snapshot(REQUEST_A, { progressBp: 2500, lastEventSeq: 1 });
+        current.set(REQUEST_A, { ...base, tracks: {
+            ...base.tracks,
+            relationshipAi: { state: 'running', stageCode: 'PROFILE_SCREENING', done: 25, total: 100, progressBp: 2500 },
+            interactions: { state: 'running', stageCode: 'INTERACTIONS_RUNNING', done: 50, total: 100, progressBp: 5000 },
+        } });
+        await renderPage();
+        const meter = container.querySelector('[role="progressbar"]');
+        expect(meter?.getAttribute('aria-label')).toBe('전체 진행률');
+        expect(meter?.getAttribute('aria-valuenow')).toBe('25');
+        expect(meter?.getAttribute('aria-valuemin')).toBe('0');
+        expect(meter?.getAttribute('aria-valuemax')).toBe('100');
+        expect(container.querySelector('h1')?.textContent).toBe('맞팔 계정을 판독하고 있습니다.');
+        const rows = [...container.querySelectorAll('li')].map(row => row.textContent);
+        expect(rows).toEqual(['맞팔·AI 판독진행 중', '위험 단서 수집진행 중', '위험도·총평 정리대기']);
+        expect(container.textContent).toContain('현재 10번째 / 대상 30개');
+        expect(container.textContent).not.toMatch(/25 \/ 100|50%|50 \/ 100/);
+        expect(container.textContent).toContain('테스트 분석은 약 45초 동안 진행돼요');
+        expect(container.querySelector('a[href="/mypage"]')?.textContent).toContain('보관함으로 이동');
+        expect(mocks.push).not.toHaveBeenCalled();
+        expect(vi.mocked(fetch).mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    });
+
+    it('keeps production demo reads on variable timing and hides partial profile counts', async () => {
+        current.set(REQUEST_A, snapshot(REQUEST_A, { lastEventSeq: 1, activeProfile: { maskedUsername: 'a***', imageUrl: null, currentOrdinal: 10 } }));
+        const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
+        vi.mocked(fetch).mockImplementation(async (...args) => {
+            const result = await defaultFetch(...args);
+            result.headers.set('x-analytics-eligible', '0');
+            return result;
+        });
+        await renderPage();
+        expect(container.textContent).toContain('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
+        expect(container.textContent).not.toContain('45초');
+        expect(container.textContent).not.toContain('현재 10번째');
+        expect(container.textContent).not.toContain('대상 30개');
+
+    });
+
+    it('keeps the page open for client-driven work without an archive exit CTA', async () => {
+        vi.mocked(fetch).mockImplementation(async (url) => {
+            if (url === '/api/analysis/step') return new Promise<Response>(() => undefined);
+            return response({ requestId: REQUEST_A, pipelineVersion: 'v1', status: 'processing', progress: 25,
+                progressStep: '판독 중', errorMessage: null, backgroundProcessing: false });
+        });
+        await renderPage();
+        expect(container.querySelector('a[href="/mypage"]')).toBeNull();
+        expect(container.textContent).toContain('이 페이지를 닫지 마세요');
+    });
+
+    it('keeps the progress view visible on later 503 and disables its GET-only retry while in flight', async () => {
+        await renderPage();
+        const heading = container.querySelector('h1')?.textContent;
+        vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 503 }));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        expect(container.querySelector('h1')?.textContent).toBe(heading);
+        expect(container.textContent).toContain('마지막으로 확인한 진행 상황');
+        let resolveRead!: (value: Response) => void;
+        vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { resolveRead = resolve; }));
+        await clickPage('다시 조회');
+        const button = [...container.querySelectorAll('button')].find(item => item.textContent === '조회 중…');
+        expect(button?.disabled).toBe(true);
+        const calls = vi.mocked(fetch).mock.calls.length;
+        await act(async () => { button!.click(); });
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(calls);
+        await act(async () => { resolveRead(response({ schemaVersion: 1, snapshot: current.get(REQUEST_A), events: [] })); });
+        expect(container.textContent).not.toContain('마지막으로 확인한 진행 상황');
+        expect(mocks.push).not.toHaveBeenCalled();
+        expect(vi.mocked(fetch).mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    });
+
+    it('continues the existing run on revisit and navigates to its result only after completion', async () => {
+        current.set(REQUEST_A, snapshot(REQUEST_A, { progressBp: 9200, lastEventSeq: 1, activeProfile: null }));
+        await renderPage();
+        expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('92');
+        expect(mocks.push).not.toHaveBeenCalled();
+        await act(async () => { root.render(null); });
+        await renderPage();
+        expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('92');
+        current.set(REQUEST_A, snapshot(REQUEST_A, {
+            revision: 2, status: 'completed', progressBp: 10000, lastEventSeq: 1, activeProfile: null,
+            tracks: {
+                relationshipAi: { state: 'completed', stageCode: 'RELATIONSHIP_AI_COMPLETE', done: 1, total: 1, progressBp: 10000 },
+                interactions: { state: 'completed', stageCode: 'INTERACTIONS_COMPLETE', done: 1, total: 1, progressBp: 10000 },
+                finalization: { state: 'completed', stageCode: 'FINALIZATION_COMPLETE', done: 1, total: 1, progressBp: 10000 },
+            },
+        }));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+        expect(container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')).toBe('100');
+        expect([...container.querySelectorAll('li')].every(row => row.textContent?.endsWith('완료'))).toBe(true);
+        expect(mocks.push).toHaveBeenCalledWith(`/result/${REQUEST_A}?pipeline=v2`);
+        expect(vi.mocked(fetch).mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    });
+
+    it.each(['failed', 'missing'] as const)('offers a new analysis for %s instead of retrying the run', async state => {
+        if (state === 'failed') current.set(REQUEST_A, snapshot(REQUEST_A, { status: 'failed', activeProfile: null, lastEventSeq: 1 }));
+        else vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 404 }));
+        await renderPage();
+        expect(container.querySelector('a[href="/mypage"]')).toBeNull();
+        expect(container.textContent).not.toContain('다시 조회');
+        const calls = vi.mocked(fetch).mock.calls.length;
+        await clickPage('새 분석 시작하기');
+        expect(mocks.push).toHaveBeenCalledWith('/analyze');
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(calls);
+    });
+
+    it('offers a safe initial retry and a login return path for an expired session', async () => {
+        vi.mocked(fetch).mockRejectedValueOnce(new TypeError('offline'));
+        await renderPage();
+        expect(container.textContent).toContain('다시 조회');
+        expect(container.querySelector('a[href="/mypage"]')).toBeNull();
+        vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 401 }));
+        await clickPage('다시 조회');
+        await clickPage('로그인하기');
+        expect(mocks.push).toHaveBeenCalledWith(`/login?redirectTo=${encodeURIComponent(`/progress/${REQUEST_A}`)}`);
+    });
 
     it('polls the exact Dev resource directly without production discovery or Realtime clients', async () => {
         vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');

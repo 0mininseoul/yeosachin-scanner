@@ -94,12 +94,11 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
         || '서버에서 판독을 진행하고 있습니다.';
 }
 
-export function analysisDurationProgressCopy(isDemo: boolean): string {
-    /* '완료 시간 측정 중' was held here while calibration was pending, but
-       nothing ever measures and writes back, so it never resolved — readers
-       watched it for the whole run. A range is a claim we cannot yet back with
-       measured data; an estimate that never arrives is worse. */
-    return isDemo ? '약 5분' : '약 5~10분';
+export function analysisDurationProgressCopy(isDevPresentation: boolean): string {
+    // Dev's synthetic execution duration is not a production timing estimate.
+    return isDevPresentation
+        ? '테스트 분석은 약 45초 동안 진행돼요'
+        : '계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요';
 }
 
 export const OWNER_RESULT_PAGE_SIZE = 50;

@@ -23,7 +23,7 @@ describe('analysis duration UI calibration contract', () => {
         const progress = source('app/progress/[requestId]/page.tsx');
         const hook = source('hooks/useAnalysisProgress.ts');
 
-        expect(progress).toContain('analysisDurationProgressCopy(data.demo)');
+        expect(progress).toContain('analysisDurationProgressCopy(isDevUiPresentation())');
         expect(progress).not.toContain('useAnalysisDurationEstimate');
         expect(progress).not.toContain('analysisDurationRangeLabel');
         expect(progress).not.toContain('hasAnalysisDurationExceeded');
@@ -33,8 +33,8 @@ describe('analysis duration UI calibration contract', () => {
         expect(hook).toContain("demo: response.headers.get('x-analytics-eligible') === '0'");
     });
 
-    it('keeps demo timing distinct from the hidden real-duration estimate', () => {
-        expect(analysisDurationProgressCopy(true)).toBe('약 5분');
-        expect(analysisDurationProgressCopy(false)).toBe('약 5~10분');
+    it('limits synthetic timing to Dev and makes no production duration promise', () => {
+        expect(analysisDurationProgressCopy(true)).toBe('테스트 분석은 약 45초 동안 진행돼요');
+        expect(analysisDurationProgressCopy(false)).toBe('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
     });
 });

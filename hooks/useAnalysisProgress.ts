@@ -49,6 +49,29 @@ function mapV2Status(status: ProgressSnapshotV1['status']): AnalysisProgress['st
 
 type TeardownErrorReporter = (message?: unknown, ...optionalParams: unknown[]) => void;
 
+type ProgressReadErrorKind = 'transient' | 'not_found' | 'unauthorized' | 'forbidden';
+
+class ProgressReadError extends Error {
+    constructor(readonly status: number) {
+        super(`Analysis status request failed (${status}).`);
+    }
+}
+
+function progressReadFailure(error: unknown): { kind: ProgressReadErrorKind; message: string } {
+    if (error instanceof ProgressReadError) {
+        if (error.status === 404) {
+            return { kind: 'not_found', message: '판독 요청을 찾을 수 없습니다.' };
+        }
+        if (error.status === 401) {
+            return { kind: 'unauthorized', message: '진행 상황을 확인하려면 다시 로그인해주세요.' };
+        }
+        if (error.status === 403) {
+            return { kind: 'forbidden', message: '이 판독 요청에 접근할 수 없습니다.' };
+        }
+    }
+    return { kind: 'transient', message: '진행 상황을 불러오지 못했어요. 잠시 후 다시 조회해주세요.' };
+}
+
 function isAbortError(error: unknown): boolean {
     return typeof error === 'object'
         && error !== null
@@ -121,8 +144,9 @@ export function useAnalysisProgress(requestId: string) {
         requestId: string;
         settled: boolean;
         error: string | null;
-    }>({ requestId: '', settled: false, error: null });
-    const hasDataRef = useRef(false);
+        errorKind: ProgressReadErrorKind | null;
+    }>({ requestId: '', settled: false, error: null, errorKind: null });
+    const [fetchingRequestId, setFetchingRequestId] = useState<string | null>(null);
     const v2ProgressUrlRef = useRef<string | null>(null);
     const v2EventsRef = useRef<ProgressEventV1[]>([]);
     const v2LastEventSeqRef = useRef(0);
@@ -143,14 +167,17 @@ export function useAnalysisProgress(requestId: string) {
     const supabase = useMemo(() => devPresentation ? null : createClient(), [devPresentation]);
 
     const fetchData = useCallback((): Promise<void> => {
+        if (activeRequestIdRef.current !== requestId) return Promise.resolve();
         const current = fetchInFlightRef.current;
-        if (current?.requestId === requestId) {
+        if (current?.requestId === requestId && !current.controller.signal.aborted) {
             fetchQueuedRef.current = true;
             return current.promise;
         }
         current?.controller.abort();
 
         const controller = new AbortController();
+        const isCurrent = () => !controller.signal.aborted && activeRequestIdRef.current === requestId;
+        setFetchingRequestId(requestId);
         const run = async () => {
             try {
                 const progressUrl = v2ProgressUrlRef.current;
@@ -160,7 +187,12 @@ export function useAnalysisProgress(requestId: string) {
                         : `/api/analysis/status/${encodeURIComponent(requestId)}`,
                     { cache: 'no-store', signal: controller.signal }
                 );
+                if (!isCurrent()) return;
+                // Classify status before parsing: gateways and auth failures may
+                // return HTML or an empty body instead of a JSON envelope.
+                if (!response.ok && response.status !== 409) throw new ProgressReadError(response.status);
                 let payload = await response.json() as Record<string, unknown>;
+                if (!isCurrent()) return;
                 analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
                 if (
                     response.status === 409
@@ -174,11 +206,14 @@ export function useAnalysisProgress(requestId: string) {
                         `${payload.progressUrl}?afterSeq=${v2LastEventSeqRef.current}&limit=200`,
                         { cache: 'no-store', signal: controller.signal }
                     );
+                    if (!isCurrent()) return;
+                    if (!response.ok) throw new ProgressReadError(response.status);
                     payload = await response.json() as Record<string, unknown>;
+                    if (!isCurrent()) return;
                     analyticsEligibleRef.current = response.headers.get('x-analytics-eligible') !== '0';
                 }
                 if (!response.ok) {
-                    throw new Error(`Analysis status request failed (${response.status}).`);
+                    throw new ProgressReadError(response.status);
                 }
 
                 if (v2ProgressUrlRef.current) {
@@ -187,6 +222,18 @@ export function useAnalysisProgress(requestId: string) {
                         throw new Error('Analysis progress response did not match the V2 contract.');
                     }
                     const progress = parsed.data;
+                    if (progress.snapshot.requestId !== requestId) {
+                        throw new Error('Analysis progress response did not match the requested resource.');
+                    }
+                    // A successful read recovers connectivity even when the
+                    // server returns an older revision. Never regress the view.
+                    setOutcome({ requestId, settled: true, error: null, errorKind: null });
+                    if (!shouldApplyProgressRevision(
+                        v2RevisionRef.current,
+                        progress.snapshot.revision
+                    )) {
+                        return;
+                    }
                     if (progress.snapshot.publicationLagReset === true) {
                         // The route deliberately hides a completed snapshot
                         // while publication catches up. Drop local history and
@@ -205,12 +252,6 @@ export function useAnalysisProgress(requestId: string) {
                         );
                     }
                     const retainedEvents = v2EventsRef.current;
-                    if (!shouldApplyProgressRevision(
-                        v2RevisionRef.current,
-                        progress.snapshot.revision
-                    )) {
-                        return;
-                    }
                     v2RevisionRef.current = progress.snapshot.revision;
                     const displayInput = displayInputForSnapshot(
                         progress.snapshot,
@@ -249,8 +290,6 @@ export function useAnalysisProgress(requestId: string) {
                         publicationLagReset: progress.snapshot.publicationLagReset === true,
                         events: retainedEvents,
                     });
-                    hasDataRef.current = true;
-                    setOutcome({ requestId, settled: true, error: null });
                     return;
                 }
 
@@ -263,6 +302,10 @@ export function useAnalysisProgress(requestId: string) {
                     errorMessage: string | null;
                     backgroundProcessing: boolean;
                 };
+
+                if (analysisRequest.requestId !== requestId) {
+                    throw new Error('Analysis status response did not match the requested resource.');
+                }
 
                 setData({
                     id: analysisRequest.requestId,
@@ -280,24 +323,29 @@ export function useAnalysisProgress(requestId: string) {
                     publicationLagReset: false,
                     events: [],
                 });
-                hasDataRef.current = true;
-                setOutcome({ requestId, settled: true, error: null });
+                setOutcome({ requestId, settled: true, error: null, errorKind: null });
             } catch (err) {
-                if (controller.signal.aborted) return;
-                console.error('Failed to fetch analysis progress:', err);
-                if (!hasDataRef.current) {
-                    setOutcome({
-                        requestId,
-                        settled: true,
-                        error: '분석 요청을 찾을 수 없습니다.',
-                    });
+                if (!isCurrent()) return;
+                const failure = progressReadFailure(err);
+                if (failure.kind !== 'transient') {
+                    // Do not keep showing owner data after access is revoked or
+                    // the resource is definitively absent.
+                    setData(null);
+                    v2EventsRef.current = [];
+                    v2LastEventSeqRef.current = 0;
+                    v2RevisionRef.current = -1;
+                    v2DisplayInputRef.current = null;
+                    v2DisplayStateRef.current = createProgressDisplayState();
+                    fetchQueuedRef.current = false;
                 }
+                setOutcome({ requestId, settled: true, error: failure.message, errorKind: failure.kind });
             }
         };
 
         const promise = run().finally(() => {
             if (fetchInFlightRef.current?.promise !== promise) return;
             fetchInFlightRef.current = null;
+            if (isCurrent()) setFetchingRequestId(null);
             const shouldRefetch = fetchQueuedRef.current;
             fetchQueuedRef.current = false;
             if (shouldRefetch && activeRequestIdRef.current === requestId) {
@@ -315,7 +363,8 @@ export function useAnalysisProgress(requestId: string) {
     useEffect(() => {
         activeRequestIdRef.current = requestId;
         fetchInFlightRef.current?.controller.abort();
-        hasDataRef.current = false;
+        setData(null);
+        setOutcome({ requestId, settled: false, error: null, errorKind: null });
         v2ProgressUrlRef.current = devPresentation ? `/api/analysis/v2/progress/${encodeURIComponent(requestId)}` : null;
         v2EventsRef.current = [];
         v2LastEventSeqRef.current = 0;
@@ -335,6 +384,15 @@ export function useAnalysisProgress(requestId: string) {
 
     const currentData = data?.id === requestId ? data : null;
     const currentOutcome = outcome.requestId === requestId ? outcome : null;
+    const readBlocked = currentOutcome?.errorKind != null && currentOutcome.errorKind !== 'transient';
+
+    // Manual retries share the in-flight GET without queuing another read.
+    // Realtime/poll updates retain their existing coalesced follow-up read.
+    const refetch = useCallback(() => {
+        const current = fetchInFlightRef.current;
+        if (current?.requestId === requestId && !current.controller.signal.aborted) return current.promise;
+        return fetchData();
+    }, [fetchData, requestId]);
 
     useEffect(() => {
         if (
@@ -408,7 +466,7 @@ export function useAnalysisProgress(requestId: string) {
 
     // Realtime accelerates visible updates; this bounded poll closes any reconnect/event gaps.
     useEffect(() => {
-        if (currentData?.status === 'completed' || currentData?.status === 'failed') return;
+        if (readBlocked || currentData?.status === 'completed' || currentData?.status === 'failed') return;
         const handleVisibility = () => {
             if (document.visibilityState === 'visible') {
                 void fetchData();
@@ -428,12 +486,14 @@ export function useAnalysisProgress(requestId: string) {
             window.clearInterval(interval);
             document.removeEventListener('visibilitychange', handleVisibility);
         };
-    }, [currentData?.status, fetchData]);
+    }, [currentData?.status, fetchData, readBlocked]);
 
     return {
         data: currentData,
         loading: currentOutcome?.settled !== true,
         error: currentOutcome?.error ?? null,
-        refetch: fetchData,
+        errorKind: currentOutcome?.errorKind ?? null,
+        refreshing: fetchingRequestId === requestId,
+        refetch,
     };
 }
