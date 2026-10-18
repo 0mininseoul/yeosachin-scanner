@@ -8,7 +8,7 @@ original_args=("$@")
 # Role-scoped maintenance for ordinary preflight and B-lite capacity-dispatch
 # recovery.  This is intentionally separate from the paid V2 scheduler so a
 # maintenance identity never needs access to both worker queues/services.
-readonly RECOVERY_SCHEDULE="* * * * *"
+readonly RECOVERY_SCHEDULE="*/5 * * * *"
 readonly TIME_ZONE="Etc/UTC"
 readonly RETRY_COUNT="3"
 readonly MAX_RETRY_DURATION="300s"
@@ -179,7 +179,7 @@ job_is_exact() {
     --arg uri "$recovery_uri" \
     --arg audience "$maintenance_audience" \
     --arg service_account "$PREFLIGHT_TASKS_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" '
-      .schedule == "* * * * *"
+      .schedule == "*/5 * * * *"
         and .timeZone == "Etc/UTC"
         and .httpTarget.uri == $uri
         and .httpTarget.httpMethod == "POST"

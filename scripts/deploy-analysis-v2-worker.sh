@@ -2560,7 +2560,7 @@ recovery_scheduler_config_is_exact() {
     --arg uri "$origin/api/analysis/v2/recover" \
     --arg audience "$origin" \
     --arg service_account "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" '
-      .schedule == "* * * * *"
+      .schedule == "*/5 * * * *"
         and .timeZone == "Etc/UTC"
         and .httpTarget.uri == $uri
         and .httpTarget.httpMethod == "POST"

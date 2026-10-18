@@ -1967,7 +1967,7 @@ verify_preflight_recovery_scheduler_quiescent() {
     --arg service_account "$maintenance" '
       (.name // "") == $name
       and (.state // "") == "PAUSED"
-      and .schedule == "* * * * *"
+      and .schedule == "*/5 * * * *"
       and .timeZone == "Etc/UTC"
       and .httpTarget.uri == $uri
       and .httpTarget.httpMethod == "POST"

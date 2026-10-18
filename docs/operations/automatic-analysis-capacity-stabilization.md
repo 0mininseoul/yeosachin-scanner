@@ -135,7 +135,7 @@ The allowance is accepted only when every one of these holds:
   so no in-flight task can still carry the prior caller identity;
 - the preflight recovery scheduler is provably quiescent. A `PAUSED` Cloud Tasks
   queue still accepts `createTask`, and the currently serving recovery endpoint
-  enqueues with the *old* caller identity, so an every-minute scheduler that is
+  enqueues with the *old* caller identity, so a five-minute scheduler that is
   still `ENABLED` can put an old-caller task into the queue after it was observed
   empty. The guard therefore requires the exact job resource
   `projects/PROJECT/locations/LOCATION/jobs/JOB` in state `PAUSED` with its
