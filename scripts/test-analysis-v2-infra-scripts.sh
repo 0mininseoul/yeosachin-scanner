@@ -1560,7 +1560,7 @@ case "$command_line" in
     fi
     job="$4"
     if [[ "$job" == "analysis-v2-recovery" ]]; then
-      schedule='*/5 * * * *'
+      schedule='2-59/5 * * * *'
       uri='https://analysis-worker-test.asia-northeast3.run.app/api/analysis/v2/recover'
       deadline='300s'
       scheduler_state=''

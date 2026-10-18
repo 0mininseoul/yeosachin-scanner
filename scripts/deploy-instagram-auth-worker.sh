@@ -39,9 +39,10 @@ Optional environment variables:
   INSTAGRAM_AUTH_WORKER_SESSION_SECRET_ID      Defaults to instagram-auth-session-settings.
   INSTAGRAM_AUTH_WORKER_DURABLE_STORE_PREFIX   Defaults to instagram-auth-worker.
 
-The service scales to zero when idle and never runs more than one instance. It
-uses request concurrency 5, a 300-second timeout, and unauthenticated access
-disabled. The caller runtime service
+The service scales to zero when idle and uses max-instances 1, request
+concurrency 5, a 300-second timeout, and unauthenticated access disabled.
+Cloud Run can briefly exceed max-instances; the durable account-operation mutex,
+not the instance count, is the concurrency guard. The caller runtime service
 account is granted roles/run.invoker on this service. The worker runtime service
 account is granted bucket-scoped roles/storage.objectUser only on the configured
 durable-state bucket and roles/secretmanager.secretAccessor only on the configured

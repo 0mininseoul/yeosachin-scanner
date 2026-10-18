@@ -130,7 +130,7 @@ OIDC audience 또는 paid runtime fingerprint drift를 계속 fail-closed 처리
   한다. 이전 caller identity를 그대로 들고 있는 in-flight task가 남으면 안 된다.
 - preflight recovery scheduler가 정지 상태임을 증명해야 한다. `PAUSED` Cloud Tasks
   queue도 `createTask`는 계속 받고, 현재 서비스 중인 recovery endpoint는 *이전*
-  caller identity로 enqueue한다. 따라서 5분마다 도는 scheduler가 `ENABLED`로 남아
+  caller identity로 enqueue한다. 따라서 매분 도는 scheduler가 `ENABLED`로 남아
   있으면 queue를 비어 있다고 관측한 뒤에도 이전 caller task가 들어올 수 있다.
   그래서 정확한 job resource `projects/PROJECT/locations/LOCATION/jobs/JOB`가
   `PAUSED`이고 검토된 attemptDeadline/retry contract를 유지해야 하며, 외부에서

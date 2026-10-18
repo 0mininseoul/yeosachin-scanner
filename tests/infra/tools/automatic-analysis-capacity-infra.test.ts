@@ -674,7 +674,7 @@ function fakeRun(options: FakeRunOptions = {}) {
     const schedulerJobName = `projects/${env.PREFLIGHT_TASKS_PROJECT}/locations/${env.PREFLIGHT_TASKS_LOCATION}/jobs/${env.PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB}`;
     writeFileSync(schedulerPath, options.schedulerJob === 'unobservable' ? '' : JSON.stringify({
         name: schedulerJobName,
-        schedule: '*/5 * * * *',
+        schedule: '* * * * *',
         timeZone: 'Etc/UTC',
         httpTarget: {
             uri: `${origin}/api/analysis/preflight/recover`,
@@ -945,7 +945,7 @@ if [[ "\${1:-} \${2:-}" == "scheduler jobs" && "\${3:-}" == "describe" ]]; then
   exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "scheduler jobs" && ("\${3:-}" == "create" || "\${3:-}" == "update") ]]; then
-  jq -n --arg uri "$FAKE_GCLOUD_SCHEDULER_URI" --arg email "$FAKE_GCLOUD_MAINTENANCE_EMAIL" --arg audience "$FAKE_GCLOUD_MAINTENANCE_AUDIENCE" '{schedule:"*/5 * * * *",timeZone:"Etc/UTC",httpTarget:{uri:$uri,httpMethod:"POST",oidcToken:{serviceAccountEmail:$email,audience:$audience},headers:{"Content-Type":"application/json"},body:"e30="},attemptDeadline:"300s",retryConfig:{retryCount:3,maxRetryDuration:"300s",minBackoffDuration:"10s",maxBackoffDuration:"60s",maxDoublings:3},state:"ENABLED"}' > "$FAKE_GCLOUD_SCHEDULER_JSON"
+  jq -n --arg uri "$FAKE_GCLOUD_SCHEDULER_URI" --arg email "$FAKE_GCLOUD_MAINTENANCE_EMAIL" --arg audience "$FAKE_GCLOUD_MAINTENANCE_AUDIENCE" '{schedule:"* * * * *",timeZone:"Etc/UTC",httpTarget:{uri:$uri,httpMethod:"POST",oidcToken:{serviceAccountEmail:$email,audience:$audience},headers:{"Content-Type":"application/json"},body:"e30="},attemptDeadline:"300s",retryConfig:{retryCount:3,maxRetryDuration:"300s",minBackoffDuration:"10s",maxBackoffDuration:"60s",maxDoublings:3},state:"ENABLED"}' > "$FAKE_GCLOUD_SCHEDULER_JSON"
   exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "scheduler jobs" && ("\${3:-}" == "pause" || "\${3:-}" == "resume") ]]; then
@@ -3412,7 +3412,7 @@ describe('automatic-analysis infrastructure contracts', () => {
     // that is PAUSED but reconfigured could be resumed into a different,
     // unreviewed behaviour at any moment.
     const schedulerConfigDriftCases: Array<[string, Record<string, unknown>]> = [
-        ['schedule', { schedule: '* * * * *' }],
+        ['schedule', { schedule: '*/5 * * * *' }],
         ['time zone', { timeZone: 'Asia/Seoul' }],
         ['attempt deadline', { attemptDeadline: '600s' }],
         ['HTTP method', { httpTarget: { httpMethod: 'GET' } }],
@@ -3447,7 +3447,7 @@ describe('automatic-analysis infrastructure contracts', () => {
         'rejects recovery scheduler configuration drift in %s',
         (_name, patch) => {
             const base = {
-                schedule: '*/5 * * * *',
+                schedule: '* * * * *',
                 timeZone: 'Etc/UTC',
                 attemptDeadline: '300s',
                 httpTarget: {
