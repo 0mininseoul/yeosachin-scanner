@@ -6,7 +6,9 @@ source "$CAPACITY_EXCLUSION_SCRIPT_DIR/capacity-identity-epoch/exclusion-supervi
 original_args=("$@")
 
 readonly SCHEDULER_API="cloudscheduler.googleapis.com"
-readonly RECOVERY_SCHEDULE="* * * * *"
+# Every five minutes, offset from retention so the two maintenance calls never
+# reach the concurrency-1 paid worker in the same minute.
+readonly RECOVERY_SCHEDULE="2-59/5 * * * *"
 readonly RETENTION_SCHEDULE="*/5 * * * *"
 readonly TIME_ZONE="Etc/UTC"
 readonly RETRY_COUNT="3"
