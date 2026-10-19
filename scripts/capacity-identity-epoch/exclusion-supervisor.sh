@@ -47,8 +47,10 @@ capacity_exclusion_validate_selector_atoms() {
   local region
   local queue
   local maintenance_location_value
-  local recovery_job
-  local retention_job
+  # Prefixed: a sourcing script may already hold a readonly recovery_job or
+  # retention_job, and bash refuses a local that shadows a readonly name.
+  local cx_recovery_job
+  local cx_retention_job
   local service_account
   local iam_scope
   local project_var
@@ -84,21 +86,21 @@ capacity_exclusion_validate_selector_atoms() {
   if [[ "$entry_point" == 'preflight-maintenance' || "$entry_point" == 'paid-maintenance' ]]; then
     if [[ "$selector_source" == 'generic' ]]; then
       maintenance_location_value="$region"
-      recovery_job=''
+      cx_recovery_job=''
     elif [[ "$role" == 'preflight' ]]; then
       maintenance_location_value="${PREFLIGHT_TASKS_MAINTENANCE_LOCATION:-$region}"
-      recovery_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
+      cx_recovery_job="${PREFLIGHT_TASKS_RECOVERY_SCHEDULER_JOB:-analysis-preflight-recovery}"
     else
       maintenance_location_value="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$region}"
-      recovery_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+      cx_recovery_job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
     fi
     [[ "$maintenance_location_value" =~ $CAPACITY_EXCLUSION_LOCATION_PATTERN ]] || capacity_exclusion_die
-    [[ "$recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
-      && ${#recovery_job} -le 500 ]] || capacity_exclusion_die
+    [[ "$cx_recovery_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
+      && ${#cx_recovery_job} -le 500 ]] || capacity_exclusion_die
     if [[ "$entry_point" == 'paid-maintenance' ]]; then
-      retention_job="${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"
-      [[ "$retention_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
-        && ${#retention_job} -le 500 ]] || capacity_exclusion_die
+      cx_retention_job="${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"
+      [[ "$cx_retention_job" =~ $CAPACITY_EXCLUSION_SCHEDULER_PATTERN \
+        && ${#cx_retention_job} -le 500 ]] || capacity_exclusion_die
     fi
   fi
 }
