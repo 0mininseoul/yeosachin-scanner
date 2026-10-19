@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const root = resolve('scripts');
@@ -72,5 +74,37 @@ describe('ordinary identity-epoch shell mappings', () => {
         expect(source).toContain('validate_scheduler_job');
         expect(source).toMatch(/validate_scheduler_job\s+"\$recovery_scheduler_job"/);
         expect(source).toMatch(/validate_scheduler_job\s+"\$retention_scheduler_job"/);
+    });
+
+    it('validates maintenance selectors while the caller holds readonly selector names', () => {
+        // configure-analysis-v2-maintenance.sh declares readonly recovery_job and retention_job
+        // before entering the launcher; a same-named local in the supervisor aborts bash.
+        const directory = mkdtempSync(join(tmpdir(), 'exclusion-shell-'));
+        try {
+            const caller = join(directory, 'configure-fixture-maintenance.sh');
+            writeFileSync(caller, [
+                'set -euo pipefail',
+                'source "$1"',
+                'readonly recovery_job=analysis-v2-recovery',
+                'readonly retention_job=analysis-v2-preflight-retention',
+                'enter() { capacity_exclusion_validate_selector_atoms paid-maintenance paid; }',
+                'enter',
+                'echo validated',
+            ].join('\n'));
+            const result = spawnSync('bash', [caller, resolve(root, 'capacity-identity-epoch/exclusion-supervisor.sh')], {
+                encoding: 'utf8',
+                env: {
+                    ...process.env,
+                    ANALYSIS_V2_TASKS_PROJECT: 'fixture-project',
+                    ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE: 'fixture-service',
+                    ANALYSIS_V2_TASKS_CLOUD_RUN_REGION: 'fixture-region',
+                },
+            });
+            expect(result.stderr).toBe('');
+            expect(result.stdout.trim()).toBe('validated');
+            expect(result.status).toBe(0);
+        } finally {
+            rmSync(directory, { recursive: true, force: true });
+        }
     });
 });
