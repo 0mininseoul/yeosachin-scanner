@@ -681,17 +681,25 @@
   },
   "web_deployments": {
     "production": {
-      "id": "dpl_6xY2xZ3x2xe81S7KfojcXLptKB4B",
-      "sourceSha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09",
+      "id": "dpl_naLm1v2ddBuLsj9t2HvzXPShmJ1P",
+      "sourceSha": "d4464368b45effbd38d6f2e7160521072416d131",
       "state": "READY",
-      "exactProductionProject": true
+      "exactProductionProject": true,
+      "gitRef": "main",
+      "target": "production"
     },
     "dev": {
-      "id": "dpl_92iM82Z3v6FcrbCPnT3dbaWcKyHr",
-      "candidateSha": "c99d4783701d4732c369cb735ea688107fcad592",
+      "id": "dpl_HVE8kTKx5eMTfBnTM3tWFFSDh5Ta",
+      "candidateSha": "aec0d3524d195ee574c7f0e0c30242a6060b1e41",
       "state": "READY",
       "exactDevProject": true,
-      "cronDefinitions": 0
+      "target": "production",
+      "devDomainAssigned": true,
+      "devConfigOverlaySha": "bceed793e1df0880076af0e5ad43951fee31ada3ee4bb310bdafe13d737d9358",
+      "nativeCronDefinitions": 0,
+      "cronFieldPresent": true,
+      "exactCandidateTreeMatchesMergedMain": true,
+      "equivalentMergedSha": "d4464368b45effbd38d6f2e7160521072416d131"
     }
   },
   "build_failure": {
@@ -802,6 +810,7 @@
     }
   },
   "preservation": {
+    "checkedAt": "2026-11-17T19:14:05.241848+00:00",
     "protected": {
       "count": 2,
       "unchanged": true
@@ -818,6 +827,26 @@
       "beforeCount": 24,
       "afterCount": 24,
       "unchanged": true
+    },
+    "checker_scope_correction": {
+      "initialRelativePathsWereResolvedAgainstFeatureCwd": true,
+      "fileChangesObserved": false,
+      "correctedToCanonicalRootAbsolutePaths": true,
+      "independentCanonicalHashChecks": [
+        {
+          "protected": true,
+          "browser": true
+        },
+        {
+          "protected": true,
+          "browser": true
+        },
+        {
+          "protected": true,
+          "browser": true
+        }
+      ],
+      "filesRestoredOrRewritten": false
     }
   },
   "cloud_run_rollout": {
@@ -913,10 +942,17 @@
       "observed_5xx": 0,
       "manual_post_calls": 0,
       "customer_end_to_end_claimed": false
+    },
+    "admission_source_binding_review": {
+      "status": "PASS",
+      "source_sha_or_revision_is_runtime_acquire_input": false,
+      "owner_cli_attestation_is_not_runtime_admission": "confirmed by direct caller and SQL definition",
+      "gate_reactivation_required": false,
+      "actual_provider_success_claimed": false
     }
   },
   "blite_source_contract_fix": {
-    "status": "REVIEWED_CANDIDATE",
+    "status": "MERGED",
     "durable_hashtag_max_length": 100,
     "prior_inference_hashtag_max_length": 64,
     "updated_inference_max_uses_canonical_source_constant": true,
@@ -946,6 +982,130 @@
       "blite_test_files": 3,
       "total_tests": 217,
       "status": "PASS"
+    },
+    "pull_request": 611,
+    "candidate_sha": "aec0d3524d195ee574c7f0e0c30242a6060b1e41",
+    "merged_main_sha": "d4464368b45effbd38d6f2e7160521072416d131",
+    "exact_main_ci": "SUCCESS",
+    "dev_native_state": "READY",
+    "worker_rollout": "PROMOTED",
+    "build": {
+      "sourceSha": "d4464368b45effbd38d6f2e7160521072416d131",
+      "status": "SUCCESS",
+      "sourceArchiveSha256": "d5ebe03abf76497d7da0ca98e73429830e658229aae5cc038a14cb60f90c740e",
+      "fullGitZipVerified": true,
+      "classicSourceContract": true,
+      "buildStepCount": 3,
+      "buildMachineType": "DEFAULT",
+      "nodeHeapMb": 4096,
+      "sourceProvenanceVerified": true,
+      "imageDigest": "sha256:40f6165a0abf0c8b1f99cb663a07ca8b0435e66c4865fd5bdeb0a9ed18892c09",
+      "finishedAt": "2026-11-17T19:05:39.290816Z"
+    }
+  },
+  "blite_worker_rollout": {
+    "image_and_promotion": {
+      "status": "promoted",
+      "protectedBuildDigest": "7743717e09b9bb1f11ce75b66afcce12f3f69e750c1e18c4445f75a6374b9b4a",
+      "sourceSha": "d4464368b45effbd38d6f2e7160521072416d131",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-d4464368-1118b",
+      "candidateImageDigest": "asia-northeast3-docker.pkg.dev/gen-lang-client-0311522474/cloud-run-source-deploy/analysis-preflight-worker@sha256:40f6165a0abf0c8b1f99cb663a07ca8b0435e66c4865fd5bdeb0a9ed18892c09",
+      "sourceProof": true,
+      "sourceArchiveSha256": "d5ebe03abf76497d7da0ca98e73429830e658229aae5cc038a14cb60f90c740e",
+      "attestationMatches": true,
+      "sourceLabelMatches": true,
+      "candidateReady": true,
+      "trafficUnchanged": true,
+      "runtimeUnchanged": true,
+      "peripheralUnchanged": true,
+      "queuedTasks": 0,
+      "stagedTemplateHash": "2cca2de5b316fbe6e956387259ec68000fa0bdd568f68906df56e582d4ccf608",
+      "secretValuesPersisted": false,
+      "activationStateChanged": false,
+      "promotedAt": "2026-11-17T19:09:41.325457+00:00",
+      "traffic": [
+        [
+          "analysis-preflight-worker-rpcfix-d4464368-1118b",
+          100,
+          null
+        ]
+      ],
+      "trafficOnCandidate": true,
+      "runtimeUnchangedAfterPromotion": true,
+      "peripheralUnchangedAfterPromotion": true,
+      "queuedTasksAfterPromotion": 0
+    },
+    "read_only_canary": {
+      "checkedAt": "2026-11-17T19:08:40.825839+00:00",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-d4464368-1118b",
+      "method": "GET",
+      "route": "/api/analysis/preflight/recover",
+      "httpStatus": 405,
+      "expectedStatus": 405,
+      "appStartupVerified": true,
+      "providerCalls": 0,
+      "workerPostCalls": 0
+    },
+    "canary_removed": {
+      "beforeRuntimeHash": "f6b69f19e2372a55984a936e3b48b3529ffa5001e526710122194f7f06ee7b71",
+      "beforeRuntimeSansUrlsHash": "c4c2078cc63e96ecbf1b5f6429dd58ca76c46f75c99b799c7d8c453a660ba9b1",
+      "sourceSha": "d4464368b45effbd38d6f2e7160521072416d131",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-d4464368-1118b",
+      "tagPresent": false,
+      "servingTrafficUnchanged": true,
+      "templateUnchanged": true,
+      "peripheralUnchanged": true,
+      "fullRuntimeRestored": true
+    },
+    "existing_scheduler_health": {
+      "checkedAt": "2026-11-17T19:10:21.941512+00:00",
+      "sourceSha": "d4464368b45effbd38d6f2e7160521072416d131",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-d4464368-1118b",
+      "logWindowStart": "2026-11-17T19:09:41.325457+00:00",
+      "trafficOnCandidate": true,
+      "runtimeUnchanged": true,
+      "peripheralUnchanged": true,
+      "queuedTasks": 0,
+      "requestCounts": [
+        {
+          "route": "/api/analysis/preflight/recover",
+          "method": "POST",
+          "status": 200,
+          "count": 1
+        }
+      ],
+      "firstExistingCronRecovery200": "2026-11-17T19:10:04.743475Z",
+      "lastExistingCronRecovery200": "2026-11-17T19:10:04.743475Z",
+      "request5xxCount": 0,
+      "manualPostCalls": 0,
+      "providerCalls": 0,
+      "rawLogsPersisted": false,
+      "logLimitReached": false
+    },
+    "independent_stage_review": "PASS",
+    "independent_native_review": {
+      "status": "PASS",
+      "checked_at_kst": "2026-11-18T04:11:13+09:00",
+      "source_image_native_build_attestations_match": true,
+      "ready": true,
+      "candidate_traffic_percent": 100,
+      "old_traffic_percent": 0,
+      "tag_removed": true,
+      "runtime_queue_schedulers_iam_unchanged": true,
+      "queued_tasks": 0,
+      "scheduler_user_agent_confirmed": true,
+      "scheduler_post_recover_200_count": 2,
+      "scheduler_post_200_times_kst": [
+        "2026-11-18T04:10:04.743475+09:00",
+        "2026-11-18T04:11:04.713579+09:00"
+      ],
+      "native_canary_get_recover_405_count": 1,
+      "native_canary_get_405_time_kst": "2026-11-18T04:08:37.644321+09:00",
+      "post_promotion_5xx": 0,
+      "manual_post_calls": 0,
+      "provider_calls": 0,
+      "raw_logs_persisted": false,
+      "customer_end_to_end_claimed": false
     }
   }
 }
