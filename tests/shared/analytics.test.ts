@@ -850,6 +850,7 @@ describe('Amplitude analytics adapter', () => {
 
     it.each([
         '/admin/analysis-audit',
+        '/admin0min',
         '/api/analysis/run',
         '/unknown-route',
     ])('never enables initial replay on an ineligible route %s', async (pathname) => {

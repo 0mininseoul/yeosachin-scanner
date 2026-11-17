@@ -1,12 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
-import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import {
     addAnonymousPreflightOAuthContinuation,
     writeOAuthRedirectIntentCookie,
@@ -68,10 +67,13 @@ export function AuthButtons({
     disabled?: boolean;
 }) {
     const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
+    const signInStarted = useRef(false);
     const busy = disabled || pending !== null;
     const kakaoText = '카카오로 3초 만에 시작하기';
 
     const signIn = async (provider: OAuthProvider) => {
+        if (disabled || signInStarted.current) return;
+        signInStarted.current = true;
         setPending(provider);
         try {
             const supabase = createClient();
@@ -89,13 +91,11 @@ export function AuthButtons({
                 nextPath
             );
             addAnonymousPreflightOAuthContinuation(callbackUrl, nextUrl);
-            // Dev 앱은 기본 프로필 동의항목만, 운영 앱은 기존 승인 항목을 요청한다.
+            // Dev와 운영 앱에 승인된 동일한 7개 동의항목을 요청한다.
             // 구글은 기본 scope(email·profile) 사용.
             const scopes =
                 provider === 'kakao'
-                    ? isDevUiPresentation()
-                        ? 'account_email profile_nickname profile_image'
-                        : 'account_email profile_nickname profile_image name gender birthyear phone_number'
+                    ? 'account_email profile_nickname profile_image name gender birthyear phone_number'
                     : undefined;
             const { error } = await performOAuthSignIn({
                 provider,
@@ -108,11 +108,13 @@ export function AuthButtons({
             });
             if (error) {
                 console.error(`${provider} login error:`, error);
+                signInStarted.current = false;
                 setPending(null);
             }
             // 성공 시 브라우저가 OAuth 제공자로 리다이렉트됨
         } catch (e) {
             console.error(`${provider} login error:`, e);
+            signInStarted.current = false;
             setPending(null);
         }
     };

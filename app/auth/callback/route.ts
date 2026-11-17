@@ -35,6 +35,7 @@ import {
     selectOAuthRedirectIntent,
 } from '@/lib/services/auth/oauth-redirect-intent';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
+import { readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -309,6 +310,11 @@ async function handleGET(
     const appOrigin = appOriginForRequest(request.url);
     const cookieNext = readOAuthRedirectIntent(request.headers.get('cookie'));
     const callbackContinuation = readAnonymousPreflightOAuthContinuation(searchParams);
+    const selectedRedirectIntent = selectOAuthRedirectIntent(
+        callbackContinuation ?? searchParams.get('next'),
+        cookieNext,
+    );
+    const adminDestination = readAdminConsoleDestination(selectedRedirectIntent);
 
     if (!code) {
         operationalLogger.emit({
@@ -321,7 +327,9 @@ async function handleGET(
                 error_code: 'INVALID_REQUEST',
             },
         });
-        return redirectAndClearOAuthIntent(new URL('/login?error=no_code', appOrigin));
+        const loginUrl = new URL(adminDestination ?? '/login', appOrigin);
+        loginUrl.searchParams.set('error', 'no_code');
+        return redirectAndClearOAuthIntent(loginUrl);
     }
 
     const cookieStore = await cookies();
@@ -359,7 +367,7 @@ async function handleGET(
                 error_code: 'PROVIDER_ERROR',
             },
         });
-        const loginUrl = new URL('/login', appOrigin);
+        const loginUrl = new URL(adminDestination ?? '/login', appOrigin);
         loginUrl.searchParams.set('error', 'exchange_failed');
         return redirectAndClearOAuthIntent(loginUrl);
     }
@@ -478,13 +486,9 @@ async function handleGET(
         if (typeof deleteAttributionCookie === 'function') deleteAttributionCookie(KAKAO_ATTRIBUTION_COOKIE);
     }
 
-    const selectedRedirectIntent = selectOAuthRedirectIntent(
-        callbackContinuation ?? searchParams.get('next'),
-        cookieNext,
-    );
     const claimRestore = await restoreAnonymousPreflightClaim(
         request.url,
-        selectedRedirectIntent,
+        adminDestination ?? selectedRedirectIntent,
         authedUser?.id,
         claimClient,
         selectedRedirectIntent !== cookieNext ? cookieNext : null,

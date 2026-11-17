@@ -143,15 +143,15 @@ describe('Dev mock checkout and order reading UI', () => {
         expect(fetchSpy).not.toHaveBeenCalled(); expect(telemetry).not.toHaveBeenCalled();
     });
     it.each([
-        { role: 'dev', origin: 'https://dev.yeosachin.com', scopes: 'account_email profile_nickname profile_image' },
+        { role: 'dev', origin: 'https://dev.yeosachin.com', scopes: 'account_email profile_nickname profile_image name gender birthyear phone_number' },
         { role: 'production', origin: 'https://yeosachin.com', scopes: 'account_email profile_nickname profile_image name gender birthyear phone_number' },
     ])('passes the configured Kakao scopes from the actual $role login CTA', async ({ role, origin, scopes }) => {
         vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', role);
-        browser.jsdom.reconfigure({ url: `${origin}/admin/analysis-audit` });
+        browser.jsdom.reconfigure({ url: `${origin}/admin0min` });
         vi.spyOn(authAnalytics, 'beginPendingAuthEvent').mockReturnValue(false);
         oauth.signInWithOAuth.mockResolvedValue({ error: null });
 
-        await render(<AuthButtons redirectTo="/admin/analysis-audit" />);
+        await render(<AuthButtons redirectTo="/admin0min" />);
         await click('카카오로 3초 만에 시작하기');
 
         expect(oauth.signInWithOAuth).toHaveBeenCalledTimes(1);
@@ -161,7 +161,7 @@ describe('Dev mock checkout and order reading UI', () => {
         const callback = new URL(input.options.redirectTo);
         expect(callback.origin).toBe(origin);
         expect(callback.pathname).toBe('/auth/callback');
-        expect(callback.searchParams.get('next')).toBe('/admin/analysis-audit');
+        expect(callback.searchParams.get('next')).toBe('/admin0min');
     });
     it('loads the existing result UI through Dev V2 without auto sharing, feedback, or deletion calls', async () => {
         const snapshot = buildDevUiPlanSnapshot().basic;

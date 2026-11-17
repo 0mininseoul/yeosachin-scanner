@@ -7,6 +7,8 @@ import {
 import { DEV_UI_ROBOTS_HEADER } from '@/lib/constants/dev-ui';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
+import { readAdminConsoleDestination } from '@/lib/contracts/admin-console';
+import { AUTH_REDIRECT_INTENT_COOKIE, readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -34,6 +36,24 @@ export async function proxy(request: NextRequest) {
     ) {
         const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, CANONICAL_APP_ORIGIN);
         return NextResponse.redirect(canonicalUrl, 308);
+    }
+
+    // GoTrue can return a missing/expired OAuth state to SiteURL before our
+    // callback runs. The intent only restores the login screen destination.
+    const parameters = request.nextUrl.searchParams;
+    if (request.method === 'GET' && request.nextUrl.pathname === '/'
+        && parameters.getAll('error').length === 1 && parameters.get('error') === 'invalid_request'
+        && parameters.getAll('error_code').length === 1 && parameters.get('error_code') === 'bad_oauth_state'
+        && !parameters.has('code')) {
+        const destination = readAdminConsoleDestination(readOAuthRedirectIntent(request.headers.get('cookie')));
+        if (destination) {
+            const url = appRedirectUrlForRequest(request.url, destination);
+            url.searchParams.set('error', 'bad_oauth_state');
+            const response = NextResponse.redirect(url);
+            response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
+            response.headers.set('Cache-Control', 'private, no-store');
+            return withDevHeaders(response);
+        }
     }
 
     let supabaseResponse = NextResponse.next({

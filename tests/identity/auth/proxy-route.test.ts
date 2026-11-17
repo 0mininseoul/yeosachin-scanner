@@ -17,6 +17,13 @@ vi.mock('@/config/dev-ui-deployment.json', () => ({
 
 import { config, proxy } from '@/proxy';
 
+const adminRequestId = '20000000-0000-4000-8000-000000000001';
+const oauthStateError = 'error=invalid_request&error_code=bad_oauth_state&error_description=OAuth+state+not+found+or+expired';
+
+function adminIntentCookie(intent: string) {
+    return { cookie: `auth_redirect_intent=${encodeURIComponent(intent)}` };
+}
+
 interface ProxyCookieAdapter {
     setAll(cookies: Array<{
         name: string;
@@ -95,6 +102,58 @@ describe('authentication proxy redirects', () => {
 
         expect(response.status).toBe(200);
         expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each(['/admin0min', '/admin/analysis-audit'])(
+        'recovers a lost OAuth state at the site root for the browser intent %s',
+        async path => {
+            const response = await proxy(new NextRequest(
+                `https://yeosachin.com/?${oauthStateError}&next=https://untrusted.example`,
+                { headers: adminIntentCookie(`${path}?requestId=${adminRequestId}&other=private`) },
+            ));
+
+            expect(response.headers.get('location')).toBe(
+                `https://yeosachin.com/admin0min?requestId=${adminRequestId}&error=bad_oauth_state`,
+            );
+            expect(response.headers.get('set-cookie')).toMatch(/auth_redirect_intent=;.*Expires=Thu, 01 Jan 1970/);
+            expect(response.headers.get('cache-control')).toContain('no-store');
+            expect(mocks.createServerClient).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        '/admin0min?requestId=unexpected',
+        `/admin0min?requestId=${adminRequestId}&requestId=${adminRequestId}`,
+    ])('recovers the admin login without an invalid or repeated requestId', async intent => {
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com/?${oauthStateError}`,
+            { headers: adminIntentCookie(intent) },
+        ));
+
+        expect(response.headers.get('location')).toBe('https://yeosachin.com/admin0min?error=bad_oauth_state');
+    });
+
+    it.each([
+        ['/', oauthStateError, null],
+        ['/', oauthStateError, '/analyze'],
+        ['/', oauthStateError, '/nested/../admin0min'],
+        ['/', oauthStateError, '//untrusted.example/admin0min'],
+        ['/', oauthStateError, '/admin0min/extra'],
+        ['/analyze', oauthStateError, '/admin0min'],
+        ['/', 'error=access_denied&error_code=bad_oauth_state', '/admin0min'],
+        ['/', 'error=invalid_request&error_code=unexpected_failure', '/admin0min'],
+        ['/', `${oauthStateError}&error=invalid_request`, '/admin0min'],
+        ['/', `${oauthStateError}&error_code=bad_oauth_state`, '/admin0min'],
+        ['/', `${oauthStateError}&code=oauth-code`, '/admin0min'],
+    ])('keeps an unrelated navigation on %s with query %s', async (pathname, query, intent) => {
+        mockAuthenticatedUser(null);
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com${pathname}?${query}`,
+            { headers: intent ? adminIntentCookie(intent) : undefined },
+        ));
+
+        expect(response.headers.get('location')).toBeNull();
+        expect(response.headers.get('set-cookie')).not.toContain('auth_redirect_intent=;');
     });
 
     it.each(['/progress/example', '/result/example', '/earlybird'])('continues to protect %s for anonymous visitors', async path => {
@@ -203,6 +262,16 @@ describe('Dev UI proxy boundary', () => {
     afterEach(() => {
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();
+    });
+
+    it('recovers Dev admin OAuth on the registered Dev origin', async () => {
+        const response = await proxy(new NextRequest(
+            `https://dev.yeosachin.com/?${oauthStateError}`,
+            { headers: adminIntentCookie('/admin0min') },
+        ));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/admin0min?error=bad_oauth_state');
+        expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
     });
 
     it.each(['/api/webhooks/sentry/synthetic.png', '/api/analysis/preflight/synthetic.jpg', '/auth/callback.png', '/result/synthetic.jpg', '/admin/synthetic.png'])
