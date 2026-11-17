@@ -6,7 +6,11 @@ import {
 } from '@/lib/constants/app-url';
 import { DEV_UI_ROBOTS_HEADER } from '@/lib/constants/dev-ui';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
+import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
+import { getAnalysisAuditOperatorDecision } from '@/lib/services/analysis/score-audit';
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
+import { ADMIN_CONSOLE_PATH, readAdminConsoleDestination } from '@/lib/contracts/admin-console';
+import { AUTH_REDIRECT_INTENT_COOKIE, readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -34,6 +38,28 @@ export async function proxy(request: NextRequest) {
     ) {
         const canonicalUrl = new URL(request.nextUrl.pathname + request.nextUrl.search, CANONICAL_APP_ORIGIN);
         return NextResponse.redirect(canonicalUrl, 308);
+    }
+
+    // GoTrue can return a missing/expired OAuth state to SiteURL before our
+    // callback runs. The intent only restores the login screen destination.
+    const parameters = request.nextUrl.searchParams;
+    const isRootOAuthStateError = request.method === 'GET' && request.nextUrl.pathname === '/'
+        && parameters.getAll('error').length === 1 && parameters.get('error') === 'invalid_request'
+        && parameters.getAll('error_code').length === 1 && parameters.get('error_code') === 'bad_oauth_state'
+        && !parameters.has('code');
+    const oauthRedirectIntent = isRootOAuthStateError
+        ? readOAuthRedirectIntent(request.headers.get('cookie'))
+        : null;
+    if (isRootOAuthStateError) {
+        const destination = readAdminConsoleDestination(oauthRedirectIntent);
+        if (destination) {
+            const url = appRedirectUrlForRequest(request.url, destination);
+            url.searchParams.set('error', 'bad_oauth_state');
+            const response = NextResponse.redirect(url);
+            response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
+            response.headers.set('Cache-Control', 'private, no-store');
+            return withDevHeaders(response);
+        }
     }
 
     let supabaseResponse = NextResponse.next({
@@ -92,6 +118,7 @@ export async function proxy(request: NextRequest) {
     // 세션 체크 (getUser는 서버 사이드에서 안전한 방법)
     const {
         data: { user },
+        error: authError,
     } = await supabase.auth.getUser();
 
     const redirectWithAuthCookies = (url: URL) => {
@@ -103,6 +130,27 @@ export async function proxy(request: NextRequest) {
         if (attribution) redirectResponse.cookies.set(attribution);
         return withDevHeaders(redirectResponse);
     };
+
+    // A completed callback consumes its intent cookie. A later duplicate
+    // provider return may still carry the state error while its session is valid.
+    if (isRootOAuthStateError && !oauthRedirectIntent && !authError && user) {
+        let authorized = false;
+        try {
+            if (deploymentBoundary === 'dev') {
+                assertDevUiAdministrator(user.id, request);
+                authorized = true;
+            } else {
+                authorized = getAnalysisAuditOperatorDecision(user.id) === 'authorized';
+            }
+        } catch {
+            // Unavailable operator configuration retains the normal landing.
+        }
+        if (authorized) {
+            const response = redirectWithAuthCookies(appRedirectUrlForRequest(request.url, ADMIN_CONSOLE_PATH));
+            response.headers.set('Cache-Control', 'private, no-store');
+            return response;
+        }
+    }
 
     // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
     if (request.nextUrl.searchParams.get('verified') === 'true' && !user) {

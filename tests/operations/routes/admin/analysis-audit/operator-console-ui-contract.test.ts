@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
-const page = readFileSync(new URL('../../../../../app/admin/analysis-audit/page.tsx', import.meta.url), 'utf8');
+const page = readFileSync(new URL('../../../../../app/admin0min/page.tsx', import.meta.url), 'utf8');
 const workbench = readFileSync(new URL('../../../../../app/admin/analysis-audit/workbench.tsx', import.meta.url), 'utf8');
 
 describe('production operator console UI boundary', () => {

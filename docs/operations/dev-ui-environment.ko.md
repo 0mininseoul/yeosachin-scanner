@@ -8,7 +8,7 @@
 2. `/analyze`에서 합성 대상 이름과 완료·부분 완료·실패·빈 결과 시나리오를 선택한다. 입력한 이름으로 Instagram에 접근하지 않는다.
 3. 기존 사전 점검·플랜 화면을 거쳐 모의 결제창으로 이동한다. 이 단계까지 분석은 시작되지 않는다.
 4. 모의 결제 성공을 선택하면 주문당 실행 1개가 생성되고 약 45초 동안 합성 진행을 보여준다. 취소·실패는 실행을 만들지 않는다.
-5. 완료 결과를 다시 방문하거나 `/mypage`에서 모의 주문/실행을 확인한다. `/admin/analysis-audit`는 Dev 모의 주문의 읽기 감사만 제공한다.
+5. 완료 결과를 다시 방문하거나 `/mypage`에서 모의 주문/실행을 확인한다. `/admin0min`은 Dev 모의 주문의 읽기 감사를 제공한다. 기존 `/admin/analysis-audit`는 새 주소로 이동한다.
 
 실제 카드, Apify, Vertex, RapidAPI, Instagram, R2, 운영 메일·Discord·Amplitude를 사용하지 않는다. 테스트 표시는 실제 결제/수집/AI 성공을 의미하지 않는다. 미결제 주문은 30분, 완료 실행은 별도 7일 수명을 갖는다. 완료 후 응답 중단·재시도·재방문은 동일 실행과 시작 시각을 복구한다.
 
@@ -57,3 +57,7 @@ Free Supabase는 휴면으로 pause될 수 있다. 재개 때 Dev identity·Auth
 ## 진행 UI 후보 갱신 · 2026-10-09
 
 [진행 UI 구현 기록](2026-10-09-progress-implementation.ko.md)의 후보309e1813을 Dev에 배포했다. native deployment `dpl_EGt3uwR6Mu4nETm2ky8MQkkLNDUg`는 READY·정확한 Dev project/owner·도메인 연결·cron 비활성/정의0을 확인했다. 기존 a299 배포 기록은 이전 검증 이력이다. 1안 큰 원형·기존 이미지 슬라이딩 유지, 조회 오류 개선과 보관함 이동을 실제 Aside에서 검증했다. 모바일은 사용자 승인 격리 실제 컴포넌트 검증이며 Dev 인증/서버 모바일 E2E를 뜻하지 않는다. 결과 UI는 유지한다. [PR #605](https://github.com/0mininseoul/yeosachin-scanner/pull/605)의 exact-head 검사와 병합 기록으로 후보 승격을 확인한다.
+
+## 2026-11-18 재개 확인
+
+사용자가 복원한 Dev Supabase는 ACTIVE_HEALTHY로 확인했다. 새 관리자 경로는 `/admin0min`이다. Dev 카카오 테스트 앱의 동의항목은 운영에서 요청하는7개(account_email, profile_nickname, profile_image, name, gender, birthyear, phone_number)로 저장했다. 이메일 필수, 나머지 선택 동의이며 값이 없는 항목을 강제로 입력받는 설정은 사용하지 않았다. 앱의 Dev OAuth 요청도 같은7개를 사용한다. Aside가390×844 실제 viewport 설정을 지원해 Dev 인증·모의 결제 흐름을 직접 검수한다. 사용자는 이번에 실물 기기 대신 Dev 모바일 viewport 검수를 선택했다. 상세 결과는 [11월18일 통합 기록](2026-11-18-admin0min-dev-verification.ko.md)에서 확인한다.

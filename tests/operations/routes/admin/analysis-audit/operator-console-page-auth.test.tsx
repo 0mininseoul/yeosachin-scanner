@@ -23,21 +23,22 @@ vi.mock('@/lib/services/analytics', async () => ({
     trackEvent: vi.fn(),
 }));
 
-import AnalysisAuditPage from '../../../../../app/admin/analysis-audit/page';
+import AnalysisAuditPage, { metadata } from '../../../../../app/admin0min/page';
+import LegacyAnalysisAuditPage from '../../../../../app/admin/analysis-audit/page';
 import { readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
 
 // Synthetic identifiers; no live account or analysis record is loaded by this suite.
 const operatorId = '10000000-0000-4000-8000-000000000001';
 const otherUserId = '10000000-0000-4000-8000-000000000002';
 const requestId = '20000000-0000-4000-8000-000000000001';
-const destination = '/admin/analysis-audit';
+const destination = '/admin0min';
 let mountedRoot: Root | null = null;
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-async function page(request?: string | string[]) {
+async function page(request?: string | string[], error?: string | string[]) {
     // Next.js can supply repeated search parameters as arrays at runtime.
     return AnalysisAuditPage({
-        searchParams: Promise.resolve({ requestId: request }) as Parameters<typeof AnalysisAuditPage>[0]['searchParams'],
+        searchParams: Promise.resolve({ requestId: request, error }) as Parameters<typeof AnalysisAuditPage>[0]['searchParams'],
     });
 }
 
@@ -99,6 +100,25 @@ afterEach(async () => {
 });
 
 describe('operator console page authentication boundary', () => {
+    it('keeps the canonical admin route out of search results', () => {
+        expect(metadata).toMatchObject({
+            robots: { index: false, follow: false },
+            alternates: { canonical: null },
+        });
+    });
+
+    it.each([
+        [undefined, destination],
+        [requestId, `${destination}?requestId=${requestId}`],
+        [[requestId, requestId], destination],
+        ['//untrusted.example', destination],
+    ])('redirects legacy console links with only a bounded detail target', async (request, expected) => {
+        await expect(LegacyAnalysisAuditPage({
+            searchParams: Promise.resolve({ requestId: request }),
+        })).rejects.toThrow(`redirect:${expected}`);
+        expect(boundary.createClient).not.toHaveBeenCalled();
+    });
+
     it('requires a matching actual Dev identity before opening any Auth client', async () => {
         vi.stubEnv('DEPLOYMENT_ROLE', 'dev'); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
         vi.stubEnv('VERCEL_PROJECT_ID', 'prj_wrong');
@@ -130,6 +150,81 @@ describe('operator console page authentication boundary', () => {
         const callback = await clickKakaoLogin(requestId);
         expect(callback.searchParams.get('next')).toBe(`${destination}?requestId=${requestId}`);
         expect(readOAuthRedirectIntent(document.cookie)).toBe(`${destination}?requestId=${requestId}`);
+    });
+
+    it.each(['bad_oauth_state', 'no_code', 'exchange_failed'])(
+        'renders a Korean manual login recovery message for %s',
+        async error => {
+            boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
+            const result = await page(requestId, error);
+            const html = renderToStaticMarkup(result);
+            expect(html).toContain('카카오 로그인을 완료하지 못했습니다');
+            expect(html).toContain('아래 버튼을 눌러 새 로그인을 시작해 주세요');
+            expect(html).toContain('카카오로 3초 만에 시작하기');
+            expect(boundary.signInWithOAuth).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each(['private@example.test token=secret', ['bad_oauth_state', 'bad_oauth_state']])(
+        'ignores unknown or repeated error details',
+        async error => {
+            boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
+            const html = renderToStaticMarkup(await page(requestId, error));
+            expect(html).not.toContain('카카오 로그인을 완료하지 못했습니다');
+            expect(html).not.toContain('private@example');
+            expect(html).not.toContain('token=secret');
+        },
+    );
+
+    it('starts a fresh OAuth request on a recovery page without forwarding the old error', async () => {
+        boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        const result = await page(requestId, 'bad_oauth_state');
+        const container = document.createElement('div');
+        document.body.append(container);
+        mountedRoot = createRoot(container);
+        await act(async () => mountedRoot!.render(result));
+        await act(async () => container.querySelector('button')!.click());
+        const callback = new URL(boundary.signInWithOAuth.mock.calls[0][0].options.redirectTo);
+        expect(callback.searchParams.get('next')).toBe(`${destination}?requestId=${requestId}`);
+        expect(callback.searchParams.has('error')).toBe(false);
+    });
+
+    it('starts only one OAuth request when the login button is clicked twice before React rerenders', async () => {
+        boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        boundary.signInWithOAuth.mockReturnValue(new Promise(() => undefined));
+        const result = await page();
+        const container = document.createElement('div');
+        document.body.append(container);
+        mountedRoot = createRoot(container);
+        await act(async () => mountedRoot!.render(result));
+        await act(async () => {
+            const button = container.querySelector('button')!;
+            button.click();
+            button.click();
+        });
+        expect(boundary.signInWithOAuth).toHaveBeenCalledOnce();
+    });
+
+    it.each(['returned', 'thrown'])('allows a manual retry after a %s OAuth startup error', async failure => {
+        boundary.getUser.mockResolvedValue({ data: { user: null }, error: null });
+        const expectedError = new Error('synthetic OAuth failure');
+        if (failure === 'returned') boundary.signInWithOAuth.mockResolvedValueOnce({ error: expectedError });
+        else boundary.signInWithOAuth.mockRejectedValueOnce(expectedError);
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+            const result = await page();
+            const container = document.createElement('div');
+            document.body.append(container);
+            mountedRoot = createRoot(container);
+            await act(async () => mountedRoot!.render(result));
+            const button = container.querySelector('button')!;
+            await act(async () => button.click());
+            expect(button.disabled).toBe(false);
+            await act(async () => button.click());
+            expect(boundary.signInWithOAuth).toHaveBeenCalledTimes(2);
+        } finally {
+            consoleError.mockRestore();
+        }
     });
 
     it.each([

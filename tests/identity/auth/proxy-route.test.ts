@@ -17,6 +17,15 @@ vi.mock('@/config/dev-ui-deployment.json', () => ({
 
 import { config, proxy } from '@/proxy';
 
+const adminRequestId = '20000000-0000-4000-8000-000000000001';
+const operatorId = '10000000-0000-4000-8000-000000000001';
+const otherUserId = '10000000-0000-4000-8000-000000000002';
+const oauthStateError = 'error=invalid_request&error_code=bad_oauth_state&error_description=OAuth+state+not+found+or+expired';
+
+function adminIntentCookie(intent: string) {
+    return { cookie: `auth_redirect_intent=${encodeURIComponent(intent)}` };
+}
+
 interface ProxyCookieAdapter {
     setAll(cookies: Array<{
         name: string;
@@ -25,7 +34,7 @@ interface ProxyCookieAdapter {
     }>): void;
 }
 
-function mockAuthenticatedUser(userId: string | null, refreshCookie = false) {
+function mockAuthenticatedUser(userId: string | null, refreshCookie = false, error: unknown = null) {
     mocks.createServerClient.mockImplementation((...args: unknown[]) => {
         const options = args[2] as { cookies: ProxyCookieAdapter };
         return {
@@ -38,7 +47,7 @@ function mockAuthenticatedUser(userId: string | null, refreshCookie = false) {
                             options: { path: '/', httpOnly: true },
                         }]);
                     }
-                    return { data: { user: userId ? { id: userId } : null } };
+                    return { data: { user: userId ? { id: userId } : null }, error };
                 },
             },
         };
@@ -95,6 +104,118 @@ describe('authentication proxy redirects', () => {
 
         expect(response.status).toBe(200);
         expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each(['/admin0min', '/admin/analysis-audit'])(
+        'recovers a lost OAuth state at the site root for the browser intent %s',
+        async path => {
+            const response = await proxy(new NextRequest(
+                `https://yeosachin.com/?${oauthStateError}&next=https://untrusted.example`,
+                { headers: adminIntentCookie(`${path}?requestId=${adminRequestId}&other=private`) },
+            ));
+
+            expect(response.headers.get('location')).toBe(
+                `https://yeosachin.com/admin0min?requestId=${adminRequestId}&error=bad_oauth_state`,
+            );
+            expect(response.headers.get('set-cookie')).toMatch(/auth_redirect_intent=;.*Expires=Thu, 01 Jan 1970/);
+            expect(response.headers.get('cache-control')).toContain('no-store');
+            expect(mocks.createServerClient).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        '/admin0min?requestId=unexpected',
+        `/admin0min?requestId=${adminRequestId}&requestId=${adminRequestId}`,
+    ])('recovers the admin login without an invalid or repeated requestId', async intent => {
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com/?${oauthStateError}`,
+            { headers: adminIntentCookie(intent) },
+        ));
+
+        expect(response.headers.get('location')).toBe('https://yeosachin.com/admin0min?error=bad_oauth_state');
+    });
+
+    it('recovers an already authenticated operator after the successful callback consumed the intent cookie', async () => {
+        vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
+        mockAuthenticatedUser(operatorId, true);
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com/?${oauthStateError}&requestId=${adminRequestId}&next=https://untrusted.example`,
+        ));
+        expect(response.headers.get('location')).toBe('https://yeosachin.com/admin0min');
+        expect(response.headers.get('set-cookie')).toContain('sb-test-auth=refreshed');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+    });
+
+    it.each([
+        [null, null],
+        [otherUserId, null],
+        [operatorId, { status: 401, code: 'invalid_token' }],
+        [operatorId, { status: 503 }],
+    ])('keeps the root state error for a missing, non-operator, or errored session', async (userId, error) => {
+        vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
+        mockAuthenticatedUser(userId, false, error);
+        const response = await proxy(new NextRequest(`https://yeosachin.com/?${oauthStateError}`));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each(['', 'invalid', `${operatorId},${operatorId}`])(
+        'keeps the root state error when the operator configuration is unavailable',
+        async configured => {
+            vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', configured);
+            mockAuthenticatedUser(operatorId);
+            const response = await proxy(new NextRequest(`https://yeosachin.com/?${oauthStateError}`));
+            expect(response.headers.get('location')).toBeNull();
+        },
+    );
+
+    it('preserves an authenticated operator consumer intent while handling a root state error', async () => {
+        vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
+        mockAuthenticatedUser(operatorId);
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com/?${oauthStateError}`,
+            { headers: adminIntentCookie('/analyze') },
+        ));
+        expect(response.headers.get('location')).toBeNull();
+        expect(response.headers.get('set-cookie')).not.toContain('auth_redirect_intent=;');
+    });
+
+    it.each([
+        ['GET', '/', ''],
+        ['GET', '/', 'error=access_denied&error_code=bad_oauth_state'],
+        ['GET', '/', `${oauthStateError}&error=invalid_request`],
+        ['GET', '/', `${oauthStateError}&error_code=bad_oauth_state`],
+        ['GET', '/', `${oauthStateError}&code=oauth-code`],
+        ['POST', '/', oauthStateError],
+        ['GET', '/analyze', oauthStateError],
+    ])('keeps an operator on an unrelated %s %s navigation', async (method, path, query) => {
+        vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
+        mockAuthenticatedUser(operatorId);
+        const response = await proxy(new NextRequest(`https://yeosachin.com${path}?${query}`, { method }));
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it.each([
+        ['/', oauthStateError, null],
+        ['/', oauthStateError, '/analyze'],
+        ['/', oauthStateError, '/nested/../admin0min'],
+        ['/', oauthStateError, '//untrusted.example/admin0min'],
+        ['/', oauthStateError, '/admin0min/extra'],
+        ['/analyze', oauthStateError, '/admin0min'],
+        ['/', 'error=access_denied&error_code=bad_oauth_state', '/admin0min'],
+        ['/', 'error=invalid_request&error_code=unexpected_failure', '/admin0min'],
+        ['/', `${oauthStateError}&error=invalid_request`, '/admin0min'],
+        ['/', `${oauthStateError}&error_code=bad_oauth_state`, '/admin0min'],
+        ['/', `${oauthStateError}&code=oauth-code`, '/admin0min'],
+    ])('keeps an unrelated navigation on %s with query %s', async (pathname, query, intent) => {
+        mockAuthenticatedUser(null);
+        const response = await proxy(new NextRequest(
+            `https://yeosachin.com${pathname}?${query}`,
+            { headers: intent ? adminIntentCookie(intent) : undefined },
+        ));
+
+        expect(response.headers.get('location')).toBeNull();
+        expect(response.headers.get('set-cookie')).not.toContain('auth_redirect_intent=;');
     });
 
     it.each(['/progress/example', '/result/example', '/earlybird'])('continues to protect %s for anonymous visitors', async path => {
@@ -203,6 +324,56 @@ describe('Dev UI proxy boundary', () => {
     afterEach(() => {
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();
+    });
+
+    it('recovers Dev admin OAuth on the registered Dev origin', async () => {
+        const response = await proxy(new NextRequest(
+            `https://dev.yeosachin.com/?${oauthStateError}`,
+            { headers: adminIntentCookie('/admin0min') },
+        ));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/admin0min?error=bad_oauth_state');
+        expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+    });
+
+    it('recovers a cookieless authenticated Dev administrator on the registered Dev origin', async () => {
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', operatorId);
+        vi.stubEnv('DEV_UI_ADMIN_USER_IDS', operatorId);
+        mockAuthenticatedUser(operatorId, true);
+        const response = await proxy(new NextRequest(`https://dev.yeosachin.com/?${oauthStateError}`));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/admin0min');
+        expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(response.headers.get('set-cookie')).toContain('sb-test-auth=refreshed');
+        expect(response.headers.get('set-cookie')).not.toMatch(/Domain=/i);
+    });
+
+    it.each([
+        ['', operatorId, null],
+        [operatorId, '', null],
+        [otherUserId, operatorId, null],
+        [operatorId, otherUserId, null],
+        ['invalid', operatorId, null],
+        [operatorId, operatorId, { status: 503 }],
+    ])('requires both valid Dev administrator allowlists and a successful session lookup', async (testers, admins, error) => {
+        vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', testers);
+        vi.stubEnv('DEV_UI_ADMIN_USER_IDS', admins);
+        mockAuthenticatedUser(operatorId, false, error);
+        const response = await proxy(new NextRequest(`https://dev.yeosachin.com/?${oauthStateError}`));
+        expect(response.status).toBe(200);
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it('rejects a mismatched Dev deployment before checking a cookieless administrator session', async () => {
+        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_wrong');
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', operatorId);
+        vi.stubEnv('DEV_UI_ADMIN_USER_IDS', operatorId);
+        mockAuthenticatedUser(operatorId);
+        const response = await proxy(new NextRequest(`https://dev.yeosachin.com/?${oauthStateError}`));
+        expect(response.status).toBe(503);
+        expect(response.headers.get('location')).toBeNull();
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
     });
 
     it.each(['/api/webhooks/sentry/synthetic.png', '/api/analysis/preflight/synthetic.jpg', '/auth/callback.png', '/result/synthetic.jpg', '/admin/synthetic.png'])

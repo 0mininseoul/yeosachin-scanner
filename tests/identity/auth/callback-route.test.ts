@@ -399,6 +399,45 @@ describe('OAuth callback redirects', () => {
         expect(consoleErrorCalls).toHaveLength(0);
     });
 
+    it.each(['/admin0min', '/admin/analysis-audit'])(
+        'keeps an in-flight admin OAuth destination canonical after successful exchange from %s',
+        async path => {
+            const requestId = '20000000-0000-4000-8000-000000000001';
+            const next = `${path}?requestId=${requestId}&other=private`;
+            const response = await GET(new Request(
+                `https://yeosachin.com/auth/callback?code=oauth-code&next=${encodeURIComponent(next)}`,
+            ));
+            expect(response.headers.get('location')).toBe(
+                `https://yeosachin.com/admin0min?requestId=${requestId}&verified=true`,
+            );
+        },
+    );
+
+    it.each(['no_code', 'exchange_failed'])(
+        'keeps a bounded admin detail target on the manual retry page for %s',
+        async error => {
+            const requestId = '20000000-0000-4000-8000-000000000001';
+            mocks.exchangeCodeForSession.mockResolvedValue({ error: { message: 'private-provider-detail' } });
+            const code = error === 'exchange_failed' ? '&code=bad-code' : '';
+            const response = await GET(new Request(
+                `https://yeosachin.com/auth/callback?next=%2F${code}&error_description=private-provider-detail`,
+                { headers: { cookie: `auth_redirect_intent=${encodeURIComponent(`/admin/analysis-audit?requestId=${requestId}&extra=private`)}` } },
+            ));
+            expect(response.headers.get('location')).toBe(
+                `https://yeosachin.com/admin0min?requestId=${requestId}&error=${error}`,
+            );
+            expect(response.headers.get('set-cookie')).toContain('auth_redirect_intent=;');
+        },
+    );
+
+    it('keeps an explicit unrelated callback destination authoritative over a stale admin cookie', async () => {
+        const response = await GET(new Request(
+            'https://yeosachin.com/auth/callback?next=%2Fanalyze',
+            { headers: { cookie: 'auth_redirect_intent=%2Fadmin0min' } },
+        ));
+        expect(response.headers.get('location')).toBe('https://yeosachin.com/login?error=no_code');
+    });
+
     it('lands an exchange failure on a bounded code without reflecting provider details', async () => {
         mocks.exchangeCodeForSession.mockResolvedValue({
             data: null,

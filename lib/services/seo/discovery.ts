@@ -11,6 +11,7 @@ export const PUBLIC_SITEMAP_URLS = [
 export const PRIVATE_CRAWL_PATHS = [
     '/api/',
     '/admin/',
+    '/admin0min',
     '/auth/',
     '/progress/',
     '/result/',

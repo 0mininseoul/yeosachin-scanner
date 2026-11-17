@@ -1,0 +1,389 @@
+{
+  "checked_on": "2026-11-18",
+  "checked_timezone": "Asia/Seoul",
+  "price_region": "Seoul Tier 2",
+  "scope": "Cloud Run compute usage for the canonical application project",
+  "periods": {
+    "before": {
+      "start_date_inclusive": "2026-10-12",
+      "end_date_inclusive": "2026-10-18",
+      "timezone": "Asia/Seoul",
+      "complete_days": 7,
+      "price_month": "2026-10",
+      "services": {
+        "paid": {
+          "requests": {
+            "sum": 12096.0,
+            "daily_mean": 1728.0
+          },
+          "billable_s": {
+            "sum": 23867.276131207225,
+            "daily_mean": 3409.6108758867467
+          },
+          "vcpu_s": {
+            "sum": 47976.44312028877,
+            "daily_mean": 6853.777588612682
+          },
+          "gib_s": {
+            "sum": 47733.07762014689,
+            "daily_mean": 6819.011088592413
+          },
+          "modeled_compute_list_krw_daily": 345.33102163871064,
+          "no_timeseries_observed": false
+        },
+        "preflight": {
+          "requests": {
+            "sum": 10092.0,
+            "daily_mean": 1441.7142857142858
+          },
+          "billable_s": {
+            "sum": 4366.643740159851,
+            "daily_mean": 623.8062485942645
+          },
+          "vcpu_s": {
+            "sum": 8865.798902155328,
+            "daily_mean": 1266.542700307904
+          },
+          "gib_s": {
+            "sum": 8736.151520722397,
+            "daily_mean": 1248.0216458174853
+          },
+          "modeled_compute_list_krw_daily": 63.75786337924783,
+          "no_timeseries_observed": false
+        },
+        "auth": {
+          "requests": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "billable_s": {
+            "sum": 604783.263275154,
+            "daily_mean": 86397.60903930772
+          },
+          "vcpu_s": {
+            "sum": 19.994819348,
+            "daily_mean": 2.856402764
+          },
+          "gib_s": {
+            "sum": 302390.2475659356,
+            "daily_mean": 43198.60679513366
+          },
+          "modeled_compute_list_krw_daily": 616.4346181492557,
+          "no_timeseries_observed": false
+        }
+      },
+      "modeled_compute_list_krw_daily": 1025.5235031672141,
+      "hypothetical_request_list_krw_daily_if_account_free_tier_exhausted": 1.7227397142857144
+    },
+    "after": {
+      "start_date_inclusive": "2026-10-20",
+      "end_date_inclusive": "2026-10-26",
+      "timezone": "Asia/Seoul",
+      "complete_days": 7,
+      "price_month": "2026-10",
+      "services": {
+        "paid": {
+          "requests": {
+            "sum": 4032.0,
+            "daily_mean": 576.0
+          },
+          "billable_s": {
+            "sum": 9435.0,
+            "daily_mean": 1347.857142857143
+          },
+          "vcpu_s": {
+            "sum": 18894.02348128,
+            "daily_mean": 2699.1462116114285
+          },
+          "gib_s": {
+            "sum": 18870.0,
+            "daily_mean": 2695.714285714286
+          },
+          "modeled_compute_list_krw_daily": 136.04662739490817,
+          "no_timeseries_observed": false
+        },
+        "preflight": {
+          "requests": {
+            "sum": 10084.0,
+            "daily_mean": 1440.5714285714287
+          },
+          "billable_s": {
+            "sum": 5455.3,
+            "daily_mean": 779.3285714285715
+          },
+          "vcpu_s": {
+            "sum": 10980.848796526,
+            "daily_mean": 1568.692685218
+          },
+          "gib_s": {
+            "sum": 10911.400000000001,
+            "daily_mean": 1558.7714285714287
+          },
+          "modeled_compute_list_krw_daily": 79.03002822594257,
+          "no_timeseries_observed": false
+        },
+        "auth": {
+          "requests": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "billable_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "vcpu_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "gib_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "modeled_compute_list_krw_daily": 0.0,
+          "no_timeseries_observed": true
+        }
+      },
+      "modeled_compute_list_krw_daily": 215.07665562085074,
+      "hypothetical_request_list_krw_daily_if_account_free_tier_exhausted": 1.0960065714285716
+    },
+    "latest": {
+      "start_date_inclusive": "2026-11-11",
+      "end_date_inclusive": "2026-11-17",
+      "timezone": "Asia/Seoul",
+      "complete_days": 7,
+      "price_month": "2026-11",
+      "services": {
+        "paid": {
+          "requests": {
+            "sum": 4032.0,
+            "daily_mean": 576.0
+          },
+          "billable_s": {
+            "sum": 9418.456418013588,
+            "daily_mean": 1345.4937740019411
+          },
+          "vcpu_s": {
+            "sum": 19089.010137508252,
+            "daily_mean": 2727.0014482154647
+          },
+          "gib_s": {
+            "sum": 18836.91283597919,
+            "daily_mean": 2690.9875479970274
+          },
+          "modeled_compute_list_krw_daily": 135.7301445020929,
+          "no_timeseries_observed": false
+        },
+        "preflight": {
+          "requests": {
+            "sum": 10157.0,
+            "daily_mean": 1451.0
+          },
+          "billable_s": {
+            "sum": 5685.486091090363,
+            "daily_mean": 812.2122987271946
+          },
+          "vcpu_s": {
+            "sum": 11649.255208344328,
+            "daily_mean": 1664.179315477761
+          },
+          "gib_s": {
+            "sum": 11360.37415062451,
+            "daily_mean": 1622.9105929463585
+          },
+          "modeled_compute_list_krw_daily": 82.73995467765984,
+          "no_timeseries_observed": false
+        },
+        "auth": {
+          "requests": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "billable_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "vcpu_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "gib_s": {
+            "sum": 0,
+            "daily_mean": 0
+          },
+          "modeled_compute_list_krw_daily": 0.0,
+          "no_timeseries_observed": true
+        }
+      },
+      "modeled_compute_list_krw_daily": 218.47009917975276,
+      "hypothetical_request_list_krw_daily_if_account_free_tier_exhausted": 1.089109127
+    }
+  },
+  "compute_list_reduction_pct_before_to_after": 79.02762296947748,
+  "compute_list_reduction_pct_before_to_latest": 78.69672430665582,
+  "price_months": {
+    "2026-10": {
+      "active_cpu_krw_per_vcpu_second": 0.045654,
+      "active_memory_krw_per_gib_second": 0.004755625,
+      "idle_min_cpu_krw_per_vcpu_second": 0.004755625,
+      "idle_min_memory_krw_per_gib_second": 0.004755625,
+      "request_krw_after_free_tier": 0.0005435,
+      "source": "Official Cloud Billing Catalog API services.skus.list, currencyCode=KRW, Seoul Tier 2 request-based"
+    },
+    "2026-11": {
+      "active_cpu_krw_per_vcpu_second": 0.045133367,
+      "active_memory_krw_per_gib_second": 0.004701392,
+      "idle_min_cpu_krw_per_vcpu_second": 0.004701392,
+      "idle_min_memory_krw_per_gib_second": 0.004701392,
+      "request_krw_after_free_tier": 0.000537301,
+      "source": "Official Cloud Billing Catalog API services.skus.list, currencyCode=KRW, Seoul Tier 2 request-based"
+    }
+  },
+  "formulas": {
+    "paid_preflight_compute": "cpu allocation seconds * active CPU price + memory allocation GiB-seconds * memory price",
+    "auth_approximate_compute": "cpu allocation seconds * active CPU price + memory allocation GiB-seconds * memory price + max(0, billable instance seconds - cpu allocation seconds / 2) * idle CPU price",
+    "auth_caveat": "No active/idle metric label was returned. Startup CPU boost means dividing CPU allocation by 2 approximates small active time. Divisor 1 or 2 yields the same rounded daily cost of KRW616.4."
+  },
+  "deployment_cutover": {
+    "paid_scheduler_update_local": "2026-10-19T14:18:53+09:00 through 2026-10-19T14:18:54+09:00",
+    "paid_scheduler_resumed_local": "2026-10-19T14:18:55+09:00 through 2026-10-19T14:18:56+09:00",
+    "auth_revision_created_local": "2026-10-19T14:38:43+09:00",
+    "hourly_observation": "Paid requests changed from 72/hour before cutover to 24/hour after. Auth billable time stopped appearing from the 15:00 KST hour."
+  },
+  "current_configuration": {
+    "paid_recovery": {
+      "enabled": true,
+      "schedule": "2-59/5 * * * *",
+      "target_role": "paid"
+    },
+    "retention": {
+      "enabled": true,
+      "schedule": "*/5 * * * *",
+      "target_role": "paid"
+    },
+    "preflight_recovery": {
+      "enabled": true,
+      "schedule": "* * * * *",
+      "target_role": "preflight"
+    },
+    "scheduler_timezone": "Etc/UTC",
+    "auth": {
+      "minimum_instances_explicit": null,
+      "minimum_instances_default": 0,
+      "single_revision_traffic_percent": 100,
+      "vcpu": 1,
+      "gib": 0.5,
+      "startup_cpu_boost": true
+    },
+    "paid_and_preflight": {
+      "vcpu_each": 2,
+      "gib_each": 2,
+      "request_based_billing": true,
+      "startup_cpu_boost": true
+    }
+  },
+  "coverage": {
+    "active_usage_service_roles": [
+      "paid",
+      "preflight",
+      "auth"
+    ],
+    "other_services_with_no_observed_usage_count": 2,
+    "auth_post_period_complete_days_with_no_usage_timeseries": 29,
+    "cloud_run_job_definition_count": 12,
+    "job_billable_cpu_memory_timeseries_count_in_observation_window": 0,
+    "seoul_worker_pool_count": 0
+  },
+  "companion_observation": {
+    "date": "2026-11-13",
+    "timezone": "Asia/Seoul",
+    "role": "preflight",
+    "http_500": 76,
+    "http_503": 24,
+    "root_cause_investigated": false,
+    "fix_attempted": false
+  },
+  "actual_billing": {
+    "project_billing_enabled": true,
+    "confirmed_invoiced_amount": null,
+    "confirmed_cash_payment": null,
+    "accessible_bigquery_dataset_count_in_project": 0,
+    "billing_account_project_discovery": "PERMISSION_DENIED",
+    "existing_export_in_other_project_presence": "unknown",
+    "created_new_export_or_dataset_or_permission": false,
+    "executed_bigquery_paid_query": false,
+    "required_input_to_confirm": "Invoice-level tax/adjustment and payment confirmation are still unobserved. Project-filtered usage-date report was verified through Aside.",
+    "browser_reports": {
+      "source": "Aside Google Cloud Billing Reports",
+      "project_filter": "exact service project, single project filter preserved",
+      "timezone": "America/Los_Angeles",
+      "periods": [
+        {
+          "start": "2026-10-12",
+          "end": "2026-10-18",
+          "usage_krw": 7158,
+          "other_savings_krw": -7158,
+          "subtotal_krw": 0
+        },
+        {
+          "start": "2026-10-20",
+          "end": "2026-10-26",
+          "usage_krw": 1512,
+          "other_savings_krw": -1512,
+          "subtotal_krw": 0
+        },
+        {
+          "start": "2026-11-01",
+          "through": "query time during PT2026-11-17",
+          "complete_period": false,
+          "usage_krw": 3593,
+          "other_savings_krw": -3593,
+          "subtotal_krw": 0
+        }
+      ],
+      "completed_period_usage_reduction_percent": 78.87678122380554,
+      "specific_credit_kind_confirmed": false,
+      "invoice_tax_adjustments_or_cash_payment_confirmed": false
+    }
+  },
+  "exclusions": [
+    "billing-account free tier",
+    "credits",
+    "contract discounts",
+    "VAT",
+    "invoice adjustments",
+    "network egress",
+    "Cloud Scheduler",
+    "Cloud Logging",
+    "Artifact Registry",
+    "other services"
+  ],
+  "official_source_urls": [
+    "https://cloud.google.com/run/pricing",
+    "https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z",
+    "https://docs.cloud.google.com/billing/docs/reference/rest/v1/services.skus/list",
+    "https://docs.cloud.google.com/billing/docs/how-to/reports"
+  ],
+  "change_sources": [
+    "https://github.com/0mininseoul/yeosachin-scanner/pull/606",
+    "https://github.com/0mininseoul/yeosachin-scanner/pull/607"
+  ],
+  "query_method": {
+    "metric_family": "run.googleapis.com",
+    "metric_names": [
+      "request_count",
+      "container/billable_instance_time",
+      "container/cpu/allocation_time",
+      "container/memory/allocation_time"
+    ],
+    "monitored_resource_types": [
+      "cloud_run_revision",
+      "cloud_run_job"
+    ],
+    "start_utc": "2026-10-11T15:00:00Z",
+    "end_utc": "2026-11-17T15:00:00Z",
+    "alignment_period_seconds": 3600,
+    "per_series_aligner": "ALIGN_SUM",
+    "pagination": "all pages",
+    "daily_assignment": "hour end timestamp minus one hour, converted to Asia/Seoul"
+  }
+}

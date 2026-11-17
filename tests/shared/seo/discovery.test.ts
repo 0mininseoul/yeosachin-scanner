@@ -8,6 +8,7 @@ const CANONICAL_ORIGIN = 'https://yeosachin.com';
 const PRIVATE_CRAWL_PATHS = [
     '/api/',
     '/admin/',
+    '/admin0min',
     '/auth/',
     '/progress/',
     '/result/',
