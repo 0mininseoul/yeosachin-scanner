@@ -180,7 +180,9 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     bliteDispatchRearmRpc: 'rearm_precheckout_blite_dispatch_v3',
     providerCapacityDeferRpc: 'defer_analysis_preflight_for_provider_capacity_v2',
     providerCapacityRearmRpc: 'rearm_analysis_preflight_dispatch_for_provider_capacity_v2',
-    providerCapacityMarkRpc: 'mark_analysis_preflight_rearmed_dispatch_for_provider_capacity_v2',
+    // PostgREST requires PostgreSQL's stored 63-byte identifier. The migration's
+    // 65-byte mark_analysis_preflight_rearmed_dispatch_for_provider_capacity_v2 is truncated.
+    providerCapacityMarkRpc: 'mark_analysis_preflight_rearmed_dispatch_for_provider_capacity_',
     providerCapacityRecoveryListRpc: 'list_analysis_preflight_dispatch_recovery_v2',
     bliteDispatchRecoveryListRpc: 'list_precheckout_blite_dispatch_recovery_v2',
     releaseClaimRpc: 'release_analysis_preflight_claim',
