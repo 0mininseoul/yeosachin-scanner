@@ -1,0 +1,99 @@
+{
+  "verifiedOn": "2026-11-18",
+  "timezone": "Asia/Seoul",
+  "runtimeCandidate": "08f54895d51dc8ddd7296a1389bed22e04e7110f",
+  "runtimeFingerprint": {
+    "sha": "08f54895d51dc8ddd7296a1389bed22e04e7110f",
+    "files": 758,
+    "sourceHash": "c58193e428f894562503f34b6d0d20bc8bc658b1d2f946d08dc91a62a7de5d37",
+    "effectiveDevHash": "a8c8a0cf7d5eeab5ffbad8b044d1ba5eefbcd82834de89b627b284b218f04203",
+    "scheme": "sha256(path NUL sha256(blob)), tracked app/components/hooks/lib/config/public plus proxy,next.config,package lock/config andvercel configs; effective replaces vercel.json"
+  },
+  "deploymentId": "dpl_DBKL3AB2CHZYANsMTBFiSW16S6AS",
+  "deploymentReady": true,
+  "exactDevProject": true,
+  "devDomainAttached": true,
+  "temporaryUploadCleaned": true,
+  "cronDisabled": true,
+  "cronDefinitions": 0,
+  "devSupabaseStatus": "ACTIVE_HEALTHY",
+  "kakaoDev": {
+    "appId": 1602072,
+    "scopes": [
+      "account_email",
+      "profile_nickname",
+      "profile_image",
+      "name",
+      "gender",
+      "birthyear",
+      "phone_number"
+    ],
+    "required": [
+      "account_email"
+    ],
+    "optional": [
+      "profile_nickname",
+      "profile_image",
+      "name",
+      "gender",
+      "birthyear",
+      "phone_number"
+    ],
+    "savedAndReloadVerified": true,
+    "forceInformationCollection": false,
+    "additionalConsentSsoVerified": true
+  },
+  "checks": {
+    "files": 24,
+    "tests": 427,
+    "typecheck": true,
+    "eslint": true,
+    "diffCheck": true,
+    "independentCodeReview": "PASS initial and follow-up"
+  },
+  "browser": {
+    "tool": "Aside u0 CLI REPL",
+    "mobileViewport": {
+      "width": 390,
+      "height": 844,
+      "dpr": 2
+    },
+    "desktopViewport": {
+      "width": 1440,
+      "height": 900,
+      "dpr": 2
+    },
+    "realDevice": "User selected viewport verification only",
+    "firstCandidate": "836ac58331706f0e40b9708e27bdd51fe6fe4e92",
+    "mobileCompleteFixture": true,
+    "sameRunReload": true,
+    "automaticResult": true,
+    "resultReadHttp": 200,
+    "mobileHorizontalOverflow": false,
+    "desktopFailedFixture": true,
+    "failedEnterToAnalyze": true,
+    "archiveSameResultResource": true,
+    "archivePipelineQueryDifference": "auto v2, archive absent",
+    "finalCandidateCookielessOperatorErrorUrlRecovered": true,
+    "providerDescriptionRemoved": true,
+    "legacyRedirect": true,
+    "noCodeErrorRetryAtAdmin": true,
+    "freshSsoAfterNoCode": true,
+    "adminReadHttp": 200
+  },
+  "productionVerification": "Pending merge and final native deployment; tracked by PR and root completion receipt",
+  "boundaries": {
+    "liveApifyActorCalls": 0,
+    "liveAiGenerationCalls": 0,
+    "realCardPayments": 0,
+    "productionDbOrOperationalSettingsChanged": false,
+    "secretsOrUserIdentifiersRecorded": false
+  },
+  "limitations": [
+    "Exact historical trigger of Supabase state disappearance not determined.",
+    "Browser error query tests app routing; does not reproduce provider state loss.",
+    "No physical iPhone or screen-reader testing.",
+    "Billing Reports project usage-date subtotals confirmed; invoice tax/adjustments/cash payment not confirmed.",
+    "November13 preflight5xx classified; later user worker success evidence absent."
+  ]
+}

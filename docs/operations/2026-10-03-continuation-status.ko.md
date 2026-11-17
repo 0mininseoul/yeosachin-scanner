@@ -65,3 +65,9 @@
 사용자 요청에 따라 Dev에서 새로운 합성 완료·분석 실패 실행을 각각 하나씩 생성하고, 모의 결제→진행 변화→동일 경로 새로고침→자동 결과 이동과 실패·미존재 조회→입력 복귀를 Aside에서 직접 검수했다. [진행 UX 감사](2026-10-09-progress-ux-audit.ko.md)와 [한국어 개선 시안](../superpowers/specs/2026-10-09-progress-ux-design.ko.md)에 실제 캡처, 확인한 동작, 사용자 경험에 대한 추론과 검증 한계를 분리해 기록한다.
 
 현재 상태는 **1안·기존 슬라이딩 유지 구현 및 Dev 검증 완료**다. 사용자는 기존 수집 계정 이미지 슬라이딩 유지를 덧붙였다. [구현 계획](../superpowers/plans/2026-10-09-progress-ux-implementation.ko.md)에 따라 전체 진행률·시간 안내·보관함·오류 행동·가독성을 개선한다. 결과 UI·기존 미적용 finding·실제 계정 분석 경계는 유지한다. [구현·검증 기록](2026-10-09-progress-implementation.ko.md): 140검사·타입·ESLint·독립 명세/품질 PASS, 새 Dev candidate309e1813 READY와 실제 Aside 완료/실패/404·보관함 왕복 확인, 사용자 승인 격리 Playwright390/320·오류 복구 및 시각 QA PASS다. [PR #605](https://github.com/0mininseoul/yeosachin-scanner/pull/605)의 exact-head 검사·병합·최종 main 동기화로 마감한다. 실제 모바일 Dev 인증/서버·실물·스크린리더·실제 장시간 지연은 합성 검증으로 대체하지 않는다.
+
+## 2026-11-18 관리자·Dev·비용 후속
+
+사용자 요청으로 관리자 주소를 `/admin0min`으로 옮겼다. Supabase OAuth 상태 소실 시 관리자 목적지 복구와 이미 유효한 운영자 세션의 복귀를 검증했고 Dev 카카오7개 동의항목을 Aside에서 저장·재조회했다. 복원된 Dev는 ACTIVE_HEALTHY이며 실제390×844·1440×900에서7scopeSSO·모의 결제·진행·새로고침·결과·실패·보관함을 확인했다. [통합 검증](2026-11-18-admin0min-dev-verification.ko.md)·[PR #608](https://github.com/0mininseoul/yeosachin-scanner/pull/608)에서 최종 검사·병합·배포를 연결한다.
+
+[비용 후속](2026-11-18-cloud-run-cost.ko.md)은 완료된PT7일의 CloudRun사용비용7,158→1,512원과 양쪽기간기타절감후소계0원을 확인했다. KST사용량 정가환산과 날짜경계를 구분한다. 11/13preflight5xx100건은 분류했으나 사용자worker성공과UNKNOWN세부정보가 부족해 재현시재개할 조사로 남긴다. 실물기기 대신Dev모바일viewport검수는 사용자 선택이다. W03실제계정분석과 W04별도Vertex예산·품질자료의 기존 경계는 유지한다.
