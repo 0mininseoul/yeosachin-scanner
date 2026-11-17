@@ -311,7 +311,39 @@
     "existing_export_in_other_project_presence": "unknown",
     "created_new_export_or_dataset_or_permission": false,
     "executed_bigquery_paid_query": false,
-    "required_input_to_confirm": "Existing Cloud Billing Reports cost/credits/currency/invoice-month aggregation for this project and Cloud Run, or an accessible existing billing export location."
+    "required_input_to_confirm": "Invoice-level tax/adjustment and payment confirmation are still unobserved. Project-filtered usage-date report was verified through Aside.",
+    "browser_reports": {
+      "source": "Aside Google Cloud Billing Reports",
+      "project_filter": "exact service project, single project filter preserved",
+      "timezone": "America/Los_Angeles",
+      "periods": [
+        {
+          "start": "2026-10-12",
+          "end": "2026-10-18",
+          "usage_krw": 7158,
+          "other_savings_krw": -7158,
+          "subtotal_krw": 0
+        },
+        {
+          "start": "2026-10-20",
+          "end": "2026-10-26",
+          "usage_krw": 1512,
+          "other_savings_krw": -1512,
+          "subtotal_krw": 0
+        },
+        {
+          "start": "2026-11-01",
+          "through": "query time during PT2026-11-17",
+          "complete_period": false,
+          "usage_krw": 3593,
+          "other_savings_krw": -3593,
+          "subtotal_krw": 0
+        }
+      ],
+      "completed_period_usage_reduction_percent": 78.87678122380554,
+      "specific_credit_kind_confirmed": false,
+      "invoice_tax_adjustments_or_cash_payment_confirmed": false
+    }
   },
   "exclusions": [
     "billing-account free tier",

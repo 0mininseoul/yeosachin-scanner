@@ -19,7 +19,7 @@
 | 진행·결과·보관함 | app/progress/, app/result/, app/mypage/ | analysis/results/archive-history.test.ts, presentation-policy.test.ts, interaction-evidence.test.ts |
 | 결제·주문·대기 등록 | app/api/earlybird/, lib/services/earlybird/ | commerce/checkout-policy.test.ts, commerce/ |
 | 계정·권한·인증 | lib/services/identity/, app/auth/ | identity/request-credentials.test.ts, identity/ |
-| 운영자 조회·감사 | app/admin/analysis-audit/, app/api/admin/ | operations/console-model.test.ts, operations/ |
+| 운영자 조회·감사 | app/admin0min/, app/admin/analysis-audit/workbench.tsx, app/api/admin/ | operations/console-model.test.ts, operations/ |
 | 비공개 migration 원본 검증 | scripts/verify-supabase-private-source.ts, scripts/supabase-private-source.ts | operations/tools/verify-supabase-private-source.test.ts |
 | 배포·queue·identity epoch | scripts/deploy-*, configure-*, capacity-identity-epoch/ | infra/ |
 | 페이지·컴포넌트·데모 | app/, components/, hooks/, lib/services/demo-analysis/ | ui/ 및 기능별 routes/ |

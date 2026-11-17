@@ -4,7 +4,7 @@
 
 ## 확인 결과
 
-Cloud Monitoring에서 확인한 사용량에 공식 Cloud Billing Catalog의 해당 월 서울 Tier 2 KRW 정가를 적용하면, compute 비용은 배포 전 약 1,025.5원/일에서 배포 직후 215.1원/일로 79.0% 감소합니다. 최근 완료된 7일은 약 218.5원/일입니다. 이 값은 사용량 기반 정가 환산액입니다. 실제 청구 금액과 결제 금액은 확인하지 못했습니다.
+Cloud Monitoring에서 확인한 사용량에 공식 Cloud Billing Catalog의 해당 월 서울 Tier 2 KRW 정가를 적용하면, compute 비용은 배포 전 약 1,025.5원/일에서 배포 직후 215.1원/일로 79.0% 감소합니다. 최근 완료된 7일은 약 218.5원/일입니다. 이 값은 사용량 기반 정가 환산액입니다. Root는 후속 Aside 조회에서 프로젝트로 필터링한 Billing Reports의 사용 비용·기타 절감·소계도 확인했습니다. 아래 두 집계의 날짜 경계와 포함 항목을 구분합니다.
 
 비교 기간은 모두 KST 00시부터 다음 날 00시까지의 완료된 7일입니다. 배포 당일인 10월 19일은 비교에서 제외했습니다. 10월 12~18일과 10월 20~26일을 비교하고, 최근 11월 11~17일의 지속 효과도 확인했습니다.
 
@@ -33,7 +33,7 @@ Cloud Monitoring에서 확인한 사용량에 공식 Cloud Billing Catalog의 �
 
 paid 요청 수 감소율은 66.7%이고, 과금 인스턴스 시간 감소율은 60.5%입니다. paid 요청 1회당 과금 인스턴스 시간은 약 1.973초에서 2.340초로 증가했습니다. preflight는 약 0.433초에서 0.541초로 증가했습니다. 처리 시간 증가가 당초 약 83% 절감 예상보다 낮은 정가 환산 절감률의 일부를 설명합니다. 처리 시간이 증가한 원인은 조사하지 않았습니다.
 
-최근 주 preflight 10,157건 중 11월 13일 KST에 5xx 100건이 관측되었습니다. Logging 상태 코드 집계는 500 76건, 503 24건입니다. 비용 비교에 포함된 재시도 등 작업 혼합의 가능성을 남깁니다. 이 조사에서 원인 확인이나 수정은 수행하지 않았습니다.
+최근 주 preflight 10,157건 중 11월 13일 KST 16:47~17:50에 5xx 100건이 관측되었습니다. worker500 53건, worker503 24건, recover500 23건이며 앱 완료 로그와 상태별 건수가 일치합니다. worker500은 UNKNOWN49·PROVIDER_ERROR4, worker503은 PROVIDER_ERROR24로 분류됐고 provider 실패28건의 upstream 상태는503입니다. Cloud Run 시작·용량·메모리 오류 징후는 관측되지 않았습니다. 마지막 오류 후 당일 recover200은369건, 11/14~17은 매일2xx1440·5xx0입니다. 그 뒤 사용자 worker의 성공 요청이 없어 실제 수집 경로 해결 여부는 미확정입니다. 배포 소스의 직접 매칭과 세부 예외 정보도 부족해 현재 코드 결함으로 단정하지 않습니다. 실제 사용자 테스트에서 같은 오류가 재현되면 그 실행의 안전한 오류 분류와 provider 가용성으로 조사를 재개합니다.
 
 ## 배포 및 현재 설정 근거
 
@@ -65,11 +65,23 @@ auth는 min=1, CPU=1, memory=0.5GiB, 요청 0건에 따른 idle 비용이 대부
 
 free tier와 credit, 계약 할인, 세금, invoice 보정, 네트워크 전송, Cloud Scheduler, Cloud Logging, Artifact Registry 등은 이 compute 환산표에 반영하지 않았습니다. free tier는 billing account의 여러 프로젝트에 걸쳐 합산되므로 이 프로젝트 사용량만으로 실제 공제 금액을 확정할 수 없습니다.
 
-## 실제 청구 확인의 한계
+## Billing Reports 후속 확인과 인보이스 범위
 
 프로젝트의 billingEnabled는 true입니다. 이 프로젝트에서 `bq ls --all`로 접근 가능한 dataset은 없었습니다. 연결 billing account의 프로젝트 목록 조회는 현재 계정 권한으로 거부되었습니다. 따라서 다른 프로젝트의 기존 billing export를 발견하거나 계정 단위 비용을 조회하지 못했습니다. export가 전혀 없다는 결론은 내리지 않습니다. 새 export, dataset, 권한, 설정을 만들지 않았고 BigQuery 과금 쿼리도 실행하지 않았습니다.
 
-실제 청구 확인에는 기존 Cloud Billing Reports의 해당 프로젝트/Cloud Run 비용 집계 또는 이미 존재하는 export의 접근 가능한 위치가 필요합니다. 사용 기간별 cost, credits, currency, invoice month를 함께 확인해야 합니다. 일별 사용량 기간과 invoice period는 서로 다를 수 있습니다.
+Root가 Aside의 기존 Google 로그인 세션에서 연결된 결제 계정의 Billing Reports를 열고 **해당 프로젝트 하나의 필터가 유지되는지 확인**한 뒤 Cloud Run 행을 읽었습니다. 보고서 기간 필터만 바꿨으며 Billing 설정·권한·export는 변경하지 않았습니다.
+
+| Billing Reports 사용일자, PT | Cloud Run 사용 비용 | 기타 절감 | 소계 |
+| --- | ---: | ---: | ---: |
+| 2026-10-12~18 | 7,158원 | -7,158원 | 0원 |
+| 2026-10-20~26 | 1,512원 | -1,512원 | 0원 |
+| 11/1~조회 시점 누계, PT11/17 미완료 | 3,593원 | -3,593원 | 0원 |
+
+완료된 두7일의 Billing Reports 사용 비용 감소율은78.88%입니다. 기타 절감은 무료 등급·프로모션 등 여러 크레딧을 포함할 수 있어 구체적인 상계 종류는 확정하지 않습니다. 프로젝트 사용일자 보고서의 소계를 읽었으며 세금·조정 등 인보이스 수준 항목과 현금 결제액은 확인하지 않았습니다.
+
+Billing Reports 일별 경계는 미국 태평양 시간 자정과 서머타임을 적용합니다. UI10/12~18은 KST10/12 16시~10/19 16시, UI10/20~26은 KST10/20 16시~10/27 16시입니다. 앞의 Monitoring KST7일과 직접 같은 시간 구간으로 취급하지 않습니다. 11월UI기간의 마지막 날은 조회 시점에 끝나지 않았으므로 일평균을 계산하지 않았습니다.
+
+증거는 서비스 집계 행 캡처로 보존하고 계정 식별자·결제 수단·원시 export는 저장하지 않았습니다. CLI에서 결제 계정 조회 권한이 없던 관측과 브라우저의 접근 가능한 다른 로그인 세션은 서로 다른 조회 경로입니다.
 
 ## 재현 방법
 
@@ -87,3 +99,5 @@ Monitoring의 기준 filter는 `metric.type="run.googleapis.com/<metric>" AND re
 - [Cloud Run Monitoring 지표 정의](https://docs.cloud.google.com/monitoring/api/metrics_gcp_p_z)
 - [Cloud Billing Catalog API](https://docs.cloud.google.com/billing/docs/reference/rest/v1/services.skus/list)
 - [Cloud Billing Reports](https://docs.cloud.google.com/billing/docs/how-to/reports)
+
+- [Billing Reports 절감액과 크레딧 정의](https://docs.cloud.google.com/billing/docs/how-to/reports/savings-and-credits?hl=ko)
