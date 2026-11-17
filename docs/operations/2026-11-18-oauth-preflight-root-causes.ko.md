@@ -62,7 +62,11 @@ Cloud Run 첫 source 빌드는 Next 컴파일 후 TypeScript 단계에서 V8 hea
 
 별도 무과금 합성 재현에서 durable source가 허용하는 100자 해시태그를 inference 입력이 64자로 제한하는 불일치를 확인했다. 65~100자는 정상 저장 후 실제 runner에서 `inference_response_invalid` → `inference_failed/VALIDATION_ERROR`로 끝났다. 이 경로는 미디어·AI 작업 이전이다.
 
-추론의 해시태그 제한만 기존 canonical source의 100자 상수를 사용하도록 정합화했다. 65·100자의 회귀 검사 실패를 먼저 확인한 뒤 수정했고 101자는 계속 외부 작업 전에 거절한다. 기존 3파일 44개 검사·타입체크·ESLint·diff가 통과했다. 구현자 외 reviewer는 관련 4파일 48개 검사와 코드 리뷰에서 P1/P2 0건을 보고했다. 상위 세션도 같은 코드에서 preflight 173개와 B-lite 44개를 각각 재실행해 모두 통과했다. 실제 외부 API·Apify·AI 호출은 0회다. 현재 확인된 계약 오류의 수정이며 10/28 실제 두 건과의 인과는 입증되지 않았다. 해당 입력과 validation path/길이 진단이 보존되지 않아 과거 두 건의 직접 원인은 미확정이다. 이 추가 수정의 PR 및 worker 배포 증거는 최종 마감 때 갱신한다.
+추론의 해시태그 제한만 기존 canonical source의 100자 상수를 사용하도록 정합화했다. 65·100자의 회귀 검사 실패를 먼저 확인한 뒤 수정했고 101자는 계속 외부 작업 전에 거절한다. 기존 3파일 44개 검사·타입체크·ESLint·diff가 통과했다. 구현자 외 reviewer는 관련 4파일 48개 검사와 코드 리뷰에서 P1/P2 0건을 보고했다. 상위 세션도 같은 코드에서 preflight 173개와 B-lite 44개를 각각 재실행해 모두 통과했다. 실제 외부 API·Apify·AI 호출은 0회다. 현재 확인된 계약 오류의 수정이며 10/28 실제 두 건과의 인과는 입증되지 않았다. 해당 입력과 validation path/길이 진단이 보존되지 않아 과거 두 건의 직접 원인은 미확정이다. [PR #611](https://github.com/0mininseoul/yeosachin-scanner/pull/611)은 exact-head CI·Vercel 검사 후 main `d4464368b45effbd38d6f2e7160521072416d131`에 병합됐고 정확한 main CI도 성공했다. Dev의 추가 수정 후보 `aec0d352`는 READY·정확한 Dev 프로젝트·`dev.yeosachin.com`·cron 정의 0개를 native 확인했다. 후보와 병합 main의 전체 Git tree는 같다. 운영 웹도 같은 main으로 READY다.
+
+이 추가 수정을 포함한 worker는 별도 fresh Git ZIP의 전체 소스 검증과 classic build를 통과했다. 소스 ZIP SHA256은 `d5ebe03abf76497d7da0ca98e73429830e658229aae5cc038a14cb60f90c740e`, 이미지 digest는 `sha256:40f6165a0abf0c8b1f99cb663a07ca8b0435e66c4865fd5bdeb0a9ed18892c09`다. 후보 `analysis-preflight-worker-rpcfix-d4464368-1118b`의 0% stage·소스·attestation·설정 보존은 별도 agent가 native 확인했다. 전용 태그의 GET recover405로 앱 기동을 확인하고 태그를 제거했다. 11/18 04:09:41 KST에 후보100%로 전환했고 04:10:04 KST에 기존 정기 recover POST200을 확인했다. 해당 짧은 창의 요청5xx는0, 대기작업은0이었다. runtime·IAM·queue·scheduler·gate·epoch는 유지했으며 실제 계정 분석과 provider 호출은 실행하지 않았다. 별도 agent의 최종 native 검토는 Scheduler UA의 POST200 두 건·후보 GET405 한 건·04:11:13 KST까지 승격 후5xx0·후보100%·태그 제거·전체 보호 해시 일치를 확인했다. runtime acquire는 source SHA나 revision을 입력·검사하지 않아 이미지 교체를 위해 gate를 재활성화할 근거가 없다는 direct caller 검토도 통과했다.
+
+최종 후속 PR은 이 증거 문서만 갱신한다. Dev 후보 `aec0d352`와 병합 main `d4464368`의 전체 tree 일치, 이후 문서 변경만 허용하는 최종 비교로 운영 웹·worker 코드의 동등성을 확인한다.
 
 ## OAuth 상태 소실의 원인 범위
 
@@ -92,4 +96,4 @@ Cloud Run 첫 source 빌드는 Next 컴파일 후 TypeScript 단계에서 V8 hea
 - 10/28 B-lite `VALIDATION_ERROR` 두 건은 별도 유형이다. 현재 입력 계약 불일치는 무과금 합성 재현으로 수정했지만 당시 두 건의 직접 원인으로 확정하지 않는다. 보존된 검증 위치·길이 구간 자료가 추가 확보될 때만 연결한다. 유료 AI 재실행을 해법으로 가정하지 않는다.
 - 실제 사용자 계정의 결제·정식 분석 성공은 사용자 실행 경계다. 이번 변경의 코드·DB 계약·배포 검증과 구분한다.
 
-프로덕션 재활성화, queue/scheduler의 재개·주기 변경, 공급자 호출, migration 이력 변경, 사용자 소유 파일 변경은 이 작업에 포함하지 않는다. 보호 파일 2개·보존 manifest 3개·기존 browser 파일 7개·지정 archive ref 24개는 해시/정확한 ref 비교에서 변경이 없었다. 마감 시 다시 확인한다.
+프로덕션 재활성화, queue/scheduler의 재개·주기 변경, 공급자 호출, migration 이력 변경, 사용자 소유 파일 변경은 이 작업에 포함하지 않는다. 보호 파일 2개·보존 manifest 3개·기존 browser 파일 7개·지정 archive ref 24개는 최종 해시/정확한 ref 비교에서 변경이 없었다.
