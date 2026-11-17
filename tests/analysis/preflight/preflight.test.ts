@@ -1661,6 +1661,26 @@ describe('preflight persistence adapter', () => {
         });
     });
 
+    it('marks a capacity successor through the deployed PostgreSQL RPC identifier', async () => {
+        const reservationToken = '423e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
+        const rpc = vi.fn(async () => ({ data: true, error: null }));
+        const store = createSupabasePreflightStore({ rpc, from: vi.fn() as never });
+
+        await expect(store.markProviderCapacityDispatch!({
+            preflightId,
+            generation: 2,
+            reservationToken,
+        })).resolves.toBe(true);
+        expect(rpc).toHaveBeenCalledExactlyOnceWith(
+            'mark_analysis_preflight_rearmed_dispatch_for_provider_capacity_',
+            {
+                p_preflight_id: preflightId,
+                p_dispatch_generation: 2,
+                p_dispatch_token: reservationToken,
+            },
+        );
+    });
+
     it('reserves, fails, and recovers a finalized B-lite dispatch without duplicating the provider run', async () => {
         const dispatchToken = '523e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
         const rpc = vi.fn(async (...args: [string, Record<string, unknown>?]) => {

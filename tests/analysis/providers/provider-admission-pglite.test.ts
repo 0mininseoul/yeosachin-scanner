@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
+import { PREFLIGHT_DATABASE_NAMES } from '../../../lib/services/analysis/preflight';
 import {
     analysisProviderAdmissionId,
     type AnalysisProviderAdmissionInput,
@@ -454,6 +455,25 @@ describe('provider admission migration PGlite contract', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    it('resolves the capacity mark RPC by its exact schema-cache name', async () => {
+        // SQL function calls truncate identifiers and can hide an RPC lookup mismatch.
+        // PostgREST resolves the exact name exposed by pg_proc in its schema cache.
+        const result = await db.query<{ rpc_name: string; argument_names: string[] }>(
+            `SELECT procedure.proname::text AS rpc_name,
+                    procedure.proargnames AS argument_names
+             FROM pg_catalog.pg_proc AS procedure
+             JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = procedure.pronamespace
+             WHERE namespace.nspname::text = 'public'
+               AND procedure.proname::text = $1::text`,
+            [PREFLIGHT_DATABASE_NAMES.providerCapacityMarkRpc],
+        );
+
+        expect(result.rows).toEqual([{
+            rpc_name: PREFLIGHT_DATABASE_NAMES.providerCapacityMarkRpc,
+            argument_names: ['p_preflight_id', 'p_dispatch_generation', 'p_dispatch_token'],
+        }]);
     });
 
     it('keeps privileged admission RPCs closed to API roles and exposes the recovery index', async () => {
