@@ -38,7 +38,7 @@ Dev 배포 `dpl_9epBXsLZiiaChPzqgnPMt34Hv8MX`는 exact project/owner·후보 SHA
 
 [Cloud Run 비용 보고서](2026-11-18-cloud-run-cost.ko.md)는 Monitoring 사용량과 프로젝트로 필터링한 Billing Reports 집계를 함께 기록한다. PT완료7일의 사용 비용7,158→1,512원, 소계는 두 기간0원이다. KST정가 환산 감소율은79.0%이고 두 자료의 일별 경계가 다르다. 인보이스 수준 세금·조정과 현금 결제액은 미확인이다.
 
-11/13에 집중된 preflight5xx100건은 앱·provider 분류까지 확인했고 이후 maintenance는 정상화됐다. 실제 사용자 worker 성공 기록과 구체적 UNKNOWN 예외 정보가 부족해 현재 코드 결함이나 완전 해결로 단정하지 않는다. 재현 실행의 안전한 오류 분류·provider 가용성이 조사의 재개 조건이다.
+11/13 preflight 5xx 100건은 최초 보고 때 미확정으로 남겼다. 사용자 요청으로 진행한 [후속 원인 조사](2026-11-18-oauth-preflight-root-causes.ko.md)에서 용량 재시도 RPC의 65/63바이트 이름 불일치를 확인하고 PR #609에서 수정했다. OAuth는 provider 콜백·PKCE 성공 직후 상태 없음 오류가 발생한 운영 순서를 확인했다. 소비한 콜백의 재요청이 유력하며 같은 flow의 재요청 방식은 기존 로그만으로 확정하지 않는다. 배포 검증과 실제 사용자 계정 분석의 경계는 후속 문서에서 구분한다.
 
 실제 Instagram 분석·Apify actor·AI 생성·실제 결제는 실행하지 않았다. Production 실제 계정 분석은 사용자 실행 경계와 기존 별도 Vertex 예산 승인 조건을 따른다. 보호 파일·보존 refs·backup 자료는 유지한다.
 
