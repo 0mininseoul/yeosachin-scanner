@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
     process: vi.fn(),
     prepareBeta: vi.fn(),
     enqueue: vi.fn(),
+    lookup: vi.fn(),
+    rearm: vi.fn(),
+    mark: vi.fn(),
     processAdmission: vi.fn(),
     runBlite: vi.fn(),
     settleBetaCredit: vi.fn(),
@@ -34,6 +37,11 @@ vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
     return {
         ...actual,
         processPreflight: mocks.process,
+        preflightStore: {
+            ...actual.preflightStore,
+            rearmProviderCapacityDispatch: mocks.rearm,
+            markProviderCapacityDispatch: mocks.mark,
+        },
         prepareBetaPreflightDispatch: mocks.prepareBeta,
     };
 });
@@ -47,6 +55,7 @@ vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getConfig,
     verifyPreflightTaskAuthorization: mocks.verify,
     enqueuePreflightTask: mocks.enqueue,
+    lookupPreflightTask: mocks.lookup,
 }));
 vi.mock('@/lib/services/analysis/beta-apify-credit-settlement-runtime', async (importOriginal) => {
     const actual = await importOriginal<
@@ -65,9 +74,12 @@ vi.mock('@/lib/services/analysis/betatest-access', async (importOriginal) => ({
 
 import { POST } from '@/app/api/analysis/preflight/worker/route';
 import { PreflightWorkerRetryError } from '../../../lib/services/analysis/preflight';
+import { sanitizeOperationalEvent } from '@/lib/observability/schema';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
+const successorToken = '123e4567-e89b-42d3-a456-426614174006';
+const ordinaryTask = { preflightId, workloadRole: 'preflight', generation: 1, reservationToken: dispatchToken };
 const config = {
     project: 'example-project',
     location: 'asia-northeast3',
@@ -101,6 +113,9 @@ describe('preflight worker route', () => {
         mocks.process.mockResolvedValue('ready');
         mocks.prepareBeta.mockResolvedValue('prepared');
         mocks.enqueue.mockResolvedValue('enqueued');
+        mocks.lookup.mockResolvedValue('exists');
+        mocks.rearm.mockResolvedValue({ shouldEnqueue: true, generation: 2, reservationToken: successorToken });
+        mocks.mark.mockResolvedValue(true);
         mocks.processAdmission.mockResolvedValue('ready');
         mocks.runBlite.mockResolvedValue('complete');
         mocks.settleBetaCredit.mockResolvedValue(false);
@@ -340,6 +355,131 @@ describe('preflight worker route', () => {
             }),
         }));
     });
+
+    it('acknowledges an ordinary capacity delivery after its successor task and DB mark are confirmed', async () => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        const response = await POST(request(ordinaryTask, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+
+        expect(mocks.rearm).toHaveBeenCalledExactlyOnceWith({
+            preflightId, expectedGeneration: 1, expectedReservationToken: dispatchToken,
+        });
+        expect(mocks.enqueue).toHaveBeenCalledExactlyOnceWith(preflightId, 2, {
+            config, reservationToken: successorToken,
+        });
+        expect(mocks.mark).toHaveBeenCalledExactlyOnceWith({
+            preflightId, generation: 2, reservationToken: successorToken,
+        });
+        expect(mocks.lookup).not.toHaveBeenCalled();
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ code: 'CAPACITY_HANDOFF', status: 'pending' });
+        expect(mocks.emit).toHaveBeenCalledWith(expect.objectContaining({
+            event: 'preflight.completed', severity: 'info',
+            fields: expect.objectContaining({
+                operation: 'enqueue', disposition: 'enqueued', retryable: false,
+            }),
+        }));
+        const handoff = mocks.emit.mock.calls.find(([event]) => event.fields.disposition === 'enqueued')?.[0];
+        expect(sanitizeOperationalEvent(handoff).fields).toMatchObject({
+            operation: 'enqueue', disposition: 'enqueued', retryable: false,
+        });
+    });
+
+    it('acknowledges a successor after an ambiguous enqueue is confirmed by its exact task lookup', async () => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        mocks.enqueue.mockRejectedValueOnce(new Error('synthetic enqueue response lost'));
+        const response = await POST(request(ordinaryTask, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+
+        expect(mocks.lookup).toHaveBeenCalledExactlyOnceWith(preflightId, 2, { config });
+        expect(mocks.mark).toHaveBeenCalledExactlyOnceWith({
+            preflightId, generation: 2, reservationToken: successorToken,
+        });
+        expect(response.status).toBe(200);
+    });
+
+    it('acknowledges only after an ambiguous mark is confirmed by exact lookup and successful fenced mark replay', async () => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        mocks.mark.mockRejectedValueOnce(new Error('synthetic mark response lost'));
+        const response = await POST(request(ordinaryTask, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+
+        expect(mocks.lookup).toHaveBeenCalledExactlyOnceWith(preflightId, 2, { config });
+        expect(mocks.enqueue).toHaveBeenCalledOnce();
+        expect(mocks.mark).toHaveBeenCalledTimes(2);
+        expect(mocks.mark).toHaveBeenNthCalledWith(2, {
+            preflightId, generation: 2, reservationToken: successorToken,
+        });
+        expect(response.status).toBe(200);
+    });
+
+    it.each(['', '5', '-1'])('keeps an ordinary capacity delivery retryable with retry metadata %s', async retryCount => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        const response = await POST(request(ordinaryTask, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': retryCount,
+        }));
+
+        expect(response.status).toBe(503);
+        expect(mocks.rearm).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.mark).not.toHaveBeenCalled();
+    });
+
+    it('keeps an unfenced legacy ordinary capacity delivery retryable at the safety ceiling', async () => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        const response = await POST(request({ preflightId }, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+
+        expect(response.status).toBe(503);
+        expect(mocks.rearm).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.mark).not.toHaveBeenCalled();
+    });
+
+    it('keeps a delivery retryable when rearm does not reserve a successor', async () => {
+        mocks.process.mockResolvedValue('capacity_pending');
+        mocks.rearm.mockResolvedValueOnce({ shouldEnqueue: false, generation: 1, reservationToken: null });
+        const response = await POST(request(ordinaryTask, 'Bearer signed', {
+            'X-CloudTasks-TaskRetryCount': '6',
+        }));
+
+        expect(response.status).toBe(503);
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.mark).not.toHaveBeenCalled();
+    });
+
+    it.each(['unconfirmed enqueue', 'false mark', 'unconfirmed mark'])(
+        'retains a retryable failure for %s instead of acknowledging an unconfirmed handoff',
+        async scenario => {
+            const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+            mocks.process.mockResolvedValue('capacity_pending');
+            if (scenario === 'unconfirmed enqueue') {
+                mocks.enqueue.mockRejectedValueOnce(new Error('synthetic enqueue response lost'));
+                mocks.lookup.mockResolvedValueOnce('not_found');
+            } else if (scenario === 'false mark') {
+                mocks.mark.mockResolvedValue(false);
+            } else {
+                mocks.mark.mockRejectedValueOnce(new Error('synthetic mark response lost'));
+                mocks.lookup.mockResolvedValueOnce('not_found');
+            }
+            try {
+                const response = await POST(request(ordinaryTask, 'Bearer signed', {
+                    'X-CloudTasks-TaskRetryCount': '6',
+                }));
+
+                expect(response.status).toBe(500);
+                await expect(response.json()).resolves.toEqual({ code: 'ANALYSIS_FAILED' });
+                if (scenario === 'unconfirmed enqueue') expect(mocks.mark).not.toHaveBeenCalled();
+                else expect(mocks.mark).toHaveBeenCalledTimes(scenario === 'false mark' ? 2 : 1);
+            } finally {
+                log.mockRestore();
+            }
+        },
+    );
 
     it('prepares beta credit only with the persisted generation/token fence', async () => {
         const prepareToken = preflightId.replace(/^1/, '3');

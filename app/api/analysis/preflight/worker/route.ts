@@ -187,10 +187,10 @@ async function rearmPreflightDispatchAfterCapacity(input: {
     generation?: number;
     reservationToken?: string;
     config: NonNullable<ReturnType<typeof getPreflightTasksConfig>>;
-}): Promise<void> {
+}): Promise<boolean> {
     // Roleless legacy deliveries remain drain-compatible, but only a new fenced task can
     // safely rotate its successor after Cloud Tasks exhausts transport attempts.
-    if (input.generation === undefined || input.reservationToken === undefined) return;
+    if (input.generation === undefined || input.reservationToken === undefined) return false;
     const rearm = preflightStore.rearmProviderCapacityDispatch;
     if (!rearm || !preflightStore.markProviderCapacityDispatch) {
         throw new Error('PREFLIGHT_DISPATCH_REARM_UNAVAILABLE');
@@ -200,7 +200,7 @@ async function rearmPreflightDispatchAfterCapacity(input: {
         expectedGeneration: input.generation,
         expectedReservationToken: input.reservationToken,
     });
-    if (!reservation.shouldEnqueue) return;
+    if (!reservation.shouldEnqueue) return false;
     if (!reservation.reservationToken) {
         throw new Error('PREFLIGHT_DISPATCH_REARM_TOKEN_MISSING');
     }
@@ -228,7 +228,7 @@ async function rearmPreflightDispatchAfterCapacity(input: {
             generation: reservation.generation,
             reservationToken: reservation.reservationToken,
         });
-        if (marked) return;
+        if (marked) return true;
         throw new Error('PREFLIGHT_DISPATCH_REARM_MARK_FENCE_MISMATCH');
     } catch (error) {
         // Preserve the reservation when the mark response is ambiguous.  Confirming the exact
@@ -241,7 +241,7 @@ async function rearmPreflightDispatchAfterCapacity(input: {
                 generation: reservation.generation,
                 reservationToken: reservation.reservationToken,
             });
-            if (marked) return;
+            if (marked) return true;
         }
         throw error;
     }
@@ -443,12 +443,28 @@ async function handlePOST(
                 retryCount !== null
                 && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
             ) {
-                await rearmPreflightDispatchAfterCapacity({
+                const handedOff = await rearmPreflightDispatchAfterCapacity({
                     preflightId: task.preflightId,
                     ...('generation' in task ? { generation: task.generation } : {}),
                     ...('reservationToken' in task ? { reservationToken: task.reservationToken } : {}),
                     config,
                 });
+                if (handedOff) {
+                    operationalLogger.emit({
+                        event: 'preflight.completed',
+                        severity: 'info',
+                        fields: {
+                            ...context,
+                            preflight_id: task.preflightId,
+                            operation: 'enqueue',
+                            disposition: 'enqueued',
+                            retryable: false,
+                        },
+                    });
+                    // The successor owns continuation. Acknowledge this retired
+                    // generation so Cloud Tasks can stop its deliveries.
+                    return NextResponse.json({ code: 'CAPACITY_HANDOFF', status: 'pending' });
+                }
             }
             operationalLogger.emit({
                 event: 'preflight.failed',
