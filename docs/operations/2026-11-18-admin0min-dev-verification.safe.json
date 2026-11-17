@@ -86,7 +86,7 @@
     "liveApifyActorCalls": 0,
     "liveAiGenerationCalls": 0,
     "realCardPayments": 0,
-    "productionDbOrOperationalSettingsChanged": false,
+    "productionSqlMigrationOrDeploymentSettingsChanged": false,
     "secretsOrUserIdentifiersRecorded": false
   },
   "limitations": [
