@@ -35,7 +35,14 @@
       "causal_mapping": "Capacity rearm reserves generation2 and creates its Cloud Task; the absent 65-byte mark endpoint leaves dispatch reserved. Subsequent old/successor claims fail fences, and recovery repeats the same absent endpoint.",
       "source_introduction_commit": "71930801",
       "source_introduction_date": "2026-09-01",
-      "source_introduction_pr": 522
+      "source_introduction_pr": 522,
+      "initial_capacity_subreason": {
+        "status": "UNKNOWN",
+        "bounded_log_rows": 517,
+        "capacity_failed_events": 28,
+        "reason_or_counter_fields_present": 0,
+        "external_provider_outage_claimed": false
+      }
     },
     "independent_deployed_source_proof": {
       "exact_image_successful_build_count": 1,
@@ -643,18 +650,21 @@
     "typecheck": "PASS",
     "independent_review": "PASS",
     "migration_changes": false,
-    "cloud_run_status": "not_yet_deployed",
+    "cloud_run_status": "PROMOTED",
     "confirmed_handoff_ack": {
-      "status": "reviewed_awaiting_pr_ci_merge",
+      "status": "MERGED",
       "related_tests": 37,
       "test_files": 2,
       "typecheck": "PASS",
       "lint": "PASS",
       "scope": "ordinary preflight confirmed successor only",
       "unconfirmed_retry_statuses_preserved": true,
-      "independent_review": "PASS"
+      "independent_review": "PASS",
+      "pull_request": 610,
+      "commit": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09"
     },
-    "integrated_tests": 173
+    "integrated_tests": 173,
+    "cloud_run_source_sha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09"
   },
   "boundaries": {
     "apify_provider_calls": 0,
@@ -671,8 +681,8 @@
   },
   "web_deployments": {
     "production": {
-      "id": "dpl_FQ9aY5egNUubMbvLoTQZGWEnzKta",
-      "sourceSha": "c99d4783701d4732c369cb735ea688107fcad592",
+      "id": "dpl_6xY2xZ3x2xe81S7KfojcXLptKB4B",
+      "sourceSha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09",
       "state": "READY",
       "exactProductionProject": true
     },
@@ -778,8 +788,164 @@
       ]
     ],
     "cause": "V8 JavaScript heap limit reached during Next.js TypeScript checking after compilation succeeded",
-    "restoring_prior_heap_option_has_not_yet_been_retested": true,
+    "restoring_prior_heap_option_has_not_yet_been_retested": false,
     "production_traffic_runtime_iam_queues_schedulers_unchanged": true,
-    "planned_node_max_old_space_mb": 4096
+    "planned_node_max_old_space_mb": 4096,
+    "classic_retry": {
+      "status": "SUCCESS",
+      "node_max_old_space_mb": 4096,
+      "machine_type_override": null,
+      "default_machine_used": true,
+      "quota_increase": false,
+      "source": "fresh main Git ZIP",
+      "prior_source_reapplied": false
+    }
+  },
+  "preservation": {
+    "protected": {
+      "count": 2,
+      "unchanged": true
+    },
+    "manifests": {
+      "count": 3,
+      "unchanged": true
+    },
+    "browser": {
+      "count": 7,
+      "unchanged": true
+    },
+    "archiveRefs": {
+      "beforeCount": 24,
+      "afterCount": 24,
+      "unchanged": true
+    }
+  },
+  "cloud_run_rollout": {
+    "image_and_promotion": {
+      "status": "promoted",
+      "protectedBuildDigest": "7918961a6be5e39aa2d8a7d8d2a2f8e0623fedbc5fe5f1806390230b4a981a6f",
+      "sourceSha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-a97b2b6e-1118",
+      "candidateImageDigest": "asia-northeast3-docker.pkg.dev/gen-lang-client-0311522474/cloud-run-source-deploy/analysis-preflight-worker@sha256:a5c6179067c42f1aa96313b0db305e2d28dfc0a45f903ef770c1917685e5f97d",
+      "sourceProof": true,
+      "sourceArchiveSha256": "ac4cc97fb8bc1a9aa3772cb5db62b90758ef958d92f40d48be4a88e9fa1f320f",
+      "attestationMatches": true,
+      "sourceLabelMatches": true,
+      "candidateReady": true,
+      "trafficUnchanged": true,
+      "runtimeUnchanged": true,
+      "peripheralUnchanged": true,
+      "queuedTasks": 0,
+      "stagedTemplateHash": "097845ca7b837a2729022d3b48492a1fab8e5d8e076eff82a7854017a3321420",
+      "secretValuesPersisted": false,
+      "activationStateChanged": false,
+      "promotedAt": "2026-11-17T18:44:26.125908+00:00",
+      "traffic": [
+        [
+          "analysis-preflight-worker-rpcfix-a97b2b6e-1118",
+          100,
+          null
+        ]
+      ],
+      "trafficOnCandidate": true,
+      "runtimeUnchangedAfterPromotion": true,
+      "peripheralUnchangedAfterPromotion": true,
+      "queuedTasksAfterPromotion": 0
+    },
+    "read_only_canary": {
+      "checkedAt": "2026-11-17T18:42:22.411198+00:00",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-a97b2b6e-1118",
+      "method": "GET",
+      "route": "/api/analysis/preflight/recover",
+      "httpStatus": 405,
+      "expectedStatus": 405,
+      "appStartupVerified": true,
+      "providerCalls": 0,
+      "workerPostCalls": 0
+    },
+    "canary_removed": {
+      "beforeRuntimeHash": "f6b69f19e2372a55984a936e3b48b3529ffa5001e526710122194f7f06ee7b71",
+      "beforeRuntimeSansUrlsHash": "c4c2078cc63e96ecbf1b5f6429dd58ca76c46f75c99b799c7d8c453a660ba9b1",
+      "sourceSha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-a97b2b6e-1118",
+      "tagPresent": false,
+      "servingTrafficUnchanged": true,
+      "templateUnchanged": true,
+      "peripheralUnchanged": true,
+      "fullRuntimeRestored": true
+    },
+    "existing_scheduler_health": {
+      "checkedAt": "2026-11-17T18:45:30.701266+00:00",
+      "sourceSha": "a97b2b6e95aab09b2639e4764d0947fe59e0fc09",
+      "candidateRevision": "analysis-preflight-worker-rpcfix-a97b2b6e-1118",
+      "logWindowStart": "2026-11-17T18:44:26.125908+00:00",
+      "trafficOnCandidate": true,
+      "runtimeUnchanged": true,
+      "peripheralUnchanged": true,
+      "queuedTasks": 0,
+      "requestCounts": [
+        {
+          "route": "/api/analysis/preflight/recover",
+          "method": "POST",
+          "status": 200,
+          "count": 1
+        }
+      ],
+      "firstExistingCronRecovery200": "2026-11-17T18:45:04.658572Z",
+      "lastExistingCronRecovery200": "2026-11-17T18:45:04.658572Z",
+      "request5xxCount": 0,
+      "manualPostCalls": 0,
+      "providerCalls": 0,
+      "rawLogsPersisted": false,
+      "logLimitReached": false
+    },
+    "independent_native_review": {
+      "status": "PASS",
+      "implementation_agent_different": true,
+      "candidate_traffic_percent": 100,
+      "old_traffic_percent": 0,
+      "canary_tag_removed": true,
+      "image_source_attestations_match": true,
+      "runtime_queue_schedulers_iam_unchanged": true,
+      "queued_tasks": 0,
+      "existing_scheduler_recover_200_count": 1,
+      "first_recover_200_kst": "2026-11-18T03:45:04.658572+09:00",
+      "observed_5xx": 0,
+      "manual_post_calls": 0,
+      "customer_end_to_end_claimed": false
+    }
+  },
+  "blite_source_contract_fix": {
+    "status": "REVIEWED_CANDIDATE",
+    "durable_hashtag_max_length": 100,
+    "prior_inference_hashtag_max_length": 64,
+    "updated_inference_max_uses_canonical_source_constant": true,
+    "red_regressions": 2,
+    "green_boundary_regressions": 3,
+    "accepted_boundary_lengths": [
+      65,
+      100
+    ],
+    "rejected_boundary_lengths": [
+      101
+    ],
+    "related_tests": 44,
+    "test_files": 3,
+    "typecheck": "PASS",
+    "lint_errors": 0,
+    "lint_warnings": 0,
+    "independent_review": "PASS",
+    "independent_test_count": 48,
+    "independent_test_files": 4,
+    "oct28_direct_causality": "NOT_PROVEN",
+    "external_provider_calls": 0,
+    "root_integrated_verification": {
+      "preflight_tests": 173,
+      "preflight_test_files": 4,
+      "blite_tests": 44,
+      "blite_test_files": 3,
+      "total_tests": 217,
+      "status": "PASS"
+    }
   }
 }

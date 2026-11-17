@@ -19,6 +19,9 @@ import {
     inferLegacyPrecheckoutBlite,
     inferPrecheckoutBlite,
 } from '../../../lib/services/precheckout/blite-inference';
+import {
+    precheckoutBliteSourceV1Schema as durableSourceSchema,
+} from '../../../lib/services/precheckout/blite-source';
 
 type SourcePost = {
     type: 'image' | 'video' | 'carousel' | 'reel';
@@ -336,6 +339,27 @@ describe('inferPrecheckoutBlite', () => {
             inferenceOptions(),
         );
         expect(result).toBeNull();
+        expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
+    it.each([65, 100])('accepts a durable source with a %i-character hashtag', async length => {
+        const input = source({ posts: [post({ hashtags: ['h'.repeat(length)] })] });
+        expect(durableSourceSchema.safeParse(input).success).toBe(true);
+        mocks.analyzeWithGemini.mockResolvedValue(validModelResponse());
+
+        const result = await inferPrecheckoutBlite(input, inferenceOptions());
+
+        expect(result).not.toBeNull();
+        expect(mocks.prepareAnalysisImages).toHaveBeenCalledOnce();
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('rejects a 101-character source hashtag before media or Gemini work', async () => {
+        const input = source({ posts: [post({ hashtags: ['h'.repeat(101)] })] });
+        expect(durableSourceSchema.safeParse(input).success).toBe(false);
+
+        expect(await inferPrecheckoutBlite(input, inferenceOptions())).toBeNull();
         expect(mocks.prepareAnalysisImages).not.toHaveBeenCalled();
         expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
     });

@@ -11,6 +11,7 @@ import {
     type AnalysisImagePolicy,
 } from '@/lib/services/ai/image-preprocessing';
 import { BLITE_INFERENCE_DEADLINE_MS } from './blite-deadline';
+import { PRECHECKOUT_BLITE_SOURCE_MAX_HASHTAG_LENGTH } from './blite-source';
 import {
     createAnalysisV2GeminiLeaseStore,
     isAnalysisV2AiAdmissionSignal,
@@ -59,7 +60,7 @@ const PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH = 64;
 const precheckoutBliteSourcePostSchema = z.object({
     type: z.enum(['image', 'video', 'carousel', 'reel']),
     captionExcerpt: z.string().max(MAX_CAPTION_EXCERPT_LENGTH).nullable(),
-    hashtags: z.array(z.string().max(PRECHECKOUT_BLITE_MAX_SOURCE_USERNAME_LENGTH))
+    hashtags: z.array(z.string().max(PRECHECKOUT_BLITE_SOURCE_MAX_HASHTAG_LENGTH))
         .max(MAX_HASHTAGS_PER_POST),
     carouselDepth: z.number().int().nonnegative().nullable(),
     likesCount: z.number().int().nonnegative().nullable(),
