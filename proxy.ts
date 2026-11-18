@@ -7,7 +7,8 @@ import {
 import { DEV_UI_ROBOTS_HEADER } from '@/lib/constants/dev-ui';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
 import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
-import { getAnalysisAuditOperatorDecision } from '@/lib/services/analysis/score-audit';
+import { classifyOperatorAuthError, getAnalysisAuditOperatorDecision } from '@/lib/services/analysis/score-audit';
+import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/services/dev-ui/site-access';
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
 import { ADMIN_CONSOLE_PATH, readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 import { AUTH_REDIRECT_INTENT_COOKIE, readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
@@ -21,7 +22,10 @@ const LEGACY_PUBLIC_HOSTNAMES = new Set([
 export async function proxy(request: NextRequest) {
     const deploymentBoundary = devUiRequestBoundary(request);
     const withDevHeaders = (response: NextResponse): NextResponse => {
-        if (deploymentBoundary !== 'production') response.headers.set('X-Robots-Tag', DEV_UI_ROBOTS_HEADER);
+        if (deploymentBoundary !== 'production') {
+            response.headers.set('X-Robots-Tag', DEV_UI_ROBOTS_HEADER);
+            response.headers.set('Cache-Control', 'private, no-store');
+        }
         return response;
     };
     if (deploymentBoundary === 'invalid' || deploymentBoundary === 'forbidden') {
@@ -50,7 +54,7 @@ export async function proxy(request: NextRequest) {
     const oauthRedirectIntent = isRootOAuthStateError
         ? readOAuthRedirectIntent(request.headers.get('cookie'))
         : null;
-    if (isRootOAuthStateError) {
+    if (isRootOAuthStateError && deploymentBoundary === 'production') {
         const destination = readAdminConsoleDestination(oauthRedirectIntent);
         if (destination) {
             const url = appRedirectUrlForRequest(request.url, destination);
@@ -66,19 +70,21 @@ export async function proxy(request: NextRequest) {
         request,
     });
 
-    // Auth Callback, API, Static, Share 파일은 proxy 로직 건너뛰기
-    // /share는 비로그인 상태에서도 접근 가능해야 함 (결과 공유 기능)
-    if (request.nextUrl.pathname.startsWith('/auth') ||
-        request.nextUrl.pathname.startsWith('/api') ||
-        request.nextUrl.pathname.startsWith('/share') ||
-        request.nextUrl.pathname.startsWith('/_next') ||
-        request.nextUrl.pathname.startsWith('/static')) {
+    const pathname = request.nextUrl.pathname;
+    // Dev's exact callback is the session entry point. Its handler checks the
+    // exchanged account before proceeding with the app's callback work.
+    if (deploymentBoundary === 'dev' && pathname === '/auth/callback') {
         return withDevHeaders(supabaseResponse);
     }
+    // Production APIs and shared pages retain their own access policies.
+    if (deploymentBoundary === 'production' && (
+        pathname.startsWith('/auth') || pathname.startsWith('/api') || pathname.startsWith('/share')
+        || pathname.startsWith('/_next') || pathname.startsWith('/static')
+    )) return supabaseResponse;
 
     // Capture first touch once on a real page navigation only. The server never
     // stores a URL, query string, referrer, click ID, or other identifier.
-    if (request.method === 'GET' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+    if (deploymentBoundary === 'production' && request.method === 'GET' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
         supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
             encodeKakaoSignupAttribution(classifyKakaoSignupAttribution(request.nextUrl.search, request.headers.get('referer') ?? ''), normalizeKakaoReferrerOrigin(request.headers.get('referer') ?? '')), {
                 maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
@@ -100,12 +106,13 @@ export async function proxy(request: NextRequest) {
                     supabaseResponse = NextResponse.next({
                         request,
                     });
-                    const attribution = request.cookies.get(KAKAO_ATTRIBUTION_COOKIE)
-                        ?? { name: KAKAO_ATTRIBUTION_COOKIE, value: encodeKakaoSignupAttribution(classifyKakaoSignupAttribution(
-                            request.nextUrl.search, request.headers.get('referer') ?? '',
-                        ), normalizeKakaoReferrerOrigin(request.headers.get('referer') ?? '')), maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax' as const, secure: true };
-                    if (!request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
-                        supabaseResponse.cookies.set(attribution);
+                    if (deploymentBoundary === 'production' && !request.cookies.has(KAKAO_ATTRIBUTION_COOKIE)) {
+                        supabaseResponse.cookies.set(KAKAO_ATTRIBUTION_COOKIE,
+                            encodeKakaoSignupAttribution(classifyKakaoSignupAttribution(
+                                request.nextUrl.search, request.headers.get('referer') ?? '',
+                            ), normalizeKakaoReferrerOrigin(request.headers.get('referer') ?? '')), {
+                                maxAge: 30 * 60, path: '/', httpOnly: true, sameSite: 'lax', secure: true,
+                            });
                     }
                     cookiesToSet.forEach(({ name, value, options }) =>
                         supabaseResponse.cookies.set(name, value, options)
@@ -116,20 +123,55 @@ export async function proxy(request: NextRequest) {
     );
 
     // 세션 체크 (getUser는 서버 사이드에서 안전한 방법)
-    const {
-        data: { user },
-        error: authError,
-    } = await supabase.auth.getUser();
+    const { data: { user }, error: authError } = await supabase.auth.getUser().catch(error => {
+        if (deploymentBoundary === 'production') throw error;
+        return { data: { user: null }, error: new Error('DEV_UI_AUTH_UNAVAILABLE') };
+    });
 
-    const redirectWithAuthCookies = (url: URL) => {
-        const redirectResponse = NextResponse.redirect(url);
-        supabaseResponse.cookies.getAll().forEach(cookie => {
-            redirectResponse.cookies.set(cookie);
-        });
-        const attribution = supabaseResponse.cookies.get(KAKAO_ATTRIBUTION_COOKIE);
-        if (attribution) redirectResponse.cookies.set(attribution);
-        return withDevHeaders(redirectResponse);
+    const withAuthCookies = (response: NextResponse): NextResponse => {
+        supabaseResponse.cookies.getAll().forEach(cookie => response.cookies.set(cookie));
+        return withDevHeaders(response);
     };
+    const redirectWithAuthCookies = (url: URL) => withAuthCookies(NextResponse.redirect(url));
+
+    if (deploymentBoundary === 'dev') {
+        const access = authError
+            ? classifyOperatorAuthError(authError) === 'unauthorized' ? 'unauthenticated' : 'unavailable'
+            : getDevUiSiteAccess(user, request);
+        const isLoginRequest = (pathname === '/login' || pathname === '/login/')
+            && (request.method === 'GET' || request.method === 'HEAD');
+        if (isLoginRequest) {
+            if (access === 'allowed') {
+                return redirectWithAuthCookies(devUiPostLoginUrl(request.url, parameters.get('redirectTo')));
+            }
+            return withDevHeaders(supabaseResponse);
+        }
+        if (access !== 'allowed') {
+            const status = access === 'unavailable' ? 503 : access === 'denied' ? 403 : 401;
+            if (pathname.startsWith('/api') || (request.method !== 'GET' && request.method !== 'HEAD')) {
+                const error = access === 'unavailable' ? 'DEV_UI_AUTH_UNAVAILABLE'
+                    : access === 'denied' ? 'DEV_UI_ACCESS_DENIED' : 'UNAUTHORIZED';
+                return withAuthCookies(NextResponse.json({ error }, { status }));
+            }
+            const destination = isRootOAuthStateError
+                ? readAdminConsoleDestination(oauthRedirectIntent) ?? oauthRedirectIntent
+                : `${pathname}${request.nextUrl.search}`;
+            const error = access === 'denied' ? 'dev_access_denied'
+                : access === 'unavailable' ? 'dev_auth_unavailable'
+                    : isRootOAuthStateError ? 'bad_oauth_state' : undefined;
+            const response = redirectWithAuthCookies(devUiLoginUrl(request.url, destination, error));
+            if (isRootOAuthStateError) response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
+            return response;
+        }
+        const adminDestination = isRootOAuthStateError ? readAdminConsoleDestination(oauthRedirectIntent) : null;
+        if (adminDestination) {
+            const url = appRedirectUrlForRequest(request.url, adminDestination);
+            url.searchParams.set('error', 'bad_oauth_state');
+            const response = redirectWithAuthCookies(url);
+            response.cookies.delete(AUTH_REDIRECT_INTENT_COOKIE);
+            return response;
+        }
+    }
 
     // A completed callback consumes its intent cookie. A later duplicate
     // provider return may still carry the state error while its session is valid.
@@ -153,7 +195,7 @@ export async function proxy(request: NextRequest) {
     }
 
     // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
-    if (request.nextUrl.searchParams.get('verified') === 'true' && !user) {
+    if (deploymentBoundary === 'production' && parameters.get('verified') === 'true' && !user) {
         console.error('Proxy: Login verified but NO USER FOUND.');
         const cookies = request.cookies.getAll();
         console.log('Proxy Cookies:', cookies.map(c => c.name).join(', '));

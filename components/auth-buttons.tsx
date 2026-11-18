@@ -22,6 +22,7 @@ type OAuthProvider = 'kakao' | 'google';
 interface OAuthOptions {
     redirectTo: string;
     scopes?: string;
+    queryParams?: Record<string, string>;
 }
 
 interface OAuthResult {
@@ -62,9 +63,11 @@ export async function performOAuthSignIn({
 export function AuthButtons({
     redirectTo = '/analyze',
     disabled = false,
+    promptKakaoLogin = false,
 }: {
     redirectTo?: string;
     disabled?: boolean;
+    promptKakaoLogin?: boolean;
 }) {
     const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
     const signInStarted = useRef(false);
@@ -102,6 +105,7 @@ export function AuthButtons({
                 options: {
                     redirectTo: callbackUrl.toString(),
                     scopes,
+                    ...(provider === 'kakao' && promptKakaoLogin ? { queryParams: { prompt: 'login' } } : {}),
                 },
                 signInWithOAuth: (input) => supabase.auth.signInWithOAuth(input),
                 storage: availableAnalyticsSessionStorage(),
