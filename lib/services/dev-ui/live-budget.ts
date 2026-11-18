@@ -1,11 +1,12 @@
 import 'server-only';
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
 import { estimateVertexAiPreDispatchCost } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { readDevLiveApproval, type DevLiveApproval } from './live-approval';
+import { devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
 
 export const DEV_LIVE_BUDGET_UNAVAILABLE = 'DEV_LIVE_BUDGET_UNAVAILABLE';
@@ -29,6 +30,11 @@ const VERTEX_MAX_CONTEXT_TOKENS = 1_048_576;
 const VERTEX_MAX_OUTPUT_TOKENS = 65_536;
 
 type Provider = 'apify' | 'vertex';
+const workerApproval = new AsyncLocalStorage<DevLiveApproval>();
+
+export function withDevLiveProviderApproval<T>(approval: DevLiveApproval | null, operation: () => T): T {
+    return approval ? workerApproval.run(approval, operation) : operation();
+}
 
 export type DevLiveCostReservation = Readonly<{
     grantId: string;
@@ -87,8 +93,8 @@ export function requireDevLiveProviderApproval(): DevLiveApproval {
     const url = role === 'preflight'
         ? `${process.env.DEV_LIVE_PREFLIGHT_ORIGIN}/api/analysis/preflight/worker`
         : `${process.env.DEV_LIVE_PAID_ORIGIN}/api/analysis/v2/worker`;
-    const approval = readDevLiveApproval();
-    if (!approval || devLiveWorkerRequestBoundary({ url, method: 'POST' }) !== 'dev-worker') {
+    const approval = devLiveOwnerStartEnabled() ? workerApproval.getStore() : readDevLiveApproval();
+    if (!approval || Date.now() >= Date.parse(approval.expiresAt) || devLiveWorkerRequestBoundary({ url, method: 'POST' }) !== 'dev-worker') {
         throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
     }
     return approval;

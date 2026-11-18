@@ -1,12 +1,12 @@
 # Dev 실제 분석 준비와 검증
 
-Dev의 기본 분석은 합성 데이터로 진행한다. 실제 분석 옵션은 승인된 카카오 운영자가 Dev 전용 인프라에서 Basic 한 건을 검증하는 용도다. 테스트 이용권으로 결제 단계를 대체하고, 사전 점검·큐·워커·진행·결과는 운영과 같은 애플리케이션 코드로 검증한다.
+Dev의 기본 분석은 합성 데이터로 진행한다. 실제 분석 옵션은 등록된 카카오 운영자 한 명이 Dev 전용 인프라에서 Basic을 검증하는 용도다. 운영자는 시작할 때마다 1회 예산을 자동으로 받는다. 테스트 이용권으로 결제 단계를 대체하고, 사전 점검·큐·워커·진행·결과는 운영과 같은 애플리케이션 코드로 검증한다.
 
 ## 현재 준비 상태
 
-11월 18일 Dev DB에서 Basic 테스트 실행자 1명, 공급자 동시 실행·속도 한도 22개, Gemini lease 8개를 설정했다. 시작 전 Apify 슬롯 10개는 잔액 미확인 상태이며, 과금 승인 사용·비용 예약·실제 요청·결제 주문은 각각 0건으로 확인했다. 과거 미과금 격리 프로젝트 `yeosachin-dev-live-261118`은 삭제 요청 상태다. Dev 워커와 큐는 기존 운영 프로젝트 Ascentum의 별도 `dev-live-*` 리소스로 구성한다.
+11월 18일 Dev DB 초기 설정에서 Basic 테스트 실행자 1명, 공급자 동시 실행·속도 한도 22개, Gemini lease 8개를 설정했다. 시작 전 Apify 슬롯 10개는 잔액 미확인 상태이며, 과금 승인 사용·비용 예약·실제 요청·결제 주문은 각각 0건으로 확인했다. 과거 미과금 격리 프로젝트 `yeosachin-dev-live-261118`은 삭제 요청 상태다. Dev 워커와 큐는 기존 운영 프로젝트 Ascentum의 별도 `dev-live-*` 리소스로 구성한다.
 
-Dev preflight는 운영 Apify 계정의 non-secondary Secret 버전 9개를 참조한다. DB가 최근 잔액과 내부 예약을 확인해 슬롯을 선택한다. 슬롯 예약에 사용 가능한 잔액 정보가 없으면 승인된 작업을 사용자가 시작하고 워커가 DB claim을 확보한 뒤에만 잔액을 갱신한다. 기존 실행은 원래 슬롯으로 재개한다. 사용자가 Basic을 선택한 뒤의 최신 프로필 확인과 정식 분석은 `secondary`를 사용한다. Dev와 운영은 Apify 계정 잔액을 공유한다.
+Dev preflight는 운영 Apify 계정의 non-secondary Secret 버전 9개를 참조한다. DB가 최근 잔액과 내부 예약을 확인해 슬롯을 선택한다. 슬롯 예약에 사용 가능한 잔액 정보가 없으면 승인된 작업을 사용자가 시작하고 워커가 DB claim을 확보한 뒤에만 잔액을 갱신한다. 기존 실행은 원래 슬롯으로 재개한다. 사용자가 Basic을 선택한 뒤 최신 프로필 확인에서 Apify로 넘어갈 때와 정식 분석에서 Apify를 호출할 때 `secondary`를 사용한다. Dev와 운영은 Apify 계정 잔액을 공유한다.
 
 ## Dev 리소스 계약
 
@@ -31,7 +31,7 @@ Ascentum Dev에서 최신 프로필 확인용 기존 DB 래퍼가 명시적 `sec
 3. 선택한 프로젝트에서 Dev 전용 런타임·invoker·Vercel enqueuer IAM을 분리한다. Ascentum에서는 운영 리소스의 설정 요약과 IAM 기준 해시를 먼저 확인하고 Dev에 속하는 신규 리소스에만 권한을 지정한다. Vercel에는 두 Dev 큐의 enqueue/get 및 두 Dev invoker의 제한된 actAs만 부여한다. 워커에는 해당 큐의 enqueue/get과 역할별 Dev 저장소 권한을 부여한다. 승인된 운영 Apify Secret은 preflight에 non-secondary 9개, 정식 분석에 secondary 1개의 접근 권한만 부여한다. 큐는 검사 단계에서 중지하고 동시 실행 한도를 1로 설정한다. 큐 설정의 URL·OIDC 덮어쓰기가 없는지, Cloud Run에 공개 invoke 권한이 없는지 native metadata에서 확인한다. 기존 배포자의 운영 activation 루틴을 실행하지 않는다.
 4. Dev Supabase 서버 키, Dev Vertex IAM, 이미지 서명 키와 Dev R2 자격 증명을 마련한다. Apify는 승인된 기존 Secret의 현재 버전을 역할별로 고정 참조한다. 워커 Secret 값은 Secret Manager version reference로만 공급한다. Dev 웹의 `LANDING_LEAD_CAPTURE_SECRET`은 Dev 전용 값을 사용해 제외 선택의 식별 정보를 Dev DB 안에서 연결한다. Vercel 토큰이나 Secret 값을 내려받아 터미널·문서·파일에 남기지 않는다. 사전 점검·분석에서 사용할 운영 공급자 정책은 이름·모델·제한값만 확인해 Dev 설정에 맞춘다.
 5. 리뷰된 같은 후보에서 Dev 웹과 두 워커를 각각 빌드한다. 워커 환경은 `DEV_LIVE_WORKLOAD`와 `ANALYSIS_WORKLOAD_ROLE`를 실제 역할 `preflight` 또는 `paid`로 맞춘다. 각 역할은 해당 namespace의 `*_TASKS_ENABLED`, `*_TASKS_PROJECT`, `*_TASKS_LOCATION`, `*_TASKS_QUEUE`, `*_TASKS_TARGET_URL`, `*_TASKS_OIDC_AUDIENCE`, `*_TASKS_SERVICE_ACCOUNT_EMAIL`, `*_TASKS_CALLER_AUTH_MODE=adc`를 사용한다. Web은 양쪽 namespace에 `vercel-wif`, `*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL`, 정확한 Dev `GCP_VERCEL_WIF_PROVIDER_RESOURCE`를 지정한다.
-6. `DEV_LIVE_ANALYSIS_ARMED`는 꺼 두고 승인값을 만들지 않는다. `PREFLIGHT_LOCAL_AFTER_ENABLED`, `ANALYSIS_BETA_PREPARE_ENABLED`, `BETATEST_FREE_POOL_ENABLED`, `PREFLIGHT_TASKS_RECOVERY_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`, `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED`는 끈다. Dev infra metadata·큐 조회 권한·리소스 일치, 승인 전 API 차단, 기존 모의 분석을 확인한다. 정상 워커 경로는 외부 공급자 함수의 모의 구현 또는 오프라인 회귀로 검사한다.
+6. 검증 중에는 `DEV_LIVE_ANALYSIS_ARMED`를 끈다. 웹과 두 워커의 검증이 끝나면 모두 `DEV_LIVE_ANALYSIS_MODE=owner_start`, `DEV_LIVE_ANALYSIS_ARMED=true`로 맞춘다. 이 모드에서는 웹과 워커가 만료 시각이 고정된 공용 환경 변수 승인을 사용하지 않는다. `PREFLIGHT_LOCAL_AFTER_ENABLED`, `ANALYSIS_BETA_PREPARE_ENABLED`, `BETATEST_FREE_POOL_ENABLED`, `PREFLIGHT_TASKS_RECOVERY_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`, `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED`는 끈다. Dev infra metadata·큐 조회 권한·리소스 일치, 승인 전 API 차단, 기존 모의 분석을 확인한다. 정상 워커 경로는 외부 공급자 함수의 모의 구현 또는 오프라인 회귀로 검사한다.
 
 ## 실행 정책 및 비용
 
@@ -43,9 +43,9 @@ Dev의 테스트 승인 대상은 Basic 한 건이다. Dev 웹은 `ANALYSIS_V2_A
 - Apify는 두 워커에 `APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 지정한다. 정식 분석 워커에는 `APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_COMMENTS_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 추가한다. 값은 양수이며 각 승인 상한을 넘지 않도록 한다.
 - 승인된 Basic 1회 상한은 Apify Actor 요금 `$5`, Vertex `$2`이다. actor start와 Vertex 호출 전에 Dev DB의 공용 예약 원장을 사용해 승인 ID별로 합산하고, 재시도가 중복 비용을 발생시키지 않는지 검증한다. Actor 실행 과금 상한 설정과 AI 비용 산정 방식은 실제 공급자 요금과 별도로 대조한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
 
-## 승인 전 운영자 점검
+## 운영자 시작과 검증
 
-- Dev 웹에서 실제 모드가 비용 승인 전 차단되고 기존 카카오 세션에서만 합성 분석이 가능한지 확인한다. 정확한 후보 코드, Dev 도메인, DB 식별자, private Cloud Run IAM, Dev 리소스 및 승격 후보의 코드 일치를 안전한 메타데이터로 남긴다.
-- Dev·운영의 Apify Actor/단위 과금과 AI 프로젝트·모델의 최신 스냅샷을 대조한다. Dev DB의 비용 예약 RPC를 적용하고 mock 실행에서 성공·실패·동시 요청·재시도를 검증하기 전까지 다음 단계로 이동하지 않는다. Actor의 실행 과금 상한과 AI 요청별 토큰/재시도 예약을 각각 확인한다.
-- 서버 승인에는 대상 한 개, 승인 시간, 30분 이내 만료, Apify·AI별 상한을 포함한다. 같은 승인으로 새 preflight·이용권이 중복 발행되지 않는지 확인한다. 실패 후 자동으로 새 비용을 발생시키는 경로가 없음을 모의 테스트에서 먼저 확인한다.
-- 첫 공급자 호출은 비용 승인 이후 사용자가 해당 Dev 실행을 직접 시작할 때 발생한다. 비용 승인이 미확정이거나 Dev 자격 증명·큐·워커·DB 필수 설정 중 하나가 없으면 실제 모드는 잠겨 있다.
+- [Dev 전용 상시 승인 SQL](../../supabase/dev-ui/live-owner-start.sql)은 Dev 비용 원장 다음에 적용한다. DB는 서버가 확인한 활성 Basic 카카오 운영자와 실제로 시작한 대상·시도 ID에 새 실행을 묶는다. 같은 버튼 요청의 재전송은 동일한 승인을 사용하고, 각각의 새 시작에서 별도 상한을 적용한다.
+- Dev 웹은 검증된 카카오 이메일 하나와 등록된 계정만 허용한다. 로그인, 페이지 방문, 상태 조회는 실행을 만들지 않는다. 운영자가 동일 오리진에서 실제 사전 점검을 시작한 뒤 인증된 워커가 DB 요청과 승인 ID를 검증하면 공급자 호출이 가능하다.
+- 각 승인은 시작 시점부터 30분이다. 새 실행은 다시 시작할 수 있으며 이전 승인과 비용을 합치지 않는다. 만료된 실행은 새 공급자 호출과 결제 없는 Basic 이용권 발급을 차단한다. 생성이 끝난 이전 결과는 계속 조회할 수 있다.
+- 후보 코드, Dev 도메인, DB 식별자, Cloud Run IAM, 큐 상태를 확인한다. 단위 검증은 인증 실패, 같은 요청 재전송, 대상 불일치, 승인 만료, 비용 상한, 공급자 호출 없는 가용성 조회를 포함한다.

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { isApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
-import { requireDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
+import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
+import { requireDevLiveProviderApproval, withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import {
     classifyPreflightWorkerFailure,
     prepareBetaPreflightDispatch,
@@ -322,15 +322,20 @@ async function handlePOST(
         return reject(503, 'ANALYSIS_WORKLOAD_ROLE_MISMATCH');
     }
     const isPrecheckoutBlite = 'kind' in task && task.kind === 'precheckout_blite';
+    let approval: DevLiveApproval | null = null;
     if (process.env.DEV_LIVE_WORKLOAD !== undefined) {
         const hasDispatchFence = isPrecheckoutBlite
             ? task.dispatchGeneration !== undefined
             : !('kind' in task) && task.generation !== undefined;
-        if (process.env.DEV_LIVE_WORKLOAD !== 'preflight' || task.workloadRole !== 'preflight'
-            || !hasDispatchFence || !await isApprovedDevLiveDelivery({ preflightId: task.preflightId })) {
+        if (process.env.DEV_LIVE_WORKLOAD === 'preflight' && task.workloadRole === 'preflight'
+            && hasDispatchFence) {
+            approval = await getApprovedDevLiveDelivery({ preflightId: task.preflightId });
+        }
+        if (!approval) {
             return NextResponse.json({ code: 'DEV_LIVE_APPROVAL_REQUIRED' }, { status: 403 });
         }
     }
+    const runWithApproval = <T>(operation: () => T): T => withDevLiveProviderApproval(approval, operation);
     const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
         store: createBetaApifyCreditPoolStore(supabaseAdmin),
         clientForSlot: createServerBetaApifyCreditClientFactory(),
@@ -339,14 +344,14 @@ async function handlePOST(
     try {
         let outcome: 'noop' | 'ready' | 'blocked' | 'prepared' | 'pending' | 'capacity_pending' | 'complete' | 'failed';
         if (isPrecheckoutBlite) {
-                outcome = task.dispatchGeneration === undefined
-                    ? await runPrecheckoutBlite(task.preflightId)
-                    : await runPrecheckoutBlite(task.preflightId, {
-                        dispatchGeneration: task.dispatchGeneration,
-                        dispatchToken: task.dispatchToken,
-                    });
+            outcome = await runWithApproval(() => task.dispatchGeneration === undefined
+                ? runPrecheckoutBlite(task.preflightId)
+                : runPrecheckoutBlite(task.preflightId, {
+                    dispatchGeneration: task.dispatchGeneration,
+                    dispatchToken: task.dispatchToken,
+                }));
         } else if (isFreshAdmission) {
-            outcome = await processAnalysisV2FreshAdmission(supabaseAdmin, {
+            outcome = await runWithApproval(() => processAnalysisV2FreshAdmission(supabaseAdmin, {
                 preflightId: task.preflightId,
                 generation: task.generation,
                 dispatchGeneration: task.dispatchGeneration,
@@ -354,9 +359,9 @@ async function handlePOST(
             }, {
                 betaCreditCoordinator,
                 ...(task.workloadRole === undefined ? { legacyDrain: true } : {}),
-            });
+            }));
         } else if (isBetaPrepare) {
-            outcome = await prepareBetaPreflightDispatch({
+            outcome = await runWithApproval(() => prepareBetaPreflightDispatch({
                 preflightId: task.preflightId,
                 userId: task.userId,
                 prepareGeneration: task.prepareGeneration,
@@ -368,18 +373,18 @@ async function handlePOST(
                     generation,
                     { config, reservationToken },
                 ),
-            });
+            }));
         } else if (!('kind' in task)) {
             const refreshApifyCreditSnapshots = () => refreshBetaApifyCreditSnapshots(
                 supabaseAdmin, { telemetry: operationalLogger }
             );
-            outcome = await processPreflight(task.preflightId, {
+            outcome = await runWithApproval(() => processPreflight(task.preflightId, {
                 betaCreditCoordinator,
                 settleBetaCredit: preflightId => settleBetaApifyPreflightCredit(
                     supabaseAdmin, preflightId, { telemetry: operationalLogger }
                 ),
                 refreshBetaCredit: refreshApifyCreditSnapshots,
-                ...(process.env.DEV_LIVE_WORKLOAD === 'preflight'
+                ...(approval
                     ? {
                         refreshFreePoolCredits: async () => {
                             requireDevLiveProviderApproval();
@@ -411,7 +416,7 @@ async function handlePOST(
                     if (observation.type === 'failed') profileFailureObserved = true;
                     emitPreflightProcessObservation(context, observation);
                 },
-            });
+            }));
         } else {
             return reject(400, 'INVALID_REQUEST');
         }
@@ -430,14 +435,14 @@ async function handlePOST(
                 && retryCount !== null
                 && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
             ) {
-                await rearmBliteDispatchAfterCapacity({
+                await runWithApproval(() => rearmBliteDispatchAfterCapacity({
                     preflightId: task.preflightId,
                     ...('dispatchGeneration' in task
                         ? { dispatchGeneration: task.dispatchGeneration }
                         : {}),
                     ...('dispatchToken' in task ? { dispatchToken: task.dispatchToken } : {}),
                     config,
-                });
+                }));
             }
             operationalLogger.emit({
                 event: 'preflight.failed',
@@ -461,12 +466,12 @@ async function handlePOST(
                 retryCount !== null
                 && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
             ) {
-                const handedOff = await rearmPreflightDispatchAfterCapacity({
+                const handedOff = await runWithApproval(() => rearmPreflightDispatchAfterCapacity({
                     preflightId: task.preflightId,
                     ...('generation' in task ? { generation: task.generation } : {}),
                     ...('reservationToken' in task ? { reservationToken: task.reservationToken } : {}),
                     config,
-                });
+                }));
                 if (handedOff) {
                     operationalLogger.emit({
                         event: 'preflight.completed',
@@ -502,11 +507,11 @@ async function handlePOST(
             );
         }
         if (outcome === 'blocked' && isFreshAdmission) {
-            await settleBlockedFreshAdmission(
+            await runWithApproval(() => settleBlockedFreshAdmission(
                 supabaseAdmin,
                 task.preflightId,
                 operationalLogger,
-            );
+            ));
         }
         const operation = isPrecheckoutBlite
             ? 'precheckout_blite'

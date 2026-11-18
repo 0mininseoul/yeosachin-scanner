@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
-import { isApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
+import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
+import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import {
@@ -239,21 +240,25 @@ async function handlePOST(
         return NextResponse.json({ code: 'WORKLOAD_ROLE_MISMATCH' }, { status: 503 });
     }
 
+    let approval: DevLiveApproval | null = null;
     if (process.env.DEV_LIVE_WORKLOAD !== undefined) {
-        const resource = 'kind' in delivery
-            ? { preflightId: delivery.preflightId }
-            : { requestId: delivery.requestId };
-        if (process.env.DEV_LIVE_WORKLOAD !== 'paid' || delivery.workloadRole !== 'paid'
-            || !await isApprovedDevLiveDelivery(resource)) {
+        if (process.env.DEV_LIVE_WORKLOAD === 'paid' && delivery.workloadRole === 'paid') {
+            const resource = 'kind' in delivery
+                ? { preflightId: delivery.preflightId }
+                : { requestId: delivery.requestId };
+            approval = await getApprovedDevLiveDelivery(resource);
+        }
+        if (!approval) {
             return NextResponse.json({ code: 'DEV_LIVE_APPROVAL_REQUIRED' }, { status: 403 });
         }
     }
+    const runWithApproval = <T>(operation: () => T): T => withDevLiveProviderApproval(approval, operation);
     const taskContract = analysisV2WorkerTaskContractFromHeader(
         request.headers.get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER),
     );
     if ('kind' in delivery && delivery.kind === 'fresh_admission') {
         try {
-            const outcome = await processAnalysisV2FreshAdmission(
+            const outcome = await runWithApproval(() => processAnalysisV2FreshAdmission(
                 supabaseAdmin,
                 {
                     preflightId: delivery.preflightId,
@@ -267,13 +272,13 @@ async function handlePOST(
                         clientForSlot: createServerBetaApifyCreditClientFactory(),
                     }),
                 },
-            );
+            ));
             if (outcome === 'capacity_pending') {
                 if (
                     retryCount !== null
                     && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
                 ) {
-                    await rearmAnalysisV2FreshAdmissionDispatch(
+                    await runWithApproval(() => rearmAnalysisV2FreshAdmissionDispatch(
                         supabaseAdmin,
                         {
                             preflightId: delivery.preflightId,
@@ -288,7 +293,7 @@ async function handlePOST(
                             ),
                             lookup: input => lookupAnalysisV2FreshAdmissionTask(input, { config }),
                         },
-                    );
+                    ));
                 }
                 emitWorkerOutcome({
                     context,
@@ -305,11 +310,11 @@ async function handlePOST(
                 );
             }
             if (outcome === 'blocked') {
-                await settleBlockedFreshAdmission(
+                await runWithApproval(() => settleBlockedFreshAdmission(
                     supabaseAdmin,
                     delivery.preflightId,
                     operationalLogger,
-                );
+                ));
             }
             emitWorkerOutcome({
                 context,
@@ -341,10 +346,10 @@ async function handlePOST(
     const jobKey = observableJobKey(paidDelivery.jobKey);
     const analysisRequestId = paidDelivery.requestId;
     try {
-        const outcome = await processAnalysisV2TaskDelivery(paidDelivery, {
+        const outcome = await runWithApproval(() => processAnalysisV2TaskDelivery(paidDelivery, {
             handlerDeadlineAtMs: startedAtMs + taskContract.handlerWindowMs,
             jobLeaseSeconds: taskContract.jobLeaseSeconds,
-        });
+        }));
         if (outcome.status === 'retry') {
             const errorCode = safeErrorCode(
                 outcome.errorCode,
@@ -367,10 +372,10 @@ async function handlePOST(
                     && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
                 ) {
                     try {
-                        await rearmAnalysisV2JobAfterCapacity(
+                        await runWithApproval(() => rearmAnalysisV2JobAfterCapacity(
                             paidDelivery as AnalysisV2TaskDelivery,
                             { config, store: analysisV2JobStore },
-                        );
+                        ));
                     } catch {
                         // The old delivery remains retryable; a failed rearm must never ack work
                         // without either a successor task or the original dispatch fence.
