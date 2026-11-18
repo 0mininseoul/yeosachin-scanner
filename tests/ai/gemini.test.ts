@@ -144,7 +144,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
         const grant = { id: 'synthetic-owner-grant' };
         const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
-        const budgetGuard = undispatchedBudgetGuard();
+        const budgetGuard = { reserve: vi.fn(), settle: vi.fn(), cancel: vi.fn() };
         mocks.requireDevApproval.mockReturnValue(grant);
         mocks.reserveDevAttempt.mockResolvedValue(reservation);
         mocks.generateContent.mockResolvedValueOnce(successfulResponse());
