@@ -7,19 +7,29 @@ import { CaseCard, Eyebrow, PrimaryButton, TopBar } from '@/components/case-ui';
 import { preflightAcceptedV1Schema, preflightStatusV1Schema, type PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
 const selector = 'devAnalysis=live';
+const ownerAttemptStoragePrefix = 'dev-live-attempt:';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function call(path: string, method: string, body: object, signal?: AbortSignal) {
+class DevLiveRequestError extends Error {
+    constructor(message: string, readonly code: string | undefined) {
+        super(message);
+    }
+}
+
+async function call(path: string, method: string, body: object, signal?: AbortSignal, attemptId?: string) {
     const response = await fetch(`${path}?${selector}`, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(attemptId ? { 'x-dev-live-attempt-id': attemptId } : {}) },
         body: JSON.stringify(body),
         cache: 'no-store',
         signal,
     });
     const payload = await response.json();
     if (!response.ok) {
-        throw new Error(typeof payload.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.');
+        throw new DevLiveRequestError(
+            typeof payload.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.',
+            typeof payload.code === 'string' ? payload.code : undefined,
+        );
     }
     return payload;
 }
@@ -111,11 +121,24 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         event.preventDefault();
         if (!confirmed) return;
         void submit(async () => {
-            const accepted = preflightAcceptedV1Schema.parse(await call('/api/analysis/preflight', 'POST', {
-                targetInstagramId: target.trim().toLowerCase(),
-            }));
-            setPreflightId(accepted.preflightId);
-            router.replace(`/dev-ui/live?preflight=${accepted.preflightId}`);
+            const targetInstagramId = target.trim().toLowerCase();
+            const storageKey = ownerAttemptStoragePrefix + targetInstagramId;
+            const saved = sessionStorage.getItem(storageKey);
+            const attemptId = saved && uuid.test(saved) ? saved : crypto.randomUUID();
+            sessionStorage.setItem(storageKey, attemptId);
+            try {
+                const accepted = preflightAcceptedV1Schema.parse(await call('/api/analysis/preflight', 'POST', {
+                    targetInstagramId,
+                }, undefined, attemptId));
+                sessionStorage.removeItem(storageKey);
+                setPreflightId(accepted.preflightId);
+                router.replace(`/dev-ui/live?preflight=${accepted.preflightId}`);
+            } catch (cause) {
+                if (cause instanceof DevLiveRequestError && cause.code === 'DEV_LIVE_START_ATTEMPT_EXPIRED') {
+                    sessionStorage.removeItem(storageKey);
+                }
+                throw cause;
+            }
         });
     }
 
@@ -149,15 +172,16 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         <main className="mx-auto max-w-[560px] px-5 py-8">
             <Eyebrow>Dev · 실제 공급자</Eyebrow>
             <h1 className="mt-3 text-[26px] font-extrabold">실제 분석 · 카드 결제 없음</h1>
-            <p className="mt-2 text-sm text-fg-dim">승인된 공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 승인 예산을 사용합니다.</p>
+            <p className="mt-2 text-sm text-fg-dim">공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 1회 최대 $7의 분석 예산을 사용합니다.</p>
             <CaseCard className="mt-5 space-y-4 p-5">
-                {available === null && <p role="status">실행 승인 상태를 확인 중입니다.</p>}
-                {available === false && <p role="status">실행 대기 중입니다. 승인된 예산과 Dev 워커 설정이 필요합니다.</p>}
+                {available === null && <p role="status">실제 분석을 준비하고 있습니다.</p>}
+                {available === false && <p role="status">실제 분석 설정을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
+                {preflightId && <a href="/dev-ui/live" className="block text-sm underline">새 실제 분석</a>}
                 {!preflightId && recentPreflightId && <Link href={`/dev-ui/live?preflight=${recentPreflightId}`} className="block text-sm underline">최근 실제 분석 다시 열기</Link>}
                 {!preflightId && available === true && <form onSubmit={start} className="space-y-4">
                     <label className="block text-sm" htmlFor="dev-live-target">대상 인스타그램 아이디</label>
                     <input id="dev-live-target" className="w-full border border-line bg-ink p-3" value={target} onChange={event => setTarget(event.target.value)} maxLength={30} required />
-                    <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /> 승인 예산으로 실제 사전 점검을 시작합니다.</label>
+                    <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /> 실제 사전 점검에서 분석 예산을 사용합니다.</label>
                     <PrimaryButton type="submit" disabled={busy || !confirmed || !target.trim()}>실제 사전 점검 시작</PrimaryButton>
                 </form>}
                 {preflightId && (!preflight || preflight.status === 'pending') && !error && <p role="status">실제 사전 점검이 진행 중입니다.</p>}

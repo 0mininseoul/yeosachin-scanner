@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     AnalysisV2JobDispatchNotReadyError,
@@ -7,7 +8,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
     config: vi.fn(),
-    isApprovedDevLiveDelivery: vi.fn(),
+    getApprovedDevLiveDelivery: vi.fn(),
     verify: vi.fn(),
     available: vi.fn(),
     process: vi.fn(),
@@ -27,7 +28,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
-    isApprovedDevLiveDelivery: mocks.isApprovedDevLiveDelivery,
+    getApprovedDevLiveDelivery: mocks.getApprovedDevLiveDelivery,
+}));
+vi.mock('@/lib/services/dev-ui/live-budget', () => ({
+    withDevLiveProviderApproval: <T>(approval: unknown, operation: () => T): T => (
+        approvalScope.run(approval, operation)
+    ),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
@@ -84,6 +90,7 @@ const freshAdmissionPayload = {
     dispatchGeneration: 2,
     dispatchToken: '323e4567-e89b-42d3-a456-426614174000',
 };
+const approvalScope = new AsyncLocalStorage<unknown>();
 
 function request(
     body: unknown = payload,
@@ -112,6 +119,7 @@ describe('analysis V2 worker route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.config.mockReturnValue(config);
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue(null);
         mocks.verify.mockResolvedValue(true);
         mocks.available.mockReturnValue(true);
         mocks.process.mockResolvedValue({
@@ -125,16 +133,45 @@ describe('analysis V2 worker route', () => {
 
     it('requires a current Dev grant for fresh admission and analysis jobs', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
-        mocks.isApprovedDevLiveDelivery.mockResolvedValue(false);
+        mocks.verify.mockResolvedValueOnce(false);
 
+        expect((await POST(request(freshAdmissionPayload))).status).toBe(401);
+        expect((await POST(request())).status).toBe(403);
+        expect(mocks.getApprovedDevLiveDelivery).not.toHaveBeenCalled();
         expect((await POST(request(freshAdmissionPayload))).status).toBe(403);
         expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(403);
-        expect(mocks.isApprovedDevLiveDelivery.mock.calls).toEqual([
+        expect(mocks.getApprovedDevLiveDelivery.mock.calls).toEqual([
             [{ preflightId: freshAdmissionPayload.preflightId }],
             [{ requestId: payload.requestId }],
         ]);
         expect(mocks.processFresh).not.toHaveBeenCalled();
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('isolates the matching persisted grants for concurrent Dev fresh admissions and jobs', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const freshGrant = { fixture: 'fresh-grant' };
+        const jobGrant = { fixture: 'job-grant' };
+        mocks.getApprovedDevLiveDelivery.mockImplementation(async resource => (
+            'preflightId' in resource ? freshGrant : jobGrant
+        ));
+        mocks.processFresh.mockImplementationOnce(async () => {
+            await Promise.resolve();
+            expect(approvalScope.getStore()).toBe(freshGrant);
+            return 'ready';
+        });
+        mocks.process.mockImplementationOnce(async () => {
+            await Promise.resolve();
+            expect(approvalScope.getStore()).toBe(jobGrant);
+            return { status: 'completed', successorCount: 0, pendingRecoveryCount: 0 };
+        });
+
+        const responses = await Promise.all([
+            POST(request(freshAdmissionPayload)),
+            POST(request({ ...payload, workloadRole: 'paid' })),
+        ]);
+        expect(responses.map(response => response.status)).toEqual([200, 200]);
+        expect(approvalScope.getStore()).toBeUndefined();
     });
 
     it('authenticates OIDC and processes only a strict task payload', async () => {

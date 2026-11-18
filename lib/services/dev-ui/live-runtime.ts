@@ -5,7 +5,7 @@ import { browserDeploymentEnvironment, type DeploymentEnvironment } from '@/lib/
 import { getPreflightTasksConfig, type PreflightTasksConfig } from '@/lib/services/analysis/preflight-tasks';
 import { getAnalysisV2TasksConfig, type AnalysisV2TasksConfig } from '@/lib/services/analysis/v2-tasks';
 import { isDevUiDeployment } from './deployment';
-import { readDevLiveApproval, type DevLiveApproval } from './live-approval';
+import { DEV_LIVE_OWNER_CAPS, devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
 
 const LOCATION = 'asia-northeast3';
 const ASCENTUM_PROJECT = 'gen-lang-client-0311522474';
@@ -122,7 +122,7 @@ function hasBoundedUsdBudget(value: string | undefined, maximumCents: number): b
     return usd > 0 && usd <= maximumCents / 100;
 }
 
-function assertLiveWorkerPolicy(env: DeploymentEnvironment, role: Role, approval: DevLiveApproval): void {
+function assertLiveWorkerPolicy(env: DeploymentEnvironment, role: Role, approval: Pick<DevLiveApproval, 'apifyMaxCents' | 'aiMaxCents'>): void {
     const aiCaps = [
         env.VERTEX_AI_PER_RUN_BUDGET_USD,
         env.VERTEX_AI_PER_ORDER_BUDGET_USD,
@@ -197,7 +197,7 @@ export function devLiveWorkerRequestBoundary(
 
     try {
         const identity = cloudIdentity(env);
-        const approval = readDevLiveApproval(env);
+        const approval = devLiveOwnerStartEnabled(env) ? DEV_LIVE_OWNER_CAPS : readDevLiveApproval(env);
         if (request.url !== `${identity.origins[role]}${WORKER_ROUTES[role]}` || !approval) return 'invalid';
         assertLiveFlags(env);
         assertLiveWorkerPolicy(env, role, approval);

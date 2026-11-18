@@ -1,8 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
-    isApprovedDevLiveDelivery: vi.fn(),
+    getApprovedDevLiveDelivery: vi.fn(),
     requireDevLiveProviderApproval: vi.fn(),
     process: vi.fn(),
     prepareBeta: vi.fn(),
@@ -30,10 +31,13 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
-    isApprovedDevLiveDelivery: mocks.isApprovedDevLiveDelivery,
+    getApprovedDevLiveDelivery: mocks.getApprovedDevLiveDelivery,
 }));
 vi.mock('@/lib/services/dev-ui/live-budget', () => ({
     requireDevLiveProviderApproval: mocks.requireDevLiveProviderApproval,
+    withDevLiveProviderApproval: <T>(approval: unknown, operation: () => T): T => (
+        approvalScope.run(approval, operation)
+    ),
 }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
@@ -88,6 +92,8 @@ const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const dispatchToken = '123e4567-e89b-42d3-a456-426614174005';
 const successorToken = '123e4567-e89b-42d3-a456-426614174006';
 const ordinaryTask = { preflightId, workloadRole: 'preflight', generation: 1, reservationToken: dispatchToken };
+const approvalScope = new AsyncLocalStorage<unknown>();
+const approvedGrant = { fixture: 'approved-preflight' };
 const config = {
     project: 'example-project',
     location: 'asia-northeast3',
@@ -117,6 +123,7 @@ describe('preflight worker route', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.getConfig.mockReturnValue(config);
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue(null);
         mocks.verify.mockResolvedValue(true);
         mocks.process.mockResolvedValue('ready');
         mocks.prepareBeta.mockResolvedValue('prepared');
@@ -137,15 +144,16 @@ describe('preflight worker route', () => {
 
     it('checks the Dev approval only after OIDC and rejects unapproved fenced work', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
-        mocks.isApprovedDevLiveDelivery.mockResolvedValue(false);
         mocks.verify.mockResolvedValueOnce(false);
 
         expect((await POST(request(ordinaryTask))).status).toBe(401);
-        expect(mocks.isApprovedDevLiveDelivery).not.toHaveBeenCalled();
+        expect((await POST(request({ preflightId, workloadRole: 'preflight' }))).status).toBe(403);
+        expect(mocks.getApprovedDevLiveDelivery).not.toHaveBeenCalled();
 
         expect((await POST(request(ordinaryTask))).status).toBe(403);
-        expect(mocks.isApprovedDevLiveDelivery).toHaveBeenCalledWith({ preflightId });
+        expect(mocks.getApprovedDevLiveDelivery).toHaveBeenCalledWith({ preflightId });
         expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
     });
 
     it('makes the credit refresh available only to approved ordinary Dev work', async () => {
@@ -154,28 +162,54 @@ describe('preflight worker route', () => {
         expect(mocks.process.mock.calls[0][1].refreshFreePoolCredits).toBeUndefined();
 
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
-        mocks.isApprovedDevLiveDelivery.mockResolvedValue(true);
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue(approvedGrant);
+        mocks.process.mockImplementationOnce(async (_preflightId, { refreshFreePoolCredits }) => {
+            await Promise.resolve();
+            expect(approvalScope.getStore()).toBe(approvedGrant);
+            expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
+            await refreshFreePoolCredits();
+            return 'ready';
+        });
+        mocks.refreshBetaCredit.mockImplementationOnce(async () => {
+            expect(approvalScope.getStore()).toBe(approvedGrant);
+        });
         expect((await POST(request(ordinaryTask))).status).toBe(200);
-
-        const refresh = mocks.process.mock.calls[1][1].refreshFreePoolCredits;
-        expect(refresh).toEqual(expect.any(Function));
-        expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
-        await refresh();
         expect(mocks.refreshBetaCredit).toHaveBeenCalledOnce();
+        expect(approvalScope.getStore()).toBeUndefined();
     });
 
     it('skips credit lookup when a Dev approval expires before fallback', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
-        mocks.isApprovedDevLiveDelivery.mockResolvedValue(true);
-        expect((await POST(request(ordinaryTask))).status).toBe(200);
-
-        const refresh = mocks.process.mock.calls[0][1].refreshFreePoolCredits;
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue(approvedGrant);
         mocks.requireDevLiveProviderApproval.mockImplementationOnce(() => {
             throw new Error('DEV_LIVE_BUDGET_UNAVAILABLE');
         });
+        mocks.process.mockImplementationOnce(async (_preflightId, { refreshFreePoolCredits }) => {
+            await expect(refreshFreePoolCredits()).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+            return 'capacity_pending';
+        });
 
-        await expect(refresh()).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        expect((await POST(request(ordinaryTask))).status).toBe(503);
         expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
+    });
+
+    it('carries the persisted Dev approval into only the approved B-lite execution', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        const task = {
+            preflightId, workloadRole: 'preflight', kind: 'precheckout_blite',
+            dispatchGeneration: 1, dispatchToken,
+        };
+        expect((await POST(request(task))).status).toBe(403);
+        expect(mocks.runBlite).not.toHaveBeenCalled();
+
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue(approvedGrant);
+        mocks.runBlite.mockImplementationOnce(async () => {
+            await Promise.resolve();
+            expect(approvalScope.getStore()).toBe(approvedGrant);
+            return 'complete';
+        });
+        expect((await POST(request(task))).status).toBe(200);
+        expect(approvalScope.getStore()).toBeUndefined();
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {

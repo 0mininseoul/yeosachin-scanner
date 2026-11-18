@@ -188,6 +188,18 @@ describe('Dev live analysis runtime placement', () => {
         expect(devLiveWorkerRequestBoundary(request(paidEndpoint), { ...paidWorker, ...changed })).toBe('invalid');
     });
 
+    it('checks owner-start worker infrastructure without a shared approval in the environment', () => {
+        const ownerStart = { ...paidWorker, DEV_LIVE_ANALYSIS_MODE: 'owner_start',
+            DEV_LIVE_ANALYSIS_APPROVAL: undefined };
+        expect(devLiveWorkerRequestBoundary(request(paidEndpoint), ownerStart)).toBe('dev-worker');
+        expect(devLiveWorkerRequestBoundary(request(paidEndpoint), {
+            ...ownerStart, DEV_LIVE_ANALYSIS_ARMED: 'false',
+        })).toBe('invalid');
+        expect(devLiveWorkerRequestBoundary(request(paidEndpoint), {
+            ...ownerStart, VERTEX_AI_DAILY_BUDGET_USD: '2.01',
+        })).toBe('invalid');
+    });
+
     it('stops accepting workers after the approval expires', () => {
         vi.setSystemTime(new Date('2026-11-18T06:31:00Z'));
         expect(devLiveWorkerRequestBoundary(request(paidEndpoint), paidWorker)).toBe('invalid');
