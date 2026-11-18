@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
     findForOwner: vi.fn(),
     readAnonymous: vi.fn(),
     readStatus: vi.fn(),
+    withDevLiveRead: vi.fn(),
+    shouldHandleDevUiRequest: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
@@ -18,6 +20,11 @@ vi.mock('@/lib/services/analysis/anonymous-preflight', () => ({
 vi.mock('@/lib/services/precheckout/blite-store', () => ({
     precheckoutBliteTerminalStore: { readStatus: mocks.readStatus },
 }));
+vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
+    isDevLiveAnalysisRequest: (request: Request) => new URL(request.url).searchParams.getAll('devAnalysis').includes('live'),
+    withDevLiveRead: mocks.withDevLiveRead,
+}));
+vi.mock('@/lib/services/dev-ui/routes', () => ({ shouldHandleDevUiRequest: mocks.shouldHandleDevUiRequest }));
 
 import { POST, maxDuration } from '../../../../../../app/api/analysis/precheckout-blite/route';
 
@@ -30,6 +37,14 @@ function request(headers: Record<string, string> = {}) {
     return new Request('https://example.com/api/analysis/precheckout-blite', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ preflightId }),
+    });
+}
+
+function devLiveRequest(origin = 'https://dev.yeosachin.com') {
+    return new Request('https://dev.yeosachin.com/api/analysis/precheckout-blite?devAnalysis=live', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin },
         body: JSON.stringify({ preflightId }),
     });
 }
@@ -69,6 +84,40 @@ describe('POST /api/analysis/precheckout-blite', () => {
         mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
         mocks.getUser.mockResolvedValue({ data: { user: { id: userId } }, error: null });
         mocks.findForOwner.mockResolvedValue(ready());
+        mocks.shouldHandleDevUiRequest.mockReturnValue(false);
+    });
+
+    it('reads the existing Dev preview only through the owner-bound live read guard', async () => {
+        mocks.withDevLiveRead.mockImplementationOnce(async (_request, _resource, read) => read({ id: userId }));
+        mocks.readStatus.mockResolvedValue({ state: 'pending', submittedAt, deadlineAt });
+        const live = devLiveRequest();
+        const response = await POST(live);
+
+        expect(response.status).toBe(202);
+        expect(mocks.withDevLiveRead).toHaveBeenCalledWith(live, { preflightId }, expect.any(Function));
+        expect(mocks.findForOwner).toHaveBeenCalledWith(preflightId, userId, { client: expect.anything() });
+        expect(mocks.getUser).not.toHaveBeenCalled();
+        expect(mocks.readAnonymous).not.toHaveBeenCalled();
+    });
+
+    it('does not read Dev preflight status across origins or for a rejected live owner', async () => {
+        const otherOrigin = await POST(devLiveRequest('https://yeosachin.com'));
+        expect(otherOrigin.status).toBe(204);
+        expect(mocks.withDevLiveRead).not.toHaveBeenCalled();
+
+        mocks.withDevLiveRead.mockResolvedValueOnce(new Response(null, { status: 403 }));
+        expect((await POST(devLiveRequest())).status).toBe(403);
+        expect(mocks.findForOwner).not.toHaveBeenCalled();
+        expect(mocks.readStatus).not.toHaveBeenCalled();
+    });
+
+    it('allows the verified Dev owner to continue to the plans when the preview is disabled', async () => {
+        process.env.PRECHECKOUT_BLITE_ENABLED = 'false';
+        mocks.withDevLiveRead.mockImplementationOnce(async (_request, _resource, read) => read({ id: userId }));
+        const response = await POST(devLiveRequest());
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ state: 'unavailable' });
+        expect(mocks.readStatus).not.toHaveBeenCalled();
     });
 
     it('is a 15-second status-only route and returns a bounded pending response', async () => {

@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 
-import Image from 'next/image';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
@@ -24,7 +23,6 @@ import {
     earlybirdCheckoutLineageStatusAction,
     applyEarlybirdPricingRefreshBoundary,
     isEarlybirdPlanSelectable,
-    isEarlybirdPlanSoldOut,
     isCurrentEarlybirdCheckoutStatusCta,
     isSafeEarlybirdCheckoutContinuationUrl,
     recoverPendingEarlybirdCheckout,
@@ -70,16 +68,18 @@ import { InstagramLookupLink } from '@/components/instagram-lookup-link';
 import { LoginModal } from '@/components/login-modal';
 import { PreflightPendingStatus } from '@/components/preflight-pending-status';
 import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
+import { AnalysisPlanCards, AnalysisPlanSection } from '@/components/analysis-plan-selection';
+import {
+    AnalysisExclusionPanel,
+    AnalysisInstagramInput,
+    AnalysisPreflightHeading,
+    AnalysisTargetCard,
+    AnalysisTargetHeading,
+} from '@/components/analysis-preflight-presentation';
 import {
     resolveActivePrecheckoutSurface,
     type PrecheckoutSurfaceState,
 } from '@/lib/services/precheckout/blite-page-flow';
-
-const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
-    basic: 'Basic',
-    standard: 'Standard',
-    plus: 'Plus',
-};
 
 interface CheckoutStatusCta {
     path: string;
@@ -89,21 +89,6 @@ interface CheckoutStatusCta {
     planId: PlanId;
     kind: 'active_pending' | 'status_only';
     navigating: boolean;
-}
-
-function relationshipCapacityLabel(
-    capacity: { followers: number; following: number },
-    lowerBound?: { followers: number; following: number } | null
-): string {
-    const fmt = (value: number) => value.toLocaleString('ko-KR');
-    if (capacity.followers === capacity.following) {
-        const upper = capacity.followers;
-        if (lowerBound && lowerBound.followers === lowerBound.following && lowerBound.followers > 0) {
-            return `팔로워·팔로잉 각 ${fmt(lowerBound.followers)}~${fmt(upper)}명`;
-        }
-        return `팔로워·팔로잉 각 ${fmt(upper)}명 이하`;
-    }
-    return `팔로워 ${fmt(capacity.followers)}명 · 팔로잉 ${fmt(capacity.following)}명 이하`;
 }
 
 export default function AnalyzePage() {
@@ -925,38 +910,22 @@ const DISCLOSURE_ACCEPTED = true;
                     </CaseCard>
                 ) : !preflight ? (
                     <>
-                        <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
-                        <h1 className="mt-3 text-[26px] font-extrabold leading-snug text-fg">
-                            누구를 판독할까요?
-                        </h1>
-                        <p className="mt-2 text-[14px] text-fg-dim">
-                            남자친구의 인스타그램 아이디를 입력해주세요.
-                        </p>
+                        <AnalysisTargetHeading />
 
                         <Panel className="mt-8 p-5">
-                            <label htmlFor="target-instagram" className="eyebrow mb-3 block">
-                                대상 인스타그램 아이디
-                            </label>
-                            <div className="relative" data-amp-mask>
-                                <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
-                                <input
-                                    id="target-instagram"
-                                    type="text"
-                                    value={instagramId}
-                                    onChange={(event) => {
-                                        setInstagramId(event.target.value);
-                                        if (error) setError(null);
-                                    }}
-                                    onKeyDown={(event) => {
-                                        if (event.key === 'Enter' && !creating) void handleStartPreflight();
-                                    }}
-                                    placeholder="username"
-                                    autoCapitalize="none"
-                                    autoCorrect="off"
-                                    spellCheck={false}
-                                    className="w-full border border-line bg-ink py-3.5 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
-                                />
-                            </div>
+                            <AnalysisInstagramInput
+                                id="target-instagram"
+                                label="대상 인스타그램 아이디"
+                                value={instagramId}
+                                onChange={value => {
+                                    setInstagramId(value);
+                                    if (error) setError(null);
+                                }}
+                                onEnter={() => {
+                                    if (!creating) void handleStartPreflight();
+                                }}
+                                placeholder="username"
+                            />
                             {!devPresentation && <InstagramLookupLink />}
                             {devPresentation && <div className="mt-5">
                                 <Link href="/dev-ui/live" className="mb-4 inline-block text-sm underline">실제 분석 · 카드 결제 없음</Link>
@@ -998,78 +967,25 @@ const DISCLOSURE_ACCEPTED = true;
                     </CaseCard>
                 ) : (
                     <>
-                        <div className="flex items-start justify-between gap-3">
-                            <div>
-                                {!bliteResultShown && (
-                                    <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>
-                                )}
-                                <h1 className={`${bliteResultShown ? '' : 'mt-3 '}text-[24px] font-extrabold leading-snug text-fg`}>
-                                    {!exclusionDecided
-                                        ? '본인 계정은 먼저 제외해주세요'
-                                        : readyPreflight
-                                            ? '판독 대상을 확인했어요'
-                                            : '대상 계정을 확인하고 있어요'}
-                                </h1>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={handleReset}
-                                className="shrink-0 text-[12px] font-medium text-fg-mute underline underline-offset-4 hover:text-fg"
-                            >
-                                대상 변경
-                            </button>
-                        </div>
+                        <AnalysisPreflightHeading
+                            exclusionDecided={exclusionDecided}
+                            ready={!!readyPreflight}
+                            bliteResultShown={bliteResultShown}
+                            onChangeTarget={handleReset}
+                        />
 
                         {!exclusionDecided && !devPresentation && (
-                            <Panel className="mt-6 p-5">
-                                <p className="text-[13px] leading-relaxed text-fg-dim">
-                                    본인 계정은 위장여사친 후보에서 처음부터 제외합니다.
-                                </p>
-                                <label htmlFor="girlfriend-instagram" className="eyebrow mb-3 mt-4 block">
-                                    본인 인스타그램 아이디
-                                </label>
-                                <div className="relative" data-amp-mask>
-                                    <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
-                                    <input
-                                        id="girlfriend-instagram"
-                                        type="text"
-                                        value={girlfriendInstagramId}
-                                        onChange={(event) => {
-                                            setGirlfriendInstagramId(event.target.value);
-                                            if (error) setError(null);
-                                        }}
-                                        onKeyDown={(event) => {
-                                            if (event.key === 'Enter' && exclusionState !== 'saving') void handleExclusion();
-                                        }}
-                                        placeholder="my_username"
-                                        autoCapitalize="none"
-                                        autoCorrect="off"
-                                        spellCheck={false}
-                                        className="w-full border border-line bg-ink py-3.5 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
-                                    />
-                                </div>
-                                {error && (
-                                    <p data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] leading-relaxed text-blood-2" role="alert">
-                                        {error}
-                                    </p>
-                                )}
-                                <div className="mt-5 space-y-2.5">
-                                    <PrimaryButton
-                                        onClick={handleExclusion}
-                                        disabled={!girlfriendInstagramId.trim() || exclusionState === 'saving'}
-                                    >
-                                        {exclusionState === 'saving' ? '제외 계정 저장 중…' : '내 계정 제외하기'}
-                                    </PrimaryButton>
-                                    <button
-                                        type="button"
-                                        onClick={() => void submitExclusion()}
-                                        disabled={exclusionState === 'saving'}
-                                        className="w-full border border-line-2 px-4 py-3 text-[13px] font-bold text-fg-dim transition-colors hover:bg-panel hover:text-fg disabled:opacity-50"
-                                    >
-                                        본인 계정 제외 안 함
-                                    </button>
-                                </div>
-                            </Panel>
+                            <AnalysisExclusionPanel
+                                value={girlfriendInstagramId}
+                                onChange={value => {
+                                    setGirlfriendInstagramId(value);
+                                    if (error) setError(null);
+                                }}
+                                onExclude={handleExclusion}
+                                onSkip={() => void submitExclusion()}
+                                saving={exclusionState === 'saving'}
+                                error={error}
+                            />
                         )}
 
                         {immersivePreflight
@@ -1096,179 +1012,15 @@ const DISCLOSURE_ACCEPTED = true;
 
                         {exclusionDecided && activePrecheckoutSurface === 'legacy' && readyPreflight && (
                             <>
-                                {!autoCheckoutTransitionVisible && (
-                                <CaseCard
-                                    bracket="var(--color-blood)"
-                                    className="mt-7 overflow-hidden"
-                                    data-precheckout-target-card
-                                >
-                                    <div className="flex items-start gap-4 p-5" data-amp-block>
-                                        <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
-                                            {readyPreflight.target.profileImage ? (
-                                                <Image
-                                                    src={readyPreflight.target.profileImage}
-                                                    alt={`@${readyPreflight.target.username} 프로필`}
-                                                    fill
-                                                    sizes="64px"
-                                                    unoptimized
-                                                    className="object-cover"
-                                                />
-                                            ) : (
-                                                <div className="flex h-full w-full items-center justify-center">
-                                                    <BrandMark size={25} className="text-fg-mute" />
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div className="min-w-0 flex-1">
-                                            <span className="eyebrow">판독 대상 확인</span>
-                                            <h2 className="mt-1 truncate text-[19px] font-extrabold text-fg">
-                                                @{readyPreflight.target.username}
-                                            </h2>
-                                            {readyPreflight.target.fullName && (
-                                                <p className="mt-0.5 truncate text-[13px] text-fg-dim">
-                                                    {readyPreflight.target.fullName}
-                                                </p>
-                                            )}
-                                            {readyPreflight.target.bio && (
-                                                <p className="mt-1.5 line-clamp-2 whitespace-pre-line text-[12px] leading-relaxed text-fg-mute">
-                                                    {readyPreflight.target.bio}
-                                                </p>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div className="grid grid-cols-2 border-t border-line">
-                                        <div className="border-r border-line px-4 py-3 text-center">
-                                            <p className="num text-[17px] font-extrabold text-fg">
-                                                {readyPreflight.target.followersCount.toLocaleString('ko-KR')}
-                                            </p>
-                                            <p className="mt-0.5 text-[11px] text-fg-mute">팔로워</p>
-                                        </div>
-                                        <div className="px-4 py-3 text-center">
-                                            <p className="num text-[17px] font-extrabold text-fg">
-                                                {readyPreflight.target.followingCount.toLocaleString('ko-KR')}
-                                            </p>
-                                            <p className="mt-0.5 text-[11px] text-fg-mute">팔로잉</p>
-                                        </div>
-                                    </div>
-                                </CaseCard>
-                                )}
+                                {!autoCheckoutTransitionVisible && <AnalysisTargetCard target={readyPreflight.target} />}
 
-                                <section
-                                    id="plan-selection"
-                                    className="mt-9 scroll-mt-20"
-                                    aria-labelledby="plan-heading"
-                                >
-                                    <Eyebrow>요금제 선택</Eyebrow>
-                                    <h2
-                                        id="plan-heading"
-                                        className="mt-3 text-[22px] font-extrabold text-fg outline-none"
-                                    >
-                                        계정 규모에 맞는 플랜이에요
-                                    </h2>
-                                    <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
-                                        전체 플랜을 비교해보고, 계정에 맞는 이용 가능한 플랜으로 진행하세요.
-                                    </p>
-
-                                    <fieldset className="mt-5 space-y-3">
-                                        <legend className="sr-only">판독 플랜</legend>
-                                        {readyPreflight.plans.map((plan, index) => {
-                                            const available = isEarlybirdPlanSelectable(
-                                                plan,
-                                                readyPreflight.requiredPlan
-                                            );
-                                            const selected = effectiveSelectedPlan === plan.planId;
-                                            const presentation = buildEarlybirdPlanPresentation(plan.planId);
-                                            const lowerBound = index > 0
-                                                ? readyPreflight.plans[index - 1].relationshipCapacity
-                                                : null;
-                                            return (
-                                                <label
-                                                    key={plan.planId}
-                                                    className={`block cursor-pointer border p-3.5 transition-colors ${
-                                                        selected
-                                                            ? 'border-blood bg-blood/[0.08]'
-                                                            : 'border-line-2 bg-ink-2 hover:border-fg-dim'
-                                                    }`}
-                                                >
-                                                    <input
-                                                        type="radio"
-                                                        name="analysis-plan"
-                                                        value={plan.planId}
-                                                        checked={selected}
-                                                        onChange={() => handlePlanSelection(plan.planId)}
-                                                        className="sr-only"
-                                                    />
-                                                    <div className="flex items-start justify-between gap-3">
-                                                        <div className="min-w-0">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="text-[16px] font-extrabold text-fg">
-                                                                    {PLAN_NAMES[plan.planId]}
-                                                                </span>
-                                                                {plan.selectionState === 'required' && (
-                                                                    <span className="border border-blood/50 bg-blood/10 px-1.5 py-0.5 text-[10px] font-bold text-blood">
-                                                                        이용 가능
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <p className="mt-1 text-[12px] text-fg-dim">
-                                                                {relationshipCapacityLabel(
-                                                                    plan.relationshipCapacity,
-                                                                    lowerBound
-                                                                )}
-                                                            </p>
-                                                        </div>
-                                                        <span className={`mt-1 block h-[18px] w-[18px] shrink-0 rounded-full border ${
-                                                            selected
-                                                                ? 'border-[5px] border-blood bg-white'
-                                                                : 'border-line-2'
-                                                        }`} />
-                                                    </div>
-
-                                                    {presentation.referencePriceLabel ? (
-                                                        <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                                                            <span className="num text-[18px] text-fg-mute line-through">
-                                                                {presentation.referencePriceLabel}
-                                                            </span>
-                                                            <span className="text-[15px] text-fg-mute" aria-hidden>→</span>
-                                                            <span className="num text-[22px] font-black leading-none tracking-tight text-fg">
-                                                                {presentation.priceLabel}
-                                                            </span>
-                                                            {presentation.discountLabel && (
-                                                                <span className="self-center border border-blood bg-blood/10 px-2 py-[3px] text-[13px] font-extrabold leading-none text-blood">
-                                                                    {presentation.discountLabel}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    ) : (
-                                                        <p className="num mt-2.5 text-[15px] font-bold text-fg-dim">
-                                                            {presentation.priceLabel}
-                                                        </p>
-                                                    )}
-
-                                                    {plan.selectionState !== 'unavailable' && isEarlybirdPlanSoldOut(plan) ? (
-                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-bold text-fg-mute">
-                                                            얼리버드 물량이 모두 소진되었어요.
-                                                        </p>
-                                                    ) : available && typeof plan.remainingSlots === 'number' ? (
-                                                        <p className="mt-2.5 flex items-center gap-1.5 border-t border-line pt-2.5 text-[11px] font-extrabold text-blood">
-                                                            <span aria-hidden>🔥</span>
-                                                            선착순 마감 임박 · {plan.remainingSlots.toLocaleString('ko-KR')}건 남음
-                                                        </p>
-                                                    ) : available && presentation.referencePriceLabel ? (
-                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-bold text-amber">
-                                                            얼리버드 선착순 한정
-                                                        </p>
-                                                    ) : !available ? (
-                                                        <p className="mt-2.5 border-t border-line pt-2.5 text-[11px] font-medium text-fg-mute">
-                                                            {plan.unavailableReason === 'below_required_plan'
-                                                                ? '이 계정 규모에서는 이용 가능한 플랜이 아니에요.'
-                                                                : '아직 오픈 전인 플랜이에요.'}
-                                                        </p>
-                                                    ) : null}
-                                                </label>
-                                            );
-                                        })}
-                                    </fieldset>
+                                <AnalysisPlanSection>
+                                    <AnalysisPlanCards
+                                        plans={readyPreflight.plans}
+                                        requiredPlan={readyPreflight.requiredPlan}
+                                        selectedPlan={effectiveSelectedPlan}
+                                        onPlanSelection={handlePlanSelection}
+                                    />
 
                                     {readyPreflight
                                         && effectiveSelectedCard
@@ -1337,7 +1089,7 @@ const DISCLOSURE_ACCEPTED = true;
                                                             ).actionLabel}
                                         </PrimaryButton>
                                     </div>
-                                </section>
+                                </AnalysisPlanSection>
                             </>
                         )}
                     </>

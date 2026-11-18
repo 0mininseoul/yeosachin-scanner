@@ -23,7 +23,7 @@ describe('analysis duration UI calibration contract', () => {
         const progress = source('app/progress/[requestId]/page.tsx');
         const hook = source('hooks/useAnalysisProgress.ts');
 
-        expect(progress).toContain('analysisDurationProgressCopy(isDevUiPresentation())');
+        expect(progress).toContain('analysisDurationProgressCopy(isDevUiPresentation() && !devLive)');
         expect(progress).not.toContain('useAnalysisDurationEstimate');
         expect(progress).not.toContain('analysisDurationRangeLabel');
         expect(progress).not.toContain('hasAnalysisDurationExceeded');

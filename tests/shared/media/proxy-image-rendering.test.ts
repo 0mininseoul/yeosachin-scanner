@@ -5,10 +5,10 @@ const proxyImageUsages = [
     {
         name: 'analyze target profile',
         source: readFileSync(
-            new URL('../../../app/analyze/page.tsx', import.meta.url),
+            new URL('../../../components/analysis-preflight-presentation.tsx', import.meta.url),
             'utf8'
         ),
-        srcExpression: 'readyPreflight.target.profileImage',
+        srcExpression: 'target.profileImage',
     },
     {
         // The progress page hands the active profile to the screened-faces

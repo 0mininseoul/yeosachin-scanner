@@ -86,6 +86,10 @@ export function devUiRequestBoundary(
     if (!canonicalDevUiPathname(url.pathname)) return 'forbidden';
     if (url.pathname.startsWith('/api')) {
         if (request.method === 'GET' && (url.pathname === '/api/dev-ui/live/availability' || url.pathname === '/api/image-proxy')) return 'dev';
+        if (request.method === 'POST' && url.pathname === '/api/analysis/precheckout-blite') {
+            const selectors = url.searchParams.getAll('devAnalysis');
+            return selectors.length === 1 && selectors[0] === 'live' ? 'dev' : 'forbidden';
+        }
         if (url.searchParams.getAll('devAnalysis').some(value => value === 'live') && (
             (request.method === 'PATCH' && new RegExp(`^/api/analysis/preflight/${UUID}$`, 'i').test(url.pathname))
             || (request.method === 'POST' && new RegExp(`^/api/analysis/preflight/${UUID}/entitle$`, 'i').test(url.pathname))

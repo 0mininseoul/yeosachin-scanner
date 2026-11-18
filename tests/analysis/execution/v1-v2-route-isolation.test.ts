@@ -26,6 +26,7 @@ describe('V1 route isolation from durable V2 requests', () => {
         const landingPage = source('components/landing-page.tsx');
         const landingEntry = source('app/page.tsx');
         const analyzePage = source('app/analyze/page.tsx');
+        const planCards = source('components/analysis-plan-selection.tsx');
         const proxy = source('proxy.ts');
 
         expect(landingEntry).toContain('<LandingPage />');
@@ -38,9 +39,10 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(proxy).toContain('request.nextUrl.search');
         expect(proxy).toContain("request.nextUrl.searchParams.get('redirectTo')");
         expect(proxy).toContain('appRedirectUrlForRequest(');
-        expect(proxy).toContain('redirectResponse.cookies.set(cookie)');
-        expect(analyzePage).toContain('plan.relationshipCapacity');
-        expect(analyzePage).not.toContain("capacity: '팔로워·팔로잉 각 400명 이하'");
+        expect(proxy).toContain('supabaseResponse.cookies.getAll().forEach(cookie => response.cookies.set(cookie))');
+        expect(analyzePage).toContain('<AnalysisPlanCards');
+        expect(planCards).toContain('plan.relationshipCapacity');
+        expect(planCards).not.toContain("capacity: '팔로워·팔로잉 각 400명 이하'");
     });
 
     it('never runs status-driven V1 stale cleanup for a V2 request', () => {

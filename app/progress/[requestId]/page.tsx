@@ -284,7 +284,7 @@ export default function ProgressPage({ params }: PageProps) {
                     <h1 className="text-[22px] font-extrabold tracking-tight text-fg">
                         {transient ? '진행 상황을 확인하지 못했어요' : unauthorized ? '다시 로그인해주세요' : '판독 요청을 확인할 수 없어요'}
                     </h1>
-                    <p className="mt-3 text-[14px] leading-relaxed text-fg-dim" role="status">
+                    <p data-amp-mask className="mt-3 text-[14px] leading-relaxed text-fg-dim" role="status">
                         {error || '판독 요청을 찾을 수 없습니다.'}
                     </p>
                     <div className="mt-7">

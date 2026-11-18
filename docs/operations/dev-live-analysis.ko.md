@@ -47,6 +47,7 @@ Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검�
 
 - [Dev 전용 상시 승인 SQL](../../supabase/dev-ui/live-owner-start.sql)은 Dev 비용 원장 다음에 적용한다. DB는 서버가 확인한 활성 Basic 카카오 운영자와 실제로 시작한 대상·시도 ID에 새 실행을 묶는다. 같은 버튼 요청의 재전송은 동일한 승인을 사용하고, 각각의 새 시작에서 별도 상한을 적용한다.
 - Dev 웹은 검증된 카카오 이메일 하나와 등록된 계정만 허용한다. 로그인, 페이지 방문, 상태 조회는 실행을 만들지 않는다. 운영자가 동일 오리진에서 실제 사전 점검을 시작한 뒤 인증된 워커가 DB 요청과 승인 ID를 검증하면 공급자 호출이 가능하다.
+- 실제 분석에서는 운영과 같은 사전 점검 미리보기 및 진행·결과 컴포넌트를 사용한다. 미리보기 상태 조회는 Dev 운영자가 소유한 실제 사전 점검의 기존 결과만 읽는다. Dev는 비용 확인과 테스트 이용권으로 결제 단계를 대체하며 실제 데이터 표시를 추가한다.
 - Basic 공급자 승인은 시작부터 30분이다. Standard의 사전 점검과 이용권 발급은 기존 30분 안에 진행한다. 접수된 Standard 분석의 공급자 호출은 시작 시점부터 최대 150분 동안 같은 승인을 사용한다. 새 실행에는 사용자의 시작 동작과 별도 예산이 필요하다. 만료된 실행에서는 새 공급자 호출과 이용권 발급을 차단한다. 이전 결과는 계속 조회할 수 있다.
 - Standard를 열려면 예산과 대상에 대한 운영자 승인 후 [Standard 승인 SQL](../../supabase/dev-ui/live-owner-start-standard.sql), [사전 점검 재전송 SQL](../../supabase/dev-ui/live-standard-preflight-replay.sql), [최신 정보 확인 SQL](../../supabase/dev-ui/live-standard-fresh-admission.sql)을 순서대로 등록된 Dev DB에 적용한다. 승인된 대상 하나를 Dev DB의 `dev_live_budget.standard_owner_policy`에 등록한다. 같은 대상의 `DEV_LIVE_STANDARD_TARGET`을 Dev 워커 두 개에 먼저 설정하고 검증한 뒤 Dev 웹에 설정한다. 생성과 이용권 발급은 Dev 운영자 세션, 요청 대상, 확인한 플랜, DB 승인이 일치할 때 진행된다. 정책을 비활성화하면 해당 Standard 승인으로 새 비용을 예약할 수 없다.
 - 후보 코드, Dev 도메인, DB 식별자, Cloud Run IAM, 큐 상태를 확인한다. 단위 검증은 인증 실패, 같은 요청 재전송, 대상 불일치, 승인 만료, 비용 상한, 공급자 호출 없는 가용성 조회를 포함한다.

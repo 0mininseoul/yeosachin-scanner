@@ -52,6 +52,7 @@ describe('Amplitude replay privacy contract', () => {
     it('does not mask full replay pages and keeps only sensitive regions marked', () => {
         const landing = source('components/landing-page.tsx');
         const analyze = source('app/analyze/page.tsx');
+        const preflightPresentation = source('components/analysis-preflight-presentation.tsx');
         const login = source('app/login/page.tsx');
         const mypage = source('app/mypage/page.tsx');
         const earlybirdPage = source('app/earlybird/page.tsx');
@@ -81,7 +82,9 @@ describe('Amplitude replay privacy contract', () => {
         expect(earlybird).toMatch(/href=\{currentOrder\.resultUrl\}[\s\S]*?data-amp-block/);
         expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.instagramId/);
         expect(profilePreview).toMatch(/data-amp-block[\s\S]*?profile\.(?:overview|bio)/);
-        expect((analyze.match(/data-amp-mask[\s\S]{0,400}\{error\}/g)?.length ?? 0)).toBeGreaterThanOrEqual(2);
+        expect(analyze).toMatch(/data-amp-mask[\s\S]{0,400}\{error\}/);
+        expect(preflightPresentation).toMatch(/data-amp-mask[\s\S]{0,400}\{error\}/);
+        expect(preflightPresentation).toMatch(/<div[^>]+data-amp-mask>[\s\S]*?<input/);
         expect(analyze).toMatch(/data-amp-mask[\s\S]{0,400}\{error \?\?/);
         expect(analyze).toMatch(/data-amp-mask[\s\S]{0,400}\{visibleError\}/);
         expect((betaTest.match(/data-amp-mask[\s\S]{0,400}\{error\}/g)?.length ?? 0)).toBeGreaterThanOrEqual(3);

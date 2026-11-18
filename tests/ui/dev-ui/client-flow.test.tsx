@@ -13,8 +13,9 @@ import { AuthButtons } from '@/components/auth-buttons';
 import * as authAnalytics from '@/lib/services/analytics-auth';
 import * as analytics from '@/lib/services/analytics';
 import AnalyzePage from '@/app/analyze/page';
-import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
+import { __resetBrowserBliteRequestsForTest, PrecheckoutImmersive } from '@/components/precheckout-immersive';
 import { PRECHECKOUT_DEMO_DURATION_MS } from '@/components/precheckout-demo';
+import { createDevUiPrecheckoutPresentation } from '@/lib/services/dev-ui/precheckout-presentation';
 
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), readyKakao: vi.fn() }));
 const oauth = vi.hoisted(() => ({ signInWithOAuth: vi.fn() }));
@@ -39,6 +40,7 @@ const browser = globalThis as typeof globalThis & { jsdom: { reconfigure: (optio
 beforeEach(() => {
     (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks(); vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+    __resetBrowserBliteRequestsForTest();
     container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
 });
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); browser.jsdom.reconfigure({ url: initialBrowserUrl }); });
@@ -67,6 +69,11 @@ async function settlePresentation() {
 async function advancePresentation(ms: number) {
     await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
     await settlePresentation();
+}
+const livePreviewUrl = '/api/analysis/precheckout-blite?devAnalysis=live';
+async function openPlansAfterPreview() {
+    await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+    await click('상세 분석 보기');
 }
 function readySnapshot() {
     const plans = buildDevUiPlanSnapshot();
@@ -236,6 +243,72 @@ describe('Dev mock checkout and order reading UI', () => {
 
 
 describe('Dev actual analysis browser attempt', () => {
+    it('opens the stored B-lite preview after saving exclusion and waits for a separate analysis start', async () => {
+        const telemetry = presentationClock();
+        const statusUrl = `/api/analysis/preflight/${orderId}?devAnalysis=live`;
+        const entitleUrl = `/api/analysis/preflight/${orderId}/entitle?devAnalysis=live`;
+        const dto = createDevUiPrecheckoutPresentation();
+        dto.persona.headline = '저장된 사전 판독 결과';
+        const fetchSpy = vi.fn(async (url: string, options?: RequestInit) => {
+            if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === statusUrl && options?.method === 'PATCH') return new Response(null, { status: 204 });
+            if (url === statusUrl) return new Response(JSON.stringify({ ...readySnapshot(), exclusionDecision: 'pending' }), {
+                headers: { 'x-dev-live-plan': 'standard' },
+            });
+            if (url === livePreviewUrl && options?.method === 'POST') return response({ state: 'complete', dto });
+            if (url === entitleUrl && options?.method === 'POST') return response({ requestId: runId });
+            throw new Error('Unexpected API or provider call');
+        });
+        vi.stubGlobal('fetch', fetchSpy);
+
+        await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        expect(container.textContent).toContain('본인 계정은 먼저 제외해주세요');
+        expect(fetchSpy.mock.calls.some(([url]) => url === livePreviewUrl)).toBe(false);
+        await click('본인 계정 제외 안 함');
+        expect(fetchSpy.mock.calls.find(([url, init]) => url === statusUrl && init?.method === 'PATCH')?.[1]?.body).toBe('{"decision":"skip"}');
+        expect(fetchSpy.mock.calls.find(([url]) => url === livePreviewUrl)?.[1]?.body).toBe(JSON.stringify({ preflightId: orderId }));
+        expect(container.querySelector('[data-precheckout-demo-mode="waiting"]')).not.toBeNull();
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+        await click('예');
+        expect(container.textContent).toContain('저장된 사전 판독 결과');
+        expect(container.querySelector('#plan-selection')).toBeNull();
+
+        await click('상세 분석 보기');
+        expect(container.querySelector('[data-precheckout-target-card] img')?.getAttribute('alt')).toBe('@dev_synthetic 프로필');
+        expect(container.querySelector('#plan-selection input[value="basic"]:disabled')).not.toBeNull();
+        expect(container.querySelector('#plan-selection input:checked')?.getAttribute('value')).toBe('standard');
+        expect(fetchSpy.mock.calls.some(([url]) => url === entitleUrl)).toBe(false);
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(telemetry).not.toHaveBeenCalled();
+
+        await click('Standard 분석 시작');
+        expect(fetchSpy.mock.calls.find(([url]) => url === entitleUrl)?.[1]?.body).toBe('{"planId":"standard"}');
+        expect(router.replace).toHaveBeenCalledWith(`/progress/${runId}?devAnalysis=live`);
+    });
+
+    it('returns an expired preview to manual start with fresh cost confirmation', async () => {
+        presentationClock();
+        const statusUrl = `/api/analysis/preflight/${orderId}?devAnalysis=live`;
+        const fetchSpy = vi.fn(async (url: string, options?: RequestInit) => {
+            if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === statusUrl && !options?.method) return new Response(JSON.stringify(readySnapshot()), {
+                headers: { 'x-dev-live-plan': 'basic' },
+            });
+            if (url === livePreviewUrl) return response({ state: 'expired' }, 410);
+            throw new Error('Unexpected API or provider call');
+        });
+        vi.stubGlobal('fetch', fetchSpy);
+
+        await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await advancePresentation(PRECHECKOUT_DEMO_DURATION_MS);
+        await click('다시 확인하기');
+        expect(router.replace).toHaveBeenCalledWith('/dev-ui/live');
+        await render(<DevLiveAnalysis initialPreflightId="" />);
+        expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(false);
+        expect(container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true);
+        expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual(['/api/dev-ui/live/availability', statusUrl, livePreviewUrl]);
+    });
+
     it.each(['basic', 'standard'] as const)('reuses the %s attempt after a lost response and page remount', async planId => {
         const attempts: (string | null)[] = [];
         const startPlans: (string | null)[] = [];
@@ -261,7 +334,7 @@ describe('Dev actual analysis browser attempt', () => {
                 const checkbox = container.querySelector<HTMLInputElement>('input[type=checkbox]')!;
                 const title = '실제 사전 점검 시작';
                 await act(async () => {
-                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(target, ' Dev_Fixture_Retry ');
+                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(target, ' @Dev_Fixture_Retry ');
                     target.dispatchEvent(new Event('input', { bubbles: true }));
                 });
                 if (planId === 'standard') {
@@ -320,16 +393,17 @@ describe('Dev actual analysis browser attempt', () => {
     });
 
     it('uses the persisted Standard plan for a reopened preflight, exclusion and pending entitlement retries', async () => {
-        vi.useFakeTimers();
+        presentationClock();
         const statusUrl = `/api/analysis/preflight/${orderId}?devAnalysis=live`;
         const entitleUrl = `/api/analysis/preflight/${orderId}/entitle?devAnalysis=live`;
         const entitlementBodies: unknown[] = [];
         let exclusionConfirmed = false;
         const fetchSpy = vi.fn(async (url: string, options?: RequestInit) => {
             if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
             if (url === statusUrl && options?.method === 'PATCH') {
                 exclusionConfirmed = true;
-                return response(readySnapshot());
+                return new Response(null, { status: 204 });
             }
             if (url === statusUrl) {
                 return new Response(JSON.stringify({ ...readySnapshot(), exclusionDecision: exclusionConfirmed ? 'skip' : 'pending' }), {
@@ -345,8 +419,9 @@ describe('Dev actual analysis browser attempt', () => {
         vi.stubGlobal('fetch', fetchSpy);
 
         await render(<DevLiveAnalysis initialPreflightId={orderId} />);
-        await click('제외 없이 계속');
+        await click('본인 계정 제외 안 함');
         expect(entitlementBodies).toEqual([]);
+        await openPlansAfterPreview();
         await click('Standard 분석 시작');
         expect(container.querySelector('[role="status"]')?.textContent).toContain('분석 작업을 준비');
         await advancePresentation(2_000);
@@ -355,12 +430,13 @@ describe('Dev actual analysis browser attempt', () => {
     });
 
     it('does not transfer a pending entitlement after navigating between ready preflights in the same mounted view', async () => {
-        vi.useFakeTimers();
+        presentationClock();
         const otherPreflightId = '123e4567-e89b-42d3-a456-426614174011';
         const entitleUrl = `/api/analysis/preflight/${orderId}/entitle?devAnalysis=live`;
         const entitlementUrls: string[] = [];
         vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
             if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
             if (options?.method === 'POST') {
                 entitlementUrls.push(url);
                 return response({ status: 'admission_pending' });
@@ -372,6 +448,7 @@ describe('Dev actual analysis browser attempt', () => {
         }));
 
         await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await openPlansAfterPreview();
         await click('Standard 분석 시작');
         expect(entitlementUrls).toEqual([entitleUrl, entitleUrl]);
         await render(<DevLiveAnalysis initialPreflightId={otherPreflightId} />);
@@ -387,10 +464,11 @@ describe('Dev actual analysis browser attempt', () => {
         { scope: 'missing plan header', preflightId: orderId, header: null },
         { scope: 'different preflight', preflightId: '123e4567-e89b-42d3-a456-426614174011', header: 'standard' },
     ])('does not retry a pending entitlement if status reports a $scope', async ({ preflightId, header }) => {
-        vi.useFakeTimers();
+        presentationClock();
         const entitlementBodies: unknown[] = [];
         vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
             if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
             if (options?.method === 'POST') {
                 entitlementBodies.push(JSON.parse(options.body as string));
                 return response({ status: 'admission_pending' });
@@ -402,6 +480,7 @@ describe('Dev actual analysis browser attempt', () => {
         }));
 
         await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await openPlansAfterPreview();
         await click('Standard 분석 시작');
         await advancePresentation(2_000);
         expect(entitlementBodies).toEqual([{ planId: 'standard' }]);
@@ -443,9 +522,11 @@ describe('Dev actual analysis browser attempt', () => {
     });
 
     it('has no entitlement control when the authorized Standard plan is unavailable', async () => {
+        presentationClock();
         const { plans, ...snapshot } = readySnapshot();
         const fetchSpy = vi.fn(async (url: string) => {
             if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
             return new Response(JSON.stringify({ ...snapshot, plans: plans.map(plan => plan.planId === 'standard'
                 ? { ...plan, launchStatus: 'disabled', selectionState: 'unavailable', unavailableReason: 'launch_gate' }
                 : plan) }), { headers: { 'Content-Type': 'application/json', 'x-dev-live-plan': 'standard' } });
@@ -453,10 +534,11 @@ describe('Dev actual analysis browser attempt', () => {
         vi.stubGlobal('fetch', fetchSpy);
 
         await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await openPlansAfterPreview();
         expect(container.textContent).toContain('Standard 실행 범위');
         expect([...container.querySelectorAll('button')].some(button => button.textContent?.includes('분석 시작'))).toBe(false);
         expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual([
-            '/api/dev-ui/live/availability', `/api/analysis/preflight/${orderId}?devAnalysis=live`,
+            '/api/dev-ui/live/availability', `/api/analysis/preflight/${orderId}?devAnalysis=live`, livePreviewUrl,
         ]);
     });
 });
