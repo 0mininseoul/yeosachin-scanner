@@ -11,6 +11,9 @@ original_args=("$@")
 readonly DEFAULT_LOCATION="asia-northeast3"
 readonly SUPABASE_SECRET_ID="ai-baram-v2-supabase-service-role"
 readonly IMAGE_SIGNING_SECRET_ID="ai-baram-v2-image-proxy-signing"
+readonly R2_ACCESS_KEY_ID_SECRET_ID="ai-baram-v2-r2-writer-access-key-id"
+readonly R2_SECRET_ACCESS_KEY_SECRET_ID="ai-baram-v2-r2-writer-secret-access-key"
+readonly RESULT_IMAGE_OBJECT_HMAC_SECRET_ID="ai-baram-v2-result-image-object-hmac"
 readonly PREFLIGHT_IDENTITY_HMAC_SECRET_ID="ai-baram-v2-preflight-identity-hmac"
 readonly GENDER_ROUTING_HMAC_SECRET_ID="ai-baram-v2-gender-routing-hmac"
 readonly APIFY_SLOTS=(primary secondary tertiary quaternary quinary senary septenary octonary nonary tenth)
@@ -62,6 +65,15 @@ Required inputs:
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
   ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION
+
+Paid result-image retention (optional):
+  Set ANALYSIS_V2_RESULT_IMAGES_ENABLED=true in the paid runtime manifest with
+  ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT and ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET.
+  Supply these exact numeric Secret Manager versions outside the manifest:
+    ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION
+    ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION
+    ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION
+  An ordinary apply preserves the exact serving configuration once enabled.
 
 Active-stage legacy freeze observations (these are read from the resources,
 not accepted from the matching *_CONFIRMED booleans):
@@ -553,7 +565,7 @@ validate_runtime_manifest() {
   fi
   while IFS= read -r key; do
     case "$key" in
-      APIFY_*_API_TOKEN|APIFY_API_TOKEN|SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_*_HMAC_SECRET|*_PASSWORD|*_PRIVATE_KEY|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_SECRET)
+      APIFY_*_API_TOKEN|APIFY_API_TOKEN|SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID|ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY|ANALYSIS_V2_*_HMAC_SECRET|*_PASSWORD|*_PRIVATE_KEY|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_SECRET)
         die "runtime manifest contains a plaintext credential key: $key"
         ;;
     esac
@@ -661,6 +673,46 @@ numeric_version ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION "$apify_secret_versio
 numeric_version ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION "$image_signing_secret_version"
 numeric_version ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION "$identity_hmac_secret_version"
 numeric_version ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET_VERSION "$gender_hmac_secret_version"
+
+result_images_enabled="$(jq -er '
+  if has("ANALYSIS_V2_RESULT_IMAGES_ENABLED") then
+    .ANALYSIS_V2_RESULT_IMAGES_ENABLED | select(. == "true" or . == "false")
+  else "false" end
+' "$env_file")" || die "runtime manifest ANALYSIS_V2_RESULT_IMAGES_ENABLED must be the string true or false"
+result_image_manifest_env="$(jq -c '
+  to_entries
+  | map(select(.key == "ANALYSIS_V2_RESULT_IMAGES_ENABLED" or (.key | startswith("ANALYSIS_V2_RESULT_IMAGE_")))
+      | {name: .key, value: .value})
+' "$env_file")"
+r2_access_key_id_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION:-}"
+r2_secret_access_key_secret_version="${ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION:-}"
+result_image_object_hmac_secret_version="${ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION:-}"
+if [[ "$result_images_enabled" == "true" ]]; then
+  [[ "$role" == "paid" ]] || die "retained result images are allowed only for the paid worker"
+  jq -e 'all(.[];
+    .name == "ANALYSIS_V2_RESULT_IMAGES_ENABLED"
+    or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT"
+    or .name == "ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET")' <<<"$result_image_manifest_env" >/dev/null \
+    || die "runtime manifest contains an unsupported retained result image key"
+  jq -e '.ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT
+    | type == "string" and test("\\Ahttps://[a-f0-9]{32}\\.r2\\.cloudflarestorage\\.com\\z")' "$env_file" >/dev/null \
+    || die "ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT must be the exact private Cloudflare R2 account endpoint"
+  jq -e '.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET
+    | type == "string" and test("\\A[a-z0-9][a-z0-9-]{1,61}[a-z0-9]\\z")' "$env_file" >/dev/null \
+    || die "ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET is invalid"
+  numeric_version ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION "$r2_access_key_id_secret_version"
+  numeric_version ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION "$r2_secret_access_key_secret_version"
+  numeric_version ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION "$result_image_object_hmac_secret_version"
+  result_image_secret_refs=(
+    "ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID|$R2_ACCESS_KEY_ID_SECRET_ID|$r2_access_key_id_secret_version"
+    "ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY|$R2_SECRET_ACCESS_KEY_SECRET_ID|$r2_secret_access_key_secret_version"
+    "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET|$RESULT_IMAGE_OBJECT_HMAC_SECRET_ID|$result_image_object_hmac_secret_version"
+  )
+else
+  jq -e 'all(.[]; .name == "ANALYSIS_V2_RESULT_IMAGES_ENABLED")' <<<"$result_image_manifest_env" >/dev/null \
+    && [[ -z "$r2_access_key_id_secret_version$r2_secret_access_key_secret_version$result_image_object_hmac_secret_version" ]] \
+    || die "retained result image endpoint, bucket, and secret versions require ANALYSIS_V2_RESULT_IMAGES_ENABLED=true"
+fi
 
 if [[ "$mode" == "check" || "$mode" == "apply" ]]; then
   github_ci_script="$(dirname "$0")/require-github-ci-success.sh"
@@ -1326,6 +1378,15 @@ secret_ref_entries=(
   "ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET|$PREFLIGHT_IDENTITY_HMAC_SECRET_ID|$identity_hmac_secret_version"
   "ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET|$GENDER_ROUTING_HMAC_SECRET_ID|$gender_hmac_secret_version"
 )
+expected_result_image_env="$result_image_manifest_env"
+if [[ "$result_images_enabled" == "true" ]]; then
+  secret_ref_entries+=("${result_image_secret_refs[@]}")
+  expected_result_image_env="$(printf '%s\n' "${result_image_secret_refs[@]}" | jq -Rnc \
+    --argjson plain "$result_image_manifest_env" '
+      ($plain + [inputs | split("|") | {name: .[0], valueFrom: {secretKeyRef: {name: .[1], key: .[2]}}}])
+      | sort_by(.name)
+    ')"
+fi
 
 additional_refs="${ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS:-}"
 if [[ -n "$additional_refs" ]]; then
@@ -1563,6 +1624,30 @@ observed_manifest_value() {
   fi
 }
 
+is_result_image_key() {
+  [[ "$1" == ANALYSIS_V2_RESULT_IMAGES_ENABLED || "$1" == ANALYSIS_V2_RESULT_IMAGE_* ]]
+}
+
+verify_result_image_environment() {
+  local config="$1"
+  local predeploy="${2:-false}"
+  # Only predeploy can add the enabled contract to a clean OFF runtime.
+  # Match all image settings as a set so omitted keys, plaintext refs, and
+  # duplicates fail closed even if no image key appears in the input manifest.
+  jq -e --argjson expected "$expected_result_image_env" --arg predeploy "$predeploy" '
+    (.spec.template.spec.containers // .spec.containers) as $containers
+    | select($containers[0].env | type == "array" and length > 0)
+    | ([$containers[]?.env[]?
+        | select(.name == "ANALYSIS_V2_RESULT_IMAGES_ENABLED" or (.name | startswith("ANALYSIS_V2_RESULT_IMAGE_")))
+        | if (.valueFrom.secretKeyRef.key? | type) == "number"
+          then .valueFrom.secretKeyRef.key |= tostring else . end
+      ] | sort_by(.name)) as $observed
+    | $observed == $expected
+      or (($observed == [] or $observed == [{name: "ANALYSIS_V2_RESULT_IMAGES_ENABLED", value: "false"}])
+          and ($predeploy == "true" or $expected == []))
+  ' <<<"$config" >/dev/null
+}
+
 canonical_service_url() {
   jq -r '(.status.url // .status.uri // empty)' <<<"$service_json"
 }
@@ -1642,6 +1727,16 @@ number_annotation() {
 service_exists() {
   gcloud run services describe "$service" \
     "--project=$project" "--region=$region" '--format=json' >/dev/null 2>&1
+}
+
+verify_paid_bootstrap_service_absent() {
+  local services
+  services="$(gcloud run services list \
+    "--project=$project" "--region=$region" "--filter=metadata.name=$service" \
+    '--format=json' 2>/dev/null)" \
+    || die "paid Cloud Run service lookup failed; cannot establish bootstrap absence"
+  jq -e '. == []' <<<"$services" >/dev/null \
+    || die "paid Cloud Run service was not verified absent; refusing bootstrap redeployment"
 }
 
 verify_service_iam() {
@@ -1772,6 +1867,7 @@ paid_legacy_secret_refs_are_exact() {
   local expected_refs
   observed_refs="$(jq -c '
     [ .spec.template.spec.containers[]?.env[]?
+      | select(.name | startswith("ANALYSIS_V2_RESULT_IMAGE_") | not)
       | select(
           (.name | test("^(APIFY_[A-Z_]+_API_TOKEN|SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|ANALYSIS_V2_(PREFLIGHT_IDENTITY|GENDER_ROUTING)_HMAC_SECRET)$"))
           or (.valueFrom.secretKeyRef? != null)
@@ -1837,13 +1933,15 @@ verify_traffic_revision() {
     || die "Cloud Run traffic is not serving the latest ready revision at 100 percent"
 }
 
-verify_staged_revision() {
+describe_cloud_run_revision() {
+  gcloud run revisions describe "$1" \
+    "--project=$project" "--region=$region" '--format=json'
+}
+
+ready_revision_belongs_to_service() {
   local revision="$1"
-  local revision_json
-  revision_json="$(gcloud run revisions describe "$revision" \
-    "--project=$project" "--region=$region" '--format=json')" \
-    || die "Cloud Run staged revision could not be observed"
-  jq -e --arg expected_revision "$revision" --arg expected_service "$service" --arg source_sha "$source_sha" '
+  local revision_json="$2"
+  jq -e --arg expected_revision "$revision" --arg expected_service "$service" '
     .metadata.name == $expected_revision
     and (
       (.metadata.labels["serving.knative.dev/service"] // "")
@@ -1854,10 +1952,35 @@ verify_staged_revision() {
     )
     and ([.status.conditions[]?
       | select(.type == "Ready" and .status == "True")] | length) == 1
-    and ((.spec.containers[0].image // "") | test("@sha256:[0-9a-f]{64}$"))
+  ' <<<"$revision_json" >/dev/null
+}
+
+verify_paid_serving_result_image_environment() {
+  local predeploy="$1"
+  local revision
+  local revision_json
+  revision="$(jq -r '.status.latestReadyRevisionName' <<<"$service_json")"
+  revision_json="$(describe_cloud_run_revision "$revision")" \
+    || die "Cloud Run paid serving revision could not be observed for the result image contract"
+  ready_revision_belongs_to_service "$revision" "$revision_json" \
+    || die "Cloud Run paid result image contract requires the exact Ready serving revision"
+  verify_result_image_environment "$revision_json" "$predeploy" \
+    || die "Cloud Run serving revision result image contract drifted"
+}
+
+verify_staged_revision() {
+  local revision="$1"
+  local revision_json
+  revision_json="$(describe_cloud_run_revision "$revision")" \
+    || die "Cloud Run staged revision could not be observed"
+  ready_revision_belongs_to_service "$revision" "$revision_json" && \
+    jq -e --arg source_sha "$source_sha" '
+    ((.spec.containers[0].image // "") | test("@sha256:[0-9a-f]{64}$"))
     and ((.metadata.labels["analysis-v2-source-commit"] // "") == $source_sha)
   ' <<<"$revision_json" >/dev/null \
     || die "Cloud Run staged revision is not the exact Ready revision for this service"
+  verify_result_image_environment "$revision_json" \
+    || die "Cloud Run staged revision result image contract drifted"
   local revision_env_value
   revision_env_value() {
     local key="$1"
@@ -1888,6 +2011,7 @@ verify_staged_revision() {
     ' <<<"$revision_json" >/dev/null
   }
   while IFS= read -r key; do
+    if is_result_image_key "$key"; then continue; fi
     expected_value="$(manifest_value "$env_file" "$key")"
     [[ "$(revision_manifest_value "$key")" == "$expected_value" ]] \
       || die "Cloud Run staged revision environment drifted for $key"
@@ -1905,6 +2029,7 @@ verify_staged_revision() {
     || die "Cloud Run staged revision memory contract drifted"
   for entry in "${secret_ref_entries[@]}"; do
     secret_env="${entry%%|*}"
+    if is_result_image_key "$secret_env"; then continue; fi
     remainder="${entry#*|}"
     secret_id="${remainder%%|*}"
     secret_version="${remainder#*|}"
@@ -2373,6 +2498,13 @@ verify_service_contract() {
   if [[ "$require_traffic" == "true" ]]; then
     verify_traffic_revision
   fi
+  if [[ "$role" == "paid" && "$require_traffic" == "true" ]]; then
+    # The service template can hold a newer revision that never served.
+    verify_paid_serving_result_image_environment "$allow_existing_service_predeploy_source_roll_forward"
+  else
+    verify_result_image_environment "$service_json" \
+      || die "Cloud Run observed result image contract drifted"
+  fi
   [[ "$(env_value "$project_var")" == "$project" ]] || die "Cloud Run observed project drifted"
   [[ "$(env_value "${prefix}_LOCATION")" == "$location" ]] || die "Cloud Run observed location drifted"
   [[ "$(env_value "$queue_var")" == "$queue" ]] || die "Cloud Run observed queue drifted"
@@ -2466,6 +2598,7 @@ verify_service_contract() {
   [[ "$(jq -r '.spec.template.spec.containers[0].resources.limits.memory // empty' <<<"$service_json")" == "$worker_memory" ]] \
     || die "Cloud Run memory contract drifted"
   while IFS= read -r manifest_key; do
+    if is_result_image_key "$manifest_key"; then continue; fi
     manifest_expected="$(manifest_value "$env_file" "$manifest_key")"
     observed_value="$(observed_manifest_value "$manifest_key")"
     if [[ "$observed_value" == "$manifest_expected" ]]; then
@@ -2519,6 +2652,7 @@ verify_service_contract() {
   fi
   for entry in "${secret_ref_entries[@]}"; do
     secret_env="${entry%%|*}"
+    if is_result_image_key "$secret_env"; then continue; fi
     remainder="${entry#*|}"
     secret_id="${remainder%%|*}"
     secret_version="${remainder#*|}"
@@ -2683,6 +2817,7 @@ if service_exists; then
 else
   [[ "$stage" == "bootstrap" ]] \
     || die "active capacity stages require an existing, verified bootstrap service"
+  if [[ "$role" == "paid" ]]; then verify_paid_bootstrap_service_absent; fi
   previous_traffic_projection='[]'
   previous_traffic_spec=''
   previous_ready_revision=''

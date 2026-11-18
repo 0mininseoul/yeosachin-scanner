@@ -11,6 +11,23 @@ const KNOWN_PREFLIGHT_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889
 const KNOWN_PAID_OLD_SOURCE_SHA = '3b28e55c8877276557f8a5a218fb2b966376d889';
 const PREFLIGHT_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'preflight-producer-config-v1';
 const PAID_PRODUCER_CONFIG_FINGERPRINT_VERSION = 'paid-producer-config-v1';
+const RESULT_IMAGE_MANIFEST = {
+    ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
+    ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: `https://${'a'.repeat(32)}.r2.cloudflarestorage.com`,
+    ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: 'paid-result-images-fixture',
+};
+const RESULT_IMAGE_VERSIONS = {
+    ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION: '11',
+    ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION: '12',
+    ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION: '13',
+};
+const RESULT_IMAGE_SECRET_REFS = {
+    ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID: ['ai-baram-v2-r2-writer-access-key-id', '11'],
+    ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY: ['ai-baram-v2-r2-writer-secret-access-key', '12'],
+    ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET: ['ai-baram-v2-result-image-object-hmac', '13'],
+};
+const OBSERVED_RESULT_IMAGE_ENV = Object.entries(RESULT_IMAGE_SECRET_REFS)
+    .map(([name, [secretName, key]]) => ({ name, valueFrom: { secretKeyRef: { name: secretName, key } } }));
 // Sanitized fixture identities for the initial-stage service-account
 // roll-forward.  These are deliberately synthetic; no real production service
 // account, project, or source SHA ever appears in this suite.
@@ -323,6 +340,9 @@ interface FakeRunOptions {
     readiness?: Record<string, unknown>;
     args?: readonly string[];
     revisionService?: string;
+    stagedRevisionPatch?: string;
+    priorServingRevisionPatch?: string;
+    paidBootstrapLookup?: 'absent' | 'unobservable';
     vercelDeployments?: unknown;
     vercelAliases?: unknown;
     vercelProjectEnvironment?: unknown;
@@ -808,6 +828,9 @@ if [[ "\${1:-}" == "storage" && "\${2:-}" == "rm" ]]; then
   exit 0
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services describe" ]]; then
+  if [[ -n "$FAKE_GCLOUD_PAID_BOOTSTRAP_LOOKUP" && ! -f "$FAKE_GCLOUD_PAID_BOOTSTRAP_DEPLOYED" ]]; then
+    exit 1
+  fi
   cat "$FAKE_GCLOUD_SERVICE_JSON"
   describe_count=\$(( \$(cat "$FAKE_GCLOUD_SERVICE_DESCRIBE_COUNT" 2>/dev/null || printf '0') + 1 ))
   printf '%s' "\$describe_count" > "$FAKE_GCLOUD_SERVICE_DESCRIBE_COUNT"
@@ -817,6 +840,12 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run services describe" ]]; then
   fi
   exit 0
 fi
+if [[ "\${1:-} \${2:-} \${3:-}" == "run services list" ]]; then
+  case "$FAKE_GCLOUD_PAID_BOOTSTRAP_LOOKUP" in
+    absent) printf '%s\\n' '[]'; exit 0 ;;
+    unobservable) exit 1 ;;
+  esac
+fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
   for argument in "\$@"; do
     [[ "\$argument" != --service=* ]] || {
@@ -824,10 +853,17 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run revisions describe" ]]; then
       exit 2
     }
   done
-  jq --arg revision "\${4:-}" --arg service "\$FAKE_GCLOUD_REVISION_SERVICE" \
+  revision="\${4:-}"
+  revision_service="\$FAKE_GCLOUD_REVISION_SERVICE"
+  revision_patch="\$FAKE_GCLOUD_STAGED_REVISION_PATCH"
+  if [[ "\$revision" != "$FAKE_GCLOUD_NEXT_REVISION" ]]; then
+    revision_service="$(jq -r '.metadata.name' "$FAKE_GCLOUD_SERVICE_JSON")"
+    revision_patch="$FAKE_GCLOUD_PRIOR_SERVING_REVISION_PATCH"
+  fi
+  jq --arg revision "\$revision" --arg service "\$revision_service" \
     --arg source "\$FAKE_GCLOUD_STAGED_SOURCE_SHA" \
     '{metadata:{name:$revision,labels:{"serving.knative.dev/service":$service,"analysis-v2-source-commit":$source}},spec:.spec.template.spec,status:{conditions:[{type:"Ready",status:"True"}]}}' \
-    "$FAKE_GCLOUD_SERVICE_JSON"
+    "$FAKE_GCLOUD_SERVICE_JSON" | jq "\$revision_patch"
   exit 0
 fi
 if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then
@@ -841,7 +877,15 @@ if [[ "\${1:-} \${2:-} \${3:-}" == "run services get-iam-policy" ]]; then
   exit 0
 fi
 if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
-  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" --argjson desiredIdentityEnv "$FAKE_GCLOUD_DEPLOY_IDENTITY_ENV" --arg desiredRuntimeSa "$FAKE_GCLOUD_DEPLOY_RUNTIME_SA" '
+  touch "$FAKE_GCLOUD_PAID_BOOTSTRAP_DEPLOYED"
+  for argument in "\$@"; do
+    case "\$argument" in
+      --env-vars-file=*) runtime_manifest="\${argument#--env-vars-file=}" ;;
+      --set-secrets=*) secret_refs="\${argument#--set-secrets=}" ;;
+    esac
+  done
+  jq --arg rev "$FAKE_GCLOUD_NEXT_REVISION" --arg stage "$FAKE_GCLOUD_TARGET_STAGE" --arg active "$FAKE_GCLOUD_ACTIVE" --arg role "$FAKE_GCLOUD_ROLE" --arg source "$FAKE_GCLOUD_SOURCE_SHA" --arg stagedTraffic "$FAKE_GCLOUD_STAGED_TRAFFIC" --argjson desiredSecretEnv "$FAKE_GCLOUD_DEPLOY_SECRET_ENV" --argjson desiredIdentityEnv "$FAKE_GCLOUD_DEPLOY_IDENTITY_ENV" --arg desiredRuntimeSa "$FAKE_GCLOUD_DEPLOY_RUNTIME_SA" --slurpfile runtimeManifest "\$runtime_manifest" --arg secretRefs "\$secret_refs" '
+    def resultImageKey: . == "ANALYSIS_V2_RESULT_IMAGES_ENABLED" or startswith("ANALYSIS_V2_RESULT_IMAGE_");
     .status.latestCreatedRevisionName = $rev
     | if $active == "false"
       then .status.latestReadyRevisionName = $rev | .status.traffic = [{revisionName:$rev,percent:100}]
@@ -872,6 +916,12 @@ if [[ "\${1:-} \${2:-}" == "run deploy" ]]; then
         elif .name == "ANALYSIS_V2_RECOVERY_ENABLED" then .value = (if $stage == "bootstrap" or $role != "paid" then "false" else "true" end)
         elif .name == "PREFLIGHT_APIFY_API_TOKEN_SLOTS" then .value = "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth"
         else . end
+      )
+    | (.spec.template.spec.containers[0].env) |= (
+        map(select(.name | resultImageKey | not))
+        + ($runtimeManifest[0] | to_entries | map(select(.key | resultImageKey) | {name: .key, value: .value}))
+        + ($secretRefs | split(",") | map(split("=") | select(.[0] | resultImageKey)
+            | {name: .[0], valueFrom: {secretKeyRef: (.[1] | split(":") | {name: .[0], key: .[1]})}}))
       )
     | (.spec.template.spec.containers[0].env) as $currentEnv
     | .spec.template.spec.containers[0].env = reduce $desiredSecretEnv[] as $desired ($currentEnv;
@@ -1093,6 +1143,10 @@ exec "$FAKE_NODE_REAL" "$@"
                 FAKE_GCLOUD_NEXT_REVISION: `${service}-00002-staged`,
                 FAKE_GCLOUD_TARGET_STAGE: stage,
                 FAKE_GCLOUD_REVISION_SERVICE: options.revisionService ?? service,
+                FAKE_GCLOUD_STAGED_REVISION_PATCH: options.stagedRevisionPatch ?? '.',
+                FAKE_GCLOUD_PRIOR_SERVING_REVISION_PATCH: options.priorServingRevisionPatch ?? '.',
+                FAKE_GCLOUD_PAID_BOOTSTRAP_LOOKUP: options.paidBootstrapLookup ?? '',
+                FAKE_GCLOUD_PAID_BOOTSTRAP_DEPLOYED: join(fixtureDir, 'paid-bootstrap-deployed'),
                 FAKE_GCLOUD_SOURCE_SHA: sourceCommit,
                 FAKE_GCLOUD_STAGED_SOURCE_SHA: options.stagedSourceSha ?? sourceCommit,
                 FAKE_GCLOUD_POST_DEPLOY_SOURCE_SHA: options.postDeploySourceSha ?? '',
@@ -1241,6 +1295,142 @@ describe('automatic-analysis infrastructure contracts', () => {
         expect(output).toContain('--max-instances=8');
         expect(output).toContain('--env-vars-file=');
         expect(output).not.toContain('--update-env-vars');
+    });
+
+    describe('paid retained result images', () => {
+        const enabled = { manifestOverrides: RESULT_IMAGE_MANIFEST, environment: RESULT_IMAGE_VERSIONS };
+        const observed = {
+            serviceEnv: RESULT_IMAGE_MANIFEST,
+            serviceJsonPatch: `.spec.template.spec.containers[0].env += ${JSON.stringify(OBSERVED_RESULT_IMAGE_ENV)}`,
+        };
+
+        it('pins all writer refs during the explicit initial opt-in and stages before promotion', () => {
+            const result = fakeRun({ ...enabled, args: ['--apply'] });
+            expect(result.status, result.stderr?.toString()).toBe(0);
+            for (const [name, [secretName, version]] of Object.entries(RESULT_IMAGE_SECRET_REFS)) {
+                expect(result.calls).toContain(`${name}=${secretName}:${version}`);
+            }
+            expect(result.calls).toMatch(/run deploy .*--no-traffic[\s\S]*run revisions describe[\s\S]*run services update-traffic/);
+        });
+
+        it('verifies and redeploys an enabled service with exact existing writer settings', () => {
+            for (const mode of ['--check', '--apply']) {
+                const result = fakeRun({ ...enabled, ...observed, args: [mode] });
+                expect(result.status, result.stderr?.toString()).toBe(0);
+            }
+        });
+
+        it('keeps disabled bootstrap and paid service manifests usable with an omitted or explicit OFF flag', () => {
+            const bootstrap = fakeRun({ stage: 'bootstrap', args: ['--apply'], paidBootstrapLookup: 'absent' });
+            expect(bootstrap.status, bootstrap.stderr?.toString()).toBe(0);
+            expect(bootstrap.calls).toMatch(/run services list[\s\S]*run deploy/);
+            expect(bootstrap.calls).not.toContain('ai-baram-v2-r2-writer');
+            const disabled = fakeRun({
+                args: ['--apply'],
+                manifestOverrides: { ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'false' },
+            });
+            expect(disabled.status, disabled.stderr?.toString()).toBe(0);
+            expect(disabled.calls).not.toContain('ai-baram-v2-r2-writer');
+        });
+
+        it('refuses to infer a clean paid bootstrap after the service lookup fails', () => {
+            const result = fakeRun({ stage: 'bootstrap', args: ['--apply'], paidBootstrapLookup: 'unobservable' });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/cannot establish bootstrap absence/);
+            expect(result.calls).not.toContain('run deploy');
+        });
+
+        it.each([
+            ['nonpaid opt-in', { ...enabled, role: 'preflight' }, /paid.*only|only.*paid/],
+            ['plaintext R2 access key ID', {
+                ...enabled,
+                manifestOverrides: { ...RESULT_IMAGE_MANIFEST, ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID: 'fixture-value' },
+            }, /plaintext credential key/],
+            ['only an endpoint with the disabled default', {
+                manifestOverrides: { ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: RESULT_IMAGE_MANIFEST.ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT },
+            }, /require.*ANALYSIS_V2_RESULT_IMAGES_ENABLED=true/],
+            ['noncanonical endpoint', {
+                ...enabled,
+                manifestOverrides: { ...RESULT_IMAGE_MANIFEST, ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: 'https://public.example.com' },
+            }, /exact private Cloudflare R2 account endpoint/],
+            ['unpinned reference', {
+                ...enabled,
+                environment: { ...RESULT_IMAGE_VERSIONS, ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET_VERSION: 'latest' },
+            }, /numeric Secret Manager version/],
+            ['missing pin', {
+                ...enabled,
+                environment: { ...RESULT_IMAGE_VERSIONS, ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY_SECRET_VERSION: '' },
+            }, /numeric Secret Manager version/],
+        ] as const)('rejects %s before remote observations', (_label, options, error) => {
+            const result = fakeRun({ ...options, args: ['--apply'] });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(error);
+            expect(result.calls).toBe('');
+        });
+
+        it.each([
+            ['omitting the flag', observed],
+            ['switching the flag off', { ...observed, manifestOverrides: { ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'false' } }],
+            ['changing the bucket', { ...observed, ...enabled, manifestOverrides: { ...RESULT_IMAGE_MANIFEST, ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: 'different-bucket' } }],
+            ['changing the writer version', { ...observed, ...enabled, environment: { ...RESULT_IMAGE_VERSIONS, ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID_SECRET_VERSION: '14' } }],
+            ['turning a partially configured service on', { ...enabled, serviceEnv: { ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true' } }],
+        ])('refuses %s during a redeploy before starting a revision', (_label, options) => {
+            const result = fakeRun({ ...options, args: ['--apply'] });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/result.image.*contract drifted/i);
+            expect(result.calls).not.toContain('run deploy');
+        });
+
+        it('rejects an enabled check when the serving service is OFF', () => {
+            const result = fakeRun({ ...enabled, args: ['--check'] });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/result.image.*contract drifted/i);
+        });
+
+        it('refuses to infer OFF when the serving revision environment is unreadable', () => {
+            const result = fakeRun({ args: ['--apply'], priorServingRevisionPatch: 'del(.spec.containers[0].env)' });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/serving revision.*result.image.*contract drifted/i);
+            expect(result.calls).not.toContain('run deploy');
+        });
+
+        const unservedRevision = {
+            serviceJsonPatch: '.status.latestCreatedRevisionName = "unserved-revision"',
+            priorServingRevisionPatch: `.spec.containers[0].env += ${JSON.stringify([
+                ...Object.entries(RESULT_IMAGE_MANIFEST).map(([name, value]) => ({ name, value })),
+                ...OBSERVED_RESULT_IMAGE_ENV,
+            ])}`,
+        };
+
+        it('blocks disabling results when the failed template is OFF and the serving revision is ON', () => {
+            const result = fakeRun({
+                ...unservedRevision,
+                args: ['--apply'],
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/serving revision.*result.image.*contract drifted/i);
+            expect(result.calls).toContain('run revisions describe analysis-paid-worker-00001-abc');
+            expect(result.calls).not.toContain('run deploy');
+        });
+
+        it('recovers from a failed newer template when the retained image settings match the serving revision', () => {
+            const result = fakeRun({ ...unservedRevision, ...enabled, args: ['--apply'] });
+            expect(result.status, result.stderr?.toString()).toBe(0);
+            expect(result.calls).toMatch(/run revisions describe analysis-paid-worker-00001-abc[\s\S]*run deploy/);
+            expect(result.calls).toContain('run services update-traffic');
+        });
+
+        it('blocks promotion when only the staged revision is missing the HMAC reference', () => {
+            const result = fakeRun({
+                ...enabled,
+                args: ['--apply'],
+                stagedRevisionPatch: '.spec.containers[0].env |= map(select(.name != "ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET"))',
+            });
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toMatch(/staged revision.*result.image.*contract drifted/i);
+            expect(result.calls).toContain('run revisions describe analysis-paid-worker-00002-staged');
+            expect(result.calls).not.toContain('run services update-traffic');
+        });
     });
 
     it('rejects repeated or conflicting modes and reconcile outside explicit apply', () => {

@@ -121,6 +121,16 @@ const FIXED_SECRET_REFERENCE_NAMES = [
     'ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET',
     'ANALYSIS_V2_GENDER_ROUTING_HMAC_SECRET',
 ] as const;
+const RESULT_IMAGE_ENV_NAMES = [
+    'ANALYSIS_V2_RESULT_IMAGES_ENABLED',
+    'ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT',
+    'ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET',
+] as const;
+const RESULT_IMAGE_SECRET_NAMES = [
+    'ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID',
+    'ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY',
+    'ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET',
+] as const;
 const OLD_OBSERVATION_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness'] as const;
 const OBSERVATION_TARGET_KEYS = ['source', 'runtime', 'queues', 'schedulers', 'iam', 'retention', 'readiness', 'zeroWorkSources'] as const;
 const SOURCE_OBSERVATION_KEYS = ['sourceSha', 'revision', 'metadataDigest'] as const;
@@ -221,6 +231,7 @@ function validateRuntimeEnvironment(value: unknown): asserts value is Record<str
     const forbiddenSecretEnvNames = new Set([
         ...APIFY_SLOTS.map(slot => `APIFY_${slot.toUpperCase()}_API_TOKEN`),
         ...FIXED_SECRET_REFERENCE_NAMES,
+        ...RESULT_IMAGE_SECRET_NAMES,
     ]);
     if (Object.keys(value).some(key => forbiddenSecretEnvNames.has(key))) epochFail('SOURCE_INVALID');
 }
@@ -405,6 +416,19 @@ function validateRuntimeInput(value: unknown, role: Role): asserts value is Prot
         || !isObject(value.target) || !hasExactKeys(value.target, TARGET_KEYS)) epochFail('SOURCE_INVALID');
     validateRuntimeSettings(value.settings);
     validateRoleWorkerTarget(value.target, role);
+    const [flagKey, endpointKey, bucketKey] = RESULT_IMAGE_ENV_NAMES;
+    const imageFlag = environment[flagKey] ?? 'false';
+    const imageEndpoint = environment[endpointKey];
+    const imageBucket = environment[bucketKey];
+    const imageRefs = RESULT_IMAGE_SECRET_NAMES.map(key => (value.secretReferences as Record<string, unknown>)[key]);
+    if (RESULT_IMAGE_SECRET_NAMES.some(key => Object.hasOwn(environment, key))) epochFail('SOURCE_INVALID');
+    if (imageFlag === 'true') {
+        if (role !== 'paid'
+            || typeof imageEndpoint !== 'string' || !/^https:\/\/[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(imageEndpoint)
+            || typeof imageBucket !== 'string' || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(imageBucket)
+            || imageRefs.some(ref => typeof ref !== 'string')) epochFail('SOURCE_INVALID');
+    } else if (imageFlag !== 'false' || imageEndpoint !== undefined || imageBucket !== undefined
+        || imageRefs.some(ref => ref !== undefined)) epochFail('SOURCE_INVALID');
     if (typeof value.noTraffic !== 'boolean' || typeof value.providerAdmissionEnabled !== 'boolean'
         || environment.ANALYSIS_PROVIDER_ADMISSION_ENABLED !== String(value.providerAdmissionEnabled)) epochFail('SOURCE_INVALID');
 }
@@ -475,6 +499,7 @@ function validateDesiredInitialRuntimeContract(
     const expectedSecretNames = [
         ...requiredApifySlots.map(slot => `APIFY_${slot.toUpperCase()}_API_TOKEN`),
         ...FIXED_SECRET_REFERENCE_NAMES,
+        ...(expectedEnvironment.ANALYSIS_V2_RESULT_IMAGES_ENABLED === 'true' ? RESULT_IMAGE_SECRET_NAMES : []),
     ].sort();
     const actualSecretNames = Object.keys(runtime.secretReferences).sort();
     if (actualSecretNames.length !== expectedSecretNames.length
@@ -823,10 +848,12 @@ function validateIamManifestRetirements(
     }
 }
 
-function validateSecretReferencePreservation(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs): void {
+function validateStorageAndSecretPreservation(oldInputs: ProtectedPlatformInputs, desiredInputs: ProtectedPlatformInputs): void {
     for (const role of ROLES) {
-        if (canonicalDigest(oldInputs.runtime[role].secretReferences)
-            !== canonicalDigest(desiredInputs.runtime[role].secretReferences)) epochFail('SOURCE_INVALID');
+        const previous = oldInputs.runtime[role];
+        const desired = desiredInputs.runtime[role];
+        if (canonicalDigest(previous.secretReferences) !== canonicalDigest(desired.secretReferences)
+            || RESULT_IMAGE_ENV_NAMES.some(key => previous.environment[key] !== desired.environment[key])) epochFail('SOURCE_INVALID');
     }
 }
 
@@ -1164,7 +1191,7 @@ function validatePacketShape(value: unknown): asserts value is CapacityEpochPack
     validatePlatformInputs(protectedInputs.desired, value.desiredManifest, 'desired');
     if (providerScope.googleProjectId !== value.oldManifest.build.project
         || providerScope.googleProjectId !== value.desiredManifest.build.project) epochFail('PROJECT_MISMATCH');
-    validateSecretReferencePreservation(protectedInputs.old, protectedInputs.desired);
+    validateStorageAndSecretPreservation(protectedInputs.old, protectedInputs.desired);
     validateIamPreservesOld(protectedInputs.old, protectedInputs.desired);
     validateIamAdditions(protectedInputs.old, protectedInputs.desired, value.desiredManifest);
     validateIamManifestRetirements(value.oldManifest, value.desiredManifest, protectedInputs.old);
@@ -1187,7 +1214,7 @@ export function createProtectedPacket(input: ProtectedPacketInput): CapacityEpoc
         || input.providerScope.googleProjectId !== input.desiredManifest.build.project) epochFail('PROJECT_MISMATCH');
     validatePlatformInputs(input.protectedInputs.old, input.oldManifest, 'old');
     validatePlatformInputs(input.protectedInputs.desired, input.desiredManifest, 'desired');
-    validateSecretReferencePreservation(input.protectedInputs.old, input.protectedInputs.desired);
+    validateStorageAndSecretPreservation(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamPreservesOld(input.protectedInputs.old, input.protectedInputs.desired);
     validateIamAdditions(input.protectedInputs.old, input.protectedInputs.desired, input.desiredManifest);
     validateIamManifestRetirements(input.oldManifest, input.desiredManifest, input.protectedInputs.old);
