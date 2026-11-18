@@ -1,0 +1,28 @@
+# 2026-11-19 Dev Standard와 전략 기획 인계
+
+이 문서는 11월 19일 기준으로 전략 세션이 다시 확인할 제품 동작, 검증 결과, 남은 실측을 연결한다. 배포와 운영 상태를 갱신할 때는 현재의 `origin/main`, 실제 도메인과 워커의 활성 리비전, Dev DB를 확인한다.
+
+## 현재 제품과 운영 경로
+
+- 위장여사친 판독기의 사용자 경로는 공개 인스타그램 대상 입력 → 사전 점검과 본인 계정 제외 → 미리보기와 플랜 → 최신 프로필 확인·분석 접수 → 진행 → 결과 리포트다. 운영은 결제 흐름을 사용하고 Dev 실제 분석은 테스트 이용권을 사용한다. [분석 플랜 카탈로그](../../lib/domain/analysis/plan-catalog.ts)
+- Basic과 Standard의 팔로워·팔로잉 한도는 각각 방향당 400명, 800명이다. Plus의 방향당 한도는 1,200명이고 가격·판매 상태는 카탈로그와 실제 플랜 응답을 기준으로 확인한다.
+- 운영 및 Dev 구매 전 새 프로필 수집은 Apify 무료 슬롯 9개에서 잔여 한도와 예약량을 보고 선택한다. 가용 슬롯이 부족하면 용량 대기로 처리한다. 정식 분석의 Apify 호출에는 `secondary`가 사용된다. Dev와 운영은 승인된 Apify 계정의 잔여 한도를 공유한다. [사전 점검 라우팅 PR #618](https://github.com/0mininseoul/yeosachin-scanner/pull/618)
+- Dev 기본 경로 [모의 분석](https://dev.yeosachin.com/analyze)은 합성 프로필, 모의 결제, 합성 결과로 화면을 검증한다. [Dev 실제 분석](https://dev.yeosachin.com/dev-ui/live)은 등록된 카카오 운영자와 분리된 DB·큐·워커를 사용한다. 운영 관리자 화면은 [관리자 콘솔](https://yeosachin.com/admin0min)이다. [Dev 운영 문서](dev-live-analysis.ko.md) · [Dev 인프라 인계](dev-ui-environment.ko.md)
+
+## Dev Standard의 승인과 배포
+
+- 지정된 대상 한 개의 Standard가 카드 결제 없이 활성화됐다. 운영자가 비용을 확인하고 직접 사전 점검을 시작할 때 실행별 승인이 발급된다. 미리보기의 상세 보기 버튼은 플랜 화면을 연다. 정식 분석은 운영자가 플랜의 시작 버튼을 누를 때 접수된다. [Standard 권한 PR #619](https://github.com/0mininseoul/yeosachin-scanner/pull/619) · [화면 공용화 PR #620](https://github.com/0mininseoul/yeosachin-scanner/pull/620)
+- 승인 상한은 1회 Apify `$6`, Vertex `$4`다. 공급자별 누적 예약액이 한도를 초과하는 요청은 차단한다. 사전 점검·접수는 30분 안에 진행하고 접수된 Standard는 시작부터 최대 150분 동안 같은 승인을 사용한다. 반복 전송에는 같은 실행 승인을 사용한다. 이번 검증의 예산을 잡을 때 대상의 관계 목록 수집 약 `$0.95`와 과거 Standard의 건당 평균 AI 비용 약 `$1.17`에 추가 수집량을 고려해 약 `$2–$4`로 추정했다. 실제 비용은 운영자가 직접 시작한 실행의 사용량 정산 뒤에 확인한다. [과거 Standard 비용 자료](../reports/2026-09-04-plan-operating-cost-after-vertex-optimization.md)
+- Dev 웹은 PR #620의 병합 트리, 두 Dev 워커와 승인 SQL은 PR #619의 병합 트리로 배포했다. PR CI, 독립 리뷰, 오프라인 회귀 검사, Dev SQL 롤백 검증과 실제 적용 후 읽기 검증을 거쳤다. 신규 분석 요청과 공급자 호출 없이 접근과 가용성을 검증했다.
+
+## 같아진 화면과 실측 경계
+
+- Dev 실제 분석과 운영은 대상 입력, 본인 계정 제외, B-lite 미리보기, 프로필·플랜, 정식 진행·결과 컴포넌트를 공유한다. 일반 운영 Standard와 Dev Standard에 선택되는 핵심 AI 단계·점수 계산·결과 조회는 같은 정책과 코드 경로다. 결과의 공유·피드백·삭제 등 관리 동작과 로그인·결제 방식은 환경별 정책을 따른다.
+- 결과 이미지의 운영 배포 설정에 차이가 확인됐다. Dev 웹·paid 워커와 운영 웹·legacy 워커는 R2 이미지 보관·조회 설정이 켜져 있다. 운영 split paid 워커는 이미지 보관 설정이 꺼져 있다. 이 경로에 들어간 새 결과는 저장된 이미지가 없어 대체 표시될 수 있다. 최근 운영 로그로 일반 Standard의 실제 paid 도착 경로와 발생 건수는 확정하지 못했다.
+- 실제 계정 Standard 전체 실행과 결과 내용, 소요 시간, 실비는 남은 검증 항목이다. 사용자가 Dev에서 직접 시작한 첫 실행의 완료 단계·시간·공급자별 집계·화면 결과를 확인하면 전략 기획에 실측을 반영할 수 있다. 오프라인 결과 계약 검사와 배포 준비는 실제 계정 실행 성과와 구분해서 기록한다.
+
+## 전략 세션에서 이어서 볼 자료
+
+- 제품 우선순위·유료화 가설·당시 매출 목표는 [8월 매출 우선 운영 전략](../strategy/2026-08-08-revenue-first-operating-strategy.md)과 [전략 자료 모음](../strategy/README.md)을 먼저 본다. 해당 시점의 가격·수요·일정을 현재 사실로 옮기기 전에 카탈로그와 최신 운영 지표를 확인한다.
+- 공급자별 비용과 완료 시간 실측에는 한계가 있다. [운영 비용 모델](../operations-cost-model.md)과 [Cloud Run 비용 점검](2026-11-18-cloud-run-cost.ko.md)에서 표본, 집계 범위, 누락 비용을 확인한다.
+- UX와 운영 장애 이력은 [진행 화면 검수](2026-10-09-progress-ux-audit.ko.md), [관리자 콘솔 검증](2026-11-18-admin0min-dev-verification.ko.md), [OAuth·사전 점검 조사](2026-11-18-oauth-preflight-root-causes.ko.md)에 있다. 통합 업무의 원본과 재개 조건은 [10월 인계](2026-10-03-consolidated-checkout.ko.md)와 [상태판](2026-10-03-continuation-status.ko.md)을 참조한다.
