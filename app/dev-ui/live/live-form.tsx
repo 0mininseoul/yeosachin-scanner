@@ -7,7 +7,14 @@ import { CaseCard, Eyebrow, PrimaryButton, TopBar } from '@/components/case-ui';
 import { preflightAcceptedV1Schema, preflightStatusV1Schema, type PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
 const selector = 'devAnalysis=live';
+const ownerAttemptStoragePrefix = 'dev-live-attempt:';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+class DevLiveRequestError extends Error {
+    constructor(message: string, readonly code: string | undefined) {
+        super(message);
+    }
+}
 
 async function call(path: string, method: string, body: object, signal?: AbortSignal, attemptId?: string) {
     const response = await fetch(`${path}?${selector}`, {
@@ -19,7 +26,10 @@ async function call(path: string, method: string, body: object, signal?: AbortSi
     });
     const payload = await response.json();
     if (!response.ok) {
-        throw new Error(typeof payload.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.');
+        throw new DevLiveRequestError(
+            typeof payload.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.',
+            typeof payload.code === 'string' ? payload.code : undefined,
+        );
     }
     return payload;
 }
@@ -41,7 +51,6 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const [error, setError] = useState('');
     const [readRevision, setReadRevision] = useState(0);
     const busyRef = useRef(false);
-    const startAttempt = useRef<{ target: string; id: string } | null>(null);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -113,15 +122,23 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         if (!confirmed) return;
         void submit(async () => {
             const targetInstagramId = target.trim().toLowerCase();
-            if (startAttempt.current?.target !== targetInstagramId) {
-                startAttempt.current = { target: targetInstagramId, id: crypto.randomUUID() };
+            const storageKey = ownerAttemptStoragePrefix + targetInstagramId;
+            const saved = sessionStorage.getItem(storageKey);
+            const attemptId = saved && uuid.test(saved) ? saved : crypto.randomUUID();
+            sessionStorage.setItem(storageKey, attemptId);
+            try {
+                const accepted = preflightAcceptedV1Schema.parse(await call('/api/analysis/preflight', 'POST', {
+                    targetInstagramId,
+                }, undefined, attemptId));
+                sessionStorage.removeItem(storageKey);
+                setPreflightId(accepted.preflightId);
+                router.replace(`/dev-ui/live?preflight=${accepted.preflightId}`);
+            } catch (cause) {
+                if (cause instanceof DevLiveRequestError && cause.code === 'DEV_LIVE_START_ATTEMPT_EXPIRED') {
+                    sessionStorage.removeItem(storageKey);
+                }
+                throw cause;
             }
-            const accepted = preflightAcceptedV1Schema.parse(await call('/api/analysis/preflight', 'POST', {
-                targetInstagramId,
-            }, undefined, startAttempt.current.id));
-            startAttempt.current = null;
-            setPreflightId(accepted.preflightId);
-            router.replace(`/dev-ui/live?preflight=${accepted.preflightId}`);
         });
     }
 

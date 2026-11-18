@@ -64,15 +64,11 @@ AS $$
 $$;
 REVOKE ALL ON FUNCTION dev_live_budget.owner_is_authorized(uuid) FROM PUBLIC, anon, authenticated, service_role;
 
-CREATE OR REPLACE FUNCTION public.dev_live_owner_start_ready_v1()
+CREATE OR REPLACE FUNCTION public.dev_live_owner_start_ready_v1(p_user_id uuid)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
 AS $$
-    SELECT EXISTS (
-        SELECT FROM public.account_e2e_test_runners AS runner
-        WHERE runner.runner_plan = 'basic'
-          AND dev_live_budget.owner_is_authorized(runner.account_id)
-    );
+    SELECT dev_live_budget.owner_is_authorized(p_user_id);
 $$;
 
 CREATE OR REPLACE FUNCTION public.dev_live_owner_start_lookup_v1(
@@ -189,11 +185,11 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.dev_live_owner_start_ready_v1(),
+REVOKE ALL ON FUNCTION public.dev_live_owner_start_ready_v1(uuid),
     public.dev_live_owner_start_v1(uuid,text,uuid),
     public.dev_live_owner_start_lookup_v1(uuid,uuid,text)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.dev_live_owner_start_ready_v1(),
+GRANT EXECUTE ON FUNCTION public.dev_live_owner_start_ready_v1(uuid),
     public.dev_live_owner_start_v1(uuid,text,uuid),
     public.dev_live_owner_start_lookup_v1(uuid,uuid,text)
     TO service_role;

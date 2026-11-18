@@ -2,6 +2,7 @@
 import { act, Suspense } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DevLiveAnalysis } from '@/app/dev-ui/live/live-form';
 import { DevUiCheckout } from '@/app/dev-ui/checkout/[orderId]/checkout';
 import { DevUiOrderList } from '@/components/dev-ui/order-list';
 import { useAnalysisV2Preflight } from '@/hooks/useAnalysisV2Preflight';
@@ -230,5 +231,39 @@ describe('Dev mock checkout and order reading UI', () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ simulation: true, order: { ...order, status: 'success', run: { runId }, nextUrl: 'https://yeosachin.com/' } })));
         await render(<DevUiCheckout orderId={orderId} />);
         expect(router.replace).not.toHaveBeenCalled(); expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    });
+});
+
+
+describe('Dev actual analysis browser attempt', () => {
+    it('reuses the pending attempt after a lost response and page remount', async () => {
+        const attempts: (string | null)[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+            if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            attempts.push(new Headers(options?.headers).get('x-dev-live-attempt-id'));
+            throw new Error('synthetic connection loss');
+        }));
+        const storageKey = 'dev-live-attempt:dev_fixture_retry';
+        sessionStorage.removeItem(storageKey);
+        try {
+            for (let index = 0; index < 2; index += 1) {
+                await render(<DevLiveAnalysis initialPreflightId="" />);
+                const target = container.querySelector<HTMLInputElement>('#dev-live-target')!;
+                const checkbox = container.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+                const title = '실제 사전 점검 시작';
+                await act(async () => {
+                    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(target, 'dev_fixture_retry');
+                    target.dispatchEvent(new Event('input', { bubbles: true }));
+                    checkbox.click();
+                });
+                await click(title);
+                await render(null);
+            }
+            expect(attempts).toHaveLength(2);
+            expect(attempts[0]).toMatch(/^[\w-]{36}$/u);
+            expect(attempts[1]).toBe(attempts[0]);
+        } finally {
+            sessionStorage.removeItem(storageKey);
+        }
     });
 });

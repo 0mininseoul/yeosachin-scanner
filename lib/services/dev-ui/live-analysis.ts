@@ -88,7 +88,13 @@ type OwnerStartRpc = 'dev_live_owner_start_v1' | 'dev_live_owner_start_lookup_v1
 
 async function ownerStartRpc(name: OwnerStartRpc, args?: Record<string, string>): Promise<unknown> {
     const { data, error } = await supabaseAdmin.rpc(name, args);
-    if (error) throw new Error('DEV_LIVE_OWNER_START_UNAVAILABLE');
+    if (error) {
+        if (name === 'dev_live_owner_start_v1' && error.code === 'P0001'
+            && error.message === 'DEV_LIVE_OWNER_START_UNAVAILABLE') {
+            throw new Error('DEV_LIVE_START_ATTEMPT_EXPIRED');
+        }
+        throw new Error('DEV_LIVE_OWNER_START_UNAVAILABLE');
+    }
     return data;
 }
 
@@ -151,7 +157,11 @@ export function withDevLiveApproval(
             }
             if (!approval) return closed();
             await assertDevLiveBudgetAvailable(approval);
-        } catch {
+        } catch (error) {
+            if (error instanceof Error && error.message === 'DEV_LIVE_START_ATTEMPT_EXPIRED') {
+                return devUiJson({ code: 'DEV_LIVE_START_ATTEMPT_EXPIRED',
+                    error: '이전 실행이 만료되었습니다. 시작 버튼을 다시 눌러 주세요.' }, 410);
+            }
             return closed();
         }
         return privateResponse(await operation(user, approval));
@@ -181,7 +191,7 @@ export function handleDevLiveAvailability(request: Request): Promise<NextRespons
         try {
             await requireLiveWebAccess(user);
             if (devLiveOwnerStartEnabled()) {
-                const available = await ownerStartRpc('dev_live_owner_start_ready_v1') === true;
+                const available = await ownerStartRpc('dev_live_owner_start_ready_v1', { p_user_id: user.id }) === true;
                 return devUiJson({ available, recentPreflightId });
             }
             const approval = readDevLiveApproval();

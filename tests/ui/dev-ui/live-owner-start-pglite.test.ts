@@ -126,7 +126,7 @@ describe('Dev owner-start grant SQL', () => {
         expect(rows.every(row => !row.writable)).toBe(true);
         await db.exec('SET ROLE service_role');
         try {
-            expect((await db.query('SELECT public.dev_live_owner_start_ready_v1() AS ready')).rows)
+            expect((await db.query('SELECT public.dev_live_owner_start_ready_v1($1::uuid) AS ready', [ownerId])).rows)
                 .toEqual([{ ready: true }]);
             await expect(db.query('SELECT 1 FROM dev_live_budget.owner_starts')).rejects.toThrow('permission denied');
         } finally {
@@ -159,7 +159,7 @@ describe('Dev owner-start grant SQL', () => {
         `, [ownerId]);
         await expect(lookup(approval)).resolves.toBeNull();
         await expect(start()).rejects.toThrow('DEV_LIVE_OWNER_START_DENIED');
-        expect((await db.query('SELECT public.dev_live_owner_start_ready_v1() AS ready')).rows)
+        expect((await db.query('SELECT public.dev_live_owner_start_ready_v1($1::uuid) AS ready', [ownerId])).rows)
             .toEqual([{ ready: false }]);
         await db.query(`
             UPDATE auth.identities

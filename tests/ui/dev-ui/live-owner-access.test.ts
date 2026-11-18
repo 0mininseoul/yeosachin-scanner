@@ -67,7 +67,7 @@ describe('owner-start live Dev approval', () => {
         mocks.rpc.mockResolvedValue({ data: true, error: null });
         const response = await handleDevLiveAvailability(new Request(host + '/api/dev-ui/live/availability'));
         expect(await response.json()).toEqual({ available: true, recentPreflightId: null });
-        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_ready_v1', undefined);
+        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_ready_v1', { p_user_id: 'synthetic-owner' });
         expect(mocks.budget).not.toHaveBeenCalled();
     });
 
@@ -77,6 +77,16 @@ describe('owner-start live Dev approval', () => {
         mocks.owner = false;
         expect((await withDevLiveApproval(start(), handler)).status).toBe(403);
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('tells the browser an expired attempt can be cleared without retrying the request', async () => {
+        mocks.rpc.mockResolvedValue({ data: null,
+            error: { code: 'P0001', message: 'DEV_LIVE_OWNER_START_UNAVAILABLE' } });
+        const handler = vi.fn();
+        const response = await withDevLiveApproval(start(), handler);
+        expect(response.status).toBe(410);
+        expect((await response.json()).code).toBe('DEV_LIVE_START_ATTEMPT_EXPIRED');
         expect(handler).not.toHaveBeenCalled();
     });
 
