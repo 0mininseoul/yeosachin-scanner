@@ -63,6 +63,7 @@ const mocks = vi.hoisted(() => ({
     requireActiveAccountClassification: vi.fn(),
     requireActiveE2eTestAccount: vi.fn(),
     requireActiveE2eTestRunner: vi.fn(),
+    isDevLivePreflightBoundToApproval: vi.fn(),
     withDevLiveApproval: vi.fn(),
 }));
 
@@ -75,6 +76,7 @@ vi.mock('@/lib/observability/request', async importOriginal => ({
 }));
 vi.mock('@/lib/services/dev-ui/live-analysis', async importOriginal => ({
     ...(await importOriginal<typeof import('@/lib/services/dev-ui/live-analysis')>()),
+    isDevLivePreflightBoundToApproval: mocks.isDevLivePreflightBoundToApproval,
     withDevLiveApproval: mocks.withDevLiveApproval,
 }));
 vi.mock('@/lib/observability/server', () => ({
@@ -368,7 +370,7 @@ describe('preflight owner routes', () => {
         mocks.admissionAvailable.mockReturnValue(false);
         mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
             { id: userId, email: 'owner@example.com', app_metadata: { provider: 'kakao' } },
-            { id: approvalId, targetInstagramId: 'target.name', idempotencyKey: trustedKey, nonce: 'dev-live-approved-nonce' },
+            { id: approvalId, planId: 'basic', targetInstagramId: 'target.name', idempotencyKey: trustedKey, nonce: 'dev-live-approved-nonce' },
         ));
         const response = await createPreflight(new Request('https://dev.yeosachin.com/api/analysis/preflight?devAnalysis=live', {
             method: 'POST',
@@ -402,6 +404,29 @@ describe('preflight owner routes', () => {
         }
         expect(mocks.observeRoute).not.toHaveBeenCalled();
         expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it('blocks dispatch if a Standard start was replayed under a different approval key', async () => {
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', Buffer.alloc(32, 11).toString('base64url'));
+        const approvalId = '423e4567-e89b-42d3-a456-426614174000';
+        const approval = { id: approvalId, planId: 'standard', targetInstagramId: 'target.name',
+            idempotencyKey: `dev-live:owner:standard:${approvalId}`, nonce: 'dev-live-approved-nonce' };
+        mocks.admissionAvailable.mockReturnValue(false);
+        mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
+            { id: userId, email: 'owner@example.com', app_metadata: { provider: 'kakao' } }, approval,
+        ));
+        mocks.isDevLivePreflightBoundToApproval.mockResolvedValue(false);
+
+        const response = await createPreflight(new Request('https://dev.yeosachin.com/api/analysis/preflight?devAnalysis=live', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ targetInstagramId: 'target.name' }),
+        }));
+
+        expect(response.status).toBe(409);
+        expect(mocks.isDevLivePreflightBoundToApproval).toHaveBeenCalledWith(userId, preflightId, approval);
+        expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
     });
 
     it('saves a Dev live exclusion through the authenticated owner and approved preflight', async () => {

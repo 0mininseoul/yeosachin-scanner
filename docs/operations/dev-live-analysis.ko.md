@@ -1,6 +1,6 @@
 # Dev 실제 분석 준비와 검증
 
-Dev의 기본 분석은 합성 데이터로 진행한다. 실제 분석 옵션은 등록된 카카오 운영자 한 명이 Dev 전용 인프라에서 Basic을 검증하는 용도다. 운영자는 시작할 때마다 1회 예산을 자동으로 받는다. 테스트 이용권으로 결제 단계를 대체하고, 사전 점검·큐·워커·진행·결과는 운영과 같은 애플리케이션 코드로 검증한다.
+Dev의 기본 분석은 합성 데이터로 진행한다. 실제 분석 옵션은 등록된 카카오 운영자 한 명이 Dev 전용 인프라에서 Basic과 별도로 승인된 대상의 Standard를 검증하는 용도다. 운영자는 직접 시작할 때마다 1회 예산을 자동으로 받는다. 테스트 이용권으로 결제 단계를 대체하고, 사전 점검·큐·워커·진행·결과는 운영과 같은 애플리케이션 코드로 검증한다.
 
 ## 현재 준비 상태
 
@@ -35,17 +35,18 @@ Ascentum Dev에서 최신 프로필 확인용 기존 DB 래퍼가 명시적 `sec
 
 ## 실행 정책 및 비용
 
-Dev의 테스트 승인 대상은 Basic 한 건이다. Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검에 기록할 정책을 운영과 맞춘다. `ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT`, `ANALYSIS_V2_NARRATIVE_V28_ROLLOUT`, `ANALYSIS_V2_AI_MICROBATCH_V29_ROLLOUT`, `ANALYSIS_V2_GENDER_SUMMARY_QUALITY_V211_ROLLOUT`, `ANALYSIS_V2_AI_SCHEDULER_ROLLOUT`에는 `production`을 지정하고, `ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT`에는 `off`를 지정한다.
+Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검에 기록할 정책을 운영과 맞춘다. `ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT`, `ANALYSIS_V2_NARRATIVE_V28_ROLLOUT`, `ANALYSIS_V2_AI_MICROBATCH_V29_ROLLOUT`, `ANALYSIS_V2_GENDER_SUMMARY_QUALITY_V211_ROLLOUT`, `ANALYSIS_V2_AI_SCHEDULER_ROLLOUT`에는 `production`을 지정하고, `ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT`에는 `off`를 지정한다.
 
 두 Dev 워커는 `ANALYSIS_PROVIDER_ADMISSION_ENABLED=true`, `ANALYSIS_V2_INSTAGRAM_ROUTE=apify_v1`, `VERTEX_AI_BUDGET_GUARD_ENABLED=true`, `VERTEX_AI_BUDGET_STORE=supabase`를 요구한다. 정식 분석 워커는 `ANALYSIS_V2_WORKER_ENABLED=true`가 필요하다. 아래 개별 보호 한도도 승인값을 초과하지 않아야 한다.
 
-- Vertex `VERTEX_AI_PER_RUN_BUDGET_USD`, `VERTEX_AI_PER_ORDER_BUDGET_USD`, `VERTEX_AI_DAILY_BUDGET_USD`의 양수 합의값은 해당 실행의 Vertex 승인 상한 이하다.
-- Apify는 두 워커에 `APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 지정한다. 정식 분석 워커에는 `APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_COMMENTS_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 추가한다. 값은 양수이며 각 승인 상한을 넘지 않도록 한다.
-- 승인된 Basic 1회 상한은 Apify Actor 요금 `$5`, Vertex `$2`이다. actor start와 Vertex 호출 전에 Dev DB의 공용 예약 원장을 사용해 승인 ID별로 합산하고, 재시도가 중복 비용을 발생시키지 않는지 검증한다. Actor 실행 과금 상한 설정과 AI 비용 산정 방식은 실제 공급자 요금과 별도로 대조한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
+- 워커 공용 Vertex `VERTEX_AI_PER_RUN_BUDGET_USD`, `VERTEX_AI_PER_ORDER_BUDGET_USD`, `VERTEX_AI_DAILY_BUDGET_USD`는 양수이며 Basic 기준 `$2` 이하다. 운영자 시작 모드에서는 각 실행에 발급한 Dev 비용 원장 한도를 사용한다.
+- Apify는 두 워커에 `APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 지정한다. 정식 분석 워커에는 `APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_COMMENTS_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 추가한다. 공용 설정은 양수이며 Basic 기준 `$5` 이하다.
+- 1회 상한은 Basic에서 Apify Actor 요금 `$5`와 Vertex `$2`, 승인된 Standard 대상에서 Apify Actor 요금 `$6`과 Vertex `$4`이다. Dev DB의 공용 예약 원장은 각 호출 전 같은 승인 ID의 공급자별 누적액을 검사한다. 한도를 넘는 호출은 차단한다. Vertex는 호출의 전체 입력 한도까지 선예약하고 완전한 사용량이 기록된 경우에만 차액을 반환한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
 
 ## 운영자 시작과 검증
 
 - [Dev 전용 상시 승인 SQL](../../supabase/dev-ui/live-owner-start.sql)은 Dev 비용 원장 다음에 적용한다. DB는 서버가 확인한 활성 Basic 카카오 운영자와 실제로 시작한 대상·시도 ID에 새 실행을 묶는다. 같은 버튼 요청의 재전송은 동일한 승인을 사용하고, 각각의 새 시작에서 별도 상한을 적용한다.
 - Dev 웹은 검증된 카카오 이메일 하나와 등록된 계정만 허용한다. 로그인, 페이지 방문, 상태 조회는 실행을 만들지 않는다. 운영자가 동일 오리진에서 실제 사전 점검을 시작한 뒤 인증된 워커가 DB 요청과 승인 ID를 검증하면 공급자 호출이 가능하다.
-- 각 승인은 시작 시점부터 30분이다. 새 실행은 다시 시작할 수 있으며 이전 승인과 비용을 합치지 않는다. 만료된 실행은 새 공급자 호출과 결제 없는 Basic 이용권 발급을 차단한다. 생성이 끝난 이전 결과는 계속 조회할 수 있다.
+- Basic 공급자 승인은 시작부터 30분이다. Standard의 사전 점검과 이용권 발급은 기존 30분 안에 진행한다. 접수된 Standard 분석의 공급자 호출은 시작 시점부터 최대 150분 동안 같은 승인을 사용한다. 새 실행에는 사용자의 시작 동작과 별도 예산이 필요하다. 만료된 실행에서는 새 공급자 호출과 이용권 발급을 차단한다. 이전 결과는 계속 조회할 수 있다.
+- Standard를 열려면 예산과 대상에 대한 운영자 승인 후 [Standard 승인 SQL](../../supabase/dev-ui/live-owner-start-standard.sql), [사전 점검 재전송 SQL](../../supabase/dev-ui/live-standard-preflight-replay.sql), [최신 정보 확인 SQL](../../supabase/dev-ui/live-standard-fresh-admission.sql)을 순서대로 등록된 Dev DB에 적용한다. 승인된 대상 하나를 Dev DB의 `dev_live_budget.standard_owner_policy`에 등록한다. 같은 대상의 `DEV_LIVE_STANDARD_TARGET`을 Dev 워커 두 개에 먼저 설정하고 검증한 뒤 Dev 웹에 설정한다. 생성과 이용권 발급은 Dev 운영자 세션, 요청 대상, 확인한 플랜, DB 승인이 일치할 때 진행된다. 정책을 비활성화하면 해당 Standard 승인으로 새 비용을 예약할 수 없다.
 - 후보 코드, Dev 도메인, DB 식별자, Cloud Run IAM, 큐 상태를 확인한다. 단위 검증은 인증 실패, 같은 요청 재전송, 대상 불일치, 승인 만료, 비용 상한, 공급자 호출 없는 가용성 조회를 포함한다.

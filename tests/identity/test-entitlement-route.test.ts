@@ -335,36 +335,52 @@ describe('analysis V2 durable test-entitlement route', () => {
         vi.restoreAllMocks();
     });
 
-    it('uses the approved Dev nonce with the ordinary non-sharded Basic entitlement RPC', async () => {
+    it.each(['basic', 'standard'] as const)('uses the approved Dev nonce with the ordinary non-sharded %s entitlement RPC', async planId => {
         const nonce = 'dev-live-approved-nonce';
         mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
             { id: USER_ID, app_metadata: { provider: 'kakao' } },
-            { targetInstagramId: 'target.account', nonce },
+            { targetInstagramId: 'target.account', nonce, planId },
         ));
         process.env.ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED = 'true';
         installPreflightQuery(preflightRow({
-            target_followers_count: 300,
-            target_following_count: 350,
-            capacity_required_plan_id: 'basic',
-            required_plan_id: 'basic',
-            plan_cards_snapshot: planCards('basic'),
+            target_followers_count: planId === 'basic' ? 300 : 477,
+            target_following_count: planId === 'basic' ? 350 : 641,
+            capacity_required_plan_id: planId,
+            required_plan_id: planId,
+            plan_cards_snapshot: planCards(planId),
         }));
         const response = await POST(new Request(
             `https://dev.yeosachin.com/api/analysis/preflight/${PREFLIGHT_ID}/entitle?devAnalysis=live`,
-            { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ planId: 'basic' }) },
+            { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ planId }) },
         ), context());
 
         expect(response.status).toBe(201);
+        expect(mocks.requireActiveE2eTestRunner).toHaveBeenCalledWith(expect.objectContaining({ id: USER_ID }), 'basic');
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
             'reserve_analysis_v2_preflight_admission_dispatch_v2',
             'consume_analysis_v2_test_entitlement',
         ]);
         expect(mocks.rpc).toHaveBeenCalledWith('consume_analysis_v2_test_entitlement', expect.objectContaining({
             p_entitlement_jti_hash: hashAnalysisTestEntitlementJti(nonce),
-            p_selected_plan_id: 'basic',
+            p_selected_plan_id: planId,
         }));
         expect(mocks.dispatchJob).toHaveBeenCalledWith(REQUEST_ID, ANALYSIS_V2_BOOTSTRAP_JOB_KEY);
         expect(mocks.operationalEmit).not.toHaveBeenCalled();
+    });
+
+    it('blocks changing a Dev-approved analysis plan before consuming an entitlement', async () => {
+        mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
+            { id: USER_ID, app_metadata: { provider: 'kakao' } },
+            { targetInstagramId: 'target.account', nonce: 'dev-run-nonce', planId: 'basic' },
+        ));
+        const response = await POST(new Request(
+            `https://dev.yeosachin.com/api/analysis/preflight/${PREFLIGHT_ID}/entitle?devAnalysis=live`,
+            { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ planId: 'standard' }) },
+        ), context());
+
+        expect(response.status).toBe(409);
+        expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
 
     it('reserves and enqueues count refresh, returning bounded 202 without consumption', async () => {
