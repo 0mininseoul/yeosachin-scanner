@@ -1,5 +1,13 @@
+import type { User } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
+import {
+    isDevLiveAnalysisRequest,
+    withDevLiveApproval,
+    type DevLiveApproval,
+} from '@/lib/services/dev-ui/live-analysis';
+import { DEV_LIVE_PLAN } from '@/lib/services/dev-ui/live-approval';
+import { shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     planIdSchema,
@@ -7,6 +15,7 @@ import {
 import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
+    createAnalysisTestEntitlement,
     verifyAnalysisTestEntitlement,
 } from '@/lib/services/analysis/test-entitlement';
 import {
@@ -41,6 +50,7 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import {
     observeRoute,
+    requestContext,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
@@ -205,10 +215,12 @@ async function handlePOST(
     request: Request,
     { params }: EntitlementRouteContext,
     context: OperationalRequestContext,
+    devLive?: { user: User; approval: DevLiveApproval },
 ) {
     try {
-        const supabase = await createClient();
-        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        const { data: { user }, error: authError } = devLive
+            ? { data: { user: devLive.user }, error: null }
+            : await (await createClient()).auth.getUser();
         if (authError || !user) {
             return NextResponse.json(
                 { error: '로그인이 필요합니다.', code: 'AUTHENTICATION_REQUIRED' },
@@ -264,6 +276,10 @@ async function handlePOST(
             );
         }
 
+        if (devLive && body.data.planId !== DEV_LIVE_PLAN) {
+            return entitlementError('ANALYSIS_V2_PLAN_NOT_ALLOWED');
+        }
+
         try {
             await requireActiveE2eTestRunner(user, body.data.planId);
         } catch (accountError) {
@@ -285,7 +301,10 @@ async function handlePOST(
             );
         }
 
-        const entitlementToken = request.headers.get('x-analysis-test-entitlement');
+        const entitlementScope = { preflightId, userId: user.id, planId: body.data.planId };
+        const entitlementToken = devLive
+            ? createAnalysisTestEntitlement({ ...entitlementScope, nonce: devLive.approval.nonce })
+            : request.headers.get('x-analysis-test-entitlement');
         if (!entitlementToken) {
             return NextResponse.json(
                 { error: '유효한 분석 테스트 이용권이 필요합니다.', code: 'INVALID_ENTITLEMENT' },
@@ -293,11 +312,7 @@ async function handlePOST(
             );
         }
 
-        const entitlement = verifyAnalysisTestEntitlement(entitlementToken, {
-            preflightId,
-            userId: user.id,
-            planId: body.data.planId,
-        });
+        const entitlement = verifyAnalysisTestEntitlement(entitlementToken, entitlementScope);
         if (!entitlement) {
             return NextResponse.json(
                 { error: '유효한 분석 테스트 이용권이 필요합니다.', code: 'INVALID_ENTITLEMENT' },
@@ -323,6 +338,10 @@ async function handlePOST(
             return entitlementError('ANALYSIS_V2_PREFLIGHT_NOT_FOUND');
         }
 
+        if (devLive && row.target_instagram_id !== devLive.approval.targetInstagramId) {
+            return entitlementError('ANALYSIS_V2_PREFLIGHT_NOT_FOUND');
+        }
+
         const validatedPreflight = validatePreflightForTestEntitlement(
             row,
             body.data.planId,
@@ -330,7 +349,7 @@ async function handlePOST(
         );
         let providerExecutionPolicy;
         try {
-            providerExecutionPolicy = configuredAuthorizedTestProviderPolicy(
+            providerExecutionPolicy = devLive ? null : configuredAuthorizedTestProviderPolicy(
                 {
                     targetUsername: row.target_instagram_id,
                     ownerUserId: user.id,
@@ -470,7 +489,7 @@ async function handlePOST(
                             { status: 503 }
                         );
                     }
-                    operationalLogger.emit({
+                    if (!devLive) operationalLogger.emit({
                         event: 'analysis_v2.fresh_admission_enqueued',
                         severity: 'info',
                         fields: {
@@ -629,7 +648,7 @@ async function handlePOST(
             }
         }
 
-        if (!terminal) {
+        if (!terminal && !devLive) {
             operationalLogger.emit({
                 event: 'analysis_v2.request_queued',
                 severity: 'info',
@@ -699,6 +718,17 @@ export async function POST(
     request: Request,
     routeContext: EntitlementRouteContext,
 ) {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveApproval(request, (user, approval) => handlePOST(
+            request,
+            routeContext,
+            requestContext(request, '/api/analysis/preflight/[preflightId]/entitle'),
+            { user, approval },
+        ), (await routeContext.params).preflightId);
+    }
+    if (shouldHandleDevUiRequest(request)) {
+        return NextResponse.json({ code: 'DEV_UI_ROUTE_DISABLED' }, { status: 403 });
+    }
     return observeRoute(
         request,
         '/api/analysis/preflight/[preflightId]/entitle',

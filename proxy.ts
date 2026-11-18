@@ -20,6 +20,16 @@ const LEGACY_PUBLIC_HOSTNAMES = new Set([
 ]);
 
 export async function proxy(request: NextRequest) {
+    if (process.env.DEV_LIVE_WORKLOAD !== undefined || process.env.K_SERVICE?.startsWith('dev-live-')) {
+        const { devLiveWorkerRequestBoundary } = await import('@/lib/services/dev-ui/live-runtime');
+        const workerBoundary = devLiveWorkerRequestBoundary(request);
+        const response = workerBoundary === 'dev-worker'
+            ? NextResponse.next({ request })
+            : NextResponse.json({ error: 'DEV_LIVE_WORKER_DISABLED' }, { status: 403 });
+        response.headers.set('Cache-Control', 'private, no-store');
+        response.headers.set('X-Robots-Tag', DEV_UI_ROBOTS_HEADER);
+        return response;
+    }
     const deploymentBoundary = devUiRequestBoundary(request);
     const withDevHeaders = (response: NextResponse): NextResponse => {
         if (deploymentBoundary !== 'production') {

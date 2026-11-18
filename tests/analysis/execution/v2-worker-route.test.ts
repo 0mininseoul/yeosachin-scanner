@@ -7,6 +7,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
     config: vi.fn(),
+    isApprovedDevLiveDelivery: vi.fn(),
     verify: vi.fn(),
     available: vi.fn(),
     process: vi.fn(),
@@ -25,6 +26,9 @@ const mocks = vi.hoisted(() => ({
     })),
 }));
 
+vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
+    isApprovedDevLiveDelivery: mocks.isApprovedDevLiveDelivery,
+}));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -102,6 +106,7 @@ function request(
 describe('analysis V2 worker route', () => {
     afterEach(() => {
         vi.restoreAllMocks();
+        vi.unstubAllEnvs();
     });
 
     beforeEach(() => {
@@ -116,6 +121,20 @@ describe('analysis V2 worker route', () => {
         });
         mocks.processFresh.mockResolvedValue('ready');
         mocks.settleBlockedFresh.mockResolvedValue(undefined);
+    });
+
+    it('requires a current Dev grant for fresh admission and analysis jobs', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        mocks.isApprovedDevLiveDelivery.mockResolvedValue(false);
+
+        expect((await POST(request(freshAdmissionPayload))).status).toBe(403);
+        expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(403);
+        expect(mocks.isApprovedDevLiveDelivery.mock.calls).toEqual([
+            [{ preflightId: freshAdmissionPayload.preflightId }],
+            [{ requestId: payload.requestId }],
+        ]);
+        expect(mocks.processFresh).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
     });
 
     it('authenticates OIDC and processes only a strict task payload', async () => {

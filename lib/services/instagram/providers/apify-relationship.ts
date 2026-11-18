@@ -1,5 +1,6 @@
 import { ApifyApiError, ApifyClient } from 'apify-client';
 import { createHash } from 'node:crypto';
+import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import type { InstagramFollower } from '@/lib/types/instagram';
 import type {
     ApifyCredentialSlot,
@@ -58,6 +59,8 @@ export const APIFY_DURABLE_PROVIDER_CALLBACK_ERROR_CODES = Object.freeze([
     PROVIDER_RUN_PERSISTENCE_ERROR,
     'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_CONFLICT',
     'ANALYSIS_V2_PROVIDER_RUN_RECONCILIATION_NOT_READY',
+    'DEV_LIVE_BUDGET_EXCEEDED',
+    'DEV_LIVE_BUDGET_UNAVAILABLE',
     PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR,
     PROVIDER_RUN_COST_START_PERSISTENCE_ERROR,
     PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR,
@@ -424,6 +427,13 @@ export async function startOrResumeApifyActor(
         throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify invocation wait limit.');
     }
 
+    const devLiveBudget = process.env.DEV_LIVE_WORKLOAD !== undefined
+        || process.env.K_SERVICE?.startsWith('dev-live-') || isDevUiDeploymentContext()
+        ? await import('@/lib/services/dev-ui/live-budget') : null;
+    const devApproval = devLiveBudget?.requireDevLiveProviderApproval();
+    if (resumeRunId && devLiveBudget && devApproval) {
+        await devLiveBudget.assertDevLiveBudgetAvailable(devApproval);
+    }
     let runId = resumeRunId;
     let durablyCheckpointed = Boolean(resumeRunId);
     const reportAmbiguousStart = async (): Promise<void> => {
@@ -460,6 +470,27 @@ export async function startOrResumeApifyActor(
                 error,
                 PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR
             );
+        }
+        if (devLiveBudget && devApproval) {
+            try {
+                await devLiveBudget.reserveDevLiveApifyStart(devApproval, actorId, executionMaxTotalChargeUsd);
+                throwIfApifyQueuedStartCancelled(context);
+            } catch (error) {
+                // This attempt reached the local intent but the provider POST was not sent.
+                try {
+                    await context?.onRunStartRejected?.({
+                        logicalProvider: options.logicalProvider,
+                        actorId,
+                        credentialSlot,
+                        maxChargeUsd: maxTotalChargeUsd,
+                        statusCode: 412,
+                        errorType: 'dev_live_budget_rejected',
+                    });
+                } catch (callbackError) {
+                    throw sanitizedProviderCallbackError(callbackError, PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR);
+                }
+                throw error;
+            }
         }
         let startedRun;
         try {

@@ -1,6 +1,9 @@
+import type { User } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { isDevLiveAnalysisRequest, withDevLiveRead } from '@/lib/services/dev-ui/live-analysis';
+import { shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
 import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
@@ -34,9 +37,10 @@ function demoJson(body: unknown, status: number) {
     return NextResponse.json(body, { status, headers: demoResponseHeaders() });
 }
 
-export async function GET(
+async function handleGET(
     request: Request,
-    { params }: { params: Promise<{ requestId: string }> }
+    { params }: { params: Promise<{ requestId: string }> },
+    verifiedDevUser?: User,
 ) {
     let demoRecognized = false;
     try {
@@ -46,8 +50,9 @@ export async function GET(
         }
         const url = new URL(request.url);
 
-        const supabase = await createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
+        const { data: { user }, error } = verifiedDevUser
+            ? { data: { user: verifiedDevUser }, error: null }
+            : await (await createClient()).auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
         }
@@ -61,7 +66,7 @@ export async function GET(
             throw accountError;
         }
 
-        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        const demo = verifiedDevUser ? null : await demoAnalysisStore.findForOwner(requestId.data, user.id);
         demoRecognized = demo !== null;
 
         const afterSequence = url.searchParams.has('afterSeq')
@@ -157,4 +162,18 @@ export async function GET(
             ? demoJson({ error: 'Progress could not be loaded.' }, 500)
             : json({ error: 'Progress could not be loaded.' }, 500);
     }
+}
+
+export async function GET(
+    request: Request,
+    routeContext: { params: Promise<{ requestId: string }> },
+) {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveRead(request, { requestId: (await routeContext.params).requestId },
+            user => handleGET(request, routeContext, user));
+    }
+    if (shouldHandleDevUiRequest(request)) {
+        return json({ code: 'DEV_UI_ROUTE_DISABLED' }, 403);
+    }
+    return handleGET(request, routeContext);
 }

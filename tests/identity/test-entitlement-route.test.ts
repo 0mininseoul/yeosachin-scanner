@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     rpc: vi.fn(),
     requireActiveE2eTestAccount: vi.fn(),
     requireActiveE2eTestRunner: vi.fn(),
+    withDevLiveApproval: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({
@@ -35,8 +36,13 @@ vi.mock('@/lib/services/analysis/v2-tasks', () => ({
 vi.mock('@/lib/services/analysis/preflight-tasks', () => ({
     getPreflightTasksConfig: mocks.getPreflightTasksConfig,
 }));
-vi.mock('@/lib/observability/request', () => ({
+vi.mock('@/lib/observability/request', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/observability/request')>()),
     observeRoute: mocks.observeRoute,
+}));
+vi.mock('@/lib/services/dev-ui/live-analysis', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/dev-ui/live-analysis')>()),
+    withDevLiveApproval: mocks.withDevLiveApproval,
 }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.operationalEmit },
@@ -327,6 +333,38 @@ describe('analysis V2 durable test-entitlement route', () => {
         delete process.env.ANALYSIS_V2_ADMISSION_ENABLED;
         for (const key of AUTHORIZED_TEST_ENV_KEYS) delete process.env[key];
         vi.restoreAllMocks();
+    });
+
+    it('uses the approved Dev nonce with the ordinary non-sharded Basic entitlement RPC', async () => {
+        const nonce = 'dev-live-approved-nonce';
+        mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
+            { id: USER_ID, app_metadata: { provider: 'kakao' } },
+            { targetInstagramId: 'target.account', nonce },
+        ));
+        process.env.ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED = 'true';
+        installPreflightQuery(preflightRow({
+            target_followers_count: 300,
+            target_following_count: 350,
+            capacity_required_plan_id: 'basic',
+            required_plan_id: 'basic',
+            plan_cards_snapshot: planCards('basic'),
+        }));
+        const response = await POST(new Request(
+            `https://dev.yeosachin.com/api/analysis/preflight/${PREFLIGHT_ID}/entitle?devAnalysis=live`,
+            { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ planId: 'basic' }) },
+        ), context());
+
+        expect(response.status).toBe(201);
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
+            'reserve_analysis_v2_preflight_admission_dispatch_v2',
+            'consume_analysis_v2_test_entitlement',
+        ]);
+        expect(mocks.rpc).toHaveBeenCalledWith('consume_analysis_v2_test_entitlement', expect.objectContaining({
+            p_entitlement_jti_hash: hashAnalysisTestEntitlementJti(nonce),
+            p_selected_plan_id: 'basic',
+        }));
+        expect(mocks.dispatchJob).toHaveBeenCalledWith(REQUEST_ID, ANALYSIS_V2_BOOTSTRAP_JOB_KEY);
+        expect(mocks.operationalEmit).not.toHaveBeenCalled();
     });
 
     it('reserves and enqueues count refresh, returning bounded 202 without consumption', async () => {

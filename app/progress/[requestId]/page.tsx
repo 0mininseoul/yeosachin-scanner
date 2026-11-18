@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, use, useRef, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Archive, Check, ChevronRight } from 'lucide-react';
 import { ProgressFaces } from '@/components/progress-faces';
@@ -37,7 +37,9 @@ const V2_TRACK_PRESENTATION = [
 
 export default function ProgressPage({ params }: PageProps) {
     const { requestId } = use(params);
-    const { data, loading, error, errorKind, refreshing, refetch } = useAnalysisProgress(requestId);
+    const searchParams = useSearchParams();
+    const devLive = isDevUiPresentation() && searchParams.get('devAnalysis') === 'live';
+    const { data, loading, error, errorKind, refreshing, refetch } = useAnalysisProgress(requestId, devLive);
     const router = useRouter();
     const isRunningStep = useRef(false);
     const abortControllerRef = useRef<AbortController | null>(null);
@@ -235,10 +237,10 @@ export default function ProgressPage({ params }: PageProps) {
             clearPendingAnalysisTargetForTerminalState(storage, data?.status);
         }
         if (data?.status === 'completed') {
-            const pipeline = data.pipelineVersion === 'v2' ? '?pipeline=v2' : '';
+            const pipeline = devLive ? '?devAnalysis=live' : data.pipelineVersion === 'v2' ? '?pipeline=v2' : '';
             router.push(`/result/${requestId}${pipeline}`);
         }
-    }, [data?.pipelineVersion, data?.status, requestId, router]);
+    }, [data?.pipelineVersion, data?.status, devLive, requestId, router]);
 
     const handleLogout = async () => {
         try {
@@ -397,7 +399,7 @@ export default function ProgressPage({ params }: PageProps) {
                 {data.pipelineVersion === 'v2' && (
                     <div data-amp-block>
                         <ProgressFaces
-                            allowLocalAssets={isDevUiPresentation()}
+                            allowLocalAssets={isDevUiPresentation() && !devLive}
                             key={requestId}
                             active={data.activeProfile}
                             candidateMedia={data.candidateMedia}
@@ -413,8 +415,9 @@ export default function ProgressPage({ params }: PageProps) {
                         )}
                     </p>
                 )}
+                {devLive && <p className="mt-4 text-center text-sm text-fg-dim">Dev · 실제 분석</p>}
                 <p className="mt-4 text-balance text-center text-[14px] leading-relaxed text-fg-dim">
-                    {analysisDurationProgressCopy(isDevUiPresentation())}
+                    {analysisDurationProgressCopy(isDevUiPresentation() && !devLive)}
                 </p>
 
                 <ul aria-label="판독 작업 상태" className="mt-4 w-full">

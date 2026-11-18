@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
+import { isApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
 import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import {
@@ -238,6 +239,15 @@ async function handlePOST(
         return NextResponse.json({ code: 'WORKLOAD_ROLE_MISMATCH' }, { status: 503 });
     }
 
+    if (process.env.DEV_LIVE_WORKLOAD !== undefined) {
+        const resource = 'kind' in delivery
+            ? { preflightId: delivery.preflightId }
+            : { requestId: delivery.requestId };
+        if (process.env.DEV_LIVE_WORKLOAD !== 'paid' || delivery.workloadRole !== 'paid'
+            || !await isApprovedDevLiveDelivery(resource)) {
+            return NextResponse.json({ code: 'DEV_LIVE_APPROVAL_REQUIRED' }, { status: 403 });
+        }
+    }
     const taskContract = analysisV2WorkerTaskContractFromHeader(
         request.headers.get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER),
     );

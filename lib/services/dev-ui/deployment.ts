@@ -85,6 +85,12 @@ export function devUiRequestBoundary(
     if (!isDevUiDeployment(environment) || !isDevUiRequestOrigin(request.url)) return 'invalid';
     if (!canonicalDevUiPathname(url.pathname)) return 'forbidden';
     if (url.pathname.startsWith('/api')) {
+        if (request.method === 'GET' && (url.pathname === '/api/dev-ui/live/availability' || url.pathname === '/api/image-proxy')) return 'dev';
+        if (url.searchParams.getAll('devAnalysis').some(value => value === 'live') && (
+            (request.method === 'PATCH' && new RegExp(`^/api/analysis/preflight/${UUID}$`, 'i').test(url.pathname))
+            || (request.method === 'POST' && new RegExp(`^/api/analysis/preflight/${UUID}/entitle$`, 'i').test(url.pathname))
+            || (request.method === 'GET' && new RegExp(`^/api/analysis/progress/${UUID}$`, 'i').test(url.pathname))
+        )) return 'dev';
         return DEV_API_ROUTES.some(route => route.method === request.method && route.path.test(url.pathname))
             ? 'dev'
             : 'forbidden';

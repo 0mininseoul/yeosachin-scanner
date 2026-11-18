@@ -2273,10 +2273,12 @@ export async function processPreflight(
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
+        const runtime = dependencies.env ?? process.env;
+        const devPreflightWorker = runtime.DEV_LIVE_WORKLOAD === 'preflight' && runtime.K_SERVICE === 'dev-live-preflight';
         const bliteCohortSelected = selectBliteCohort(
             claim.preflightId,
-            dependencies.env ?? process.env,
-            { signedTestEntitlement: claim.accessMode === 'test_entitlement' },
+            runtime,
+            { signedTestEntitlement: claim.accessMode === 'test_entitlement' && !devPreflightWorker },
         );
         // Hash-complete identity is a prerequisite for B-lite's durable
         // provider lineage. Legacy rows remain valid ordinary preflights, but

@@ -63,13 +63,19 @@ const mocks = vi.hoisted(() => ({
     requireActiveAccountClassification: vi.fn(),
     requireActiveE2eTestAccount: vi.fn(),
     requireActiveE2eTestRunner: vi.fn(),
+    withDevLiveApproval: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
-vi.mock('@/lib/observability/request', () => ({
+vi.mock('@/lib/observability/request', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/observability/request')>()),
     observeRoute: mocks.observeRoute,
     suppressOperationalObservation: mocks.suppressOperationalObservation,
+}));
+vi.mock('@/lib/services/dev-ui/live-analysis', async importOriginal => ({
+    ...(await importOriginal<typeof import('@/lib/services/dev-ui/live-analysis')>()),
+    withDevLiveApproval: mocks.withDevLiveApproval,
 }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
@@ -349,6 +355,76 @@ describe('preflight owner routes', () => {
 
     afterEach(() => {
         vi.unstubAllEnvs();
+    });
+
+    it.each([
+        { targetInstagramId: 'Target.Name', status: 202 },
+        { targetInstagramId: 'other.target', status: 403 },
+    ])('scopes a Dev live preflight to the approved target ($status)', async ({ targetInstagramId, status }) => {
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', Buffer.alloc(32, 11).toString('base64url'));
+        const approvalId = '423e4567-e89b-42d3-a456-426614174000';
+        const trustedKey = `dev-live:${approvalId}`;
+        mocks.admissionAvailable.mockReturnValue(false);
+        mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
+            { id: userId, email: 'owner@example.com', app_metadata: { provider: 'kakao' } },
+            { id: approvalId, targetInstagramId: 'target.name', idempotencyKey: trustedKey, nonce: 'dev-live-approved-nonce' },
+        ));
+        const response = await createPreflight(new Request('https://dev.yeosachin.com/api/analysis/preflight?devAnalysis=live', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'idempotency-key': 'caller-supplied-key',
+                'x-landing-lead-capture-token': 'browser-capture-token',
+            },
+            body: JSON.stringify({ targetInstagramId }),
+        }));
+
+        expect(response.status).toBe(status);
+        if (status === 202) {
+            expect(mocks.store.createOrReplay).toHaveBeenCalledWith(expect.objectContaining({
+                userId,
+                targetInstagramId: 'target.name',
+                idempotencyKey: trustedKey,
+                accessMode: 'test_entitlement',
+            }));
+            expect(mocks.landingCaptureBind).toHaveBeenCalledWith(mocks.admin, expect.objectContaining({
+                preflightId,
+                authUserId: userId,
+                anonymousDeviceId: approvalId,
+                landingCaptureToken: undefined,
+            }));
+            expect(mocks.enqueue).toHaveBeenCalledOnce();
+        } else {
+            expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+            expect(mocks.landingCaptureBind).not.toHaveBeenCalled();
+            expect(mocks.enqueue).not.toHaveBeenCalled();
+        }
+        expect(mocks.observeRoute).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it('saves a Dev live exclusion through the authenticated owner and approved preflight', async () => {
+        mocks.withDevLiveApproval.mockImplementation(async (_request, operation) => operation(
+            { id: userId, email: 'owner@example.com', app_metadata: { provider: 'kakao' } },
+        ));
+        const request = new Request(`https://dev.yeosachin.com/api/analysis/preflight/${preflightId}?devAnalysis=live`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ decision: 'exclude', excludedInstagramId: 'fixture.exclude' }),
+        });
+
+        const response = await patchPreflight(request, context());
+
+        expect(response.status).toBe(204);
+        expect(mocks.withDevLiveApproval).toHaveBeenCalledWith(request, expect.any(Function), preflightId);
+        expect(mocks.store.setExclusion).toHaveBeenCalledWith({
+            preflightId,
+            userId,
+            decision: 'exclude',
+            excludedInstagramId: 'fixture.exclude',
+        }, { client: expect.any(Object) });
+        expect(mocks.emit).not.toHaveBeenCalled();
     });
 
     it('falls back to the bounded anonymous path for creation while keeping owner reads protected', async () => {

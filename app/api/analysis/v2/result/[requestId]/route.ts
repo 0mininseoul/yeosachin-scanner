@@ -1,6 +1,8 @@
+import type { User } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
 import { handleDevUiResultRead, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
+import { isDevLiveAnalysisRequest, withDevLiveRead } from '@/lib/services/dev-ui/live-analysis';
 import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 import {
     RESULT_PAGE_SIZE_DEFAULT,
@@ -19,6 +21,7 @@ import {
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
 import {
     observeRoute,
+    requestContext,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
@@ -74,6 +77,7 @@ async function handleGET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> },
     context: OperationalRequestContext,
+    verifiedDevUser?: User,
 ) {
     const requestId = requestIdSchema.safeParse((await params).requestId);
     if (!requestId.success) {
@@ -83,8 +87,9 @@ async function handleGET(
     let demoRecognized = false;
 
     try {
-        const supabase = await createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
+        const { data: { user }, error } = verifiedDevUser
+            ? { data: { user: verifiedDevUser }, error: null }
+            : await (await createClient()).auth.getUser();
         if (error || !user) {
             return json({ error: 'Authentication required.' }, 401);
         }
@@ -97,7 +102,7 @@ async function handleGET(
             throw accountError;
         }
 
-        const demo = await demoAnalysisStore.findForOwner(requestId.data, user.id);
+        const demo = verifiedDevUser ? null : await demoAnalysisStore.findForOwner(requestId.data, user.id);
         demoRecognized = demo !== null;
 
         const pageSize = url.searchParams.has('pageSize')
@@ -142,7 +147,7 @@ async function handleGET(
             })), 200);
         }
 
-        const operator = isAnalysisResultOperator({ id: user.id, email: user.email });
+        const operator = !verifiedDevUser && isAnalysisResultOperator({ id: user.id, email: user.email });
         const authorizedOwnerId = operator
             ? await resolveAnalysisResultOwner(requestId.data)
             : user.id;
@@ -171,7 +176,8 @@ async function handleGET(
 
         const response = json(analysisResultPageV1Schema.parse(result), 200);
         if (
-            !url.searchParams.has('femaleCursor')
+            !verifiedDevUser
+            && !url.searchParams.has('femaleCursor')
             && !url.searchParams.has('privateCursor')
         ) {
             operationalLogger.emit({
@@ -199,6 +205,15 @@ export async function GET(
     request: Request,
     routeContext: { params: Promise<{ requestId: string }> },
 ) {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveRead(request, { requestId: (await routeContext.params).requestId },
+            user => handleGET(
+                request,
+                routeContext,
+                requestContext(request, '/api/analysis/v2/result/[requestId]'),
+                user,
+            ));
+    }
     if (shouldHandleDevUiRequest(request)) return handleDevUiResultRead(request, (await routeContext.params).requestId);
     return observeRoute(
         request,

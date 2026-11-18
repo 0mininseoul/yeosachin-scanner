@@ -1,6 +1,12 @@
+import type { User } from '@supabase/supabase-js';
 import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { handleDevUiPreflightCreate, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
+import {
+    isDevLiveAnalysisRequest,
+    withDevLiveApproval,
+    type DevLiveApproval,
+} from '@/lib/services/dev-ui/live-analysis';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightAcceptedV1Schema,
@@ -28,11 +34,13 @@ import {
 import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
+    createAnalysisTestAdmission,
     verifyAnalysisTestAdmission,
 } from '@/lib/services/analysis/test-entitlement';
 import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import {
     observeRoute,
+    requestContext,
     suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
@@ -125,10 +133,9 @@ function preflightErrorCode(code: string): string {
 type SignedTestAdmissionState = 'absent' | 'valid' | 'invalid';
 
 function signedTestAdmissionState(
-    request: Request,
+    token: string | null,
     input: { userId: string; targetInstagramId: string; idempotencyKey: string }
 ): SignedTestAdmissionState {
-    const token = request.headers.get('x-analysis-test-admission');
     if (token === null) return 'absent';
     if (!token.trim()) return 'invalid';
     try {
@@ -380,6 +387,7 @@ async function handleAnonymousPOST(
 async function handlePOST(
     request: Request,
     context: OperationalRequestContext,
+    devLive?: { user: User; approval: DevLiveApproval },
 ): Promise<NextResponse> {
     let userId: string | undefined;
     let targetInstagramId: string | undefined;
@@ -387,6 +395,7 @@ async function handlePOST(
     let preflightId: string | undefined;
     let demoCandidate = false;
     const failed = (status: number, code: string, message: string): NextResponse => {
+        if (devLive) return errorResponse(status, code, message);
         void recordPreflightFailure({
             ...(userId ? { userId } : {}),
             ...(preflightId ? { preflightId } : {}),
@@ -414,7 +423,9 @@ async function handlePOST(
 
     try {
         const supabase = await createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
+        const { data: { user }, error } = devLive
+            ? { data: { user: devLive.user }, error: null }
+            : await supabase.auth.getUser();
         if (error || !user) {
             return handleAnonymousPOST(request, context, supabase);
         }
@@ -443,7 +454,7 @@ async function handlePOST(
         // This is intentionally evaluated before validation failures can be logged. The
         // demo target is never an operational analytics/logging subject.
         const demoTarget = isDemoTarget(rawTargetInstagramId);
-        demoCandidate = isDemoEligible(user.id, rawTargetInstagramId);
+        demoCandidate = !devLive && isDemoEligible(user.id, rawTargetInstagramId);
         if (demoTarget && !demoCandidate) {
             return suppressOperationalObservation(demoErrorResponse(
                 403,
@@ -458,15 +469,18 @@ async function handlePOST(
                 : failed(400, 'INVALID_REQUEST', '인스타그램 아이디를 확인해주세요.');
         }
         targetInstagramId = parsed.data.targetInstagramId;
+        if (devLive && targetInstagramId !== devLive.approval.targetInstagramId) {
+            return failed(403, 'DEV_LIVE_APPROVAL_REQUIRED', '승인된 실제 분석 대상이 아닙니다.');
+        }
 
-        const landingDeviceId = request.headers.get('x-anonymous-device-id')?.trim();
+        const landingDeviceId = devLive?.approval.id ?? request.headers.get('x-anonymous-device-id')?.trim();
         if (!landingDeviceId || !STABLE_DEVICE_ID_PATTERN.test(landingDeviceId)) {
             return demoCandidate
                 ? suppressOperationalObservation(demoErrorResponse(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.'))
                 : failed(400, 'DEVICE_ID_REQUIRED', '분석을 계속하려면 브라우저 식별자가 필요합니다.');
         }
 
-        const idempotencyKey = request.headers.get('idempotency-key')?.trim();
+        const idempotencyKey = devLive?.approval.idempotencyKey ?? request.headers.get('idempotency-key')?.trim();
         if (!idempotencyKey || !IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
             return demoCandidate
                 ? suppressOperationalObservation(demoErrorResponse(400, 'INVALID_IDEMPOTENCY_KEY', '올바른 Idempotency-Key가 필요합니다.'))
@@ -512,14 +526,15 @@ async function handlePOST(
             return suppressOperationalObservation(response);
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
-        const signedTestAdmission = signedTestAdmissionState(
-            request,
-            {
-                userId: user.id,
-                targetInstagramId: parsed.data.targetInstagramId,
-                idempotencyKey,
-            }
-        );
+        const admissionIdentity = {
+            userId: user.id,
+            targetInstagramId: parsed.data.targetInstagramId,
+            idempotencyKey,
+        };
+        const admissionToken = devLive
+            ? createAnalysisTestAdmission({ ...admissionIdentity, nonce: devLive.approval.nonce })
+            : request.headers.get('x-analysis-test-admission');
+        const signedTestAdmission = signedTestAdmissionState(admissionToken, admissionIdentity);
         if (signedTestAdmission === 'invalid') {
             return failed(
                 503,
@@ -527,7 +542,7 @@ async function handlePOST(
                 '새 분석 접수가 일시적으로 중단되었습니다.'
             );
         }
-        if (signedTestAdmission === 'valid') {
+        if (signedTestAdmission === 'valid' && !devLive) {
             try {
                 await requireActiveE2eTestRunner(user);
             } catch (accountError) {
@@ -570,7 +585,7 @@ async function handlePOST(
         } catch {
             return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
         }
-        if (dispatchPolicy.mode === 'unavailable') {
+        if (dispatchPolicy.mode === 'unavailable' || (devLive && dispatchPolicy.mode !== 'queue')) {
             return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
         }
         const created = await preflightStore.createOrReplay({
@@ -598,7 +613,8 @@ async function handlePOST(
             {
                 preflightId: created.preflightId,
                 targetInstagramId: parsed.data.targetInstagramId,
-                landingCaptureToken: request.headers.get('x-landing-lead-capture-token')?.trim() || undefined,
+                landingCaptureToken: devLive
+                    ? undefined : request.headers.get('x-landing-lead-capture-token')?.trim() || undefined,
                 anonymousDeviceId: landingDeviceId,
                 authUserId: user.id,
                 env: process.env,
@@ -712,7 +728,7 @@ async function handlePOST(
             });
         }
 
-        operationalLogger.emit({
+        if (!devLive) operationalLogger.emit({
             event: 'preflight.requested',
             severity: 'info',
             fields: {
@@ -762,6 +778,13 @@ async function handlePOST(
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveApproval(request, (user, approval) => handlePOST(
+            request,
+            requestContext(request, '/api/analysis/preflight'),
+            { user, approval },
+        ));
+    }
     if (shouldHandleDevUiRequest(request)) return handleDevUiPreflightCreate(request);
     return observeRoute(
         request,

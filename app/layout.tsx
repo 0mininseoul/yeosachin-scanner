@@ -3,12 +3,15 @@ import localFont from "next/font/local";
 import { Analytics } from "@vercel/analytics/next";
 import { AmplitudeProvider } from "@/components/amplitude-provider";
 import { appOriginForServer } from "@/lib/constants/app-url";
-import { isDevUiDeploymentContext } from "@/lib/constants/dev-ui";
+import { DEV_UI_APP_ORIGIN, isDevUiDeploymentContext } from "@/lib/constants/dev-ui";
 import "./globals.css";
 
 const naverSiteVerification = process.env.NAVER_SITE_VERIFICATION?.trim();
 const devUi = isDevUiDeploymentContext();
-const appOrigin = appOriginForServer();
+// Private workers still compile the shared Next.js layout. Only the proxy and
+// worker handlers can authorize a request to these deployments.
+const devWorkerBuild = devUi && ['preflight', 'paid'].includes(process.env.DEV_LIVE_WORKLOAD ?? '');
+const appOrigin = devWorkerBuild ? DEV_UI_APP_ORIGIN : appOriginForServer();
 
 const paperlogy = localFont({
   variable: "--font-paperlogy",
@@ -86,7 +89,7 @@ export default function RootLayout({
       <body className="antialiased">
         {devUi && (
           <div role="status" className="sticky top-0 z-[100] bg-amber-300 px-4 py-2 text-center text-xs font-bold text-amber-950">
-            테스트 환경 · 모의 결제 및 합성 분석 결과
+            테스트 환경
           </div>
         )}
         {devUi ? children : <AmplitudeProvider>{children}</AmplitudeProvider>}

@@ -949,7 +949,10 @@ export async function processAnalysisV2FreshAdmission(
                 assertFreshCount(value.followingCount);
             }
         };
-        const freeProfilePath = claim.accessMode === 'test_entitlement'
+        const runtime = dependencies.env ?? process.env;
+        const devPaidWorker = runtime.DEV_LIVE_WORKLOAD === 'paid' && runtime.K_SERVICE === 'dev-live-paid';
+        const testProfilePath = claim.accessMode === 'test_entitlement' && !devPaidWorker;
+        const freeProfilePath = testProfilePath
             && !claim.orderScopedCredentialSlot
             && !betaHold;
         const fetchPaidProfile = async (
@@ -1004,7 +1007,7 @@ export async function processAnalysisV2FreshAdmission(
             return Object.freeze({ profile: paidProfile, inputHash: paidInputHash });
         };
         try {
-            const forcePaidProfile = claim.accessMode === 'test_entitlement';
+            const forcePaidProfile = testProfilePath;
             useAuthenticatedProfile = !existingRun
                 && !forcePaidProfile
                 && claim.analysisEntryChannel !== 'betatest'
@@ -1041,7 +1044,7 @@ export async function processAnalysisV2FreshAdmission(
         } catch (primaryError) {
             const primaryFailure = classifyPreflightError(primaryError);
             if (
-                claim.accessMode === 'test_entitlement'
+                testProfilePath
                 || useAuthenticatedProfile
                 || !primaryFailure.paidFallbackEligible
             ) {

@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+
 import Image from 'next/image';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -957,6 +959,7 @@ const DISCLOSURE_ACCEPTED = true;
                             </div>
                             {!devPresentation && <InstagramLookupLink />}
                             {devPresentation && <div className="mt-5">
+                                <Link href="/dev-ui/live" className="mb-4 inline-block text-sm underline">실제 분석 · 카드 결제 없음</Link>
                                 <label htmlFor="dev-fixture-scenario" className="eyebrow mb-3 block">합성 분석 시나리오</label>
                                 <select id="dev-fixture-scenario" value={fixtureScenario} disabled={creating} onChange={event => setFixtureScenario(event.target.value as DevFixtureScenario)} className="min-h-12 w-full border border-line bg-ink px-3 text-[14px] text-fg">
                                     {(Object.keys(DEV_UI_SCENARIO_LABELS) as DevFixtureScenario[]).map(scenario => <option key={scenario} value={scenario}>{DEV_UI_SCENARIO_LABELS[scenario]}</option>)}
