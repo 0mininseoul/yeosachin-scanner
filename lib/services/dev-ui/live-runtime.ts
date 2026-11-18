@@ -8,8 +8,8 @@ import { isDevUiDeployment } from './deployment';
 import { readDevLiveApproval, type DevLiveApproval } from './live-approval';
 
 const LOCATION = 'asia-northeast3';
-const PRODUCTION_GCP_PROJECT = 'gen-lang-client-0311522474';
-const PRODUCTION_GCP_PROJECT_NUMBER = '919163272964';
+const ASCENTUM_PROJECT = 'gen-lang-client-0311522474';
+const ASCENTUM_PROJECT_NUMBER = '919163272964';
 const ERROR = 'DEV_LIVE_RUNTIME_REJECTED';
 const WORKER_ROUTES = {
     preflight: '/api/analysis/preflight/worker',
@@ -36,10 +36,13 @@ function serviceName(role: Role): string {
 function cloudIdentity(env: DeploymentEnvironment): DevLiveCloudIdentity {
     const projectId = env.DEV_LIVE_GCP_PROJECT ?? '';
     const projectNumber = env.DEV_LIVE_GCP_PROJECT_NUMBER ?? '';
+    const placement = env.DEV_LIVE_GCP_PLACEMENT ?? 'dedicated';
+    const isExactAscentum = projectId === ASCENTUM_PROJECT && projectNumber === ASCENTUM_PROJECT_NUMBER;
+    const containsAscentumIdentity = projectId === ASCENTUM_PROJECT || projectNumber === ASCENTUM_PROJECT_NUMBER;
     if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)
-        || projectId === PRODUCTION_GCP_PROJECT
         || !/^[1-9]\d{5,19}$/.test(projectNumber)
-        || projectNumber === PRODUCTION_GCP_PROJECT_NUMBER
+        || (placement !== 'dedicated' && placement !== 'ascentum_shared')
+        || (placement === 'ascentum_shared' ? !isExactAscentum : containsAscentumIdentity)
         || env.GOOGLE_CLOUD_PROJECT !== projectId
         || (env.GCLOUD_PROJECT !== undefined && env.GCLOUD_PROJECT !== projectId)
         || (env.GOOGLE_CLOUD_QUOTA_PROJECT !== undefined && env.GOOGLE_CLOUD_QUOTA_PROJECT !== projectId)

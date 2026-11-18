@@ -143,6 +143,22 @@ describe('Dev live analysis runtime placement', () => {
         expect(() => assertDevLiveWebRuntime({ ...webEnv, ...changed })).toThrow('DEV_LIVE_RUNTIME_REJECTED');
     });
 
+    it('permits Ascentum only with an explicit placement and fully namespaced resources', () => {
+        const shared = Object.fromEntries(Object.entries(webEnv).map(([key, value]) => [
+            key, value.replaceAll(project, 'gen-lang-client-0311522474').replaceAll(number, '919163272964'),
+        ]));
+        expect(() => assertDevLiveWebRuntime(shared)).toThrow('DEV_LIVE_RUNTIME_REJECTED');
+        expect(() => assertDevLiveWebRuntime({ ...shared, DEV_LIVE_GCP_PLACEMENT: 'ascentum_shared' })).not.toThrow();
+        expect(() => assertDevLiveWebRuntime({
+            ...shared, DEV_LIVE_GCP_PLACEMENT: 'ascentum_shared', ANALYSIS_V2_TASKS_QUEUE: 'analysis-paid',
+        })).toThrow('DEV_LIVE_RUNTIME_REJECTED');
+        expect(() => assertDevLiveWebRuntime({
+            ...shared, DEV_LIVE_GCP_PLACEMENT: 'ascentum_shared', DEV_LIVE_GCP_PROJECT_NUMBER: number,
+        })).toThrow('DEV_LIVE_RUNTIME_REJECTED');
+        expect(() => assertDevLiveWebRuntime({ ...webEnv, DEV_LIVE_GCP_PLACEMENT: 'ascentum_shared' }))
+            .toThrow('DEV_LIVE_RUNTIME_REJECTED');
+    });
+
     it('recognizes only matching active preflight and paid Cloud Run endpoints', () => {
         expect(devLiveWorkerRequestBoundary(request(preflightEndpoint), preflightWorker)).toBe('dev-worker');
         expect(devLiveWorkerRequestBoundary(request(paidEndpoint), paidWorker)).toBe('dev-worker');
