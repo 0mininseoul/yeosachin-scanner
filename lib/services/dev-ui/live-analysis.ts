@@ -12,11 +12,14 @@ import { devUiJson, withDevUiSession } from './routes';
 import {
     DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX,
     DEV_LIVE_OWNER_START_ATTEMPT,
-    DEV_LIVE_PLAN,
     DEV_LIVE_PREFLIGHT_KEY_PREFIX,
+    DEV_LIVE_RUNNER_PLAN,
+    DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX,
     devLiveApprovalId,
     devLiveOwnerStartEnabled,
+    devLiveStandardTarget,
     parseDevLiveOwnerApproval,
+    parseDevLiveStandardApproval,
     readDevLiveApproval,
     type DevLiveApproval,
 } from './live-approval';
@@ -26,9 +29,10 @@ import { assertDevLiveBudgetAvailable } from './live-budget';
 export type { DevLiveApproval } from './live-approval';
 
 const uuid = z.string().uuid();
-const persistedKey = new RegExp(`^${DEV_LIVE_PREFLIGHT_KEY_PREFIX}(?:owner:)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`);
+const persistedKey = new RegExp(`^${DEV_LIVE_PREFLIGHT_KEY_PREFIX}(?:owner:(?:standard:)?)?[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`);
 
 type DevLiveResource = { preflightId: string } | { requestId: string };
+const devLivePlanHeader = 'x-dev-live-plan';
 
 export function isDevLiveAnalysisRequest(request: Request): boolean {
     return new URL(request.url).searchParams.getAll('devAnalysis').some(value => value === 'live');
@@ -71,6 +75,14 @@ export async function isDevLiveRequestOwnedBy(userId: string, requestId: string)
     return !!await readLivePreflight(userId, { requestId });
 }
 
+export async function isDevLivePreflightBoundToApproval(
+    userId: string, preflightId: string, approval: DevLiveApproval,
+): Promise<boolean> {
+    const preflight = await readLivePreflight(userId, { preflightId });
+    return preflight?.idempotency_key === approval.idempotencyKey
+        && preflight.target_instagram_id === approval.targetInstagramId;
+}
+
 function privateResponse(response: NextResponse): NextResponse {
     response.headers.set('Cache-Control', 'private, no-store');
     response.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
@@ -81,15 +93,15 @@ function privateResponse(response: NextResponse): NextResponse {
 async function requireLiveWebAccess(user: User): Promise<void> {
     assertDevLiveWebRuntime();
     assertAnalysisTestEntitlementConfiguration();
-    await requireActiveE2eTestRunner(user, DEV_LIVE_PLAN);
+    await requireActiveE2eTestRunner(user, DEV_LIVE_RUNNER_PLAN);
 }
 
-type OwnerStartRpc = 'dev_live_owner_start_v1' | 'dev_live_owner_start_lookup_v1' | 'dev_live_owner_start_ready_v1';
+type OwnerStartRpc = `dev_live_owner_start${'' | '_lookup' | '_ready'}_v${1 | 2}`;
 
 async function ownerStartRpc(name: OwnerStartRpc, args?: Record<string, string>): Promise<unknown> {
     const { data, error } = await supabaseAdmin.rpc(name, args);
     if (error) {
-        if (name === 'dev_live_owner_start_v1' && error.code === 'P0001'
+        if ((name === 'dev_live_owner_start_v1' || name === 'dev_live_owner_start_v2') && error.code === 'P0001'
             && error.message === 'DEV_LIVE_OWNER_START_UNAVAILABLE') {
             throw new Error('DEV_LIVE_START_ATTEMPT_EXPIRED');
         }
@@ -100,11 +112,18 @@ async function ownerStartRpc(name: OwnerStartRpc, args?: Record<string, string>)
 
 async function ownerApprovalForPreflight(preflight: { idempotency_key: string; target_instagram_id: string }, userId: string) {
     if (!preflight.idempotency_key.startsWith(DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX)) return null;
-    const approval = parseDevLiveOwnerApproval(await ownerStartRpc('dev_live_owner_start_lookup_v1', {
-        p_grant_id: preflight.idempotency_key.slice(DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX.length),
+    const standard = preflight.idempotency_key.startsWith(DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX);
+    const standardTarget = devLiveStandardTarget();
+    if (standard && standardTarget !== preflight.target_instagram_id) return null;
+    const prefix = standard ? DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX : DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX;
+    const descriptor = await ownerStartRpc(standard ? 'dev_live_owner_start_lookup_v2' : 'dev_live_owner_start_lookup_v1', {
+        p_grant_id: preflight.idempotency_key.slice(prefix.length),
         p_user_id: userId,
         p_target_instagram_id: preflight.target_instagram_id,
-    }));
+    });
+    const approval = standard
+        ? parseDevLiveStandardApproval(descriptor, preflight.target_instagram_id)
+        : parseDevLiveOwnerApproval(descriptor);
     if (approval?.idempotencyKey !== preflight.idempotency_key || approval.targetInstagramId !== preflight.target_instagram_id) return null;
     return approval;
 }
@@ -115,11 +134,19 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
     const body = await request.clone().json().catch(() => null);
     const input = preflightRequestV1Schema.safeParse(body);
     if (!input.success) return null;
-    const approval = parseDevLiveOwnerApproval(await ownerStartRpc('dev_live_owner_start_v1', {
+    const standard = devLiveStandardTarget() === input.data.targetInstagramId;
+    const acknowledgedPlan = request.headers.get(devLivePlanHeader);
+    if (standard ? acknowledgedPlan !== 'standard' : acknowledgedPlan !== null && acknowledgedPlan !== 'basic') {
+        throw new Error('DEV_LIVE_PLAN_CHANGED');
+    }
+    const descriptor = await ownerStartRpc(standard ? 'dev_live_owner_start_v2' : 'dev_live_owner_start_v1', {
         p_user_id: user.id,
         p_target_instagram_id: input.data.targetInstagramId,
         p_attempt_id: attempt.data,
-    }));
+    });
+    const approval = standard
+        ? parseDevLiveStandardApproval(descriptor, input.data.targetInstagramId)
+        : parseDevLiveOwnerApproval(descriptor);
     return approval?.targetInstagramId === input.data.targetInstagramId ? approval : null;
 }
 
@@ -158,6 +185,12 @@ export function withDevLiveApproval(
             if (!approval) return closed();
             await assertDevLiveBudgetAvailable(approval);
         } catch (error) {
+            if (error instanceof Error && error.message === 'DEV_LIVE_PLAN_CHANGED') {
+                return devUiJson({
+                    code: 'DEV_LIVE_PLAN_CHANGED',
+                    error: '분석 플랜이 바뀌었습니다. 페이지를 새로고침하고 예산을 확인해 주세요.',
+                }, 409);
+            }
             if (error instanceof Error && error.message === 'DEV_LIVE_START_ATTEMPT_EXPIRED') {
                 return devUiJson({ code: 'DEV_LIVE_START_ATTEMPT_EXPIRED',
                     error: '이전 실행이 만료되었습니다. 시작 버튼을 다시 눌러 주세요.' }, 410);
@@ -175,8 +208,15 @@ export function withDevLiveRead(
     operation: (user: User) => Promise<NextResponse>,
 ): Promise<NextResponse> {
     return withDevUiSession(request, async user => {
-        if (!validSelector(request) || !await readLivePreflight(user.id, resource)) return notFound();
-        return privateResponse(await operation(user));
+        if (!validSelector(request)) return notFound();
+        const preflight = await readLivePreflight(user.id, resource);
+        if (!preflight) return notFound();
+        const response = privateResponse(await operation(user));
+        if ('preflightId' in resource) {
+            response.headers.set(devLivePlanHeader,
+                preflight.idempotency_key.startsWith(DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX) ? 'standard' : 'basic');
+        }
+        return response;
     });
 }
 
@@ -192,7 +232,14 @@ export function handleDevLiveAvailability(request: Request): Promise<NextRespons
             await requireLiveWebAccess(user);
             if (devLiveOwnerStartEnabled()) {
                 const available = await ownerStartRpc('dev_live_owner_start_ready_v1', { p_user_id: user.id }) === true;
-                return devUiJson({ available, recentPreflightId });
+                const target = available ? devLiveStandardTarget() : null;
+                const standardReady = target && await ownerStartRpc('dev_live_owner_start_ready_v2', {
+                    p_user_id: user.id, p_target_instagram_id: target,
+                }).catch(() => false) === true;
+                return devUiJson({
+                    available, recentPreflightId,
+                    ...(target ? { standardTarget: target, standardAvailable: standardReady === true } : {}),
+                });
             }
             const approval = readDevLiveApproval();
             if (!approval) return devUiJson({ available: false, recentPreflightId });
@@ -216,15 +263,18 @@ export async function getApprovedDevLiveDelivery(resource: DevLiveResource): Pro
         query = 'preflightId' in resource ? query.eq('id', id) : query.eq('consumed_request_id', id);
         const preflight = await query.maybeSingle();
         if (preflight.error || !preflight.data?.user_id) return null;
+        const approval = ownerStart
+            ? await ownerApprovalForPreflight(preflight.data, preflight.data.user_id)
+            : (legacyApproval && preflight.data.idempotency_key === legacyApproval.idempotencyKey
+                && preflight.data.target_instagram_id === legacyApproval.targetInstagramId ? legacyApproval : null);
+        if (!approval) return null;
         if ('requestId' in resource) {
-            const request = await supabaseAdmin.from('analysis_requests').select('id').eq('id', id)
+            const request = await supabaseAdmin.from('analysis_requests').select('id, selected_plan_id_snapshot').eq('id', id)
                 .eq('user_id', preflight.data.user_id).eq('preflight_id', preflight.data.id)
                 .eq('pipeline_version', 'v2').maybeSingle();
-            if (request.error || !request.data) return null;
+            if (request.error || request.data?.selected_plan_id_snapshot !== approval.planId) return null;
         }
-        if (ownerStart) return await ownerApprovalForPreflight(preflight.data, preflight.data.user_id);
-        return legacyApproval && preflight.data.idempotency_key === legacyApproval.idempotencyKey
-            && preflight.data.target_instagram_id === legacyApproval.targetInstagramId ? legacyApproval : null;
+        return approval;
     } catch {
         return null;
     }

@@ -6,7 +6,7 @@ import {
     withDevLiveApproval,
     type DevLiveApproval,
 } from '@/lib/services/dev-ui/live-analysis';
-import { DEV_LIVE_PLAN } from '@/lib/services/dev-ui/live-approval';
+import { DEV_LIVE_RUNNER_PLAN } from '@/lib/services/dev-ui/live-approval';
 import { shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -276,12 +276,14 @@ async function handlePOST(
             );
         }
 
-        if (devLive && body.data.planId !== DEV_LIVE_PLAN) {
+        if (devLive && body.data.planId !== devLive.approval.planId) {
             return entitlementError('ANALYSIS_V2_PLAN_NOT_ALLOWED');
         }
 
         try {
-            await requireActiveE2eTestRunner(user, body.data.planId);
+            // The Dev-only grant authorizes the analysis plan after the existing
+            // Basic Kakao runner has been authenticated by the Dev gate.
+            await requireActiveE2eTestRunner(user, devLive ? DEV_LIVE_RUNNER_PLAN : body.data.planId);
         } catch (accountError) {
             if (accountError instanceof AccountPrincipalAdmissionError) {
                 return NextResponse.json(

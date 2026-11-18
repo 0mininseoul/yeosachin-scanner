@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 import { handleDevUiPreflightCreate, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import {
     isDevLiveAnalysisRequest,
+    isDevLivePreflightBoundToApproval,
     withDevLiveApproval,
     type DevLiveApproval,
 } from '@/lib/services/dev-ui/live-analysis';
@@ -603,6 +604,11 @@ async function handlePOST(
         preflightId = created.preflightId;
         if (created.status === 'expired') throw new PreflightExpiredError();
         if (created.status === 'consumed') throw new PreflightConsumedError();
+
+        if (devLive?.approval.planId === 'standard'
+            && !await isDevLivePreflightBoundToApproval(user.id, created.preflightId, devLive.approval)) {
+            return failed(409, 'DEV_LIVE_PREFLIGHT_CONFLICT', '이번 Standard 실행에 연결된 사전 점검을 찾을 수 없습니다.');
+        }
 
         // Authenticated landing, post-OAuth, and direct /analyze flows all pass
         // through the same exact target capture boundary. The response is not
