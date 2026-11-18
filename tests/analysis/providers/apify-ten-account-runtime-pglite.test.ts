@@ -14,7 +14,11 @@ const slots = [
     'septenary', 'octonary', 'nonary', 'tenth',
 ] as const;
 const allSlots = ['primary', 'secondary', ...slots.slice(1)] as const;
-const observedAt = new Date(Date.now() - 1_000).toISOString();
+const observedAtMs = Date.now() - 1_000;
+const observedAt = new Date(observedAtMs).toISOString();
+const halfBillingCycleMs = 15 * 24 * 60 * 60 * 1_000;
+const billingCycleStartAt = new Date(observedAtMs - halfBillingCycleMs).toISOString();
+const billingCycleEndAt = new Date(observedAtMs + halfBillingCycleMs).toISOString();
 const freePreflightId = '123e4567-e89b-42d3-a456-426614174000';
 const freeClaimToken = '223e4567-e89b-42d3-a456-426614174000';
 const freeInputHash = 'a'.repeat(64);
@@ -287,8 +291,8 @@ function snapshotRows() {
         credentialSlot,
         monthlyLimitUsd: 10,
         monthlyUsageUsd: 1,
-        billingCycleStartAt: '2026-09-01T00:00:00.000Z',
-        billingCycleEndAt: '2026-10-01T00:00:00.000Z',
+        billingCycleStartAt,
+        billingCycleEndAt,
         observedAt,
         healthState: 'healthy',
     }));
@@ -592,8 +596,8 @@ describe('Apify ten-account runtime PGlite migration', () => {
             credentialSlot: 'secondary',
             monthlyLimitUsd: 20,
             monthlyUsageUsd: 3,
-            billingCycleStartAt: '2026-09-01T00:00:00.000Z',
-            billingCycleEndAt: '2026-10-01T00:00:00.000Z',
+            billingCycleStartAt,
+            billingCycleEndAt,
             observedAt,
             healthState: 'healthy',
         };
@@ -613,9 +617,9 @@ describe('Apify ten-account runtime PGlite migration', () => {
             effectiveRemainingUsd: 17,
         });
         expect(Date.parse(String(inventory[1]?.billingCycleEndAt)))
-            .toBe(Date.parse('2026-10-01T00:00:00Z'));
+            .toBe(Date.parse(billingCycleEndAt));
         expect(Date.parse(String(inventory[1]?.cycleResetAt)))
-            .toBe(Date.parse('2026-10-01T00:00:00Z'));
+            .toBe(Date.parse(billingCycleEndAt));
     });
 
     it('allows secondary staleness without blocking the independent nine-row free refresh', async () => {
@@ -626,11 +630,12 @@ describe('Apify ten-account runtime PGlite migration', () => {
         await db.query(
             `UPDATE public.analysis_apify_credit_snapshots
              SET monthly_limit_usd = 20, monthly_usage_usd = 3,
-                 billing_cycle_start_at = '2026-09-01T00:00:00Z',
-                 billing_cycle_end_at = '2026-10-01T00:00:00Z',
+                 billing_cycle_start_at = $1,
+                 billing_cycle_end_at = $2,
                  observed_at = clock_timestamp() - interval '1 day',
                  health_state = 'healthy'
              WHERE credential_slot = 'secondary'`,
+            [billingCycleStartAt, billingCycleEndAt],
         );
         await expect(db.query(
             'SELECT public.upsert_analysis_beta_apify_credit_snapshots($1::JSONB)',
@@ -765,6 +770,87 @@ describe('Apify ten-account runtime PGlite migration', () => {
                 ? [freePreflightId, freeClaimToken, freeInputHash]
                 : [freePreflightId, freeClaimToken, freeInputHash],
         )).rejects.toThrow('ANALYSIS_BETA_PREFLIGHT_PROVIDER_RUN_SLOT_MISMATCH');
+    });
+
+    it('allows explicit paid secondary while preserving automatic and beta slot fences', async () => {
+        const baseline = readFileSync(join(process.cwd(), 'supabase/dev-ui/production-baseline.sql'), 'utf8');
+        const isolated = await PGlite.create({ extensions: { pgcrypto } });
+        try {
+            await isolated.exec(bootstrap);
+            await isolated.exec(migration);
+            await isolated.exec(`
+                ALTER TABLE public.analysis_preflights
+                    ADD COLUMN admission_status TEXT,
+                    ADD COLUMN admission_generation INT,
+                    ADD COLUMN admission_requested_at TIMESTAMPTZ,
+                    ADD COLUMN admission_claim_token UUID,
+                    ADD COLUMN admission_lease_expires_at TIMESTAMPTZ;
+                ALTER TABLE public.analysis_preflight_provider_runs
+                    ADD COLUMN usage_reconciliation_attempt_count INT,
+                    ADD COLUMN usage_reconciliation_attempted_at TIMESTAMPTZ,
+                    ADD COLUMN manual_resolution_evidence_hash TEXT,
+                    ADD COLUMN manual_resolved_at TIMESTAMPTZ;
+            `);
+            for (const name of [
+                'adopt_legacy_fresh_admission_provider_run',
+                'analysis_preflight_provider_run_json',
+                'reserve_analysis_v2_fresh_admission_provider_run_fixed_20260904',
+            ]) {
+                const definition = baseline.match(new RegExp(
+                    `CREATE FUNCTION public\\.${name}\\([\\s\\S]*?\\n    AS (\\$\\w*\\$)[\\s\\S]*?\\n\\1;`,
+                ))?.[0];
+                if (!definition) throw new Error(`Missing production baseline function ${name}`);
+                await isolated.exec(definition.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+            }
+            const secondaryReservationPatch = readFileSync(join(
+                process.cwd(),
+                'supabase/operations/20261119_allow_secondary_fresh_admission_provider_reservation.sql',
+            ), 'utf8');
+            await isolated.exec(secondaryReservationPatch);
+            await isolated.exec(secondaryReservationPatch);
+            await isolated.query(`
+                INSERT INTO public.analysis_preflights (
+                    id, status, analysis_entry_channel, expires_at,
+                    admission_status, admission_generation, admission_requested_at,
+                    admission_claim_token, admission_lease_expires_at
+                ) VALUES (
+                    $1, 'ready', 'standard', now() + interval '30 minutes',
+                    'processing', 1, now(), $2, now() + interval '5 minutes'
+                )
+            `, [freePreflightId, freeClaimToken]);
+
+            const reserve = async (slot: string | null, claimToken = freeClaimToken) => {
+                await isolated.exec('SET ROLE service_role');
+                try {
+                    const { rows } = await isolated.query<{
+                        result: { created: boolean; run: { credentialSlot: string } };
+                    }>(`
+                        SELECT public.reserve_analysis_v2_fresh_admission_provider_run(
+                            $1, 1, $2, $3, $4, 0.0026
+                        ) AS result
+                    `, [freePreflightId, claimToken, freeInputHash, slot]);
+                    return rows[0]?.result;
+                } finally {
+                    await isolated.exec('RESET ROLE');
+                }
+            };
+
+            await expect(reserve('secondary', freePreflightId)).rejects.toThrow(
+                'ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH',
+            );
+            await expect(reserve('secondary')).resolves.toMatchObject({
+                created: true, run: { credentialSlot: 'secondary' },
+            });
+            await expect(reserve('secondary')).resolves.toMatchObject({
+                created: false, run: { credentialSlot: 'secondary' },
+            });
+            await expect(reserve(null)).rejects.toThrow('ANALYSIS_BETA_PREFLIGHT_PROVIDER_RUN_SLOT_MISMATCH');
+            await expect(reserve('unsupported')).rejects.toThrow('ANALYSIS_BETA_PREFLIGHT_PROVIDER_RUN_SLOT_MISMATCH');
+            await isolated.exec("UPDATE public.analysis_preflights SET analysis_entry_channel = 'betatest'");
+            await expect(reserve('secondary')).rejects.toThrow('ANALYSIS_BETA_PREFLIGHT_PROVIDER_RUN_SLOT_MISMATCH');
+        } finally {
+            await isolated.close();
+        }
     });
 
     it.each([
