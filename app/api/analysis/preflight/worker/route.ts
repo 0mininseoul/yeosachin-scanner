@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { isApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
+import { requireDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import {
     classifyPreflightWorkerFailure,
     prepareBetaPreflightDispatch,
@@ -369,16 +370,23 @@ async function handlePOST(
                 ),
             });
         } else if (!('kind' in task)) {
-            // Construction is server-only and lazy: no token is read and no network starts
-            // until a claimed row identifies itself as the dedicated beta channel.
+            const refreshApifyCreditSnapshots = () => refreshBetaApifyCreditSnapshots(
+                supabaseAdmin, { telemetry: operationalLogger }
+            );
             outcome = await processPreflight(task.preflightId, {
                 betaCreditCoordinator,
                 settleBetaCredit: preflightId => settleBetaApifyPreflightCredit(
                     supabaseAdmin, preflightId, { telemetry: operationalLogger }
                 ),
-                refreshBetaCredit: () => refreshBetaApifyCreditSnapshots(
-                    supabaseAdmin, { telemetry: operationalLogger }
-                ),
+                refreshBetaCredit: refreshApifyCreditSnapshots,
+                ...(process.env.DEV_LIVE_WORKLOAD === 'preflight'
+                    ? {
+                        refreshFreePoolCredits: async () => {
+                            requireDevLiveProviderApproval();
+                            await refreshApifyCreditSnapshots();
+                        },
+                    }
+                    : {}),
                 enqueueBliteInference: (preflightId, dispatchGeneration, dispatchToken) => (
                     enqueuePrecheckoutBliteTask(
                         preflightId,

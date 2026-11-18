@@ -2101,6 +2101,8 @@ export async function processPreflight(
         /** Post-terminal only; true means a beta allocation was processed. */
         settleBetaCredit?: (preflightId: string) => Promise<boolean>;
         refreshBetaCredit?: () => Promise<void>;
+        /** Dev live ordinary queue only. Runs after the durable claim on a free-pool miss. */
+        refreshFreePoolCredits?: () => Promise<void>;
         activateBliteCohort?: (input: {
             preflightId: string;
             claimToken: string;
@@ -2136,6 +2138,7 @@ export async function processPreflight(
         ...input,
         env: dependencies.env,
         providerAdmissionStore: dependencies.providerAdmissionStore,
+        refreshFreePoolCredits: dependencies.refreshFreePoolCredits,
     });
     const recordTerminalFailure = (
         claim: ClaimedPreflight,

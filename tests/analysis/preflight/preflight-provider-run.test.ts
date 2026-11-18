@@ -270,14 +270,17 @@ describe('preflight provider-run adapter', () => {
             checkpointRejected: vi.fn(),
             checkpointTerminal: vi.fn(),
         };
+        const refreshFreePoolCredits = vi.fn();
         const result = await bindPreflightProviderRunCheckpoint({
             store,
             claim: { preflightId, claimToken } as ClaimedPreflight,
             inputHash,
             identity: preflightProviderIdentity('primary'),
             freePool: true,
+            refreshFreePoolCredits,
         });
 
+        expect(refreshFreePoolCredits).not.toHaveBeenCalled();
         expect(result.stored).toMatchObject({ credentialSlot: 'octonary' });
         expect(result.checkpoint).toMatchObject({ credentialSlot: 'octonary' });
         await result.checkpoint.onBeforeRunStart?.({
@@ -290,6 +293,58 @@ describe('preflight provider-run adapter', () => {
             credentialSlot: 'octonary',
             runId,
         }));
+    });
+
+    it('refreshes a capacity-blocked free pool before choosing a new provider slot', async () => {
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: null })
+            .mockResolvedValueOnce({
+                data: null,
+                error: { message: 'ANALYSIS_APIFY_FREE_POOL_CAPACITY_UNAVAILABLE' },
+            })
+            .mockResolvedValueOnce({
+                data: { created: true, run: row('starting', { credentialSlot: 'octonary' }) },
+                error: null,
+            });
+        const refreshFreePoolCredits = vi.fn(async () => {
+            // The initial null-slot RPC must fail before any provider metadata lookup.
+            expect(rpc).toHaveBeenCalledTimes(2);
+        });
+
+        await expect(bindPreflightProviderRunCheckpoint({
+            store: createPreflightProviderRunStore({ rpc }),
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            refreshFreePoolCredits,
+        })).resolves.toMatchObject({ checkpoint: { credentialSlot: 'octonary' } });
+        expect(refreshFreePoolCredits).toHaveBeenCalledOnce();
+        expect(rpc).toHaveBeenCalledTimes(3);
+        expect(rpc.mock.calls[2]).toEqual(rpc.mock.calls[1]);
+    });
+
+    it('keeps the free pool closed when refreshing its capacity fails', async () => {
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: null })
+            .mockResolvedValueOnce({
+                data: null,
+                error: { message: 'ANALYSIS_APIFY_FREE_POOL_CAPACITY_UNAVAILABLE' },
+            });
+        const refreshFreePoolCredits = vi.fn(async () => {
+            throw new Error('fixture refresh failure');
+        });
+
+        await expect(bindPreflightProviderRunCheckpoint({
+            store: createPreflightProviderRunStore({ rpc }),
+            claim: { preflightId, claimToken } as ClaimedPreflight,
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            refreshFreePoolCredits,
+        })).rejects.toBeInstanceOf(AnalysisProviderAdmissionCapacityPendingError);
+        expect(refreshFreePoolCredits).toHaveBeenCalledOnce();
+        expect(rpc).toHaveBeenCalledTimes(2);
     });
 
     it('admits the durable free-pool slot with its exact preflight budget before start', async () => {
@@ -548,21 +603,27 @@ describe('preflight provider-run adapter', () => {
         const store = {
             load: vi.fn(async () => row('starting') as StoredPreflightProviderRun),
             reserve: vi.fn(),
+            reserveFree: vi.fn(),
             checkpointStarted: vi.fn(),
             checkpointRejected: vi.fn(),
             checkpointTerminal: vi.fn(),
         };
+        const refreshFreePoolCredits = vi.fn();
         const result = await bindPreflightProviderRunCheckpoint({
             store,
             claim: { preflightId, claimToken } as ClaimedPreflight,
             inputHash,
-            identity: preflightProviderIdentity('quinary'),
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            refreshFreePoolCredits,
         });
 
-        expect(result.checkpoint).toMatchObject({ startReserved: true });
+        expect(result.checkpoint).toMatchObject({ startReserved: true, credentialSlot: 'quinary' });
         expect(result.checkpoint.onBeforeRunStart).toBeUndefined();
         expect(result.checkpoint.onRunStarted).toBeUndefined();
         expect(store.reserve).not.toHaveBeenCalled();
+        expect(store.reserveFree).not.toHaveBeenCalled();
+        expect(refreshFreePoolCredits).not.toHaveBeenCalled();
     });
 
     it('persists a definite start rejection against the exact reserved identity', async () => {

@@ -4,9 +4,9 @@ Dev의 기본 분석은 합성 데이터로 진행한다. 실제 분석 옵션�
 
 ## 현재 준비 상태
 
-11월 18일 Dev DB 읽기 전용 확인에서 public 테이블 150개와 합성 주문용 `dev_ui` 테이블 3개를 확인했다. `account_e2e_test_runners`, `account_ledger_rollout_state`, `analysis_provider_admission_budgets`, `analysis_provider_usage_expectations`, `analysis_v2_provider_execution_policies`, `earlybird_plan_inventory`는 존재하며 모두 0행이었다. 따라서 기준점만으로는 실제 처리에 필요한 Dev 등록이나 공급자 실행 정책이 준비되지 않는다.
+11월 18일 Dev DB에서 Basic 테스트 실행자 1명, 공급자 동시 실행·속도 한도 22개, Gemini lease 8개를 설정했다. 시작 전 Apify 슬롯 10개는 잔액 미확인 상태이며, 과금 승인 사용·비용 예약·실제 요청·결제 주문은 각각 0건으로 확인했다. 과거 미과금 격리 프로젝트 `yeosachin-dev-live-261118`은 삭제 요청 상태다. Dev 워커와 큐는 기존 운영 프로젝트 Ascentum의 별도 `dev-live-*` 리소스로 구성한다.
 
-현재 운영 GCP 프로젝트의 서울 리전과 접근 가능한 프로젝트 목록에는 이 실행 계약에 맞는 Dev 서비스·큐·전용 자격 증명이 확인되지 않았다. 격리 프로젝트 `yeosachin-dev-live-261118`을 별도로 생성하고 프로젝트 활성 상태와 결제 미연결을 확인했다. 운영 Cloud Run이 속한 `Ascentum`(`gen-lang-client-0311522474`)은 기존 결제 연결을 사용할 수 있는 배치 대안이다. 기존 Dev 서비스의 모의 분석은 Dev Vercel 및 Dev Supabase에서 실행한다. 운영의 Secret Manager 설정과 과거 검증용 Cloud Run 서비스는 독립 Dev 구성의 증거가 되지 않는다.
+Dev preflight는 운영 Apify 계정의 non-secondary Secret 버전 9개를 참조한다. DB가 최근 잔액과 내부 예약을 확인해 슬롯을 선택한다. 슬롯 예약에 사용 가능한 잔액 정보가 없으면 승인된 작업을 사용자가 시작하고 워커가 DB claim을 확보한 뒤에만 잔액을 갱신한다. 기존 실행은 원래 슬롯으로 재개한다. 사용자가 Basic을 선택한 뒤의 최신 프로필 확인과 정식 분석은 `secondary`를 사용한다. Dev와 운영은 Apify 계정 잔액을 공유한다.
 
 ## Dev 리소스 계약
 
@@ -24,10 +24,12 @@ Ascentum 배치에서는 `dev-live-*` 이름과 전용 권한으로 기존 워�
 
 ## 호출 0회로 준비하는 순서
 
+Ascentum Dev에서 최신 프로필 확인용 기존 DB 래퍼가 명시적 `secondary` 예약을 거절하면, 정확한 Dev 프로젝트에만 [Dev 전용 SQL](../../supabase/dev-ui/live-fresh-admission-secondary.sql)을 적용한다. 이 SQL은 기존 함수 본문과 권한을 검증하고 자동 선택의 non-secondary 제한을 보존한다.
+
 1. 기존 Dev DB의 live preflight·판매 없이 처리하는 entitlement·fresh admission·provider budget/lease·진행·결과 RPC의 이름과 실제 권한을 현재 후보 코드와 비교한다. 10월 기준점과 최신 migration 목록의 차이는 이 호출 목록으로 좁힌다. 특히 63바이트로 저장된 provider capacity mark RPC를 실제 카탈로그 이름으로 확인한다. [Dev 기준점과 기존 검증](../../supabase/dev-ui/README.ko.md)
 2. Dev 프로젝트임을 재확인한 뒤 부족한 정의와 seed만 별도 SQL로 검토한다. 테스트 이용권 사용자는 현 카카오 allowlist의 Dev 계정 한 명을 existing principal RPC로 분류하고, 활성 `e2e_test` runner의 서버 `app_metadata`와 registry 값을 모두 Basic으로 설정한다. 사용할 역할 및 Dev 토큰 슬롯에 필요한 Apify·Gemini admission budget과 공급자 비용을 위한 한도를 준비한다. 운영 주문·인벤토리·자격 증명 같은 행을 복제하지 않는다. 원격 migration 이력을 수정하거나 보호 migration을 재적용하지 않는다.
-3. 선택한 프로젝트에서 Dev 전용 런타임·invoker·Vercel enqueuer IAM을 분리한다. Ascentum에서는 운영 리소스의 설정 요약과 IAM 기준 해시를 먼저 확인하고 Dev에 속하는 신규 리소스에만 권한을 지정한다. Vercel에는 두 Dev 큐의 enqueue/get 및 두 Dev invoker의 제한된 actAs만 부여한다. 워커에는 해당 큐의 enqueue/get, 자기 Dev 버킷·Secret의 역할별 권한만 부여한다. 큐는 검사 단계에서 중지하고 동시 실행 한도를 1로 설정한다. 큐 설정의 URL·OIDC 덮어쓰기가 없는지, Cloud Run에 공개 invoke 권한이 없는지 native metadata에서 확인한다. 기존 배포자의 운영 activation 루틴을 실행하지 않는다.
-4. Dev 자격 증명 저장소에서 Dev Supabase 서버 키, Apify 슬롯별 Dev 토큰, Dev Vertex IAM, 이미지 서명 키와 Dev R2 자격 증명을 마련한다. 워커 Secret 값은 Secret Manager version reference로만 공급한다. Dev 웹의 `LANDING_LEAD_CAPTURE_SECRET`은 Dev 전용 값을 사용해 제외 선택의 식별 정보를 Dev DB 안에서 연결한다. Vercel 토큰이나 Secret 값을 내려받아 터미널·문서·파일에 남기지 않는다. 사전 점검·분석에서 사용할 운영 공급자 정책은 이름·모델·제한값만 확인해 Dev 설정에 맞춘다.
+3. 선택한 프로젝트에서 Dev 전용 런타임·invoker·Vercel enqueuer IAM을 분리한다. Ascentum에서는 운영 리소스의 설정 요약과 IAM 기준 해시를 먼저 확인하고 Dev에 속하는 신규 리소스에만 권한을 지정한다. Vercel에는 두 Dev 큐의 enqueue/get 및 두 Dev invoker의 제한된 actAs만 부여한다. 워커에는 해당 큐의 enqueue/get과 역할별 Dev 저장소 권한을 부여한다. 승인된 운영 Apify Secret은 preflight에 non-secondary 9개, 정식 분석에 secondary 1개의 접근 권한만 부여한다. 큐는 검사 단계에서 중지하고 동시 실행 한도를 1로 설정한다. 큐 설정의 URL·OIDC 덮어쓰기가 없는지, Cloud Run에 공개 invoke 권한이 없는지 native metadata에서 확인한다. 기존 배포자의 운영 activation 루틴을 실행하지 않는다.
+4. Dev Supabase 서버 키, Dev Vertex IAM, 이미지 서명 키와 Dev R2 자격 증명을 마련한다. Apify는 승인된 기존 Secret의 현재 버전을 역할별로 고정 참조한다. 워커 Secret 값은 Secret Manager version reference로만 공급한다. Dev 웹의 `LANDING_LEAD_CAPTURE_SECRET`은 Dev 전용 값을 사용해 제외 선택의 식별 정보를 Dev DB 안에서 연결한다. Vercel 토큰이나 Secret 값을 내려받아 터미널·문서·파일에 남기지 않는다. 사전 점검·분석에서 사용할 운영 공급자 정책은 이름·모델·제한값만 확인해 Dev 설정에 맞춘다.
 5. 리뷰된 같은 후보에서 Dev 웹과 두 워커를 각각 빌드한다. 워커 환경은 `DEV_LIVE_WORKLOAD`와 `ANALYSIS_WORKLOAD_ROLE`를 실제 역할 `preflight` 또는 `paid`로 맞춘다. 각 역할은 해당 namespace의 `*_TASKS_ENABLED`, `*_TASKS_PROJECT`, `*_TASKS_LOCATION`, `*_TASKS_QUEUE`, `*_TASKS_TARGET_URL`, `*_TASKS_OIDC_AUDIENCE`, `*_TASKS_SERVICE_ACCOUNT_EMAIL`, `*_TASKS_CALLER_AUTH_MODE=adc`를 사용한다. Web은 양쪽 namespace에 `vercel-wif`, `*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL`, 정확한 Dev `GCP_VERCEL_WIF_PROVIDER_RESOURCE`를 지정한다.
 6. `DEV_LIVE_ANALYSIS_ARMED`는 꺼 두고 승인값을 만들지 않는다. `PREFLIGHT_LOCAL_AFTER_ENABLED`, `ANALYSIS_BETA_PREPARE_ENABLED`, `BETATEST_FREE_POOL_ENABLED`, `PREFLIGHT_TASKS_RECOVERY_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`, `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED`는 끈다. Dev infra metadata·큐 조회 권한·리소스 일치, 승인 전 API 차단, 기존 모의 분석을 확인한다. 정상 워커 경로는 외부 공급자 함수의 모의 구현 또는 오프라인 회귀로 검사한다.
 
@@ -39,7 +41,7 @@ Dev의 테스트 승인 대상은 Basic 한 건이다. Dev 웹은 `ANALYSIS_V2_A
 
 - Vertex `VERTEX_AI_PER_RUN_BUDGET_USD`, `VERTEX_AI_PER_ORDER_BUDGET_USD`, `VERTEX_AI_DAILY_BUDGET_USD`의 양수 합의값은 해당 실행의 Vertex 승인 상한 이하다.
 - Apify는 두 워커에 `APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 지정한다. 정식 분석 워커에는 `APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_COMMENTS_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 추가한다. 값은 양수이며 각 승인 상한을 넘지 않도록 한다.
-- 제안 상한은 Apify Actor 요금 `$5`, Vertex `$2`이다. actor start와 Vertex 호출 전에 Dev DB의 공용 예약 원장을 사용해 승인 ID별로 합산하고, 재시도가 중복 비용을 발생시키지 않는지 검증한다. Actor 실행 과금 상한 설정과 AI 비용 산정 방식은 실제 공급자 요금과 별도로 대조한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
+- 승인된 Basic 1회 상한은 Apify Actor 요금 `$5`, Vertex `$2`이다. actor start와 Vertex 호출 전에 Dev DB의 공용 예약 원장을 사용해 승인 ID별로 합산하고, 재시도가 중복 비용을 발생시키지 않는지 검증한다. Actor 실행 과금 상한 설정과 AI 비용 산정 방식은 실제 공급자 요금과 별도로 대조한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
 
 ## 승인 전 운영자 점검
 

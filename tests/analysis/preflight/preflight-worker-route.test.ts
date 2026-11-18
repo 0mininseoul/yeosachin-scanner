@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
     isApprovedDevLiveDelivery: vi.fn(),
+    requireDevLiveProviderApproval: vi.fn(),
     process: vi.fn(),
     prepareBeta: vi.fn(),
     enqueue: vi.fn(),
@@ -30,6 +31,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
     isApprovedDevLiveDelivery: mocks.isApprovedDevLiveDelivery,
+}));
+vi.mock('@/lib/services/dev-ui/live-budget', () => ({
+    requireDevLiveProviderApproval: mocks.requireDevLiveProviderApproval,
 }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
@@ -142,6 +146,36 @@ describe('preflight worker route', () => {
         expect((await POST(request(ordinaryTask))).status).toBe(403);
         expect(mocks.isApprovedDevLiveDelivery).toHaveBeenCalledWith({ preflightId });
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it('makes the credit refresh available only to approved ordinary Dev work', async () => {
+        const refreshUnused = await POST(request(ordinaryTask));
+        expect(refreshUnused.status).toBe(200);
+        expect(mocks.process.mock.calls[0][1].refreshFreePoolCredits).toBeUndefined();
+
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        mocks.isApprovedDevLiveDelivery.mockResolvedValue(true);
+        expect((await POST(request(ordinaryTask))).status).toBe(200);
+
+        const refresh = mocks.process.mock.calls[1][1].refreshFreePoolCredits;
+        expect(refresh).toEqual(expect.any(Function));
+        expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
+        await refresh();
+        expect(mocks.refreshBetaCredit).toHaveBeenCalledOnce();
+    });
+
+    it('skips credit lookup when a Dev approval expires before fallback', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        mocks.isApprovedDevLiveDelivery.mockResolvedValue(true);
+        expect((await POST(request(ordinaryTask))).status).toBe(200);
+
+        const refresh = mocks.process.mock.calls[0][1].refreshFreePoolCredits;
+        mocks.requireDevLiveProviderApproval.mockImplementationOnce(() => {
+            throw new Error('DEV_LIVE_BUDGET_UNAVAILABLE');
+        });
+
+        await expect(refresh()).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {

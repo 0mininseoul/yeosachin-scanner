@@ -876,6 +876,7 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     identity: ProviderIdentity;
     /** New anonymous/B-lite/free admission uses the database best-fit fence. */
     freePool?: boolean;
+    refreshFreePoolCredits?: () => Promise<void>;
     operationKey?: string;
     /** Fresh paid admission runs on the paid worker route while its provider-run
      * ledger remains the generation-fenced preflight lineage. */
@@ -990,12 +991,26 @@ export async function bindPreflightProviderRunCheckpoint(input: {
         if (!input.store.reserveFree) {
             throw new Error('ANALYSIS_PROVIDER_ADMISSION_CAPACITY_PENDING');
         }
-        const reserved = await input.store.reserveFree({
+        const reservationInput = {
             ...claimInput,
             logicalProvider: input.identity.logicalProvider,
             actorId: input.identity.actorId,
             maxChargeUsd: input.identity.maxChargeUsd,
-        });
+        };
+        let reserved;
+        try {
+            reserved = await input.store.reserveFree(reservationInput);
+        } catch (error) {
+            if (!(error instanceof AnalysisProviderAdmissionCapacityPendingError)
+                || !input.refreshFreePoolCredits) throw error;
+            try {
+                await input.refreshFreePoolCredits();
+            } catch {
+                // Preserve the capacity defer when usage reads or persistence fail.
+                throw error;
+            }
+            reserved = await input.store.reserveFree(reservationInput);
+        }
         current = reserved.run;
         assertFreeIdentity(current, input.identity);
         assertFreeSlot(current);
