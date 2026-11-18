@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { CaseCard, Eyebrow, PrimaryButton, TopBar } from '@/components/case-ui';
@@ -66,9 +66,6 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const [confirmed, setConfirmed] = useState(false);
     const [busy, setBusy] = useState(false);
     const [pendingAdmission, setPendingAdmission] = useState<PendingAdmission | null>(null);
-    useEffect(() => {
-        setPendingAdmission(pending => pending?.preflightId === preflightId ? pending : null);
-    }, [preflightId]);
     const [error, setError] = useState('');
     const [readRevision, setReadRevision] = useState(0);
     const busyRef = useRef(false);
@@ -82,6 +79,12 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const canStartPlan = startPlanId === 'basic' || standard?.available === true;
     const displayedPlanId = preflightId ? current?.planId : canStartPlan ? startPlanId : undefined;
     const displayedPlan = displayedPlanId === 'standard' ? 'Standard' : 'Basic';
+
+    useLayoutEffect(() => {
+        setPendingAdmission(pending => pending?.preflightId === preflightId ? pending : null);
+        // Abort the previous preflight at navigation commit, before a queued poll can resume it.
+        return () => preflightController.current?.abort();
+    }, [preflightId]);
 
     useEffect(() => {
         const controller = new AbortController();
