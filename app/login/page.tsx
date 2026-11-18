@@ -5,6 +5,8 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect } from 'react';
 import { BrandMark, Eyebrow, CaseCard } from '@/components/case-ui';
 import { AuthButtons } from '@/components/auth-buttons';
+import { isDevUiPresentation } from '@/lib/constants/dev-ui';
+import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import { availableAnalyticsSessionStorage } from '@/lib/services/analytics-auth';
 import { clearLoginTerminalState } from '@/lib/services/auth/login-terminal-state';
 
@@ -12,6 +14,13 @@ function LoginContent() {
     const searchParams = useSearchParams();
     const redirectTo = searchParams.get('redirectTo') || '/analyze';
     const error = searchParams.get('error');
+    const isDev = isDevUiPresentation();
+    const devAccessDenied = isDev && error === 'dev_access_denied';
+    const errorMessage = devAccessDenied
+        ? '이 계정은 개발 환경에 접근할 수 없습니다. 허용된 카카오 계정으로 다시 로그인해 주세요.'
+        : isDev && error === 'dev_auth_unavailable'
+            ? '개발 환경의 인증을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.'
+            : '인증에 실패했습니다. 다시 시도해 주세요.';
 
     useEffect(() => {
         clearLoginTerminalState(Boolean(error), availableAnalyticsSessionStorage());
@@ -31,7 +40,9 @@ function LoginContent() {
                     <h1 className="mt-4 text-[22px] font-extrabold tracking-tight text-fg">
                         AI 위장 여사친 판독기
                     </h1>
-                    <p className="mt-2 text-[13px] text-fg-dim">인증 후 판독을 시작하세요.</p>
+                    <p className="mt-2 text-[13px] text-fg-dim">
+                        {isDev ? '개발 환경은 허용된 카카오 계정으로 로그인해 주세요.' : '인증 후 판독을 시작하세요.'}
+                    </p>
                 </div>
 
                 <CaseCard className="p-5">
@@ -42,20 +53,20 @@ function LoginContent() {
 
                     {error && (
                         <div className="mb-4 border border-blood/45 bg-blood/10 px-3 py-2.5 text-[13px] text-blood">
-                            인증에 실패했습니다. 다시 시도해 주세요.
+                            {errorMessage}
                         </div>
                     )}
 
-                    <AuthButtons redirectTo={redirectTo} />
+                    <AuthButtons redirectTo={redirectTo} promptKakaoLogin={devAccessDenied} />
                 </CaseCard>
 
                 <p className="mt-6 text-center text-[12px] leading-relaxed text-fg-mute">
                     인증 시{' '}
-                    <Link href="/terms" className="text-fg-dim underline underline-offset-2 hover:text-fg">
+                    <Link href={isDev ? `${CANONICAL_APP_ORIGIN}/terms` : '/terms'} className="text-fg-dim underline underline-offset-2 hover:text-fg">
                         이용약관
                     </Link>{' '}
                     및{' '}
-                    <Link href="/privacy" className="text-fg-dim underline underline-offset-2 hover:text-fg">
+                    <Link href={isDev ? `${CANONICAL_APP_ORIGIN}/privacy` : '/privacy'} className="text-fg-dim underline underline-offset-2 hover:text-fg">
                         개인정보처리방침
                     </Link>
                     에 동의하게 됩니다.

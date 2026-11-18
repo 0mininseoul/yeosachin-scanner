@@ -4,7 +4,7 @@
 
 ## 테스트 흐름
 
-1. Dev 도메인에서 카카오로 로그인한다. Production과 다른 Dev Auth 계정으로 테스트/관리자 allowlist에 등록되어 있어야 한다.
+1. Dev 도메인을 열고 카카오로 로그인한다. 지정 이메일을 확인한 Dev 테스트 계정만 화면과 API에 접근할 수 있다.
 2. `/analyze`에서 합성 대상 이름과 완료·부분 완료·실패·빈 결과 시나리오를 선택한다. 입력한 이름으로 Instagram에 접근하지 않는다.
 3. 기존 사전 점검·플랜 화면을 거쳐 모의 결제창으로 이동한다. 이 단계까지 분석은 시작되지 않는다.
 4. 모의 결제 성공을 선택하면 주문당 실행 1개가 생성되고 약 45초 동안 합성 진행을 보여준다. 취소·실패는 실행을 만들지 않는다.
@@ -16,7 +16,9 @@
 
 Dev 전용 카카오 테스트 앱과 Dev Supabase provider를 사용한다. 앱 callback은 Dev 웹의 `/auth/callback`, provider callback은 Dev Supabase의 `/auth/v1/callback`이다. Production cookie를 옮기거나 cookie Domain을 넓히지 않는다.
 
-`DEV_UI_TEST_USER_IDS`, `DEV_UI_ADMIN_USER_IDS`, 기존 콘솔의 `ANALYSIS_AUDIT_OPERATOR_USER_IDS`는 Dev에서 새로 생성한 Auth 계정으로 별도 등록한다. 관리자 권한은 tester와 admin의 교집합을 요구한다. 계정 식별자는 문서·커밋·터미널·채팅에 남기지 않는다. 인증된 `/api/user/me`의 기본 bootstrap은 최초 등록을 위해 allowlist 이전에도 가능하며 모의 생성/감사 권한은 부여하지 않는다.
+`DEV_UI_ALLOWED_KAKAO_EMAIL`은 Dev Vercel 프로젝트의 production 슬롯에 서버 전용 설정으로 등록한다. 앱은 Dev Supabase가 반환한 카카오 identity의 인증 이메일과 기존 `DEV_UI_TEST_USER_IDS`를 함께 확인한다. `/api/user/me`도 같은 조건을 적용한다. 로그인 페이지와 카카오 콜백은 인증 전에 열리며, 앱 화면과 합성 데이터 API는 확인된 계정에만 열린다. Dev Supabase의 로그인 provider는 카카오를 사용한다.
+
+`DEV_UI_TEST_USER_IDS`, `DEV_UI_ADMIN_USER_IDS`, 기존 콘솔의 `ANALYSIS_AUDIT_OPERATOR_USER_IDS`는 Dev Auth 계정 기준으로 별도 등록한다. 관리자 권한은 tester와 admin의 교집합을 요구한다. 계정 식별자는 기록에 남기지 않는다. Dev 테스트 계정을 다시 등록할 때는 Dev Supabase의 인증 정보에서 확인하고 계정 값을 출력하지 않은 채 서버 환경에 설정한다.
 
 ## 후보 배포와 main 승격
 

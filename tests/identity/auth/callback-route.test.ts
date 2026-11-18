@@ -42,6 +42,24 @@ vi.mock('@/config/dev-ui-deployment.json', () => ({
 import { GET } from '@/app/auth/callback/route';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 
+const devEmail = 'allowed@example.invalid';
+const devUserId = '123e4567-e89b-42d3-a456-426614174000';
+
+function configureDevOAuth() {
+    vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+    vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+    vi.stubEnv('VERCEL_PROJECT_ID', 'prj_dev_ui_test');
+    vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://devuitestproject.supabase.co');
+    vi.stubEnv('DEV_UI_ALLOWED_KAKAO_EMAIL', devEmail);
+    vi.stubEnv('DEV_UI_TEST_USER_IDS', devUserId);
+}
+
+function devOAuthUser(email = devEmail, provider = 'kakao', verified = true) {
+    return { id: devUserId, email, app_metadata: { provider }, identities: [{
+        provider, identity_data: { email, email_verified: verified },
+    }] };
+}
+
 describe('OAuth callback redirects', () => {
     beforeEach(() => {
         vi.clearAllMocks();
@@ -73,22 +91,50 @@ describe('OAuth callback redirects', () => {
         vi.unstubAllEnvs();
     });
 
-    it('keeps Dev OAuth on Dev without staging notifications or fetching a provider profile', async () => {
-        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
-        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
-        vi.stubEnv('VERCEL_PROJECT_ID', 'prj_dev_ui_test');
-        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://devuitestproject.supabase.co');
+    it('accepts a verified Dev Kakao tester without claim, provider, or notification work', async () => {
+        configureDevOAuth();
+        const user = devOAuthUser('Allowed@example.invalid');
         mocks.exchangeCodeForSession.mockResolvedValue({
-            data: { session: { provider_token: 'synthetic-provider-token' }, user: {
-                id: '123e4567-e89b-42d3-a456-426614174000', app_metadata: { provider: 'kakao' },
-            } }, error: null,
+            data: { session: { access_token: 'synthetic-session-token', provider_token: 'synthetic-provider-token' }, user },
+            error: null,
         });
-        const fetchSpy = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+        mocks.getUser.mockResolvedValue({ data: { user }, error: null });
+        const fetchSpy = vi.fn();
         vi.stubGlobal('fetch', fetchSpy);
-        const response = await GET(new Request('https://dev.yeosachin.com/auth/callback?code=oauth-code&next=%2Fanalyze'));
-        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/analyze?verified=true');
+        const next = encodeURIComponent('/analyze?preflight=synthetic&claim=synthetic');
+        const response = await GET(new Request(`https://dev.yeosachin.com/auth/callback?code=oauth-code&next=${next}`));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/analyze?preflight=synthetic&claim=synthetic&verified=true');
+        expect(response.headers.get('cache-control')).toContain('no-store');
         expect(fetchSpy).not.toHaveBeenCalled();
         expect(mocks.accountRpc.mock.calls.every(([name]) => name === 'load_account_classification_v1')).toBe(true);
+        expect(mocks.createRlsClient).not.toHaveBeenCalled();
+        expect(mocks.claimAnonymousPreflight).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        devOAuthUser('another@example.invalid'),
+        devOAuthUser(devEmail, 'google'),
+        devOAuthUser(devEmail, 'kakao', false),
+    ])('ends a rejected Dev callback before app-side account or claim work', async user => {
+        configureDevOAuth();
+        mocks.exchangeCodeForSession.mockResolvedValue({ data: { session: {}, user }, error: null });
+        mocks.getUser.mockResolvedValue({ data: { user }, error: null });
+        const response = await GET(new Request('https://dev.yeosachin.com/auth/callback?code=oauth-code&next=%2Fadmin0min'));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/login?redirectTo=%2Fadmin0min&error=dev_access_denied');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.signOut).toHaveBeenCalledOnce();
+        expect(mocks.signOut).toHaveBeenCalledWith({ scope: 'local' });
+        expect(mocks.accountRpc).not.toHaveBeenCalled();
+        expect(mocks.claimAnonymousPreflight).not.toHaveBeenCalled();
+        expect(mocks.emit).not.toHaveBeenCalled();
+    });
+
+    it('returns a Dev callback interruption to login with a bounded error and the intended page', async () => {
+        configureDevOAuth();
+        const response = await GET(new Request('https://dev.yeosachin.com/auth/callback?next=%2Fadmin0min&error_description=private'));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/login?redirectTo=%2Fadmin0min&error=no_code');
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
     });
 
     it('rejects the wrong Dev identity before OAuth session exchange', async () => {

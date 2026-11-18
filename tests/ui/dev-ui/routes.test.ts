@@ -40,6 +40,12 @@ const orderId = '123e4567-e89b-42d3-a456-426614174003';
 const runId = '123e4567-e89b-42d3-a456-426614174004';
 const registered = registry.deployments[0];
 const started = '2026-10-09T00:00:00.000Z';
+const testEmail = 'synthetic@example.invalid';
+
+function verifiedKakaoUser(id = owner, email = testEmail) {
+    return { id, email, app_metadata: { provider: 'kakao' }, created_at: started,
+        identities: [{ provider: 'kakao', identity_data: { email, email_verified: true } }] };
+}
 
 function request(path: string, body?: unknown, origin = DEV_UI_APP_ORIGIN): Request {
     return new Request(`${DEV_UI_APP_ORIGIN}${path}`, body === undefined ? {} : {
@@ -60,8 +66,9 @@ beforeEach(() => {
     vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${registered.supabaseProjectRef}.supabase.co`);
     vi.stubEnv('NEXT_PUBLIC_APP_URL', DEV_UI_APP_ORIGIN);
     vi.stubEnv('DEV_UI_TEST_USER_IDS', owner); vi.stubEnv('DEV_UI_ADMIN_USER_IDS', owner);
+    vi.stubEnv('DEV_UI_ALLOWED_KAKAO_EMAIL', testEmail);
     spies.createClient.mockResolvedValue({ auth: { getUser: spies.getUser } });
-    spies.getUser.mockResolvedValue({ data: { user: { id: owner, email: 'synthetic@example.invalid', app_metadata: { provider: 'kakao' }, created_at: started } }, error: null });
+    spies.getUser.mockResolvedValue({ data: { user: verifiedKakaoUser() }, error: null });
     spies.observe.mockImplementation(() => { throw new Error('Production observation must not run'); });
     spies.provider.mockImplementation(() => { throw new Error('Production/provider client must not run'); });
     vi.stubGlobal('fetch', vi.fn(() => { throw new Error('External fetch must not run'); }));
@@ -96,7 +103,7 @@ describe('Dev UI actual route boundary', () => {
         expect(spies.createClient).not.toHaveBeenCalled(); expect(spies.store.createOrReplayPreflight).not.toHaveBeenCalled();
     });
     it('denies an authenticated unregistered tester before synthetic writes', async () => {
-        spies.getUser.mockResolvedValue({ data: { user: { id: other } }, error: null });
+        spies.getUser.mockResolvedValue({ data: { user: verifiedKakaoUser(other) }, error: null });
         expect((await createPreflight(request('/api/analysis/preflight', { targetInstagramId: 'dev_synthetic' }))).status).toBe(403);
         expect(spies.store.createOrReplayPreflight).not.toHaveBeenCalled();
     });
@@ -133,15 +140,26 @@ describe('Dev UI actual route boundary', () => {
     });
     it('forwards only verified ownership and hides an inaccessible run', async () => {
         vi.stubEnv('DEV_UI_TEST_USER_IDS', `${owner},${other}`);
-        spies.getUser.mockResolvedValue({ data: { user: { id: other } }, error: null });
+        spies.getUser.mockResolvedValue({ data: { user: verifiedKakaoUser(other) }, error: null });
         spies.store.readRun.mockResolvedValue(null);
         const response = await readResult(request(`/api/analysis/v2/result/${runId}`), { params: Promise.resolve({ requestId: runId }) });
         expect(response.status).toBe(404); expect(spies.store.readRun).toHaveBeenCalledWith({ userId: other, runId });
     });
-    it('allows the Auth bootstrap before tester registration without any principal writer', async () => {
-        vi.stubEnv('DEV_UI_TEST_USER_IDS', '');
+    it('reads the approved Kakao tester without any principal writer', async () => {
         const response = await readMe(request('/api/user/me'));
         expect(response.status).toBe(200); expect((await response.json()).user).toMatchObject({ id: owner, provider: 'kakao', analysis_count: 0, is_paid_user: false });
+    });
+    it('blocks user bootstrap before tester registration', async () => {
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', '');
+        const response = await readMe(request('/api/user/me'));
+        expect(response.status).toBe(403);
+        expect((await response.json()).code).toBe('DEV_UI_ACCESS_DENIED');
+    });
+    it('denies a different Kakao email before entering a Dev handler', async () => {
+        spies.getUser.mockResolvedValue({ data: { user: verifiedKakaoUser(owner, 'different@example.invalid') }, error: null });
+        const response = await createPreflight(request('/api/analysis/preflight', { targetInstagramId: 'dev_synthetic' }));
+        expect(response.status).toBe(403);
+        expect(spies.store.createOrReplayPreflight).not.toHaveBeenCalled();
     });
     it('maps sanitized store failures without leaking the original error', async () => {
         spies.store.createOrReplayCheckout.mockRejectedValue(new DevUiStoreError('DEV_UI_IDEMPOTENCY_CONFLICT'));

@@ -20,6 +20,13 @@ import { config, proxy } from '@/proxy';
 const adminRequestId = '20000000-0000-4000-8000-000000000001';
 const operatorId = '10000000-0000-4000-8000-000000000001';
 const otherUserId = '10000000-0000-4000-8000-000000000002';
+const devEmail = 'allowed@example.invalid';
+
+function devUser(id = operatorId, email = devEmail, provider = 'kakao', verified = true) {
+    return { id, email, app_metadata: { provider }, identities: [{
+        provider, identity_data: { email, email_verified: verified },
+    }] };
+}
 const oauthStateError = 'error=invalid_request&error_code=bad_oauth_state&error_description=OAuth+state+not+found+or+expired';
 
 function adminIntentCookie(intent: string) {
@@ -34,7 +41,7 @@ interface ProxyCookieAdapter {
     }>): void;
 }
 
-function mockAuthenticatedUser(userId: string | null, refreshCookie = false, error: unknown = null) {
+function mockAuthenticatedUser(user: string | ReturnType<typeof devUser> | null, refreshCookie = false, error: unknown = null) {
     mocks.createServerClient.mockImplementation((...args: unknown[]) => {
         const options = args[2] as { cookies: ProxyCookieAdapter };
         return {
@@ -47,7 +54,7 @@ function mockAuthenticatedUser(userId: string | null, refreshCookie = false, err
                             options: { path: '/', httpOnly: true },
                         }]);
                     }
-                    return { data: { user: userId ? { id: userId } : null }, error };
+                    return { data: { user: typeof user === 'string' ? { id: user } : user }, error };
                 },
             },
         };
@@ -318,6 +325,8 @@ describe('Dev UI proxy boundary', () => {
         vi.stubEnv('VERCEL_PROJECT_ID', 'prj_dev_ui_test');
         vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://devuitestproject.supabase.co');
         vi.stubEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', 'test-anon-key');
+        vi.stubEnv('DEV_UI_ALLOWED_KAKAO_EMAIL', devEmail);
+        vi.stubEnv('DEV_UI_TEST_USER_IDS', operatorId);
         vi.stubGlobal('fetch', fetchSpy);
     });
 
@@ -326,20 +335,22 @@ describe('Dev UI proxy boundary', () => {
         vi.unstubAllGlobals();
     });
 
-    it('recovers Dev admin OAuth on the registered Dev origin', async () => {
+    it('recovers a logged-out Dev administrator intent at the login gate', async () => {
+        mockAuthenticatedUser(null);
         const response = await proxy(new NextRequest(
             `https://dev.yeosachin.com/?${oauthStateError}`,
             { headers: adminIntentCookie('/admin0min') },
         ));
-        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/admin0min?error=bad_oauth_state');
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/login?redirectTo=%2Fadmin0min&error=bad_oauth_state');
         expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
-        expect(mocks.createServerClient).not.toHaveBeenCalled();
+        expect(response.headers.get('set-cookie')).toMatch(/auth_redirect_intent=;.*Expires=/u);
+        expect(response.headers.get('cache-control')).toContain('no-store');
     });
 
     it('recovers a cookieless authenticated Dev administrator on the registered Dev origin', async () => {
         vi.stubEnv('DEV_UI_TEST_USER_IDS', operatorId);
         vi.stubEnv('DEV_UI_ADMIN_USER_IDS', operatorId);
-        mockAuthenticatedUser(operatorId, true);
+        mockAuthenticatedUser(devUser(), true);
         const response = await proxy(new NextRequest(`https://dev.yeosachin.com/?${oauthStateError}`));
         expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/admin0min');
         expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
@@ -349,20 +360,21 @@ describe('Dev UI proxy boundary', () => {
     });
 
     it.each([
-        ['', operatorId, null],
-        [operatorId, '', null],
-        [otherUserId, operatorId, null],
-        [operatorId, otherUserId, null],
-        ['invalid', operatorId, null],
-        [operatorId, operatorId, { status: 503 }],
-    ])('requires both valid Dev administrator allowlists and a successful session lookup', async (testers, admins, error) => {
+        ['', operatorId, null, 'dev_access_denied'],
+        [operatorId, '', null, null],
+        [otherUserId, operatorId, null, 'dev_access_denied'],
+        [operatorId, otherUserId, null, null],
+        ['invalid', operatorId, null, 'dev_access_denied'],
+        [operatorId, operatorId, { status: 503 }, 'dev_auth_unavailable'],
+    ])('checks site authorization before Dev administrator session recovery', async (testers, admins, error, loginError) => {
         vi.stubEnv('ANALYSIS_AUDIT_OPERATOR_USER_IDS', operatorId);
         vi.stubEnv('DEV_UI_TEST_USER_IDS', testers);
         vi.stubEnv('DEV_UI_ADMIN_USER_IDS', admins);
-        mockAuthenticatedUser(operatorId, false, error);
+        mockAuthenticatedUser(devUser(), false, error);
         const response = await proxy(new NextRequest(`https://dev.yeosachin.com/?${oauthStateError}`));
-        expect(response.status).toBe(200);
-        expect(response.headers.get('location')).toBeNull();
+        expect(response.status).toBe(loginError ? 307 : 200);
+        expect(response.headers.get('location')).toBe(loginError
+            ? `https://dev.yeosachin.com/login?redirectTo=%2Fanalyze&error=${loginError}` : null);
     });
 
     it('rejects a mismatched Dev deployment before checking a cookieless administrator session', async () => {
@@ -432,11 +444,13 @@ describe('Dev UI proxy boundary', () => {
         ['GET', `/api/analysis/v2/result/${uuid}`], ['POST', `/api/dev-ui/checkout/${uuid}`],
         ['GET', '/api/dev-ui/orders'], ['GET', '/api/user/me'], ['POST', '/api/auth/signout'],
         ['GET', '/api/admin/order-audit'], ['GET', '/api/admin/analysis-audit'],
-    ])('allows only the planned authenticated/read or synthetic route: %s %s', async (method, pathname) => {
+    ])('allows only a verified tester on the planned route: %s %s', async (method, pathname) => {
+        mockAuthenticatedUser(devUser());
         const response = await proxy(new NextRequest(`https://dev.yeosachin.com${pathname}`, { method }));
         expect(response.status).toBe(200);
         expect(response.headers.get('x-robots-tag')).toContain('noindex');
-        expect(mocks.createServerClient).not.toHaveBeenCalled();
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.createServerClient).toHaveBeenCalledOnce();
         expect(fetchSpy).not.toHaveBeenCalled();
     });
 
@@ -474,11 +488,68 @@ describe('Dev UI proxy boundary', () => {
     });
 
     it('keeps authenticated Dev login redirects and refreshed cookies on the host without a parent cookie domain', async () => {
-        mockAuthenticatedUser(uuid, true);
+        mockAuthenticatedUser(devUser(), true);
         const response = await proxy(new NextRequest('https://dev.yeosachin.com/login?redirectTo=%2Fresult%2Fexample'));
         expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/result/example');
         expect(response.headers.get('set-cookie')).toContain('sb-test-auth=refreshed');
         expect(response.headers.get('set-cookie')).not.toMatch(/Domain=/i);
         expect(response.headers.get('x-robots-tag')).toContain('noindex');
     });
+    it.each(['/', '/analyze?tab=standard', '/share/synthetic'])('requires Kakao login for Dev page %s', async pathname => {
+        mockAuthenticatedUser(null);
+        const response = await proxy(new NextRequest(`https://dev.yeosachin.com${pathname}`));
+        const login = new URL(response.headers.get('location')!);
+        expect(login.origin + login.pathname).toBe('https://dev.yeosachin.com/login');
+        expect(login.searchParams.get('redirectTo')).toBe(pathname);
+        expect(response.headers.get('cache-control')).toContain('no-store');
+    });
+
+    it('allows the login screen and the exact OAuth callback to reach their handlers', async () => {
+        mockAuthenticatedUser(null);
+        const login = await proxy(new NextRequest('https://dev.yeosachin.com/login'));
+        expect(login.status).toBe(200);
+        expect(login.headers.get('cache-control')).toContain('no-store');
+        mocks.createServerClient.mockClear();
+        const callback = await proxy(new NextRequest('https://dev.yeosachin.com/auth/callback'));
+        expect(callback.status).toBe(200);
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        [null, 401],
+        [devUser(operatorId, 'another@example.invalid'), 403],
+        [devUser(operatorId, devEmail, 'google'), 403],
+        [devUser(operatorId, devEmail, 'kakao', false), 403],
+        [devUser(otherUserId), 403],
+    ])('fails closed at the Dev user endpoint for an ineligible session', async (user, status) => {
+        mockAuthenticatedUser(user);
+        const response = await proxy(new NextRequest('https://dev.yeosachin.com/api/user/me'));
+        expect(response.status).toBe(status);
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(response.headers.get('location')).toBeNull();
+    });
+
+    it('sends a verified different account back to the Kakao login page without a loop', async () => {
+        mockAuthenticatedUser(devUser(operatorId, 'another@example.invalid'));
+        const denied = await proxy(new NextRequest('https://dev.yeosachin.com/analyze'));
+        const loginUrl = 'https://dev.yeosachin.com/login?redirectTo=%2Fanalyze&error=dev_access_denied';
+        expect(denied.headers.get('location')).toBe(loginUrl);
+        const login = await proxy(new NextRequest(loginUrl));
+        expect(login.status).toBe(200);
+        expect(login.headers.get('location')).toBeNull();
+    });
+
+    it('rejects a configured list in place of a single Dev Kakao email', async () => {
+        vi.stubEnv('DEV_UI_ALLOWED_KAKAO_EMAIL', `${devEmail},another@example.invalid`);
+        mockAuthenticatedUser(devUser());
+        const response = await proxy(new NextRequest('https://dev.yeosachin.com/api/user/me'));
+        expect(response.status).toBe(503);
+    });
+
+    it('does not return an authenticated Dev account to its own login page', async () => {
+        mockAuthenticatedUser(devUser());
+        const response = await proxy(new NextRequest('https://dev.yeosachin.com/login?redirectTo=%2Flogin%2F'));
+        expect(response.headers.get('location')).toBe('https://dev.yeosachin.com/analyze');
+    });
+
 });

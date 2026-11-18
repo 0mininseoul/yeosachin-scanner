@@ -35,6 +35,7 @@ import {
     selectOAuthRedirectIntent,
 } from '@/lib/services/auth/oauth-redirect-intent';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
+import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/services/dev-ui/site-access';
 import { readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -315,6 +316,17 @@ async function handleGET(
         cookieNext,
     );
     const adminDestination = readAdminConsoleDestination(selectedRedirectIntent);
+    const rawDestination = adminDestination ?? selectedRedirectIntent;
+    const redirectAfterAuthFailure = (error: string): NextResponse => {
+        if (deploymentBoundary === 'dev') {
+            const response = redirectAndClearOAuthIntent(devUiLoginUrl(request.url, rawDestination, error));
+            response.headers.set('Cache-Control', 'private, no-store');
+            return response;
+        }
+        const loginUrl = new URL(adminDestination ?? '/login', appOrigin);
+        loginUrl.searchParams.set('error', error);
+        return redirectAndClearOAuthIntent(loginUrl);
+    };
 
     if (!code) {
         operationalLogger.emit({
@@ -327,9 +339,7 @@ async function handleGET(
                 error_code: 'INVALID_REQUEST',
             },
         });
-        const loginUrl = new URL(adminDestination ?? '/login', appOrigin);
-        loginUrl.searchParams.set('error', 'no_code');
-        return redirectAndClearOAuthIntent(loginUrl);
+        return redirectAfterAuthFailure('no_code');
     }
 
     const cookieStore = await cookies();
@@ -367,14 +377,54 @@ async function handleGET(
                 error_code: 'PROVIDER_ERROR',
             },
         });
-        const loginUrl = new URL(adminDestination ?? '/login', appOrigin);
-        loginUrl.searchParams.set('error', 'exchange_failed');
-        return redirectAndClearOAuthIntent(loginUrl);
+        return redirectAfterAuthFailure('exchange_failed');
     }
     const exchange = exchangeResult.data;
 
-    // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
-    await supabase.auth.getUser();
+    // Verify the newly exchanged session before Dev DB, claim, or profile work.
+    if (deploymentBoundary === 'dev') {
+        const verified = await supabase.auth.getUser().catch(() => null);
+        const verifiedUser = verified && !verified.error ? verified.data.user : null;
+        const access = verifiedUser && verifiedUser.id === exchange?.user?.id
+            ? getDevUiSiteAccess(verifiedUser, request) : 'denied';
+        if (access !== 'allowed') {
+            await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
+            const error = !verified || verified.error || access === 'unavailable'
+                ? 'dev_auth_unavailable' : 'dev_access_denied';
+            return redirectAfterAuthFailure(error);
+        }
+    } else {
+        // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
+        await supabase.auth.getUser();
+    }
+
+    const session = exchange?.session;
+    const authedUser = exchange?.user;
+    if (authedUser) {
+        try {
+            const classification = await loadAccountClassification(authedUser.id);
+            if (classification?.lifecycle === 'retired') {
+                return redirectUnavailableAccount(
+                    () => supabase.auth.signOut({ scope: 'local' }),
+                    appOrigin,
+                );
+            }
+        } catch {
+            // A lifecycle check must not fail open after a session exchange.
+            return redirectUnavailableAccount(
+                () => supabase.auth.signOut({ scope: 'local' }),
+                appOrigin,
+            );
+        }
+    }
+
+    if (deploymentBoundary === 'dev') {
+        const redirectUrl = devUiPostLoginUrl(request.url, rawDestination);
+        redirectUrl.searchParams.set('verified', 'true');
+        const response = redirectAndClearOAuthIntent(redirectUrl);
+        response.headers.set('Cache-Control', 'private, no-store');
+        return response;
+    }
 
     // The claim RPC is SECURITY INVOKER and its UPDATE policy is granted only
     // to `authenticated`. The server cookie client has just exchanged the code,
@@ -406,29 +456,9 @@ async function handleGET(
         )
         : supabase;
 
-    const session = exchange?.session;
-    const authedUser = exchange?.user;
-    if (authedUser) {
-        try {
-            const classification = await loadAccountClassification(authedUser.id);
-            if (classification?.lifecycle === 'retired') {
-                return redirectUnavailableAccount(
-                    () => supabase.auth.signOut({ scope: 'local' }),
-                    appOrigin,
-                );
-            }
-        } catch {
-            // A lifecycle check must not fail open after a session exchange.
-            return redirectUnavailableAccount(
-                () => supabase.auth.signOut({ scope: 'local' }),
-                appOrigin,
-            );
-        }
-    }
-
     // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const provider = authProvider(authedUser?.app_metadata?.provider);
-    if (authedUser && provider === 'kakao' && deploymentBoundary !== 'dev') {
+    if (authedUser && provider === 'kakao') {
         const signedUpAt = new Date(authedUser.created_at ?? Date.now());
         // Some supported test/runtime cookie adapters expose only the Supabase
         // getAll/setAll surface; absence simply means no attribution label.
@@ -488,7 +518,7 @@ async function handleGET(
 
     const claimRestore = await restoreAnonymousPreflightClaim(
         request.url,
-        adminDestination ?? selectedRedirectIntent,
+        rawDestination,
         authedUser?.id,
         claimClient,
         selectedRedirectIntent !== cookieNext ? cookieNext : null,

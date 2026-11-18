@@ -10,7 +10,8 @@ import { isJsonRequest, isSameOriginMutation } from '@/lib/services/earlybird/co
 import { RESULT_PAGE_SIZE_DEFAULT, RESULT_PAGE_SIZE_MAX, decodeResultCursor } from '@/lib/domain/analysis/result-pagination';
 import { classifyOperatorAuthError } from '@/lib/services/analysis/score-audit';
 import { assertDevUiDeployment, devUiRequestBoundary, DevUiDeploymentError } from './deployment';
-import { assertDevUiAdministrator, assertDevUiTester } from './access';
+import { assertDevUiAdministrator } from './access';
+import { getDevUiSiteAccess } from './site-access';
 import { DEV_UI_FIXTURE_SCENARIOS, DevUiStoreError, devUiTargetSchema } from './contracts';
 import { createDevUiStore } from './store';
 import { projectDevUiProgress, projectDevUiResult } from './projection';
@@ -51,7 +52,7 @@ function storeFailure(error: unknown): NextResponse {
 export async function withDevUiSession(
     request: Request,
     operation: (user: User) => Promise<NextResponse>,
-    options: { access?: 'tester' | 'admin' | 'authenticated' } = {},
+    options: { requireAdministrator?: boolean } = {},
 ): Promise<NextResponse> {
     try {
         if (devUiRequestBoundary(request) !== 'dev') return failure(403, 'DEV_UI_DEPLOYMENT_REJECTED', '허용되지 않은 테스트 요청입니다.');
@@ -64,8 +65,10 @@ export async function withDevUiSession(
         const { data: { user }, error } = await supabase.auth.getUser();
         if (error && classifyOperatorAuthError(error) !== 'unauthorized') return failure(503, 'DEV_UI_AUTH_UNAVAILABLE', '인증 서비스를 잠시 후 다시 확인해주세요.');
         if (error || !user || !uuid.safeParse(user.id).success) return failure(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
-        if (options.access === 'admin') assertDevUiAdministrator(user.id, request);
-        else if (options.access !== 'authenticated') assertDevUiTester(user.id, request);
+        const access = getDevUiSiteAccess(user, request);
+        if (access === 'unavailable') return failure(503, 'DEV_UI_AUTH_UNAVAILABLE', '인증 서비스를 잠시 후 다시 확인해주세요.');
+        if (access !== 'allowed') return failure(403, 'DEV_UI_ACCESS_DENIED', '등록된 테스트 계정만 이용할 수 있습니다.');
+        if (options.requireAdministrator) assertDevUiAdministrator(user.id, request);
         return await operation(user);
     } catch (error) {
         return storeFailure(error);
@@ -137,9 +140,9 @@ export function handleDevUiResultRead(request: Request, runId: string): Promise<
 
 export function handleDevUiUserMe(request: Request): Promise<NextResponse> {
     return withDevUiSession(request, async user => devUiJson({ user: {
-        id: user.id, email: user.email ?? '', provider: user.app_metadata?.provider === 'kakao' ? 'kakao' : 'google',
+        id: user.id, email: user.email ?? '', provider: 'kakao',
         analysis_count: 0, is_paid_user: false, is_unlimited: false, created_at: user.created_at, updated_at: user.updated_at ?? user.created_at,
-    } }), { access: 'authenticated' });
+    } }));
 }
 
 export function handleDevUiCheckoutRead(request: Request, orderId: string): Promise<NextResponse> {
@@ -183,7 +186,7 @@ export function handleDevUiAdminOrders(request: Request): Promise<NextResponse> 
     return withDevUiSession(request, async user => {
         if (new URL(request.url).search) throw new DevUiStoreError('DEV_UI_INVALID_INPUT');
         return devUiJson({ simulation: true, orders: await createDevUiStore().listAdminOrders({ adminUserId: user.id }) });
-    }, { access: 'admin' });
+    }, { requireAdministrator: true });
 }
 
 export function handleDevUiAdminOrder(request: Request, orderId: string): Promise<NextResponse> {
@@ -192,5 +195,5 @@ export function handleDevUiAdminOrder(request: Request, orderId: string): Promis
         const order = await createDevUiStore().readAdminOrder({ adminUserId: user.id, orderId: parseId(orderId) });
         if (!order) throw new DevUiStoreError('DEV_UI_NOT_FOUND');
         return devUiJson({ simulation: true, order });
-    }, { access: 'admin' });
+    }, { requireAdministrator: true });
 }
