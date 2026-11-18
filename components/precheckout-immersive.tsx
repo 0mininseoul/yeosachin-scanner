@@ -65,9 +65,10 @@ function nextGraphTransitionAt(startedAtMs: number, nowMs: number): number {
 async function fetchPrecheckoutBlite(
     preflightId: string,
     claimToken: string | null,
+    devLive: boolean,
 ): Promise<BrowserBliteStatus> {
-    if (isDevUiPresentation()) return { state: 'complete', dto: createDevUiPrecheckoutPresentation() };
-    const key = `${preflightId}:${claimToken ?? ''}`;
+    if (!devLive && isDevUiPresentation()) return { state: 'complete', dto: createDevUiPrecheckoutPresentation() };
+    const key = `${devLive ? 'live:' : ''}${preflightId}:${claimToken ?? ''}`;
     const existing = browserBliteRequests.get(key);
     if (existing) return existing;
 
@@ -75,7 +76,8 @@ async function fetchPrecheckoutBlite(
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), FETCH_DEADLINE_MS);
         try {
-            const response = await fetch('/api/analysis/precheckout-blite', {
+            const path = '/api/analysis/precheckout-blite';
+            const response = await fetch(devLive ? `${path}?devAnalysis=live` : path, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -151,6 +153,7 @@ async function fetchPrecheckoutBlite(
 
 export interface PrecheckoutImmersiveProps {
     preflightId: string;
+    devLive?: boolean;
     claimToken: string | null;
     /** Persisted when preflight is accepted, and therefore stable on a normal refresh. */
     submittedAtMs?: number | null;
@@ -171,6 +174,7 @@ export interface PrecheckoutImmersiveProps {
 
 export function PrecheckoutImmersive({
     preflightId,
+    devLive = false,
     claimToken,
     targetUsername = null,
     onGoToPlans,
@@ -178,7 +182,7 @@ export function PrecheckoutImmersive({
     onDemoError,
     onBliteResultShown,
 }: PrecheckoutImmersiveProps) {
-    const devPresentation = isDevUiPresentation();
+    const devPresentation = devLive || isDevUiPresentation();
     /** Mount-local clock, always fresh, so every mount/remount/reload plays S1 first. */
     const [visibleEntryAtMs] = useState(() => Date.now());
     const [view, setView] = useState<ImmersiveView>('demo');
@@ -310,7 +314,7 @@ export function PrecheckoutImmersive({
         async function poll(): Promise<void> {
             if (!active || exitRef.current !== null || statusReadInFlight) return;
             statusReadInFlight = true;
-            const status = await fetchPrecheckoutBlite(preflightId, claimToken);
+            const status = await fetchPrecheckoutBlite(preflightId, claimToken, devLive);
             statusReadInFlight = false;
             if (!active || exitRef.current !== null) return;
 
@@ -382,7 +386,7 @@ export function PrecheckoutImmersive({
             active = false;
             if (pollTimer) clearTimeout(pollTimer);
         };
-    }, [claimToken, emitPrecheckoutEvent, preflightId, requestExit]);
+    }, [claimToken, devLive, emitPrecheckoutEvent, preflightId, requestExit]);
 
     /**
      * The page withdraws its own heading eyebrow on this announcement, so the announcement has

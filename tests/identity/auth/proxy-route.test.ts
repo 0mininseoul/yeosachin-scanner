@@ -427,6 +427,7 @@ describe('Dev UI proxy boundary', () => {
         '/api/analysis/v2/worker', '/api/analysis/preflight/worker', '/api/analysis/start',
         '/api/analysis/run', '/api/analysis/step', '/api/analysis/preflight/recover',
         '/api/analysis/preflight/retention', `/api/analysis/preflight/${uuid}/entitle`,
+        '/api/analysis/precheckout-blite', '/api/analysis/precheckout-blite?devAnalysis=live&devAnalysis=live',
         `/api/analysis/betatest/preflight/${uuid}/admit`, '/api/webhooks/groble',
         '/api/internal/earlybird-payment-discord-outbox', '/api/earlybird/checkout/redirect',
         '/api/image-proxy', '/api/admin/apify-accounts', '/api/account/delete',
@@ -444,6 +445,7 @@ describe('Dev UI proxy boundary', () => {
         ['GET', `/api/analysis/v2/result/${uuid}`], ['POST', `/api/dev-ui/checkout/${uuid}`],
         ['GET', '/api/dev-ui/orders'], ['GET', '/api/user/me'], ['POST', '/api/auth/signout'],
         ['GET', '/api/admin/order-audit'], ['GET', '/api/admin/analysis-audit'],
+        ['POST', '/api/analysis/precheckout-blite?devAnalysis=live'],
     ])('allows only a verified tester on the planned route: %s %s', async (method, pathname) => {
         mockAuthenticatedUser(devUser());
         const response = await proxy(new NextRequest(`https://dev.yeosachin.com${pathname}`, { method }));

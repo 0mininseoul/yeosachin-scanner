@@ -5,6 +5,8 @@ import {
     resolveActivePrecheckoutSurface,
 } from '@/lib/services/precheckout/blite-page-flow';
 
+const presentation = readFileSync(join(process.cwd(), 'components/analysis-preflight-presentation.tsx'), 'utf8');
+
 describe('/analyze precheckout plan gate', () => {
     it('keeps a prior preflight legacy surface hidden while a new cohort preflight initializes', () => {
         expect(resolveActivePrecheckoutSurface(
@@ -23,7 +25,8 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain("preflight?.status === 'pending'");
         expect(page).toContain('preflightId={immersivePreflight.preflightId}');
         expect(page).toContain("activePrecheckoutSurface === 'legacy' && readyPreflight");
-        expect(page).toContain('data-precheckout-target-card');
+        expect(page).toContain('<AnalysisTargetCard target={readyPreflight.target} />');
+        expect(presentation).toContain('data-precheckout-target-card');
     });
 
     it('resumes an authenticated exact-match OAuth checkout continuation without the immersive gate, and hides the demo during hydration', () => {
@@ -49,11 +52,9 @@ describe('/analyze precheckout plan gate', () => {
         expect(page).toContain(
             'const handleBliteResultShown = useCallback(() => setBliteResultShown(true), []);',
         );
-        expect(page).toContain(
-            "{!bliteResultShown && (\n                                    <Eyebrow>{exclusionDecided ? '판독 의뢰서 · 대상 확인' : '판독 의뢰서 · 본인 제외'}</Eyebrow>\n                                )}",
-        );
+        expect(page).toContain('bliteResultShown={bliteResultShown}');
+        expect(presentation).toMatch(/{!bliteResultShown && \(\s*<Eyebrow>{exclusionDecided[^}]*'판독 의뢰서 · 본인 제외'}/);
         // Every other state keeps it, and a target reset restores it.
-        expect(page).toContain("'판독 의뢰서 · 본인 제외'");
         expect(page).toContain('setBliteResultShown(false);');
     });
 

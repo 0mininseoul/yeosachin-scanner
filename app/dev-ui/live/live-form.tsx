@@ -1,9 +1,21 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { CaseCard, Eyebrow, PrimaryButton, TopBar } from '@/components/case-ui';
+import { CaseCard, Eyebrow, Panel, PrimaryButton, TopBar } from '@/components/case-ui';
+import { InstagramLookupLink } from '@/components/instagram-lookup-link';
+import { AnalysisPlanCards, AnalysisPlanSection } from '@/components/analysis-plan-selection';
+import {
+    AnalysisExclusionPanel,
+    AnalysisInstagramInput,
+    AnalysisPreflightHeading,
+    AnalysisTargetCard,
+    AnalysisTargetHeading,
+} from '@/components/analysis-preflight-presentation';
+import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
+import { PreflightPendingStatus } from '@/components/preflight-pending-status';
+import { normalizeInstagramUsername } from '@/lib/services/analysis/v2-client-credentials';
 import { preflightAcceptedV1Schema, preflightStatusV1Schema, type PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
 const selector = 'devAnalysis=live';
@@ -38,6 +50,7 @@ async function call(
         cache: 'no-store',
         signal,
     });
+    if (response.status === 204 && method === 'PATCH') return null;
     const payload = await response.json();
     if (!response.ok) {
         throw new DevLiveRequestError(
@@ -63,6 +76,10 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     }, [routePreflightId]);
     const [snapshot, setSnapshot] = useState<{ status: PreflightStatusV1; planId: LivePlanId } | null>(null);
     const [excluded, setExcluded] = useState('');
+    const [savedExclusionId, setSavedExclusionId] = useState('');
+    const [planViewId, setPlanViewId] = useState('');
+    const [bliteResultId, setBliteResultId] = useState('');
+    const [launched, setLaunched] = useState<{ id: string; target: string; at: number } | null>(null);
     const [confirmed, setConfirmed] = useState(false);
     const [busy, setBusy] = useState(false);
     const [pendingAdmission, setPendingAdmission] = useState<PendingAdmission | null>(null);
@@ -73,15 +90,39 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const activeAdmission = pendingAdmission?.preflightId === preflightId ? pendingAdmission : null;
     const current = snapshot?.status.preflightId.toLowerCase() === preflightId ? snapshot : null;
     const preflight = current?.status;
-    const targetInstagramId = target.trim().toLowerCase();
+    const targetInstagramId = normalizeInstagramUsername(target);
+    const readyPreflight = preflight?.status === 'ready' ? preflight : null;
+    const exclusionDecided = !!preflight && (preflight.exclusionDecision !== 'pending' || savedExclusionId === preflightId);
+    const plansVisible = !!preflightId && planViewId === preflightId;
+    const launchedPreflight = launched?.id === preflightId ? launched : null;
+    const displayTarget = readyPreflight?.target.username ?? launchedPreflight?.target ?? null;
     const standardTarget = standard?.target ?? null;
-    const startPlanId = targetInstagramId === standardTarget ? 'standard' : 'basic';
+    const startPlanId = targetInstagramId && targetInstagramId === standardTarget ? 'standard' : 'basic';
     const canStartPlan = startPlanId === 'basic' || standard?.available === true;
     const displayedPlanId = preflightId ? current?.planId : canStartPlan ? startPlanId : undefined;
     const displayedPlan = displayedPlanId === 'standard' ? 'Standard' : 'Basic';
+    const approvedPlanAvailable = !!readyPreflight && !!current && isPlanAvailable(readyPreflight, current.planId);
+    const showExclusion = !!preflight && (preflight.status === 'pending' || preflight.status === 'ready') && !exclusionDecided;
+    const showImmersive = !!preflight && (preflight.status === 'pending' || preflight.status === 'ready')
+        && exclusionDecided && !plansVisible;
+    const goToPlans = useCallback(() => {
+        setPlanViewId(preflightId);
+        setBliteResultId('');
+    }, [preflightId]);
+    useEffect(() => {
+        if (!plansVisible) return;
+        const frame = requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
+        return () => cancelAnimationFrame(frame);
+    }, [plansVisible]);
+    const markBliteShown = useCallback(() => setBliteResultId(preflightId), [preflightId]);
 
     useLayoutEffect(() => {
         setPendingAdmission(pending => pending?.preflightId === preflightId ? pending : null);
+        setSavedExclusionId(id => id === preflightId ? id : '');
+        setPlanViewId(id => id === preflightId ? id : '');
+        setBliteResultId(id => id === preflightId ? id : '');
+        setExcluded('');
+        setError('');
         // Abort the previous preflight at navigation commit, before a queued poll can resume it.
         return () => preflightController.current?.abort();
     }, [preflightId]);
@@ -119,7 +160,7 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                 const status = preflightStatusV1Schema.parse(payload);
                 if (status.preflightId.toLowerCase() !== preflightId) throw new Error('조회한 사전 점검이 현재 실행과 일치하지 않습니다.');
                 const reportedPlan = response.headers.get(planHeader);
-                const planId = reportedPlan ?? 'basic';
+                const planId = reportedPlan;
                 if (planId !== 'basic' && planId !== 'standard') throw new Error('사전 점검의 분석 플랜을 확인하지 못했습니다.');
                 if (controller.signal.aborted) return;
                 setSnapshot({ status, planId });
@@ -177,7 +218,9 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                     targetInstagramId,
                 }, undefined, { attemptId, planId: startPlanId }));
                 sessionStorage.removeItem(storageKey);
-                setAcceptedPreflightId(accepted.preflightId.toLowerCase());
+                const id = accepted.preflightId.toLowerCase();
+                setLaunched({ id, target: targetInstagramId, at: Date.now() });
+                setAcceptedPreflightId(id);
                 router.replace(`/dev-ui/live?preflight=${accepted.preflightId}`);
             } catch (cause) {
                 if (cause instanceof DevLiveRequestError && (cause.code === 'DEV_LIVE_START_ATTEMPT_EXPIRED'
@@ -190,19 +233,41 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         });
     }
 
-    function confirmExclusion() {
+    function resetTarget() {
+        preflightController.current?.abort();
+        setAcceptedPreflightId('');
+        setSnapshot(null);
+        setLaunched(null);
+        setSavedExclusionId('');
+        setPlanViewId('');
+        setBliteResultId('');
+        setTarget('');
+        setConfirmed(false);
+        setExcluded('');
+        setError('');
+        router.replace('/dev-ui/live');
+    }
+
+    function confirmExclusion(rawUsername?: string) {
+        const signal = preflightController.current?.signal;
+        if (!signal || signal.aborted || !showExclusion) return;
+        const excludedInstagramId = rawUsername === undefined ? null : normalizeInstagramUsername(rawUsername);
+        if (rawUsername !== undefined && !excludedInstagramId) {
+            setError('본인의 인스타그램 아이디를 확인해주세요.');
+            return;
+        }
         void submit(async () => {
-            const excludedInstagramId = excluded.trim().toLowerCase();
-            const result = await call(`/api/analysis/preflight/${preflightId}`, 'PATCH', excludedInstagramId
-                ? { decision: 'exclude', excludedInstagramId } : { decision: 'skip' });
-            const status = preflightStatusV1Schema.parse(result);
-            setSnapshot(previous => previous?.status.preflightId === status.preflightId ? { ...previous, status } : previous);
+            await call(`/api/analysis/preflight/${preflightId}`, 'PATCH', excludedInstagramId
+                ? { decision: 'exclude', excludedInstagramId } : { decision: 'skip' }, signal)
+                .catch(cause => { if (!signal.aborted) throw cause; });
+            if (!signal.aborted) setSavedExclusionId(preflightId);
         });
     }
 
     function beginAnalysis() {
         const signal = preflightController.current?.signal;
-        if (!signal || signal.aborted || !current || activeAdmission || !isPlanAvailable(current.status, current.planId)) return;
+        if (!signal || signal.aborted || !plansVisible || !exclusionDecided || !current
+            || activeAdmission || !isPlanAvailable(current.status, current.planId)) return;
         void submit(async () => {
             const { planId } = current;
             const result = await call(`/api/analysis/preflight/${preflightId}/entitle`, 'POST', { planId }, signal)
@@ -220,53 +285,117 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         });
     }
 
-    return <>
+    return <div className="min-h-dvh">
         <TopBar />
-        <main className="mx-auto max-w-[560px] px-5 py-8">
-            <Eyebrow>Dev · 실제 공급자</Eyebrow>
-            <h1 className="mt-3 text-[26px] font-extrabold">실제 분석 · 카드 결제 없음</h1>
-            {displayedPlanId && <p className="mt-2 text-sm text-fg-dim">{displayedPlanId === 'standard'
-                ? '공개 테스트 계정을 Standard로 판독합니다. 사전 점검부터 분석 1회에 Apify 최대 $6, Vertex 최대 $4로 총 $10까지 사용합니다.'
-                : '공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 1회 최대 $7의 분석 예산을 사용합니다.'}</p>}
-            <CaseCard className="mt-5 space-y-4 p-5">
-                {available === null && <p role="status">실제 분석을 준비하고 있습니다.</p>}
-                {available === false && <p role="status">실제 분석 설정을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
-                {preflightId && <a href="/dev-ui/live" className="block text-sm underline">새 실제 분석</a>}
-                {!preflightId && recentPreflightId && <Link href={`/dev-ui/live?preflight=${recentPreflightId}`} className="block text-sm underline">최근 실제 분석 다시 열기</Link>}
-                {!preflightId && available === true && <form onSubmit={start} className="space-y-4">
-                    <label className="block text-sm" htmlFor="dev-live-target">대상 인스타그램 아이디</label>
-                    <input id="dev-live-target" className="w-full border border-line bg-ink p-3" value={target} onChange={event => {
-                        const value = event.target.value;
-                        if ((value.trim().toLowerCase() === standardTarget) !== (startPlanId === 'standard')) setConfirmed(false);
-                        setTarget(value);
-                    }} maxLength={30} required />
-                    {standardTarget && <p className="text-sm text-fg-dim">Standard 대상은 @{standardTarget}입니다.</p>}
-                    {!canStartPlan && <p role="status">현재 Standard 사전 점검을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
-                    <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /> 실제 사전 점검에서 분석 예산을 사용합니다.</label>
-                    <PrimaryButton type="submit" disabled={busy || !confirmed || !canStartPlan || !targetInstagramId}>실제 사전 점검 시작</PrimaryButton>
-                </form>}
-                {preflightId && (!preflight || preflight.status === 'pending') && !error && <p role="status">실제 사전 점검이 진행 중입니다.</p>}
-                {preflight?.status === 'blocked' && <p role="alert">이 계정의 사전 점검을 완료할 수 없습니다. ({preflight.code})</p>}
-                {preflight?.status === 'ready' && <>
-                    <p>사전 점검 완료 · 팔로워 {preflight.target.followersCount} · 팔로잉 {preflight.target.followingCount}</p>
-                    {preflight.exclusionDecision === 'pending' ? <>
-                        <label className="block text-sm" htmlFor="dev-live-exclusion">제외할 계정 (선택)</label>
-                        <input id="dev-live-exclusion" className="w-full border border-line bg-ink p-3" value={excluded} onChange={event => setExcluded(event.target.value)} maxLength={30} />
-                        <PrimaryButton onClick={confirmExclusion} disabled={busy || available !== true}>{excluded.trim() ? '이 계정 제외' : '제외 없이 계속'}</PrimaryButton>
-                    </> : <>
-                        {activeAdmission && <p role="status">최신 계정 정보를 확인하고 분석 작업을 준비하고 있습니다.</p>}
-                        {current && isPlanAvailable(preflight, current.planId) ? <PrimaryButton onClick={beginAnalysis} disabled={busy || !!activeAdmission || available !== true}>
-                            {activeAdmission ? '분석 시작 상태 다시 확인' : `${displayedPlan} 분석 시작 · 카드 결제 없음`}
-                        </PrimaryButton> : <p>현재 계정은 이번 {displayedPlan} 실행 범위에 해당하지 않습니다.</p>}
-                    </>}
+        <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
+            <p className="mb-5 border-l-2 border-amber pl-3 text-[13px] text-fg-dim">Dev 실제 분석 · 카드 결제 없음</p>
+            {available === null && <p role="status" className="mb-5 text-sm text-fg-dim">실제 분석을 준비하고 있습니다.</p>}
+            {available === false && <p role="status" className="mb-5 text-sm text-fg-dim">실제 분석 설정을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
+            {!preflightId && <>
+                <AnalysisTargetHeading />
+                {available === true && <Panel className="mt-8 p-5">
+                    <form onSubmit={start}>
+                        <AnalysisInstagramInput
+                            id="dev-live-target"
+                            label="대상 인스타그램 아이디"
+                            placeholder="username"
+                            value={target}
+                            onChange={value => {
+                                if (normalizeInstagramUsername(value) !== targetInstagramId) setConfirmed(false);
+                                setTarget(value);
+                                setError('');
+                            }}
+                        />
+                        <InstagramLookupLink />
+                        <p className="mt-4 border-l-2 border-amber pl-3 text-[12px] leading-relaxed text-fg-dim">
+                            <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.
+                        </p>
+                        {standardTarget && <p data-amp-mask className="mt-3 text-sm text-fg-dim">Standard 대상은 @{standardTarget}입니다.</p>}
+                        {!canStartPlan && <p role="status" className="mt-3 text-sm text-fg-dim">현재 Standard 사전 점검을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
+                        {displayedPlanId && <p className="mt-3 text-sm text-fg-dim">{displayedPlanId === 'standard'
+                            ? '공개 테스트 계정을 Standard로 판독합니다. 사전 점검부터 분석 1회에 Apify 최대 $6, Vertex 최대 $4로 총 $10까지 사용합니다.'
+                            : '공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 1회 최대 $7의 분석 예산을 사용합니다.'}</p>}
+                        <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /> 실제 사전 점검에서 분석 예산을 사용합니다.</label>
+                        <div className="mt-5">
+                            <PrimaryButton type="submit" disabled={busy || !confirmed || !canStartPlan || !targetInstagramId}>
+                                {busy ? '계정 확인 중…' : '실제 사전 점검 시작'}
+                            </PrimaryButton>
+                        </div>
+                    </form>
+                </Panel>}
+                {recentPreflightId && <Link href={`/dev-ui/live?preflight=${recentPreflightId}`} className="mt-5 block text-sm underline">최근 실제 분석 다시 열기</Link>}
+            </>}
+
+            {preflightId && preflight?.status === 'blocked' ? (
+                <CaseCard bracket="var(--color-blood)" className="p-7 text-center">
+                    <Eyebrow className="justify-center">사전 점검 중단</Eyebrow>
+                    <h1 className="mt-4 text-[22px] font-extrabold text-fg">판독 대상을 확인해주세요</h1>
+                    <p role="alert" data-amp-mask className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        현재 이 계정은 판독할 수 없습니다. ({preflight.code})
+                    </p>
+                    <div className="mt-7">
+                        <PrimaryButton type="button" onClick={resetTarget}>다른 계정 확인하기</PrimaryButton>
+                    </div>
+                </CaseCard>
+            ) : preflightId && <>
+                <AnalysisPreflightHeading
+                    exclusionDecided={!preflight || exclusionDecided}
+                    ready={!!readyPreflight}
+                    bliteResultShown={bliteResultId === preflightId}
+                    onChangeTarget={resetTarget}
+                />
+                {showExclusion && <AnalysisExclusionPanel
+                    value={excluded}
+                    onChange={value => { setExcluded(value); setError(''); }}
+                    onExclude={() => confirmExclusion(excluded)}
+                    onSkip={() => confirmExclusion()}
+                    saving={busy}
+                    disabled={available !== true}
+                    error={error}
+                />}
+                {showImmersive && <PrecheckoutImmersive
+                    key={preflightId}
+                    preflightId={preflightId}
+                    devLive
+                    claimToken={null}
+                    submittedAtMs={launchedPreflight?.at}
+                    targetUsername={displayTarget}
+                    onGoToPlans={goToPlans}
+                    onRetry={resetTarget}
+                    onBliteResultShown={markBliteShown}
+                />}
+                {!readyPreflight && ((!preflight && !error) || plansVisible) && <PreflightPendingStatus
+                    targetInstagramId={displayTarget}
+                    startedAt={launchedPreflight?.at ?? null}
+                />}
+                {plansVisible && readyPreflight && current && <>
+                    <AnalysisTargetCard target={readyPreflight.target} />
+                    <AnalysisPlanSection>
+                        <AnalysisPlanCards
+                            plans={readyPreflight.plans}
+                            requiredPlan={readyPreflight.requiredPlan}
+                            selectedPlan={current.planId}
+                            lockedPlan={current.planId}
+                        />
+                        <p className="mt-4 text-[11.5px] leading-relaxed text-fg-dim">
+                            실제 분석은 이번에 승인된 {displayedPlan} 플랜으로만 진행합니다. 카드 결제는 없습니다.
+                        </p>
+                        {activeAdmission && <p role="status" className="mt-4 text-sm text-fg-dim">최신 계정 정보를 확인하고 분석 작업을 준비하고 있습니다.</p>}
+                        {approvedPlanAvailable ? <div className="mt-5">
+                            <PrimaryButton type="button" size="lg" onClick={beginAnalysis} disabled={busy || !!activeAdmission || available !== true}>
+                                {activeAdmission ? '분석 시작 상태 다시 확인' : busy ? '요청 처리 중…' : `${displayedPlan} 분석 시작 · 카드 결제 없음`}
+                            </PrimaryButton>
+                        </div> : <p className="mt-5 text-sm text-fg-dim">현재 계정은 이번 {displayedPlan} 실행 범위에 해당하지 않습니다.</p>}
+                    </AnalysisPlanSection>
                 </>}
-                {error && <p role="alert" className="text-sm text-blood-2">{error}</p>}
-                {error && preflightId && <button type="button" className="text-sm underline" onClick={() => {
-                    setError('');
-                    setReadRevision(value => value + 1);
-                }}>상태 다시 확인</button>}
-            </CaseCard>
-            <Link href="/analyze" className="mt-6 inline-block underline">모의 분석으로 돌아가기</Link>
+            </>}
+
+            {error && !showExclusion && <p role="alert" data-amp-mask className="mt-4 border-l-2 border-blood pl-3 text-[13px] text-blood-2">{error}</p>}
+            {error && preflightId && <button type="button" className="mt-4 text-sm underline" onClick={() => {
+                setError('');
+                setReadRevision(value => value + 1);
+            }}>상태 다시 확인</button>}
+            <Link href="/analyze" className="mt-6 inline-block text-sm underline">모의 분석으로 돌아가기</Link>
         </main>
-    </>;
+    </div>;
 }
