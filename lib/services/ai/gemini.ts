@@ -1020,8 +1020,11 @@ export async function analyzeWithGemini<T>(
     const configuredBudgetGuard = ['1', 'true', 'yes', 'on'].includes(
         process.env.VERTEX_AI_BUDGET_GUARD_ENABLED?.trim().toLowerCase() ?? '',
     );
-    const resolvedBudgetGuard = suppliedBudgetGuard
-        ?? (configuredBudgetGuard
+    // Owner-start runs reserve the full context in their separate durable
+    // grant. The shared daily ledger would combine distinct Dev runs.
+    const resolvedBudgetGuard = devLiveApproval && process.env.DEV_LIVE_ANALYSIS_MODE === 'owner_start'
+        ? null
+        : suppliedBudgetGuard ?? (configuredBudgetGuard
             || Boolean(stage && aiStagePolicySupports(resolvedPolicyVersion, 'vertexAiCostGuardV1'))
             ? defaultVertexAiBudgetGuard()
             : null);

@@ -138,6 +138,26 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
     });
 
+    it('reserves an owner-start run independently of the shared daily ledger', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_ARMED', 'true');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+        const grant = { id: 'synthetic-owner-grant' };
+        const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
+        const budgetGuard = undispatchedBudgetGuard();
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValue(reservation);
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
+            budgetGuard: budgetGuard as unknown as VertexAiBudgetGuard,
+        })).resolves.toEqual({ value: 'ok' });
+        expect(budgetGuard.reserve).not.toHaveBeenCalled();
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, 'gemini-3.1-flash-lite', 'global', 128);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledOnce();
+    });
+
     it('disables SDK retry for a reserved Dev attempt and settles only complete usage', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };
