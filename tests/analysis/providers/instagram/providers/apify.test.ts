@@ -3,6 +3,18 @@ import { ApifyApiError } from 'apify-client';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
+const devBudget = vi.hoisted(() => ({
+    require: vi.fn(),
+    reserve: vi.fn(),
+    check: vi.fn(),
+}));
+
+vi.mock('@/lib/services/dev-ui/live-budget', () => ({
+    requireDevLiveProviderApproval: devBudget.require,
+    reserveDevLiveApifyStart: devBudget.reserve,
+    assertDevLiveBudgetAvailable: devBudget.check,
+}));
+
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
@@ -100,6 +112,56 @@ function mockClient(
     } as unknown as ApifyClientLike;
     return { client, call, waitForFinish, abort, listItems };
 }
+
+describe('Dev live Apify budget', () => {
+    it('reserves the execution ceiling and never sends a refused Actor start', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        try {
+            const { client, call } = mockClient([]);
+            const grant = { id: 'synthetic-grant' };
+            devBudget.require.mockReturnValue(grant);
+            devBudget.reserve.mockRejectedValueOnce(new Error('DEV_LIVE_BUDGET_EXCEEDED'));
+            const onRunStartRejected = vi.fn();
+            await expect(startOrResumeApifyActor(
+                client, APIFY_RELATIONSHIP_ACTOR_ID, { Account: ['target'] }, {
+                    logicalProvider: 'apify', credentialSlot: 'secondary', timeoutSecs: 300,
+                    maxItems: 1, maxTotalChargeUsd: 0.0026, executionMaxTotalChargeUsd: 0.003,
+                }, { onRunStartRejected, recordUsage: vi.fn() },
+            )).rejects.toThrow('DEV_LIVE_BUDGET_EXCEEDED');
+
+            expect(devBudget.reserve).toHaveBeenCalledWith(grant, APIFY_RELATIONSHIP_ACTOR_ID, 0.003);
+            expect(onRunStartRejected).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 412 }));
+            expect(call).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('checks an approved resumed Actor run without reserving or dispatching a new start', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        try {
+            const { client, call, waitForFinish } = mockClient([]);
+            const grant = { id: 'synthetic-grant' };
+            devBudget.require.mockReturnValue(grant);
+            devBudget.reserve.mockClear();
+            await startOrResumeApifyActor(
+                client, APIFY_RELATIONSHIP_ACTOR_ID, { Account: ['target'] }, {
+                    logicalProvider: 'apify', credentialSlot: 'secondary', timeoutSecs: 300,
+                    maxItems: 1, maxTotalChargeUsd: 0.003,
+                }, {
+                    resumeRunId: 'RunAbcd1234567890',
+                    credentialSlot: 'secondary', maxChargeUsd: 0.003, recordUsage: vi.fn(),
+                },
+            );
+            expect(devBudget.check).toHaveBeenCalledWith(grant);
+            expect(devBudget.reserve).not.toHaveBeenCalled();
+            expect(call).not.toHaveBeenCalled();
+            expect(waitForFinish).toHaveBeenCalledOnce();
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+});
 
 function mockBatchedClient(batches: Array<Array<Record<string, unknown>>>) {
     const runIds = batches.map((_, index) => `RunBatch${String(index).padStart(8, '0')}`);

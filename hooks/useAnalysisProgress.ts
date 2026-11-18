@@ -137,7 +137,7 @@ export function disposeAnalysisProgressChannel(
     }
 }
 
-export function useAnalysisProgress(requestId: string) {
+export function useAnalysisProgress(requestId: string, devLive = false) {
     const devPresentation = isDevUiPresentation();
     const [data, setData] = useState<AnalysisProgress | null>(null);
     const [outcome, setOutcome] = useState<{
@@ -183,7 +183,7 @@ export function useAnalysisProgress(requestId: string) {
                 const progressUrl = v2ProgressUrlRef.current;
                 let response = await fetch(
                     progressUrl
-                        ? `${progressUrl}?afterSeq=${v2LastEventSeqRef.current}&limit=200`
+                        ? `${progressUrl}${devLive ? '?devAnalysis=live&' : '?'}afterSeq=${v2LastEventSeqRef.current}&limit=200`
                         : `/api/analysis/status/${encodeURIComponent(requestId)}`,
                     { cache: 'no-store', signal: controller.signal }
                 );
@@ -354,7 +354,7 @@ export function useAnalysisProgress(requestId: string) {
         });
         fetchInFlightRef.current = { requestId, controller, promise };
         return promise;
-    }, [requestId]);
+    }, [devLive, requestId]);
 
     useEffect(() => {
         fetchDataRef.current = fetchData;
@@ -365,7 +365,9 @@ export function useAnalysisProgress(requestId: string) {
         fetchInFlightRef.current?.controller.abort();
         setData(null);
         setOutcome({ requestId, settled: false, error: null, errorKind: null });
-        v2ProgressUrlRef.current = devPresentation ? `/api/analysis/v2/progress/${encodeURIComponent(requestId)}` : null;
+        v2ProgressUrlRef.current = devPresentation
+            ? `/api/analysis/${devLive ? 'progress' : 'v2/progress'}/${encodeURIComponent(requestId)}`
+            : null;
         v2EventsRef.current = [];
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
@@ -380,7 +382,7 @@ export function useAnalysisProgress(requestId: string) {
             const inFlight = fetchInFlightRef.current;
             if (inFlight?.requestId === requestId) inFlight.controller.abort();
         };
-    }, [devPresentation, fetchData, requestId]);
+    }, [devLive, devPresentation, fetchData, requestId]);
 
     const currentData = data?.id === requestId ? data : null;
     const currentOutcome = outcome.requestId === requestId ? outcome : null;

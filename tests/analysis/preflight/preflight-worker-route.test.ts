@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     getConfig: vi.fn(),
+    isApprovedDevLiveDelivery: vi.fn(),
     process: vi.fn(),
     prepareBeta: vi.fn(),
     enqueue: vi.fn(),
@@ -27,6 +28,9 @@ const mocks = vi.hoisted(() => ({
     })),
 }));
 
+vi.mock('@/lib/services/dev-ui/live-analysis', () => ({
+    isApprovedDevLiveDelivery: mocks.isApprovedDevLiveDelivery,
+}));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
@@ -121,6 +125,23 @@ describe('preflight worker route', () => {
         mocks.settleBetaCredit.mockResolvedValue(false);
         mocks.refreshBetaCredit.mockResolvedValue(undefined);
         mocks.betaPrepareEnabled.mockReturnValue(true);
+    });
+
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    it('checks the Dev approval only after OIDC and rejects unapproved fenced work', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        mocks.isApprovedDevLiveDelivery.mockResolvedValue(false);
+        mocks.verify.mockResolvedValueOnce(false);
+
+        expect((await POST(request(ordinaryTask))).status).toBe(401);
+        expect(mocks.isApprovedDevLiveDelivery).not.toHaveBeenCalled();
+
+        expect((await POST(request(ordinaryTask))).status).toBe(403);
+        expect(mocks.isApprovedDevLiveDelivery).toHaveBeenCalledWith({ preflightId });
+        expect(mocks.process).not.toHaveBeenCalled();
     });
 
     it('rejects an unverified caller before parsing or claiming work', async () => {

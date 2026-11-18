@@ -1,6 +1,8 @@
+import type { User } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { handleDevUiPreflightRead, shouldHandleDevUiRequest, withDevUiSession } from '@/lib/services/dev-ui/routes';
+import { isDevLiveAnalysisRequest, withDevLiveApproval, withDevLiveRead } from '@/lib/services/dev-ui/live-analysis';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
     preflightExclusionRequestV1Schema,
@@ -17,6 +19,7 @@ import {
 } from '@/lib/services/analysis/preflight';
 import {
     observeRoute,
+    requestContext,
     suppressOperationalObservation,
     type OperationalRequestContext,
 } from '@/lib/observability/request';
@@ -58,9 +61,11 @@ function demoErrorResponse(status: number, code: string, message: string): NextR
     }, { status, headers: demoResponseHeaders() });
 }
 
-async function authenticatedSession() {
+async function authenticatedSession(verifiedDevUser?: User) {
     const supabase = await createClient();
-    const { data: { user }, error } = await supabase.auth.getUser();
+    const { data: { user }, error } = verifiedDevUser
+        ? { data: { user: verifiedDevUser }, error: null }
+        : await supabase.auth.getUser();
     return {
         user: error || !user ? null : user,
         supabase: supabase as unknown as PreflightSupabaseClient,
@@ -113,11 +118,12 @@ async function consumedPreflightStatus(
 
 async function handleGET(
     request: Request,
-    { params }: { params: Promise<{ preflightId: string }> }
+    { params }: { params: Promise<{ preflightId: string }> },
+    verifiedDevUser?: User,
 ) {
     let demoRecognized = false;
     try {
-        const session = await authenticatedSession();
+        const session = await authenticatedSession(verifiedDevUser);
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
@@ -145,7 +151,7 @@ async function handleGET(
             throw accountError;
         }
 
-        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        const demo = verifiedDevUser ? null : await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
             demoRecognized = true;
             if (!isDemoOperator(user.id)) return suppressOperationalObservation(demoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
@@ -218,6 +224,10 @@ export async function GET(
     request: Request,
     routeContext: { params: Promise<{ preflightId: string }> }
 ): Promise<NextResponse> {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveRead(request, { preflightId: (await routeContext.params).preflightId },
+            user => handleGET(request, routeContext, user));
+    }
     if (shouldHandleDevUiRequest(request)) return handleDevUiPreflightRead(request, (await routeContext.params).preflightId);
     return observeRoute(
         request,
@@ -230,12 +240,13 @@ async function handlePATCH(
     request: Request,
     { params }: { params: Promise<{ preflightId: string }> },
     context: OperationalRequestContext,
+    verifiedDevUser?: User,
 ) {
     let demoRecognized = false;
     let observedUserId: string | undefined;
     let observedPreflightId: string | undefined;
     try {
-        const session = await authenticatedSession();
+        const session = await authenticatedSession(verifiedDevUser);
         const { preflightId } = await params;
         if (!UUID_PATTERN.test(preflightId)) {
             return errorResponse(400, 'INVALID_REQUEST', '사전 점검 식별자가 올바르지 않습니다.');
@@ -299,7 +310,7 @@ async function handlePATCH(
             throw accountError;
         }
 
-        const demo = await demoAnalysisStore.findForOwner(preflightId, user.id);
+        const demo = verifiedDevUser ? null : await demoAnalysisStore.findForOwner(preflightId, user.id);
         if (demo) {
             demoRecognized = true;
             if (!isDemoOperator(user.id)) return suppressOperationalObservation(demoErrorResponse(404, 'NOT_FOUND', '사전 점검 요청을 찾을 수 없습니다.'));
@@ -324,7 +335,7 @@ async function handlePATCH(
         try {
             body = await request.json();
         } catch {
-            void recordPreflightFailure({
+            if (!verifiedDevUser) void recordPreflightFailure({
                 userId: user.id,
                 preflightId,
                 stage: 'exclusion',
@@ -334,7 +345,7 @@ async function handlePATCH(
         }
         const parsed = preflightExclusionRequestV1Schema.safeParse(body);
         if (!parsed.success) {
-            void recordPreflightFailure({
+            if (!verifiedDevUser) void recordPreflightFailure({
                 userId: user.id,
                 preflightId,
                 stage: 'exclusion',
@@ -367,7 +378,7 @@ async function handlePATCH(
                 ? parsed.data.excludedInstagramId
                 : null,
         }, { client: supabase });
-        operationalLogger.emit({
+        if (!verifiedDevUser) operationalLogger.emit({
             event: 'preflight.exclusion_decided',
             severity: 'info',
             fields: {
@@ -400,7 +411,7 @@ async function handlePATCH(
             return errorResponse(503, 'ANONYMOUS_PREFLIGHT_UNAVAILABLE', '익명 사전 점검을 잠시 사용할 수 없습니다.');
         }
         if (error instanceof InvalidPreflightExclusionError) {
-            void recordPreflightFailure({
+            if (!verifiedDevUser) void recordPreflightFailure({
                 ...(observedUserId ? { userId: observedUserId } : {}),
                 ...(observedPreflightId ? { preflightId: observedPreflightId } : {}),
                 stage: 'exclusion',
@@ -412,13 +423,13 @@ async function handlePATCH(
             return errorResponse(409, error.message, '이 사전 점검 요청은 변경할 수 없습니다.');
         }
         const errorCode = exclusionFailureErrorCode(error);
-        void recordPreflightFailure({
+        if (!verifiedDevUser) void recordPreflightFailure({
             ...(observedUserId ? { userId: observedUserId } : {}),
             ...(observedPreflightId ? { preflightId: observedPreflightId } : {}),
             stage: 'exclusion',
             errorCode: 'INTERNAL_ERROR',
         });
-        operationalLogger.emit({
+        if (!verifiedDevUser) operationalLogger.emit({
             event: 'preflight.failed',
             severity: 'error',
             fields: {
@@ -440,6 +451,14 @@ export async function PATCH(
     request: Request,
     routeContext: { params: Promise<{ preflightId: string }> }
 ): Promise<NextResponse> {
+    if (isDevLiveAnalysisRequest(request)) {
+        return withDevLiveApproval(request, user => handlePATCH(
+            request,
+            routeContext,
+            requestContext(request, '/api/analysis/preflight/[preflightId]'),
+            user,
+        ), (await routeContext.params).preflightId);
+    }
     if (shouldHandleDevUiRequest(request)) return withDevUiSession(request, async () => new NextResponse(null, { status: 403 }));
     return observeRoute(
         request,

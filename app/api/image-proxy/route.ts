@@ -24,6 +24,8 @@ import {
 } from '@/lib/services/media/image-proxy-cache';
 import { isImageProxyClientDisconnectEpipe } from '@/lib/observability/image-proxy-request-error';
 
+import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
+
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
 const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
@@ -243,7 +245,7 @@ function errorResponse(error: string, status: number) {
  * 직접 접근 실패 시 weserv.nl 프록시를 통해 재시도
  * 모든 시도 실패 시 재시도 가능한 비캐시 오류 반환
  */
-export async function GET(request: NextRequest) {
+async function handleGET(request: NextRequest, devOwnerId?: string) {
     const searchParams = request.nextUrl.searchParams;
     const genericParameters = ['token', 'expires'] as const;
     const resultParameters = ['result', 'expires'] as const;
@@ -322,6 +324,12 @@ export async function GET(request: NextRequest) {
             });
             return errorResponse('Image proxy token rejected', 403);
         }
+        if (devOwnerId) {
+            const { isDevLiveRequestOwnedBy } = await import('@/lib/services/dev-ui/live-analysis');
+            if (user.id !== devOwnerId || !await isDevLiveRequestOwnedBy(user.id, locator.requestId)) {
+                return errorResponse('Image proxy token rejected', 403);
+            }
+        }
         resolvedResult = await resolveAnalysisV2ResultImageLocator(
             locator,
             user.id
@@ -376,7 +384,7 @@ export async function GET(request: NextRequest) {
         IMAGE_PROXY_TOTAL_TIMEOUT_MS - (Date.now() - startedAt)
     );
 
-    const cacheEnabled = !isResult && conciergeImageProxyCacheEnabled();
+    const cacheEnabled = !isResult && !devOwnerId && conciergeImageProxyCacheEnabled();
     const cacheKey = cacheEnabled ? imageProxyCacheKey(authorizedUrl) : null;
 
     try {
@@ -412,7 +420,7 @@ export async function GET(request: NextRequest) {
         // trusted compatibility proxy branch. Generic progress media gets a
         // concurrent fallback so a slow origin cannot consume all remaining
         // response time before the safe proxy has a chance to respond.
-        if (!isResult) {
+        if (!isResult && !devOwnerId) {
             const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(authorizedUrl)}`;
             const proxyTimeoutMs = remainingTimeoutMs();
             attempts.push(
@@ -446,7 +454,7 @@ export async function GET(request: NextRequest) {
                 successful.result.bytes,
                 successful.result.contentType,
                 expires,
-                isResult,
+                isResult || !!devOwnerId,
             );
         }
 
@@ -475,4 +483,14 @@ export async function GET(request: NextRequest) {
         });
         return retryableImageUnavailableResponse();
     }
+}
+
+export async function GET(request: NextRequest) {
+    if (devUiRequestBoundary(request) === 'production') return handleGET(request);
+    const { withDevUiSession } = await import('@/lib/services/dev-ui/routes');
+    const { assertDevLiveImageRuntime } = await import('@/lib/services/dev-ui/live-runtime');
+    return withDevUiSession(request, async user => {
+        assertDevLiveImageRuntime();
+        return handleGET(request, user.id);
+    });
 }

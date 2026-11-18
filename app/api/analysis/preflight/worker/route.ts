@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { isApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
 import {
     classifyPreflightWorkerFailure,
     prepareBetaPreflightDispatch,
@@ -320,6 +321,15 @@ async function handlePOST(
         return reject(503, 'ANALYSIS_WORKLOAD_ROLE_MISMATCH');
     }
     const isPrecheckoutBlite = 'kind' in task && task.kind === 'precheckout_blite';
+    if (process.env.DEV_LIVE_WORKLOAD !== undefined) {
+        const hasDispatchFence = isPrecheckoutBlite
+            ? task.dispatchGeneration !== undefined
+            : !('kind' in task) && task.generation !== undefined;
+        if (process.env.DEV_LIVE_WORKLOAD !== 'preflight' || task.workloadRole !== 'preflight'
+            || !hasDispatchFence || !await isApprovedDevLiveDelivery({ preflightId: task.preflightId })) {
+            return NextResponse.json({ code: 'DEV_LIVE_APPROVAL_REQUIRED' }, { status: 403 });
+        }
+    }
     const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
         store: createBetaApifyCreditPoolStore(supabaseAdmin),
         clientForSlot: createServerBetaApifyCreditClientFactory(),

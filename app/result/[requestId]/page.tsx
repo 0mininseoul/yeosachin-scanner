@@ -195,6 +195,7 @@ export default function ResultPage({ params }: PageProps) {
     const router = useRouter();
     const devPresentation = isDevUiPresentation();
     const searchParams = useSearchParams();
+    const devLive = devPresentation && searchParams.get('devAnalysis') === 'live';
     const requestedPipeline = devPresentation ? 'v2' : searchParams.get('pipeline');
 
     useEffect(() => {
@@ -206,7 +207,7 @@ export default function ResultPage({ params }: PageProps) {
                 let isV2Request = requestedPipeline === 'v2';
                 let response = await fetch(
                     requestedPipeline === 'v2'
-                        ? `/api/analysis/v2/result/${requestId}?pageSize=50`
+                        ? `/api/analysis/v2/result/${requestId}?pageSize=50${devLive ? '&devAnalysis=live' : ''}`
                         : `/api/analysis/result/${requestId}`,
                     { cache: 'no-store', signal: abortController.signal }
                 );
@@ -233,13 +234,13 @@ export default function ResultPage({ params }: PageProps) {
                 if (!response.ok) {
                     if (isV2Request) {
                         if (result.code === 'RESULT_PENDING' || result.status === 'pending') {
-                            router.replace(`/progress/${requestId}`);
+                            router.replace(`/progress/${requestId}${devLive ? '?devAnalysis=live' : ''}`);
                             return;
                         }
                         let progressStatus: OwnerProgressStatus | null = null;
                         if (response.status === 404) {
                             const progressResponse = await fetch(
-                                `${devPresentation ? '/api/analysis/v2/progress' : '/api/analysis/progress'}/${encodeURIComponent(requestId)}?limit=1`,
+                                `${devPresentation && !devLive ? '/api/analysis/v2/progress' : '/api/analysis/progress'}/${encodeURIComponent(requestId)}?limit=1${devLive ? '&devAnalysis=live' : ''}`,
                                 { cache: 'no-store', signal: abortController.signal }
                             );
                             if (progressResponse.ok) {
@@ -251,7 +252,7 @@ export default function ResultPage({ params }: PageProps) {
                             resultStatus: response.status,
                             progressStatus,
                         }) === 'show_progress') {
-                            router.replace(`/progress/${requestId}`);
+                            router.replace(`/progress/${requestId}${devLive ? '?devAnalysis=live' : ''}`);
                             return;
                         }
                         throw new Error('V2_RESULT_UNAVAILABLE');
@@ -298,7 +299,7 @@ export default function ResultPage({ params }: PageProps) {
 
         void fetchResult();
         return () => abortController.abort();
-    }, [devPresentation, requestId, requestedPipeline, resultRetry, router]);
+    }, [devLive, devPresentation, requestId, requestedPipeline, resultRetry, router]);
 
     const goToResultPage = async (
         kind: ResultAccountKind,
@@ -323,6 +324,7 @@ export default function ResultPage({ params }: PageProps) {
         try {
             const cursorName = kind === 'public' ? 'femaleCursor' : 'privateCursor';
             const query = new URLSearchParams({ pageSize: String(OWNER_RESULT_PAGE_SIZE) });
+            if (devLive) query.set('devAnalysis', 'live');
             if (cursor) query.set(cursorName, cursor);
             const response = await fetch(
                 `/api/analysis/v2/result/${requestId}?${query.toString()}`,
@@ -684,6 +686,7 @@ export default function ResultPage({ params }: PageProps) {
                     "share this result". */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
+                    {devPresentation && <span className="text-xs text-fg-dim">{devLive ? 'Dev · 실제 데이터' : 'Dev · 합성 데이터'}</span>}
                     {!devPresentation && <ResultActions
                         onKakaoShare={handleKakaoShare}
                         onPrepare={prepareShare}

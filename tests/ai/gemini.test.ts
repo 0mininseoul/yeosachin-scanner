@@ -5,6 +5,9 @@ const mocks = vi.hoisted(() => ({
     generateContent: vi.fn(),
     prepareGoogleApplicationCredentials: vi.fn(),
     tokenUsageInsert: vi.fn(),
+    requireDevApproval: vi.fn(),
+    reserveDevAttempt: vi.fn(),
+    settleDevAttempt: vi.fn(),
 }));
 
 vi.mock('@google/genai', () => ({
@@ -32,6 +35,14 @@ vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: {
         from: vi.fn(() => ({ insert: mocks.tokenUsageInsert })),
     },
+}));
+
+vi.mock('@/lib/services/dev-ui/live-budget', () => ({
+    DEV_LIVE_BUDGET_UNAVAILABLE: 'DEV_LIVE_BUDGET_UNAVAILABLE',
+    DEV_LIVE_BUDGET_EXCEEDED: 'DEV_LIVE_BUDGET_EXCEEDED',
+    requireDevLiveProviderApproval: mocks.requireDevApproval,
+    reserveDevLiveVertexAttempt: mocks.reserveDevAttempt,
+    settleDevLiveVertexAttempt: mocks.settleDevAttempt,
 }));
 
 import {
@@ -111,6 +122,44 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.useRealTimers();
         vi.unstubAllEnvs();
         vi.restoreAllMocks();
+    });
+
+    it('refuses a Dev attempt that could not reserve its authorized budget', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockRejectedValueOnce(new Error('DEV_LIVE_BUDGET_EXCEEDED'));
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
+        })).rejects.toThrow('DEV_LIVE_BUDGET_EXCEEDED');
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledWith(grant, 'gemini-3.1-flash-lite', 'global', 128);
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it('disables SDK retry for a reserved Dev attempt and settles only complete usage', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: 'synthetic-approval', reservationId: 'synthetic-reservation' };
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValue(reservation);
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        mocks.generateContent.mockResolvedValueOnce(responseWithText('{"value":"ok"}', null));
+        const options = {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
+        };
+
+        await expect(analyzeWithGemini('prompt', undefined, options)).resolves.toEqual({ value: 'ok' });
+        await expect(analyzeWithGemini('prompt', undefined, options)).resolves.toEqual({ value: 'ok' });
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(2);
+        expect(mocks.generateContent).toHaveBeenCalledWith(expect.objectContaining({
+            config: expect.objectContaining({
+                maxOutputTokens: 128, candidateCount: 1,
+                httpOptions: expect.objectContaining({ retryOptions: { attempts: 1 } }),
+            }),
+        }));
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0.0000085);
     });
 
     it('does not retry an ambiguous generation and never exposes the provider error', async () => {
