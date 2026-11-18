@@ -30,8 +30,9 @@ import type {
     PreflightProviderRunStore,
     StoredPreflightProviderRun,
 } from '../../../lib/services/analysis/preflight-provider-run';
-import type {
-    AnalysisProviderAdmissionStore,
+import {
+    AnalysisProviderAdmissionCapacityPendingError,
+    type AnalysisProviderAdmissionStore,
 } from '../../../lib/services/analysis/provider-admission-store';
 import { preflightTargetInputHash } from '../../../lib/services/analysis/preflight-identity';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from '../../../lib/services/analysis/preflight-runtime-policy';
@@ -337,6 +338,7 @@ describe('B-lite single-collection preflight', () => {
             })),
             env: {
                 ...preflightApifyPoolEnv,
+                PREFLIGHT_PROFILE_PROVIDER: 'apify_pool',
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -954,6 +956,7 @@ describe('B-lite single-collection preflight', () => {
             finalizeReadyWithSource,
             enqueueBliteInference,
             env: {
+                PREFLIGHT_PROFILE_PROVIDER: 'apify_pool',
                 PRECHECKOUT_BLITE_ENABLED: 'true',
                 PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
                 ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
@@ -1940,6 +1943,129 @@ describe('preflight persistence adapter', () => {
 });
 
 describe('preflight worker domain', () => {
+    it.each([
+        { label: 'classic authenticated', blite: false, hash: preflightInputHash, paidRoute: 'selfhosted_auth_v1' },
+        { label: 'hashless legacy', blite: true, hash: null, paidRoute: 'apify_v1' },
+        { label: 'expired B-lite fence', blite: true, hash: preflightInputHash, paidRoute: 'apify_v1' },
+    ])('uses Apify free-pool summary for $label work', async ({ blite, hash, paidRoute }) => {
+        const claimed = claim({
+            targetInputHash: hash,
+            leaseExpiresAt: new Date(Date.now() + 180_000).toISOString(),
+        });
+        const runs = providerRunStore();
+        const getProfile = vi.fn(async () => profile());
+        const getAuthenticatedProfile = vi.fn(async () => profile());
+        const getFallbackProfile = vi.fn(async () => profile());
+        const activateBliteCohort = vi.fn(async () => {
+            throw new Error('PRECHECKOUT_BLITE_PREFLIGHT_FENCE_LOST');
+        });
+
+        await expect(processPreflight(preflightId, {
+            store: workerStore(claimed),
+            providerRunStore: runs,
+            getProfile,
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            activateBliteCohort,
+            env: {
+                ...preflightApifyPoolEnv,
+                PREFLIGHT_PROFILE_PROVIDER: 'apify_pool',
+                PRECHECKOUT_BLITE_ENABLED: String(blite),
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+                ANALYSIS_V2_INSTAGRAM_ROUTE: paidRoute,
+                SELFHOSTED_AUTH_ENABLED: 'true',
+                ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET: preflightIdentitySecret,
+            },
+        })).resolves.toBe('ready');
+
+        expect(activateBliteCohort).toHaveBeenCalledTimes(blite && hash ? 1 : 0);
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).toHaveBeenCalledExactlyOnceWith(
+            claimed.targetInstagramId,
+            expect.objectContaining({ credentialSlot: 'quinary' }),
+        );
+        expect(runs.reserveFree).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            inputHash: preflightInputHash,
+        }));
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
+    it.each(['initial load', 'checkpoint binding'])(
+        'blocks stored secondary discovered during %s before collection',
+        async stage => {
+            const claimed = claim();
+            const store = workerStore(claimed);
+            const runs = providerRunStore();
+            if (stage === 'checkpoint binding') vi.mocked(runs.load).mockResolvedValueOnce(null);
+            vi.mocked(runs.load).mockResolvedValue({
+                ...storedRun('running'),
+                credentialSlot: 'secondary',
+            });
+            const getProfile = vi.fn(async () => profile());
+            const getFallbackProfile = vi.fn(async () => profile());
+
+            await expect(processPreflight(preflightId, {
+                store,
+                providerRunStore: runs,
+                getProfile,
+                getFallbackProfile,
+                recordPreflightFailure: vi.fn(),
+                env: { PREFLIGHT_PROFILE_PROVIDER: 'apify_pool' },
+            })).resolves.toBe('blocked');
+
+            expect(store.finalizeBlocked).toHaveBeenCalledWith(claimed, 'ANALYSIS_FAILED');
+            expect(getProfile).not.toHaveBeenCalled();
+            expect(getFallbackProfile).not.toHaveBeenCalled();
+            expect(runs.reserveFree).not.toHaveBeenCalled();
+            expect(runs.reserve).not.toHaveBeenCalled();
+        },
+    );
+
+    it('waits for free-pool capacity without reaching another provider', async () => {
+        const store = { ...workerStore(), deferProviderCapacity: vi.fn(async () => true) };
+        const runs = providerRunStore();
+        vi.mocked(runs.reserveFree!).mockRejectedValue(new AnalysisProviderAdmissionCapacityPendingError());
+        const getProfile = vi.fn(async () => profile());
+        const getAuthenticatedProfile = vi.fn(async () => profile());
+        const getFallbackProfile = vi.fn(async () => profile());
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getProfile,
+            getAuthenticatedProfile,
+            getFallbackProfile,
+            env: { PREFLIGHT_PROFILE_PROVIDER: 'apify_pool' },
+        })).resolves.toBe('capacity_pending');
+
+        expect(store.deferProviderCapacity).toHaveBeenCalledOnce();
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getAuthenticatedProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(runs.reserve).not.toHaveBeenCalled();
+    });
+
+    it('fails closed before collection for an unknown preflight provider setting', async () => {
+        const store = workerStore();
+        const runs = providerRunStore();
+        const getProfile = vi.fn(async () => profile());
+        const getFallbackProfile = vi.fn(async () => profile());
+
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: runs,
+            getProfile,
+            getFallbackProfile,
+            recordPreflightFailure: vi.fn(),
+            env: { PREFLIGHT_PROFILE_PROVIDER: 'unknown' },
+        })).resolves.toBe('blocked');
+
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(runs.reserveFree).not.toHaveBeenCalled();
+    });
+
     it('uses the database-selected free-pool slot for a new anonymous fallback', async () => {
         const selectedPreflightId = '123e4567-e89b-42d3-a456-000000000001';
         const env = {

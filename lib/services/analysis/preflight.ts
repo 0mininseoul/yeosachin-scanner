@@ -46,9 +46,6 @@ import { getApifyProfile, getApifyProfileSummary } from '@/lib/services/instagra
 import { selfHostedAuthProvider } from '@/lib/services/instagram/providers/selfhosted-auth';
 import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import {
-    selectAnalysisV2ApifyCredentialSlot,
-} from '@/lib/services/instagram/providers/apify-relationship';
-import {
     classifyWebProfileFailure,
     type WebProfileFailureKind,
 } from '@/lib/services/instagram/providers/selfhosted/web-client';
@@ -58,8 +55,11 @@ import {
     createImageProxyPath,
 } from '@/lib/services/media/image-proxy-token';
 import type { InstagramProfile } from '@/lib/types/instagram';
-import type { ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
-import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
+import {
+    APIFY_FREE_CREDENTIAL_SLOTS,
+    type ProviderCallContext,
+    type ProviderRunCheckpoint,
+} from '@/lib/services/instagram/providers/types';
 import {
     PREFLIGHT_PROVIDER_DEADLINE_MS,
     PREFLIGHT_WORKER_LEASE_SECONDS,
@@ -2132,14 +2132,26 @@ export async function processPreflight(
 ): Promise<'noop' | 'ready' | 'blocked' | 'capacity_pending'> {
     const store = dependencies.store ?? preflightStore;
     const providerRuns = dependencies.providerRunStore ?? preflightProviderRunStore;
-    const bindProviderRun = (
+    const runtime = dependencies.env ?? process.env;
+    const profileProvider = runtime.PREFLIGHT_PROFILE_PROVIDER;
+    const useFreeApifyPool = profileProvider === 'apify_pool';
+    const assertPoolSlot = (credentialSlot: ProviderRunCheckpoint['credentialSlot']) => {
+        if (useFreeApifyPool && !APIFY_FREE_CREDENTIAL_SLOTS.some(slot => slot === credentialSlot)) {
+            throw new Error('SCRAPING_CONFIG_ERROR: stored preflight credential is outside the free pool.');
+        }
+    };
+    const bindProviderRun = async (
         input: Parameters<typeof bindPreflightProviderRunCheckpoint>[0],
-    ) => bindPreflightProviderRunCheckpoint({
-        ...input,
-        env: dependencies.env,
-        providerAdmissionStore: dependencies.providerAdmissionStore,
-        refreshFreePoolCredits: dependencies.refreshFreePoolCredits,
-    });
+    ) => {
+        const bound = await bindPreflightProviderRunCheckpoint({
+            ...input,
+            env: dependencies.env,
+            providerAdmissionStore: dependencies.providerAdmissionStore,
+            refreshFreePoolCredits: dependencies.refreshFreePoolCredits,
+        });
+        assertPoolSlot(bound.checkpoint.credentialSlot);
+        return bound;
+    };
     const recordTerminalFailure = (
         claim: ClaimedPreflight,
         errorCode: string,
@@ -2276,7 +2288,9 @@ export async function processPreflight(
     try {
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
-        const runtime = dependencies.env ?? process.env;
+        if (profileProvider !== undefined && !useFreeApifyPool) {
+            throw new Error('SCRAPING_CONFIG_ERROR: PREFLIGHT_PROFILE_PROVIDER must be apify_pool.');
+        }
         const devPreflightWorker = runtime.DEV_LIVE_WORKLOAD === 'preflight' && runtime.K_SERVICE === 'dev-live-preflight';
         const bliteCohortSelected = selectBliteCohort(
             claim.preflightId,
@@ -2342,9 +2356,9 @@ export async function processPreflight(
             claimToken: claim.claimToken,
             inputHash,
         });
-        // A persisted Apify run owns provider lineage. Read it before selecting
-        // the current paid route so a route flip cannot strand a reserved run.
-        const useAuthenticatedProfile = !existingRun
+        if (existingRun) assertPoolSlot(existingRun.credentialSlot);
+        const useAuthenticatedProfile = !useFreeApifyPool
+            && !existingRun
             && !isAnonymousPreflight
             && !isBetatest
             && getAnalysisV2PaidCollectionProvider(dependencies.env) === 'selfhosted_auth';
@@ -2552,17 +2566,13 @@ export async function processPreflight(
                 claim.targetInstagramId,
                 fallbackCallContext(bound.checkpoint, workerStartedAt)
             );
-        } else if (isBetatest) {
-            const identity = preflightProviderIdentity(
-                betaHold?.credentialSlot
-                ?? selectAnalysisV2ApifyCredentialSlot(dependencies.env)
-            );
+        } else if (isBetatest || useFreeApifyPool) {
             const bound = await bindProviderRun({
                 store: providerRuns,
                 claim,
                 inputHash,
-                identity,
-                freePool: false,
+                identity: preflightProviderIdentity(betaHold?.credentialSlot ?? 'primary'),
+                freePool: !isBetatest,
                 ...(betaHold
                     ? {
                         providerAdmissionWorkloadRole: 'paid' as const,
