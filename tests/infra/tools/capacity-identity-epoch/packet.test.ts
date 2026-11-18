@@ -684,6 +684,49 @@ describe('coordinated epoch protected packet', () => {
         expect(() => createProtectedPacket(changedSecretVersion)).toThrow('SOURCE_INVALID');
     });
 
+    it('preserves pinned paid result-image storage during an identity change', () => {
+        const value = mutablePacket();
+        const imageEnv = {
+            ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
+            ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: `https://${'a'.repeat(32)}.r2.cloudflarestorage.com`,
+            ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: 'fixture-result-images',
+        };
+        const imageRefs = {
+            ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID: 'fixture-r2-access:1',
+            ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY: 'fixture-r2-secret:2',
+            ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET: 'fixture-r2-hmac:3',
+        };
+        for (const phase of ['old', 'desired'] as const) {
+            const runtime = value.protectedInputs[phase].runtime.paid;
+            Object.assign(runtime.environment, imageEnv);
+            Object.assign(runtime.secretReferences, imageRefs);
+        }
+        synchronizeDesiredRuntimeProof(value, 'paid');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).not.toThrow();
+
+        const desired = value.protectedInputs.desired.runtime.paid;
+        desired.environment.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET = 'fixture-other-bucket';
+        synchronizeDesiredRuntimeProof(value, 'paid');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+
+        desired.environment.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET = imageEnv.ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET;
+        delete desired.secretReferences.ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET;
+        synchronizeDesiredRuntimeProof(value, 'paid');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+
+        Object.assign(desired.secretReferences, imageRefs);
+        const preflight = value.protectedInputs.desired.runtime.preflight;
+        Object.assign(preflight.environment, imageEnv);
+        Object.assign(preflight.secretReferences, imageRefs);
+        synchronizeDesiredRuntimeProof(value, 'paid');
+        synchronizeDesiredRuntimeProof(value, 'preflight');
+        value.observationInputs = deriveObservationInputDigests(value);
+        expect(() => createProtectedPacket(value)).toThrow('SOURCE_INVALID');
+    });
+
     it('preserves unrelated old IAM policy bindings and rejects unapproved additions', () => {
         const preserved = mutablePacket();
         const unrelated = { role: 'roles/logging.viewer', member: 'user:operator@example.test', condition: null };
