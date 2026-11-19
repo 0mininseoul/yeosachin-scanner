@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
@@ -21,6 +22,10 @@ const PREFLIGHT_ID = '33333333-3333-4333-8333-333333333333';
 const ORDER_ID = '44444444-4444-4444-8444-444444444444';
 const CLAIM_TOKEN = '55555555-5555-4555-8555-555555555555';
 const RETRY_CLAIM_TOKEN = '55555555-5555-4555-8555-555555555556';
+const DEV_GRANT_ID = '55555555-5555-4555-8555-555555555557';
+const DEV_ENTITLEMENT_HASH = createHash('sha256')
+    .update(`analysis-test-entitlement-jti-v1\ndev-live-${DEV_GRANT_ID}`)
+    .digest('hex');
 const TARGET_RUN_ID = '66666666-6666-4666-8666-666666666666';
 const BATCH_RUN_ID = '77777777-7777-4777-8777-777777777777';
 const TARGET_JOB = 'track:target-evidence:collect';
@@ -420,6 +425,145 @@ beforeEach(async () => {
 
 afterAll(async () => {
     await db.close();
+});
+
+describe('Dev Standard direct fresh-Apify checkpoints', () => {
+    const targetProfile = {
+        jobKey: TARGET_JOB,
+        operationKey: TARGET_OPERATION,
+        providerInputHash: TARGET_PROVIDER_HASH,
+        requestedUsernames: [TARGET],
+        outcomes: [outcome(TARGET)],
+    };
+
+    function loadRetry(claimToken = CLAIM_TOKEN) {
+        return asService<{ snapshot: { primaryResults: unknown[] } | null }>(
+            'SELECT public.load_analysis_v2_profile_fetch_checkpoint_for_retry($1,$2,$3,$4,$5,$6) AS snapshot',
+            [REQUEST_ID, TARGET_JOB, claimToken, JOB_HASH, TARGET_OPERATION, TARGET_PROVIDER_HASH],
+        );
+    }
+
+    beforeAll(async () => {
+        const patch = readFileSync(new URL(
+            '../../supabase/dev-ui/live-standard-fresh-profile-checkpoint.sql', import.meta.url,
+        ), 'utf8');
+        await expect(db.exec(patch)).rejects.toThrow('DEV_LIVE_STANDARD_PROFILE_WRONG_DATABASE');
+        await db.exec('ROLLBACK');
+        await db.exec(`
+            CREATE SCHEMA dev_ui;
+            CREATE TABLE dev_ui.preflights ();
+            CREATE TABLE dev_ui.orders ();
+            CREATE TABLE dev_ui.runs ();
+            CREATE SCHEMA dev_live_budget;
+            CREATE TABLE dev_live_budget.standard_owner_policy (enabled boolean NOT NULL);
+            CREATE TABLE dev_live_budget.owner_starts (
+                grant_id uuid PRIMARY KEY, user_id uuid NOT NULL, target_instagram_id text NOT NULL
+            );
+            CREATE FUNCTION public.dev_live_owner_start_lookup_v2(p_grant_id uuid, p_user_id uuid, p_target_instagram_id text)
+            RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$
+                SELECT jsonb_build_object('planId','standard')
+                FROM dev_live_budget.owner_starts start_row, dev_live_budget.standard_owner_policy policy
+                WHERE start_row.grant_id=p_grant_id AND start_row.user_id=p_user_id
+                  AND start_row.target_instagram_id=p_target_instagram_id AND policy.enabled
+            $$;
+            ALTER TABLE public.analysis_preflights
+                ADD COLUMN idempotency_key text,
+                ADD COLUMN beta_entry_provenance text,
+                ADD COLUMN admission_status text,
+                ADD COLUMN admission_generation integer,
+                ADD COLUMN admission_entitlement_jti_hash text,
+                ADD COLUMN admission_refreshed_at timestamptz,
+                ADD COLUMN consumed_at timestamptz,
+                ADD COLUMN admission_plan_cards_snapshot jsonb;
+            ALTER TABLE public.analysis_v2_test_entitlement_consumptions
+                ADD COLUMN entitlement_jti_hash text,
+                ADD COLUMN preflight_id uuid,
+                ADD COLUMN user_id uuid,
+                ADD COLUMN selected_plan_id text;
+        `);
+        await db.exec(patch);
+        await db.exec(patch);
+    });
+
+    beforeEach(async () => {
+        const cards = `jsonb_set(jsonb_set('${PLAN_CARDS}'::jsonb, '{basic,selectionState}', '"unavailable"'), '{standard,selectionState}', '"required"')`;
+        await db.exec(`
+            TRUNCATE dev_live_budget.owner_starts, dev_live_budget.standard_owner_policy;
+            INSERT INTO dev_live_budget.standard_owner_policy VALUES (true);
+            INSERT INTO dev_live_budget.owner_starts VALUES ('${DEV_GRANT_ID}','${USER_ID}','${TARGET}');
+            DELETE FROM public.earlybird_fulfillments;
+            DELETE FROM public.earlybird_orders;
+            UPDATE public.analysis_requests SET
+                plan_access_mode_snapshot='test_entitlement',
+                selected_plan_id_snapshot='standard',
+                required_plan_id_snapshot='standard',
+                capacity_required_plan_id_snapshot='standard',
+                plan_cards_snapshot=${cards},
+                analysis_scope_snapshot='{"relationshipCapacity":{"followers":800,"following":800},"detailedMutualLimit":600}'::jsonb,
+                test_entitlement_jti_hash='${DEV_ENTITLEMENT_HASH}';
+            UPDATE public.analysis_preflights SET
+                access_mode='test_entitlement',
+                idempotency_key='dev-live:owner:standard:${DEV_GRANT_ID}',
+                order_scoped_apify_credential_slot=NULL,
+                admission_status='ready', admission_generation=1,
+                admission_entitlement_jti_hash='${DEV_ENTITLEMENT_HASH}',
+                admission_selected_plan_id='standard',
+                required_plan_id='standard', capacity_required_plan_id='standard',
+                admission_required_plan_id='standard', admission_capacity_required_plan_id='standard',
+                admission_refreshed_at=statement_timestamp(), consumed_at=statement_timestamp(),
+                plan_cards_snapshot=${cards}, admission_plan_cards_snapshot=${cards},
+                target_followers_count=477, target_following_count=641,
+                admission_target_followers_count=477, admission_target_following_count=641;
+            INSERT INTO public.analysis_v2_test_entitlement_consumptions
+                (request_id,entitlement_jti_hash,preflight_id,user_id,selected_plan_id)
+                VALUES ('${REQUEST_ID}','${DEV_ENTITLEMENT_HASH}','${PREFLIGHT_ID}','${USER_ID}','standard');
+        `);
+    });
+
+    it('reads, writes and re-admits direct Apify evidence without a paid order', async () => {
+        expect((await loadRetry()).rows[0]?.snapshot).toBeNull();
+        await expect(checkpoint(targetProfile)).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: [TARGET] } }],
+        });
+        await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token=$1 WHERE job_key=$2',
+            [RETRY_CLAIM_TOKEN, TARGET_JOB]);
+        expect((await loadRetry(RETRY_CLAIM_TOKEN)).rows[0]?.snapshot?.primaryResults).toHaveLength(1);
+        await expect(checkpoint({ ...targetProfile, claimToken: RETRY_CLAIM_TOKEN })).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: [TARGET] } }],
+        });
+    });
+
+    it.each([
+        'UPDATE dev_live_budget.standard_owner_policy SET enabled=false',
+        'DELETE FROM public.analysis_v2_test_entitlement_consumptions',
+        'UPDATE public.analysis_requests SET plan_access_mode_snapshot=\'production\'',
+        'UPDATE public.analysis_preflights SET admission_entitlement_jti_hash=repeat(\'0\',64)',
+        'UPDATE public.analysis_requests SET plan_cards_snapshot=\'{}\'::jsonb',
+    ])('rejects Dev requests with a broken owner or admission fence', async mutation => {
+        await db.exec(mutation);
+        await expect(loadRetry()).rejects.toThrow('ANALYSIS_V2_PROFILE_RETRY_ADMISSION_FENCE_MISMATCH');
+        await expect(checkpoint(targetProfile)).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+    });
+
+    it('requires the current succeeded secondary provider evidence for write and replay', async () => {
+        await db.exec("UPDATE public.analysis_v2_provider_runs SET credential_slot='primary'");
+        await expect(checkpoint(targetProfile)).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+        await db.exec("UPDATE public.analysis_v2_provider_runs SET credential_slot='secondary'");
+        await checkpoint(targetProfile);
+        await db.exec("UPDATE public.analysis_v2_provider_runs SET status='running'");
+        await expect(loadRetry()).rejects.toThrow('ANALYSIS_V2_PROFILE_RETRY_ADMISSION_PROVIDER_NOT_SUCCEEDED');
+    });
+
+    it('uses the same direct checkpoint for a Standard candidate batch', async () => {
+        const usernames = ['candidate_1', 'candidate_2'];
+        await expect(checkpoint({
+            jobKey: BATCH_JOB,
+            operationKey: BATCH_OPERATION,
+            providerInputHash: BATCH_PROVIDER_HASH,
+            requestedUsernames: usernames,
+            outcomes: usernames.map(username => outcome(username)),
+        })).resolves.toMatchObject({ rows: [{ snapshot: { requestedUsernames: usernames } }] });
+    });
 });
 
 describe('paid Earlybird direct fresh-Apify checkpoint RPC', () => {
