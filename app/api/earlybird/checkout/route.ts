@@ -1,5 +1,7 @@
 import { after, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import { classifyClientDevice } from '@/lib/services/admin/client-signals';
 import { handleDevUiCheckoutCreate, shouldHandleDevUiRequest, withDevUiSession } from '@/lib/services/dev-ui/routes';
 import {
     earlybirdCheckoutRecoveryRequestSchema,
@@ -294,6 +296,24 @@ async function handlePOST(
             orderId: result.orderId,
             created: result.created,
         });
+        const deviceLabel = classifyClientDevice(request.headers.get('user-agent'));
+        if (deviceLabel) {
+            // Short device summary for the operator console; fills only NULL
+            // and never affects checkout.
+            const orderId = result.orderId;
+            const userId = user.id;
+            after(async () => {
+                try {
+                    await supabaseAdmin.rpc('set_earlybird_order_client_device', {
+                        p_order_id: orderId,
+                        p_user_id: userId,
+                        p_label: deviceLabel,
+                    });
+                } catch {
+                    // Intentionally ignored.
+                }
+            });
+        }
         return NextResponse.json({
             orderId: result.orderId,
             nextUrl: buildEarlybirdCheckoutContinuationUrl({
