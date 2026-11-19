@@ -82,7 +82,8 @@ export const overviewSchema = z.object({
 export type ConsoleOverview = z.infer<typeof overviewSchema>;
 export type OverviewBucket = z.infer<typeof overviewBucketSchema>;
 
-export const inventoryEnvelopeSchema = z.object({ inventory: apifyAccountCreditInventorySchema }).strict();
+// The paid refresh POST also returns `secondary`; only `inventory` is read here.
+export const inventoryEnvelopeSchema = z.object({ inventory: apifyAccountCreditInventorySchema });
 
 const attributionLabel = z.string().max(40).nullable();
 
@@ -113,6 +114,106 @@ export const orderCustomersSchema = z.object({
 });
 
 export type OrderCustomer = z.infer<typeof orderCustomersSchema>['rows'][number];
+
+const nullableUsd = z.number().finite().nonnegative().nullable();
+
+export const adminOrdersSchema = z.object({
+    rows: z.array(z.object({
+        orderId: z.string().uuid(),
+        requestId: z.string().uuid().nullable(),
+        orderStatus: z.enum([
+            'payment_pending', 'payment_failed', 'paid', 'analysis_in_progress', 'completed',
+            'overflow_refund_required', 'cancelled', 'refund_pending', 'refunded',
+        ]),
+        planId: z.string(),
+        targetInstagramId: z.string(),
+        excludedInstagramId: z.string().nullable(),
+        paidAt: z.string(),
+        paidAmountKrw: z.number().int().nullable(),
+        userName: z.string().nullable(),
+        gender: z.string().nullable(),
+        birthyear: z.string().nullable(),
+        attributionLabel,
+        deviceLabel: z.string().nullable(),
+        bundle: z.object({
+            version: z.number().int(),
+            completenessStatus: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
+            gapCodes: z.array(z.string()),
+            costStatus: z.enum(['complete', 'partial', 'unknown', 'not_available']),
+            knownUsd: nullableUsd,
+            conservativeUsd: nullableUsd,
+            assembledAt: z.string(),
+            retentionState: z.enum(['retained', 'pending', 'fenced', 'unknown']),
+        }).nullable(),
+        costSnapshot: z.object({
+            knownUsd: nullableUsd,
+            conservativeUsd: nullableUsd,
+            complete: z.boolean(),
+            usageUnknown: z.boolean(),
+        }).nullable(),
+    })).max(50),
+    nextCursor: z.string().nullable(),
+});
+
+export type AdminOrderRow = z.infer<typeof adminOrdersSchema>['rows'][number];
+
+export function orderCustomerOf(row: AdminOrderRow): OrderCustomer {
+    return {
+        requestId: row.requestId ?? row.orderId,
+        userName: row.userName,
+        gender: row.gender,
+        birthyear: row.birthyear,
+        deviceLabel: row.deviceLabel,
+        attributionLabel: row.attributionLabel,
+        paidAmountKrw: row.paidAmountKrw,
+    };
+}
+
+/** Order cost from the audit bundle, else the durable V2 cost snapshot. */
+export function orderCost(row: AdminOrderRow): { known: string; conservative: string | null } {
+    if (row.bundle) {
+        return {
+            known: knownCostLabel(row.bundle.knownUsd, row.bundle.costStatus),
+            conservative: row.bundle.costStatus === 'complete' ? null : formatUsd(row.bundle.conservativeUsd),
+        };
+    }
+    if (row.costSnapshot) {
+        return {
+            known: row.costSnapshot.knownUsd === null ? '미확정' : formatUsd(row.costSnapshot.knownUsd),
+            conservative: row.costSnapshot.complete ? null : formatUsd(row.costSnapshot.conservativeUsd),
+        };
+    }
+    return { known: '미상', conservative: null };
+}
+
+const REFUND_LABEL: Partial<Record<AdminOrderRow['orderStatus'], string>> = {
+    refunded: '환불 완료', refund_pending: '환불 대기', overflow_refund_required: '환불 필요', cancelled: '취소',
+};
+
+/** One status per paid order: refunds, in-flight analysis, missing bundle, or the bundle verdict. */
+export function adminOrderStatus(row: AdminOrderRow, now = Date.now()): OrderStatusSummary {
+    const refund = REFUND_LABEL[row.orderStatus];
+    if (refund) {
+        const actionable = row.orderStatus === 'overflow_refund_required' || row.orderStatus === 'refund_pending';
+        return { tone: actionable ? 'warn' : 'none', label: refund, reason: actionable ? '환불 처리가 남아 있습니다' : '환불·취소된 주문' };
+    }
+    if (row.orderStatus === 'paid' || row.orderStatus === 'analysis_in_progress') {
+        const hours = Math.max(0, (now - Date.parse(row.paidAt)) / 3_600_000);
+        if (hours >= 24) {
+            const days = Math.floor(hours / 24);
+            return { tone: 'warn', label: '분석 지연', reason: `결제 후 ${days}일째 ${row.orderStatus === 'paid' ? '분석 시작 전' : '분석 중'}` };
+        }
+        return { tone: 'none', label: '분석 중', reason: row.orderStatus === 'paid' ? '결제 완료 · 분석 대기' : '분석 진행 중' };
+    }
+    if (row.bundle) {
+        return orderStatus({
+            completenessStatus: row.bundle.completenessStatus,
+            costStatus: row.bundle.costStatus,
+            retentionState: row.bundle.retentionState,
+        });
+    }
+    return { tone: 'none', label: '번들 없음', reason: '완료 · 영구 감사 번들이 없는 주문' };
+}
 
 export async function loadOrderCustomers(
     requestIds: readonly string[],
