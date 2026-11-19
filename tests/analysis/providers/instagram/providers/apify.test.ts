@@ -1394,19 +1394,27 @@ describe('apifyProvider', () => {
         ));
     });
 
-    it('accepts only exact relationship build pins and forwards an override', async () => {
-        const overridden = mockClient([relationshipItem('alice')]);
+    it.each([
+        { method: 'getFollowers', direction: 'Followers' },
+        { method: 'getFollowing', direction: 'Followings' },
+    ] as const)('forwards the exact Dev build pin for $direction with the existing input and caps', async ({ method, direction }) => {
+        const { client, call, waitForFinish } = mockClient([relationshipItem('alice', { type: direction })]);
         const provider = makeApifyProvider({
-            client: overridden.client,
-            env: { APIFY_RELATIONSHIP_BUILD: '1.2.3' },
+            client,
+            env: { APIFY_RELATIONSHIP_BUILD: '0.0.96' },
         });
 
-        await expect(provider.getFollowers!('target', 1)).resolves.toHaveLength(1);
-        expect(overridden.call).toHaveBeenCalledWith(
-            expect.anything(),
-            expect.objectContaining({ build: '1.2.3' })
-        );
+        await expect(provider[method]!('target', 1)).resolves.toMatchObject([{ username: 'alice' }]);
 
+        expect(client.actor).toHaveBeenCalledWith(APIFY_RELATIONSHIP_ACTOR_ID);
+        expect(call.mock.calls).toEqual([[
+            { Account: ['target'], resultsLimit: 25, dataToScrape: direction },
+            { build: '0.0.96', timeout: 900, maxItems: 25, maxTotalChargeUsd: 0.02125, restartOnError: false },
+        ]]);
+        expect(waitForFinish).toHaveBeenCalledWith({ waitSecs: 240 });
+    });
+
+    it('rejects a floating relationship build before starting the Actor', async () => {
         const invalid = mockClient([relationshipItem('alice')]);
         await expect(makeApifyProvider({
             client: invalid.client,
