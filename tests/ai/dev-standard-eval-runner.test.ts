@@ -7,6 +7,7 @@ import {
 } from '@/lib/services/ai/v2-staged-analysis';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
 import type { V2PreliminaryCandidateScore } from '@/lib/services/analysis/v2-candidate-scoring';
+import type { DevStandardEvalBundle } from '@/lib/services/dev-ui/standard-eval-types';
 import {
     generateDevStandardEvalFeature,
     runDevStandardEval,
@@ -76,7 +77,7 @@ function fixture() {
     preliminary.push(frozenOutsideSample);
     return {
         version: 1, expiresAt: Date.now() + 60_000, candidates, preliminary,
-        observed: [], notCollected: [], partnerOverrides: [],
+        observed: [], notCollected: [], partnerOverrides: [] as DevStandardEvalBundle['partnerOverrides'],
         originalHighRiskIds: [candidates[0]!.candidateId],
     };
 }
@@ -101,7 +102,7 @@ function fullMediaFixture(text: string) {
 }
 
 describe('paired Standard feature evaluation', () => {
-    beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-19T10:00:00Z')));
+    beforeEach(() => { vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-19T10:00:00Z')); });
     afterEach(() => vi.restoreAllMocks());
 
     it('runs exactly three pairs against the same feature inputs and reports only ordinal and aggregate values', async () => {
@@ -165,6 +166,35 @@ describe('paired Standard feature evaluation', () => {
             expect(generate).not.toHaveBeenCalled();
             expect(beforeDispatch).not.toHaveBeenCalled();
         }
+    });
+
+    it('combines frozen contact evidence with each arm’s feature evidence before recalibrating risk', async () => {
+        const bundle = fixture();
+        const sample = bundle.candidates[0]!;
+        bundle.partnerOverrides.push({ candidateId: sample.candidateId, evidence: 'weak' });
+        bundle.preliminary[0]!.hasWeakPartnerEvidence = true;
+        const generate = vi.fn<DevStandardEvalGenerate>(async request => {
+            const original = bundle.candidates[request.ordinal - 1]!.featureResult;
+            const result: FeatureAnalysisResult = request.ordinal === 1 && request.thinkingLevel === 'MEDIUM'
+                ? {
+                    ...original,
+                    features: {
+                        ...original.features,
+                        partnerEvidence: 'strong',
+                        evidenceSelectionIds: {
+                            ...original.features.evidenceSelectionIds,
+                            marriagePartner: [sample.input.media[1]!.selectionId],
+                        },
+                    },
+                }
+                : original;
+            return { result, tokenUsage, latencyMs: 20 };
+        });
+
+        const report = await runDevStandardEval({ bundle, generate });
+
+        expect(report.pairs[0]).toMatchObject({ high: { riskBand: 'high_risk' }, medium: { riskBand: 'normal' } });
+        expect(report.arms.medium.cohortSize).toBe(report.arms.high.cohortSize);
     });
 
     it('does not retry or start further requests after a provider failure', async () => {

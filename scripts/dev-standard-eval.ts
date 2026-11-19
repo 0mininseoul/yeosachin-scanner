@@ -30,14 +30,23 @@ async function main() {
         || process.env.GOOGLE_CLOUD_LOCATION !== 'global') {
         throw new Error('DEV_STANDARD_EVAL_VERTEX_CONFIG_INVALID');
     }
-    const result = await runDevStandardEval({
-        bundle,
-        generate: generateDevStandardEvalFeature,
-        beforeDispatch: async () => {
-            if (!await store.claimEvaluation()) throw new Error('DEV_STANDARD_EVAL_ALREADY_STARTED');
-        },
-    });
-    console.log(JSON.stringify(result));
+    // This command emits one safe receipt. Existing SDK and worker debug logs
+    // are irrelevant to the offline evaluation and must stay out of the receipt.
+    const { debug, error, info, log, warn } = console;
+    const quiet = () => undefined;
+    Object.assign(console, { debug: quiet, error: quiet, info: quiet, log: quiet, warn: quiet });
+    try {
+        const result = await runDevStandardEval({
+            bundle,
+            generate: generateDevStandardEvalFeature,
+            beforeDispatch: async () => {
+                if (!await store.claimEvaluation()) throw new Error('DEV_STANDARD_EVAL_ALREADY_STARTED');
+            },
+        });
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+    } finally {
+        Object.assign(console, { debug, error, info, log, warn });
+    }
 }
 
 main().catch(error => {

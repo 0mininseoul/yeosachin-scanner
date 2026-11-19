@@ -174,6 +174,8 @@ function requestBudgetGuard(
         reserve(input) {
             if (
                 input.runId !== request.runId || input.operationKey !== request.identity.operationKey
+                || input.reservationKey !== `${request.runId}:${request.identity.operationKey}:1`
+                || input.orderId != null || input.route !== 'high_value'
                 || input.attempt !== 1 || input.modelName !== MODEL || input.location !== LOCATION
                 || input.maxOutputTokens !== MAX_OUTPUT_TOKENS || input.inputTokens > MAX_INPUT_TOKENS
             ) {
