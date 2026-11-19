@@ -22,6 +22,27 @@ const ACTOR_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~/-]{2,199}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 const MAX_CANONICAL_HASH_INPUT_BYTES = 65_536;
 const MAX_PROVIDER_CHARGE_USD = 100_000;
+const APIFY_START_REJECTION_TYPES = new Set([
+    'actor-disabled',
+    'actor-not-found',
+    'apify-plan-required-to-use-paid-actor',
+    'build-not-found',
+    'build-outdated',
+    'concurrent-runs-limit-exceeded',
+    'full-permission-actor-not-approved',
+    'insufficient-permissions',
+    'invalid-build',
+    'invalid-input',
+    'invalid-token',
+    'max-total-charge-usd-below-minimum',
+    'monthly-usage-limit-too-low',
+    'not-enough-usage-to-run-paid-actor',
+    'rate-limit-exceeded',
+    'record-not-found',
+    'schema-validation',
+    'unknown-build-tag',
+    'usage-limit-exceeded',
+]);
 
 export const ANALYSIS_V2_PROVIDER_OPERATION_KINDS = [
     'target-profile',
@@ -1600,6 +1621,17 @@ export function createAnalysisV2ProviderRunStore(
                             || actual.maxChargeUsd !== expectedProvider.maxChargeUsd
                         ) {
                             throw new AnalysisV2ProviderRunConflictError();
+                        }
+                        if (actual.logicalProvider === 'apify' && event.errorType !== 'dev_live_budget_rejected') {
+                            console.warn(JSON.stringify({
+                                severity: 'WARNING',
+                                event: 'analysis_v2_apify_start_rejected',
+                                operation: input.operationKey.split(':', 1)[0],
+                                statusCode: event.statusCode,
+                                errorType: event.errorType && APIFY_START_REJECTION_TYPES.has(event.errorType)
+                                    ? event.errorType
+                                    : 'unclassified',
+                            }));
                         }
                         reserved = await store.rejectStart({
                             ...input,

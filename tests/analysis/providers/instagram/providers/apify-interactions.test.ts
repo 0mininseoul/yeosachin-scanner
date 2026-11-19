@@ -364,14 +364,17 @@ describe('Apify interaction adapter', () => {
         }).getPostLikers([post], 1)).rejects.toThrow('APIFY_LIKER_POST_MISMATCH');
     });
 
-    it('batches official comments, disables replies, and caps the full batch charge', async () => {
+    it.each([
+        { env: BASE_ENV, build: '0.0.588' },
+        { env: { ...BASE_ENV, APIFY_COMMENTS_BUILD: '0.0.682' }, build: '0.0.682' },
+    ])('batches official comments, disables replies, and caps the charge on $build', async ({ env, build }) => {
         const postA = 'https://www.instagram.com/p/PostA/';
         const postB = 'https://www.instagram.com/reel/PostB/';
         const { client, call } = mockClient([
             comment('1', postA),
             { ...comment('2', postB), commentUrl: 'https://www.instagram.com/reel/PostB/c/2/' },
         ]);
-        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+        const adapter = makeApifyInteractionAdapter({ client, env });
 
         const result = await adapter.getPostComments([postA, postB], 15);
 
@@ -384,7 +387,7 @@ describe('Apify interaction adapter', () => {
                 includeNestedComments: false,
             },
             expect.objectContaining({
-                build: '0.0.588',
+                build,
                 maxItems: 30,
                 maxTotalChargeUsd: 0.078,
                 timeout: 300,

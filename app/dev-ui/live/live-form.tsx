@@ -22,8 +22,14 @@ const selector = 'devAnalysis=live';
 const planHeader = 'x-dev-live-plan';
 const ownerAttemptStoragePrefix = 'dev-live-attempt:';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const defaultRetryDelayMs = 2_000;
 type LivePlanId = 'basic' | 'standard';
-type PendingAdmission = { preflightId: string; planId: LivePlanId };
+type Admission = { preflightId: string; planId: LivePlanId; retryAfterMs?: number };
+
+function admissionRetryDelay(value: unknown) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 250 && value <= 30_000) return value;
+    return defaultRetryDelayMs;
+}
 
 function isPlanAvailable(status: PreflightStatusV1, planId: LivePlanId) {
     return status.status === 'ready'
@@ -54,8 +60,8 @@ async function call(
     const payload = await response.json();
     if (!response.ok) {
         throw new DevLiveRequestError(
-            typeof payload.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.',
-            typeof payload.code === 'string' ? payload.code : undefined,
+            typeof payload?.error === 'string' ? payload.error : '요청을 처리하지 못했습니다.',
+            typeof payload?.code === 'string' ? payload.code : undefined,
             response.status,
         );
     }
@@ -82,12 +88,14 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const [launched, setLaunched] = useState<{ id: string; target: string; at: number } | null>(null);
     const [confirmed, setConfirmed] = useState(false);
     const [busy, setBusy] = useState(false);
-    const [pendingAdmission, setPendingAdmission] = useState<PendingAdmission | null>(null);
+    const [admission, setAdmission] = useState<Admission | null>(null);
     const [error, setError] = useState('');
     const [readRevision, setReadRevision] = useState(0);
     const busyRef = useRef(false);
     const preflightController = useRef<AbortController | null>(null);
-    const activeAdmission = pendingAdmission?.preflightId === preflightId ? pendingAdmission : null;
+    const activeAdmission = admission?.preflightId === preflightId ? admission : null;
+    const preparing = !!activeAdmission;
+    const pendingAdmission = activeAdmission?.retryAfterMs !== undefined ? activeAdmission : null;
     const current = snapshot?.status.preflightId.toLowerCase() === preflightId ? snapshot : null;
     const preflight = current?.status;
     const targetInstagramId = normalizeInstagramUsername(target);
@@ -102,8 +110,8 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const displayedPlanId = preflightId ? current?.planId : canStartPlan ? startPlanId : undefined;
     const displayedPlan = displayedPlanId === 'standard' ? 'Standard' : 'Basic';
     const approvedPlanAvailable = !!readyPreflight && !!current && isPlanAvailable(readyPreflight, current.planId);
-    const showExclusion = !!preflight && (preflight.status === 'pending' || preflight.status === 'ready') && !exclusionDecided;
-    const showImmersive = !!preflight && (preflight.status === 'pending' || preflight.status === 'ready')
+    const showExclusion = !preparing && !!preflight && (preflight.status === 'pending' || preflight.status === 'ready') && !exclusionDecided;
+    const showImmersive = !preparing && !!preflight && (preflight.status === 'pending' || preflight.status === 'ready')
         && exclusionDecided && !plansVisible;
     const goToPlans = useCallback(() => {
         setPlanViewId(preflightId);
@@ -113,11 +121,11 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         if (!plansVisible) return;
         const frame = requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
         return () => cancelAnimationFrame(frame);
-    }, [plansVisible]);
+    }, [plansVisible, preparing]);
     const markBliteShown = useCallback(() => setBliteResultId(preflightId), [preflightId]);
 
     useLayoutEffect(() => {
-        setPendingAdmission(pending => pending?.preflightId === preflightId ? pending : null);
+        setAdmission(previous => previous?.preflightId === preflightId ? previous : null);
         setSavedExclusionId(id => id === preflightId ? id : '');
         setPlanViewId(id => id === preflightId ? id : '');
         setBliteResultId(id => id === preflightId ? id : '');
@@ -151,45 +159,56 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
         preflightController.current = controller;
         let timer: ReturnType<typeof setTimeout> | undefined;
         async function refresh() {
+            if (controller.signal.aborted) return;
             try {
                 const response = await fetch(`/api/analysis/preflight/${preflightId}?${selector}`, {
                     cache: 'no-store', signal: controller.signal,
                 });
                 const payload = await response.json();
-                if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : '사전 점검을 조회하지 못했습니다.');
-                const status = preflightStatusV1Schema.parse(payload);
-                if (status.preflightId.toLowerCase() !== preflightId) throw new Error('조회한 사전 점검이 현재 실행과 일치하지 않습니다.');
-                const reportedPlan = response.headers.get(planHeader);
-                const planId = reportedPlan;
-                if (planId !== 'basic' && planId !== 'standard') throw new Error('사전 점검의 분석 플랜을 확인하지 못했습니다.');
                 if (controller.signal.aborted) return;
+                if (!response.ok) {
+                    if (response.status === 410) setSnapshot(null);
+                    throw new Error(typeof payload?.error === 'string' ? payload.error : '사전 점검을 조회하지 못했습니다.');
+                }
+                const parsed = preflightStatusV1Schema.safeParse(payload);
+                if (!parsed.success) throw new Error('사전 점검 상태를 확인하지 못했습니다.');
+                const status = parsed.data;
+                if (status.preflightId.toLowerCase() !== preflightId) throw new Error('조회한 사전 점검이 현재 실행과 일치하지 않습니다.');
+                const planId = response.headers.get(planHeader);
+                if (planId !== 'basic' && planId !== 'standard') throw new Error('사전 점검의 분석 플랜을 확인하지 못했습니다.');
                 setSnapshot({ status, planId });
                 if (status.status === 'consumed') router.replace(`/progress/${status.requestId}?${selector}`);
-                else if (activeAdmission && status.status === 'ready') {
-                    if (reportedPlan !== activeAdmission.planId || status.exclusionDecision === 'pending' || !isPlanAvailable(status, planId)) {
-                        setPendingAdmission(null);
+                else if (pendingAdmission) {
+                    if (status.status === 'blocked') {
+                        setAdmission(null);
                         return;
                     }
-                    const admission = await call(`/api/analysis/preflight/${preflightId}/entitle`, 'POST', { planId }, controller.signal);
+                    if (status.status !== 'ready' || planId !== pendingAdmission.planId
+                        || status.exclusionDecision === 'pending' || !isPlanAvailable(status, planId)) {
+                        throw new Error('사전 점검이 변경되었습니다. 현재 계정과 플랜을 다시 확인해 주세요.');
+                    }
+                    const result = await call(`/api/analysis/preflight/${preflightId}/entitle`, 'POST', { planId }, controller.signal);
                     if (controller.signal.aborted) return;
-                    if (typeof admission.requestId === 'string' && uuid.test(admission.requestId)) {
-                        router.replace(`/progress/${admission.requestId}?${selector}`);
-                    } else if (admission.status === 'admission_pending') timer = setTimeout(refresh, 2_000);
+                    if (typeof result?.requestId === 'string' && uuid.test(result.requestId)) {
+                        router.replace(`/progress/${result.requestId}?${selector}`);
+                    } else if (result?.status === 'admission_pending') timer = setTimeout(refresh, admissionRetryDelay(result.retryAfterMs));
                     else throw new Error('실제 분석 요청의 상태를 확인하지 못했습니다.');
-                } else if (status.status === 'pending') timer = setTimeout(refresh, 2_000);
+                } else if (status.status === 'pending') timer = setTimeout(refresh, defaultRetryDelayMs);
             } catch (cause) {
                 if (!controller.signal.aborted) {
+                    if (cause instanceof DevLiveRequestError && cause.status === 410) setSnapshot(null);
                     setError(cause instanceof Error ? cause.message : '사전 점검을 조회하지 못했습니다.');
-                    setPendingAdmission(null);
+                    setAdmission(null);
                 }
             }
         }
-        void refresh();
+        if (pendingAdmission) timer = setTimeout(refresh, pendingAdmission.retryAfterMs);
+        else void refresh();
         return () => {
             controller.abort();
             clearTimeout(timer);
         };
-    }, [activeAdmission, preflightId, readRevision, router]);
+    }, [pendingAdmission, preflightId, readRevision, router]);
 
     async function submit(work: () => Promise<void>) {
         if (available !== true || busyRef.current) return;
@@ -270,17 +289,22 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
             || activeAdmission || !isPlanAvailable(current.status, current.planId)) return;
         void submit(async () => {
             const { planId } = current;
-            const result = await call(`/api/analysis/preflight/${preflightId}/entitle`, 'POST', { planId }, signal)
-                .catch(cause => {
-                    if (!signal.aborted) throw cause;
-                });
-            if (signal.aborted) return;
-            if (typeof result.requestId === 'string' && uuid.test(result.requestId)) {
-                router.replace(`/progress/${result.requestId}?${selector}`);
-            } else if (result.status === 'admission_pending') {
-                setPendingAdmission({ preflightId, planId });
-            } else {
-                throw new Error('실제 분석 요청의 상태를 확인하지 못했습니다.');
+            setAdmission({ preflightId, planId });
+            try {
+                const result = await call(`/api/analysis/preflight/${preflightId}/entitle`, 'POST', { planId }, signal);
+                if (signal.aborted) return;
+                if (typeof result?.requestId === 'string' && uuid.test(result.requestId)) {
+                    router.replace(`/progress/${result.requestId}?${selector}`);
+                } else if (result?.status === 'admission_pending') {
+                    setAdmission({ preflightId, planId, retryAfterMs: admissionRetryDelay(result.retryAfterMs) });
+                } else {
+                    throw new Error('실제 분석 요청의 상태를 확인하지 못했습니다.');
+                }
+            } catch (cause) {
+                if (signal.aborted) return;
+                if (cause instanceof DevLiveRequestError && cause.status === 410) setSnapshot(null);
+                setAdmission(null);
+                throw cause;
             }
         });
     }
@@ -339,8 +363,8 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                 </CaseCard>
             ) : preflightId && <>
                 <AnalysisPreflightHeading
-                    exclusionDecided={!preflight || exclusionDecided}
-                    ready={!!readyPreflight}
+                    exclusionDecided={preparing || !preflight || exclusionDecided}
+                    ready={preparing || !!readyPreflight}
                     bliteResultShown={bliteResultId === preflightId}
                     onChangeTarget={resetTarget}
                 />
@@ -364,11 +388,21 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                     onRetry={resetTarget}
                     onBliteResultShown={markBliteShown}
                 />}
-                {!readyPreflight && ((!preflight && !error) || plansVisible) && <PreflightPendingStatus
+                {!preparing && !readyPreflight && !error && (!preflight || plansVisible) && <PreflightPendingStatus
                     targetInstagramId={displayTarget}
                     startedAt={launchedPreflight?.at ?? null}
                 />}
-                {plansVisible && readyPreflight && current && <>
+                {preparing && <CaseCard className="mt-7 p-7 text-center">
+                    <div role="status" aria-live="polite" aria-atomic="true">
+                        <Eyebrow className="justify-center">분석 준비 중</Eyebrow>
+                        <h2 className="mt-4 text-[20px] font-extrabold text-fg">최신 계정 정보를 확인하고 있어요</h2>
+                        <div className="mt-6 h-1.5 w-full overflow-hidden bg-line" aria-hidden="true">
+                            <div className="h-full w-1/3 bg-blood anim-indeterminate" />
+                        </div>
+                        <p className="mt-5 text-[13px] leading-relaxed text-fg-dim">준비가 끝나면 분석 진행 화면으로 이동합니다.</p>
+                    </div>
+                </CaseCard>}
+                {!preparing && plansVisible && readyPreflight && current && <>
                     <AnalysisTargetCard target={readyPreflight.target} />
                     <AnalysisPlanSection>
                         <AnalysisPlanCards
@@ -380,10 +414,9 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                         <p className="mt-4 text-[11.5px] leading-relaxed text-fg-dim">
                             실제 분석은 이번에 승인된 {displayedPlan} 플랜으로만 진행합니다. 카드 결제는 없습니다.
                         </p>
-                        {activeAdmission && <p role="status" className="mt-4 text-sm text-fg-dim">최신 계정 정보를 확인하고 분석 작업을 준비하고 있습니다.</p>}
                         {approvedPlanAvailable ? <div className="mt-5">
-                            <PrimaryButton type="button" size="lg" onClick={beginAnalysis} disabled={busy || !!activeAdmission || available !== true}>
-                                {activeAdmission ? '분석 시작 상태 다시 확인' : busy ? '요청 처리 중…' : `${displayedPlan} 분석 시작 · 카드 결제 없음`}
+                            <PrimaryButton type="button" size="lg" onClick={beginAnalysis} disabled={busy || available !== true}>
+                                {`${displayedPlan} 분석 시작 · 카드 결제 없음`}
                             </PrimaryButton>
                         </div> : <p className="mt-5 text-sm text-fg-dim">현재 계정은 이번 {displayedPlan} 실행 범위에 해당하지 않습니다.</p>}
                     </AnalysisPlanSection>
