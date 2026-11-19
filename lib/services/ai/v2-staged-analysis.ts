@@ -20,6 +20,7 @@ import {
 import type { PartnerContactSheet } from './partner-contact-sheet';
 import {
     analyzeWithGemini,
+    zodToGeminiResponseJsonSchema,
     type GeminiAttemptStartTelemetry,
     type GeminiAttemptTelemetry,
     type GeminiRequestTelemetry,
@@ -45,7 +46,10 @@ import {
     type VertexAiEscalationReason,
 } from './vertex-ai-cost-policy';
 import type { VertexAiBudgetGuard } from './vertex-ai-cost-policy';
-import type { ReplayStatelessCapability } from './replay-stateless-capability';
+import {
+    isReplayStatelessCapability,
+    type ReplayStatelessCapability,
+} from './replay-stateless-capability';
 import {
     isAnalysisV2AiDeterministicFallbackError,
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
@@ -2520,23 +2524,83 @@ export function createGenderResolutionResultIdentity(
     );
 }
 
+export type FeatureEvalThinkingLevel = 'HIGH' | 'MEDIUM';
+
+function projectFeatureAnalysis(
+    rawInput: FeatureAnalysisInput,
+    policyVersion: AiStagePolicyVersion,
+    escalationOverride?: VertexAiEscalationReason | null,
+    thinkingLevel?: FeatureEvalThinkingLevel,
+) {
+    const input = featureAnalysisInputSchema.parse(rawInput);
+    const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
+    const escalationReason = escalationOverride
+        ?? featureEscalationReason(input, policyVersion);
+    const prompt = featureAnalysisPrompt(input, media, policyVersion);
+    const identity = stagedResultIdentity(
+        'featureAnalysis',
+        prompt,
+        media,
+        'request',
+        policyVersion,
+        { escalationReason, thinkingLevel },
+    );
+    return { input, media, escalationReason, prompt, identity };
+}
+
 export function createFeatureAnalysisResultIdentity(
     rawInput: FeatureAnalysisInput,
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
     options: { escalationReason?: VertexAiEscalationReason | null } = {},
 ): AnalysisV2AiResultIdentity {
-    const input = featureAnalysisInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
-    const escalationReason = options.escalationReason
-        ?? featureEscalationReason(input, policyVersion);
-    return stagedResultIdentity(
-        'featureAnalysis',
-        featureAnalysisPrompt(input, media, policyVersion),
-        media,
-        'request',
-        policyVersion,
-        { escalationReason },
+    return projectFeatureAnalysis(rawInput, policyVersion, options.escalationReason).identity;
+}
+
+function featureSchemaForProjection(
+    projection: ReturnType<typeof projectFeatureAnalysis>,
+    policyVersion: AiStagePolicyVersion,
+) {
+    const { input, media } = projection;
+    return featureResponseSchemaFor(media, policyVersion, {
+        profileEvidence: input.bio,
+        feedEvidence: input.captions.map(caption => caption.text),
+    }, input.accountProfile?.fullName);
+}
+
+function finalizeFeatureAnalysis(
+    projection: ReturnType<typeof projectFeatureAnalysis>,
+    features: FeatureAnalysisResult['features'],
+): FeatureAnalysisResult {
+    return featureAnalysisResultSchema.parse({
+        features,
+        finalGenderDecision: resolveFinalGenderDecision(projection.input.triage.assessment, features),
+        analyzedSelectionIds: projection.media.map(item => item.selectionId),
+    });
+}
+
+export function projectV211FeatureEvaluation(rawInput: FeatureAnalysisInput, thinkingLevel: FeatureEvalThinkingLevel) {
+    const projection = projectFeatureAnalysis(
+        rawInput, AI_STAGE_POLICY_V211_VERSION, undefined, thinkingLevel,
     );
+    const schema = featureSchemaForProjection(projection, AI_STAGE_POLICY_V211_VERSION);
+    return {
+        identity: projection.identity,
+        promptUtf8Bytes: Buffer.byteLength(projection.prompt, 'utf8'),
+        responseSchemaUtf8Bytes: Buffer.byteLength(JSON.stringify(zodToGeminiResponseJsonSchema(schema)), 'utf8'),
+        mediaCount: projection.media.length,
+        validateResult(rawResult: unknown): FeatureAnalysisResult {
+            const value = featureAnalysisResultSchema.parse(rawResult);
+            const result = finalizeFeatureAnalysis(projection, schema.parse(value.features));
+            if (
+                value.finalGenderDecision !== result.finalGenderDecision
+                || value.analyzedSelectionIds.length !== result.analyzedSelectionIds.length
+                || value.analyzedSelectionIds.some((id, index) => id !== result.analyzedSelectionIds[index])
+            ) {
+                throw new Error('DEV_STANDARD_EVAL_FEATURE_RESULT_MISMATCH');
+            }
+            return result;
+        },
+    };
 }
 
 /**
@@ -2765,29 +2829,27 @@ export async function featureAnalysis(
         aiStagePolicyVersion?: AiStagePolicyVersion;
         replayCapability?: ReplayStatelessCapability;
         escalationReason?: VertexAiEscalationReason | null;
+        replayThinkingLevel?: FeatureEvalThinkingLevel;
     } = {},
 ): Promise<FeatureAnalysisResult> {
-    const input = featureAnalysisInputSchema.parse(rawInput);
-    const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const policyVersion = options.aiStagePolicyVersion ?? AI_STAGE_POLICY_VERSION;
-    const escalationReason = options.escalationReason
-        ?? featureEscalationReason(input, policyVersion);
+    const thinkingLevel = options.replayThinkingLevel;
+    if (thinkingLevel !== undefined && (
+        policyVersion !== AI_STAGE_POLICY_V211_VERSION
+        || !isReplayStatelessCapability(options.replayCapability)
+        || (thinkingLevel !== 'HIGH' && thinkingLevel !== 'MEDIUM')
+    )) {
+        throw new Error('DEV_STANDARD_EVAL_FEATURE_POLICY_INVALID');
+    }
+    const projection = projectFeatureAnalysis(rawInput, policyVersion, options.escalationReason, thinkingLevel);
+    const { input, media, escalationReason, prompt, identity } = projection;
     const costRoute = costRouteForStage('featureAnalysis', policyVersion, escalationReason);
-    const prompt = featureAnalysisPrompt(input, media, policyVersion);
-    const identity = stagedResultIdentity(
-        'featureAnalysis',
-        prompt,
-        media,
-        'request',
-        policyVersion,
-        { escalationReason },
-    );
     const audit = parseAuditContext(rawAuditContext, identity);
-    const responseSchema = featureResponseSchemaFor(media, policyVersion, {
-        profileEvidence: input.bio,
-        feedEvidence: input.captions.map(caption => caption.text),
-    }, input.accountProfile?.fullName);
+    const responseSchema = featureSchemaForProjection(projection, policyVersion);
     const prepared = await prepareStagedResult(audit, responseSchema);
+    if (thinkingLevel !== undefined && (prepared.cached !== null || prepared.startingAttempt !== 1)) {
+        throw new Error('DEV_STANDARD_EVAL_FEATURE_ATTEMPT_INVALID');
+    }
     let features;
     try {
         features = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
@@ -2804,7 +2866,9 @@ export async function featureAnalysis(
                 onAttemptTelemetry: audit.onAttemptTelemetry,
                 ...costRouteGenerationOptions(costRoute),
                 ...stagedTelemetryOptions(audit, costRoute),
-                ...(policyVersion === AI_STAGE_POLICY_V211_VERSION
+                ...(thinkingLevel !== undefined
+                    ? { thinkingLevel, maxAttempts: 1, retryResponseRejections: false }
+                    : policyVersion === AI_STAGE_POLICY_V211_VERSION
                     ? {
                         maxAttempts: conciergeBatchFeatureAnalysisMaxAttempts(),
                         retryResponseRejections: true,
@@ -2816,6 +2880,7 @@ export async function featureAnalysis(
             }
         ));
     } catch (error) {
+        if (thinkingLevel !== undefined) throw error;
         const validation = error instanceof Error && error.cause instanceof GeminiResponseValidationError
             ? error.cause
             : null;
@@ -2850,11 +2915,7 @@ export async function featureAnalysis(
             }),
         });
     }
-    return featureAnalysisResultSchema.parse({
-        features,
-        finalGenderDecision: resolveFinalGenderDecision(input.triage.assessment, features),
-        analyzedSelectionIds: media.map(item => item.selectionId),
-    });
+    return finalizeFeatureAnalysis(projection, features);
 }
 
 function partnerSafetyResponseSchemaFor(

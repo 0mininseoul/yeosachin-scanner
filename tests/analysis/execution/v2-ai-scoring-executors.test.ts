@@ -11,11 +11,12 @@ import type {
     GenderTriageResult,
     PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
-import { featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis';
+import { createFeatureAnalysisResultIdentity, featureAnalysisInputSchema } from '@/lib/services/ai/v2-staged-analysis';
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
@@ -164,7 +165,7 @@ function context<S extends AnalysisV2StageId>(
             preview?: AnalysisV2ProgressCandidateMediaPreview
         ) => Promise<void>;
         aiStagePolicyVersion?: string;
-        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4';
+        riskPolicyVersion?: 'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5';
     } = {}
 ): AnalysisV2StageExecutorContext<S> {
     const jobKey = options.jobKey ?? `test:${stage}`;
@@ -3945,6 +3946,78 @@ describe('V2 AI and scoring executors', () => {
             weakPartnerAdjustment: -5,
             preScore: Math.max(0, componentTotal - 5),
         });
+    });
+
+    it('seals the exact three archived inputs and fixed scoring cohort before the final score checkpoint', async () => {
+        const memoryState = memory();
+        const women = ['sample.one', 'sample.two', 'sample.three', 'sample.four'];
+        const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+        const riskPolicyVersion = 'risk-policy-v2.5' as const;
+        memoryState.outcomes = women.map(username => {
+            const outcome = verifiedOutcome(username);
+            outcome.featureOperationKey = createFeatureAnalysisResultIdentity({
+                triage: outcome.triage!,
+                bio: outcome.profile!.bio ?? null,
+                media: [{
+                    selectionId: outcome.normalizedSelectionIds[0]!,
+                    kind: 'profile',
+                    normalizedJpegBase64: bytes.toString('base64'),
+                }],
+                captions: [],
+                accountProfile: {
+                    fullName: outcome.profile!.fullName ?? null,
+                    bio: outcome.profile!.bio ?? null,
+                    hasProfileImage: true,
+                },
+            }, AI_STAGE_POLICY_V211_VERSION).operationKey;
+            return outcome;
+        });
+        const candidates = calculateV2PreliminaryScores({
+            candidates: memoryState.outcomes.map((outcome, index) => ({
+                candidateId: outcome.candidateId,
+                username: outcome.instagramId,
+                appearanceGrade: 4,
+                exposureScore: 2,
+                accountContext: 'personal',
+                hasWeakPartnerEvidence: false,
+                hasStrongPartnerEvidence: false,
+                uniqueTargetPostsLikedByCandidate: index === 0 ? 1 : 0,
+                boundedCandidateCommentsOnTarget: 0,
+                hasCandidateToTargetTagOrCaptionMention: false,
+                hasTargetToCandidateTagOrCaptionMention: false,
+            })),
+            orderedMutualUsernames: women,
+            excludedUsername: null,
+            riskPolicyVersion,
+        });
+        memoryState.screening = {
+            revision: 1, resultHash: digest('screening'), shortlistHash: digest('shortlist'),
+            riskPolicyVersion, candidates,
+        };
+        memoryState.reverse = { revision: 1, resultHash: digest('reverse'), rows: [] };
+        memoryState.partner = { revision: 1, resultHash: digest('partner'), rows: [] };
+        const expiresAt = 2_000_000_000_000;
+        const deps = dependencies(memoryState, {
+            sourceMediaArchive: {
+                persistBundle: vi.fn(async () => undefined),
+                loadBundle: vi.fn(async ({ expectedSelectionIds }: Parameters<AnalysisV2SourceMediaArchiveStore['loadBundle']>[0]) =>
+                    expectedSelectionIds.map(selectionId => ({ selectionId, normalizedJpeg: bytes }))),
+            },
+            devStandardEvalCapture: async build => {
+                expect(memoryState.final).toBeNull();
+                const bundle = await build(expiresAt);
+                expect(bundle?.candidates).toHaveLength(3);
+                expect(bundle?.candidates[0]?.candidateId).toBe(memoryState.outcomes[0]!.candidateId);
+                expect(bundle?.originalHighRiskIds).toContain(memoryState.outcomes[0]!.candidateId);
+                expect(bundle?.preliminary.map(row => row.username)).toEqual(['eval_1', 'eval_2', 'eval_3', 'eval_4']);
+            },
+        });
+        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
+        await registry.final_score!(context('final_score', { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, riskPolicyVersion }));
+        expect(deps.sourceMediaArchive.loadBundle).toHaveBeenCalledTimes(3);
+        expect(deps.normalizeMedia).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(memoryState.final?.candidates).toHaveLength(4);
     });
 
     it('checkpoints every candidate publicly while keeping paid verification frozen to Top 10', async () => {

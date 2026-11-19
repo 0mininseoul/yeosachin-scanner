@@ -33,6 +33,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createAnalysisV2RevenueFinalQualityGate } from './revenue-final-quality-gate';
 import { createAnalysisV2RevenueResolverCapacity } from './revenue-resolver-capacity';
 import { enqueueAnalysisOrderAuditBundle } from './order-audit-bundle';
+import { createDevStandardEvalCapture } from '@/lib/services/dev-ui/standard-eval-capture';
 
 export type AnalysisV2ProductionEnvironment = Record<string, string | undefined>;
 
@@ -97,6 +98,7 @@ export function createProductionAnalysisV2AiScoringExecutorDependencies(
         resultImages: createProductionResultImageCapture(env),
         mediaStore,
         sourceMediaArchive,
+        devStandardEvalCapture: createDevStandardEvalCapture(env),
         ai: createDurableAnalysisV2AiStageRuntime(),
         reverseLikes: createAnalysisV2ReverseLikeCollector({
             adapter: makeApifyInteractionAdapter({ env }),
