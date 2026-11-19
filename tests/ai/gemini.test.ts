@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
 
 const mocks = vi.hoisted(() => ({
@@ -10,7 +11,8 @@ const mocks = vi.hoisted(() => ({
     settleDevAttempt: vi.fn(),
 }));
 
-vi.mock('@google/genai', () => ({
+vi.mock('@google/genai', async (importOriginal) => ({
+    ApiError: (await importOriginal<typeof import('@google/genai')>()).ApiError,
     GoogleGenAI: class {
         models = { generateContent: mocks.generateContent };
     },
@@ -113,6 +115,7 @@ function analyze(
 describe('analyzeWithGemini generation retry policy', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.settleDevAttempt.mockReset().mockResolvedValue(undefined);
         mocks.tokenUsageInsert.mockResolvedValue({ error: null });
         vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
         vi.stubEnv('VERTEX_AI_COST_OPTIMIZED', 'false');
@@ -164,15 +167,18 @@ describe('analyzeWithGemini generation retry policy', () => {
         const reservation = { grantId: 'synthetic-approval', reservationId: 'synthetic-reservation' };
         mocks.requireDevApproval.mockReturnValue(grant);
         mocks.reserveDevAttempt.mockResolvedValue(reservation);
-        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
-        mocks.generateContent.mockResolvedValueOnce(responseWithText('{"value":"ok"}', null));
+        mocks.generateContent
+            .mockResolvedValueOnce(successfulResponse())
+            .mockResolvedValueOnce(responseWithText('{"value":"ok"}', null))
+            .mockResolvedValueOnce(responseWithText('{"value":"ok"}', { promptTokenCount: 10 }));
         const options = {
             schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
         };
 
         await expect(analyzeWithGemini('prompt', undefined, options)).resolves.toEqual({ value: 'ok' });
         await expect(analyzeWithGemini('prompt', undefined, options)).resolves.toEqual({ value: 'ok' });
-        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(2);
+        await expect(analyzeWithGemini('prompt', undefined, options)).resolves.toEqual({ value: 'ok' });
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(3);
         expect(mocks.generateContent).toHaveBeenCalledWith(expect.objectContaining({
             config: expect.objectContaining({
                 maxOutputTokens: 128, candidateCount: 1,
@@ -180,6 +186,83 @@ describe('analyzeWithGemini generation retry policy', () => {
             }),
         }));
         expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0.0000085);
+    });
+
+    it('settles the confirmed Dev SDK 429 at zero before reserving the retry', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.useFakeTimers();
+        const grant = { id: 'synthetic-approval' };
+        const rejected = { grantId: grant.id, reservationId: 'rejected-reservation' };
+        const succeeded = { grantId: grant.id, reservationId: 'succeeded-reservation' };
+        const zeroSettlement = Promise.withResolvers<void>();
+        const onAttemptTelemetry = vi.fn();
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(rejected).mockResolvedValueOnce(succeeded);
+        mocks.settleDevAttempt.mockReturnValueOnce(zeroSettlement.promise);
+        mocks.generateContent
+            .mockRejectedValueOnce(new ApiError({ message: 'provider quota detail', status: 429 }))
+            .mockResolvedValueOnce(successfulResponse());
+
+        const attempt = analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+            skipTokenLog: true, maxAttempts: 2, onAttemptTelemetry,
+        });
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(rejected, 0);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+
+        zeroSettlement.resolve();
+        await vi.runAllTimersAsync();
+
+        await expect(attempt).resolves.toEqual({ value: 'ok' });
+        expect(mocks.settleDevAttempt.mock.calls).toEqual([[rejected, 0], [succeeded, 0.0000085]]);
+        expect(onAttemptTelemetry.mock.calls.map(([entry]) => entry.disposition)).toEqual(['rate_limited', 'success']);
+    });
+
+    it.each([
+        { error: new Error('network timeout after sending data'), code: 'AI_AMBIGUOUS_GENERATION_ERROR' },
+        { error: new Error('provider message mentions HTTP 429'), code: 'AI_AMBIGUOUS_GENERATION_ERROR' },
+        { error: new ApiError({ message: 'provider server failure', status: 503 }), code: 'AI_AMBIGUOUS_GENERATION_ERROR' },
+        { error: Object.assign(new Error('status from an unknown source'), { status: 429 }), code: 'AI_RATE_LIMIT_ERROR' },
+    ])('retains the reserved Dev cost when the rejection is unconfirmed: $error.message', async ({ error, code }) => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: grant.id, reservationId: 'reserved-attempt' };
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.generateContent.mockRejectedValueOnce(error);
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+            skipTokenLog: true, maxAttempts: 1,
+        })).rejects.toThrow(code);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it('records the confirmed Dev 429 and stops if its zero settlement fails', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.useFakeTimers();
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: grant.id, reservationId: 'reserved-attempt' };
+        const onAttemptTelemetry = vi.fn();
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.settleDevAttempt.mockRejectedValueOnce(new Error('DEV_LIVE_BUDGET_UNAVAILABLE'));
+        mocks.generateContent.mockRejectedValueOnce(new ApiError({ message: 'provider quota detail', status: 429 }));
+
+        const rejection = expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+            skipTokenLog: true, maxAttempts: 2, onAttemptTelemetry,
+        })).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        await vi.runAllTimersAsync();
+        await rejection;
+
+        expect(onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ disposition: 'rate_limited' }));
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
     });
 
     it('does not retry an ambiguous generation and never exposes the provider error', async () => {
@@ -299,10 +382,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.useFakeTimers();
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
-        mocks.generateContent.mockRejectedValue(Object.assign(
-            new Error('provider quota detail'),
-            { status: 429 }
-        ));
+        mocks.generateContent.mockRejectedValue(new ApiError({ message: 'provider quota detail', status: 429 }));
 
         const attemptTelemetry = vi.fn();
         const result = analyze(undefined, attemptTelemetry);
@@ -313,6 +393,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         await rejection;
 
         expect(mocks.generateContent).toHaveBeenCalledTimes(4);
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
         expect(attemptTelemetry).toHaveBeenCalledTimes(4);
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['rate_limited', 'rate_limited', 'rate_limited', 'rate_limited']);

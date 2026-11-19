@@ -137,7 +137,7 @@ export function reserveDevLiveVertexAttempt(
     return reserve(approval, 'vertex', cap.totalCostUsd);
 }
 
-/** Called only with complete provider usage. Unknown costs retain the whole reservation. */
+/** Settle complete provider usage or a confirmed zero charge. Unknown costs retain the whole reservation. */
 export async function settleDevLiveVertexAttempt(reservation: DevLiveCostReservation, actualUsd: number): Promise<void> {
     assertRegisteredDevDatabase();
     const settled = await budgetRpc('dev_live_budget_settle_vertex_v1', {

@@ -12,9 +12,13 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     captureExceptionSafely: vi.fn(),
     push: vi.fn(),
+    useSearchParams: vi.fn(),
 }));
 
-vi.mock('next/navigation', () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock('next/navigation', () => ({
+    useRouter: () => ({ push: mocks.push }),
+    useSearchParams: mocks.useSearchParams,
+}));
 vi.mock('next/link', () => ({ default: ({ href, children, ...props }: React.PropsWithChildren<{ href: string }>) => <a href={href} {...props}>{children}</a> }));
 
 vi.mock('@/lib/supabase/client', () => ({ createClient: mocks.createClient }));
@@ -126,6 +130,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
         vi.useFakeTimers();
         vi.setSystemTime(0);
+        mocks.useSearchParams.mockReturnValue(new URLSearchParams());
         current = new Map([
             [REQUEST_A, snapshot(REQUEST_A, { lastEventSeq: 1 })],
             [REQUEST_B, snapshot(REQUEST_B, {
@@ -435,9 +440,25 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
     });
 
     it.each(['failed', 'missing'] as const)('offers a new analysis for %s instead of retrying the run', async state => {
-        if (state === 'failed') current.set(REQUEST_A, snapshot(REQUEST_A, { status: 'failed', activeProfile: null, lastEventSeq: 1 }));
-        else vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 404 }));
+        if (state === 'failed') {
+            vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+            mocks.useSearchParams.mockReturnValue(new URLSearchParams('devAnalysis=live'));
+            const previous = snapshot(REQUEST_A);
+            current.set(REQUEST_A, snapshot(REQUEST_A, {
+                status: 'failed', backgroundProcessing: false, activeProfile: null, etaRange: null, lastEventSeq: 1,
+                tracks: {
+                    ...previous.tracks,
+                    relationshipAi: { state: 'failed', stageCode: 'PROFILE_SCREENING', done: 9, total: 44, progressBp: 4_500 },
+                },
+            }));
+        } else {
+            vi.mocked(fetch).mockResolvedValueOnce(new Response('', { status: 404 }));
+        }
         await renderPage();
+        if (state === 'failed') {
+            expect(container.querySelector('h1')?.textContent).toBe('판독에 실패했습니다');
+            expect(fetchUrls).toEqual([`/api/analysis/progress/${REQUEST_A}?devAnalysis=live&afterSeq=0&limit=200`]);
+        }
         expect(container.querySelector('a[href="/mypage"]')).toBeNull();
         expect(container.textContent).not.toContain('다시 조회');
         const calls = vi.mocked(fetch).mock.calls.length;

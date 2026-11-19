@@ -522,10 +522,11 @@ const progressTrackSchema = z.object({
         context.addIssue({ code: 'custom', message: 'done cannot exceed total', path: ['done'] });
         return;
     }
-    if (value.progressBp !== calculateTrackProgressBp(value)) {
+    // Concurrent checkpoints can retain prior progress when the total grows.
+    if (value.progressBp < calculateTrackProgressBp(value)) {
         context.addIssue({
             code: 'custom',
-            message: 'Track progress does not match done and total.',
+            message: 'Track progress cannot trail the work implied by done and total.',
             path: ['progressBp'],
         });
     }
@@ -636,7 +637,7 @@ export const progressSnapshotV1Schema = z.object({
         || value.etaRange !== null
         || value.lastEventSeq !== 0
         || Object.values(value.tracks).some(track => (
-            track.state !== 'pending' || track.done !== 0 || track.total !== 0
+            track.state !== 'pending' || track.done !== 0 || track.total !== 0 || track.progressBp !== 0
         ))
     )) {
         context.addIssue({

@@ -163,7 +163,7 @@ describe('V2 progress persistence adapter', () => {
         );
     });
 
-    it('accepts a canonical same-or-ahead snapshot returned by a concurrent writer', async () => {
+    it('accepts a concurrent checkpoint that retains a higher track progress after the total grows', async () => {
         const mock = client({
             snapshot: snapshot({
                 progressBp: 6_000,
@@ -174,7 +174,7 @@ describe('V2 progress persistence adapter', () => {
                         stageCode: 'EVIDENCE_JOINING',
                         done: 3,
                         total: 5,
-                        progressBp: 6_000,
+                        progressBp: 7_000,
                     },
                 },
             }),
@@ -191,7 +191,7 @@ describe('V2 progress persistence adapter', () => {
                         stageCode: 'EVIDENCE_JOINING',
                         done: 3,
                         total: 5,
-                        progressBp: 6_000,
+                        progressBp: 7_000,
                     },
                 },
             },
@@ -625,6 +625,22 @@ describe('V2 progress persistence adapter', () => {
                 status: 'failed',
                 backgroundProcessing: false,
                 etaRange: null,
+            }),
+            events: [],
+        }));
+
+        await expect(store.loadForOwner({ requestId, userId }))
+            .rejects.toThrow('invalid owner load response');
+    });
+
+    it.each([5_699, 10_001, 7_000.5])('rejects invalid stored track progress %d', async progressBp => {
+        const current = snapshot();
+        const store = createAnalysisV2ProgressStore(client({
+            snapshot: snapshot({
+                tracks: {
+                    ...current.tracks,
+                    relationshipAi: { ...current.tracks.relationshipAi, done: 57, total: 100, progressBp },
+                },
             }),
             events: [],
         }));

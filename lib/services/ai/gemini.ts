@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+    ApiError,
     GoogleGenAI,
     MediaResolution,
     ThinkingLevel,
@@ -1073,6 +1074,7 @@ export async function analyzeWithGemini<T>(
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
         let budgetSettled = false;
+        let devRateLimitSettlementError: Error | null = null;
         try {
             if (abortSignal?.aborted) {
                 throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
@@ -1203,11 +1205,25 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     providerDispatchStarted = true;
-                    const generated = await client.models.generateContent({
-                        model: modelName,
-                        contents: [{ role: 'user', parts }],
-                        config,
-                    });
+                    let generated;
+                    try {
+                        generated = await client.models.generateContent({
+                            model: modelName,
+                            contents: [{ role: 'user', parts }],
+                            config,
+                        });
+                    } catch (error) {
+                        // Settle only the single Dev call that Vertex explicitly rejected.
+                        if (devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
+                            try {
+                                await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0);
+                            } catch {
+                                // Record the provider outcome, then end this call without retrying.
+                                devRateLimitSettlementError = new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
+                            }
+                        }
+                        throw error;
+                    }
                     if (devLiveBudget && devReservation) {
                         const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
                         if (status === 'complete' && tokenUsage) {
@@ -1279,7 +1295,7 @@ export async function analyzeWithGemini<T>(
                         }
                         : {}),
                 }, onAttemptTelemetry);
-                throw sanitizeGenerationError(generationError);
+                throw devRateLimitSettlementError ?? sanitizeGenerationError(generationError);
             }
 
             const usage = extractStrictUsageMetadata(response.usageMetadata);
