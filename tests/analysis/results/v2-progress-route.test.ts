@@ -410,6 +410,31 @@ describe('analysis V2 owner progress route', () => {
         expect(response.status).toBe(404);
     });
 
+    it('serves a failed owner snapshot with retained track and aggregate progress', async () => {
+        const current = snapshot();
+        const relationshipAi = {
+            state: 'failed', stageCode: 'PROFILE_SCREENING', done: 9, total: 44, progressBp: 4_500,
+        };
+        mocks.loadForOwner.mockResolvedValue({
+            snapshot: {
+                ...current,
+                status: 'failed',
+                backgroundProcessing: false,
+                activeProfile: null,
+                etaRange: null,
+                tracks: { ...current.tracks, relationshipAi },
+            },
+            events: [],
+        });
+
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+            snapshot: { status: 'failed', progressBp: current.progressBp, tracks: { relationshipAi } },
+        });
+    });
+
     it('marks an unpublished completed snapshot as a publication-lag reset', async () => {
         mocks.loadForOwner.mockResolvedValue({
             snapshot: completedSnapshot(),

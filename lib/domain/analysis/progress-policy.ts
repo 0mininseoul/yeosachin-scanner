@@ -152,12 +152,14 @@ export function assertNextProgressEventSequence(
     }
 }
 
+function trackBasisPoints(work: ProgressTrackWork): number {
+    if (work.total === 0) return 0;
+    // Match the database's exact floor even when the ratio would round down in floating point.
+    return Number(BigInt(work.done) * BigInt(PROGRESS_BASIS_POINTS_MAX) / BigInt(work.total));
+}
+
 export function calculateTrackProgressBp(work: ProgressTrackWork): number {
-    const validated = validateTrackWork('relationshipAi', work);
-    if (validated.total === 0) return 0;
-    return Math.floor(
-        (validated.done / validated.total) * PROGRESS_BASIS_POINTS_MAX
-    );
+    return trackBasisPoints(validateTrackWork('relationshipAi', work));
 }
 
 export function calculateWeightedProgress(
@@ -173,10 +175,7 @@ export function calculateWeightedProgress(
 
     for (const trackId of PROGRESS_TRACK_IDS) {
         const work = validateTrackWork(trackId, tracks[trackId]);
-        const trackBp = work.total === 0
-            ? 0
-            : Math.floor((work.done / work.total) * PROGRESS_BASIS_POINTS_MAX);
-        trackProgressBp[trackId] = trackBp;
+        trackProgressBp[trackId] = trackBasisPoints(work);
         weightedProgress += weights[trackId] * (work.total === 0 ? 0 : work.done / work.total);
     }
 
