@@ -806,6 +806,7 @@ describe('durable fresh V2 admission worker', () => {
         const callOrder: string[] = [];
         const { client } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
+                callOrder.push('claim');
                 return {
                     data: [{
                         claimed: true,
@@ -835,6 +836,7 @@ describe('durable fresh V2 admission worker', () => {
             _username: string,
             context?: ProviderCallContext
         ) => {
+            expect(callOrder).toEqual(['claim', 'capture']);
             expect(context).toMatchObject({
                 resumeRunId: 'FreshAdmissionRun123',
                 credentialSlot: 'quinary',
@@ -849,6 +851,7 @@ describe('durable fresh V2 admission worker', () => {
         });
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+            onClaimed: async () => { callOrder.push('capture'); },
             getProfile: vi.fn().mockRejectedValue(
                 new Error('SCRAPING_SCHEMA_ERROR: selfhosted fixture')
             ),
@@ -873,7 +876,7 @@ describe('durable fresh V2 admission worker', () => {
             inputHash: expect.stringMatching(/^[0-9a-f]{64}$/),
             runId: 'FreshAdmissionRun123',
         });
-        expect(callOrder).toEqual(['attest', 'complete']);
+        expect(callOrder).toEqual(['claim', 'capture', 'attest', 'complete']);
     });
 
     it('keeps a pending existing run retryable without consuming the failure budget', async () => {
@@ -1455,6 +1458,7 @@ describe('durable fresh V2 admission worker', () => {
     });
 
     it('keeps an active duplicate lease retryable instead of acknowledging it', async () => {
+        const onClaimed = vi.fn();
         const { client } = clientWith(async () => ({
             data: [{
                 claimed: false,
@@ -1467,9 +1471,10 @@ describe('durable fresh V2 admission worker', () => {
         await expect(processAnalysisV2FreshAdmission(
             client,
             workerInput(),
-            { createClaimToken: () => CLAIM_TOKEN }
+            { createClaimToken: () => CLAIM_TOKEN, onClaimed }
         )).rejects.toBeInstanceOf(
             AnalysisV2FreshAdmissionLeaseBusyError
         );
+        expect(onClaimed).not.toHaveBeenCalled();
     });
 });

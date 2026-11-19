@@ -832,6 +832,7 @@ export async function processAnalysisV2FreshAdmission(
         env?: Record<string, string | undefined>;
         createClaimToken?: () => string;
         betaCreditCoordinator?: BetaApifyPreflightCoordinator;
+        onClaimed?: () => Promise<void>;
         /** True only for roleless tasks created before the paid queue split. */
         legacyDrain?: boolean;
     } = {}
@@ -904,6 +905,7 @@ export async function processAnalysisV2FreshAdmission(
         }, result.failureCount, error);
     };
     try {
+        await dependencies.onClaimed?.();
         let betaHold: Awaited<ReturnType<BetaApifyPreflightCoordinator['reuse']>>
             | undefined;
         if (claim.analysisEntryChannel === 'betatest') {

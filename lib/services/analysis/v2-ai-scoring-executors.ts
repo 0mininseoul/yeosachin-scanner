@@ -6,6 +6,7 @@ import {
 } from '@/lib/domain/analysis/media-policy';
 import {
     applyGenderResolution,
+    createFeatureAnalysisResultIdentity,
     createGenderResolutionResultIdentity,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
@@ -22,6 +23,7 @@ import {
     type ResultImageCaptureSource,
 } from '@/lib/services/media/result-image-capture';
 import type {
+    FeatureAnalysisInput,
     FeatureAnalysisResult,
     GenderTriageResult,
     HighRiskNarrativeInput,
@@ -29,11 +31,13 @@ import type {
     PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import {
+    AI_STAGE_POLICY_V211_VERSION,
     aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyCapability,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
+import { devStandardEvalBundleSchema, type DevStandardEvalBundle } from '@/lib/services/dev-ui/standard-eval-types';
 import type { AnalysisV2CheckpointProfile } from './v2-profile-fetch-store';
 import type {
     AnalysisV2CanonicalTargetEvidenceRow,
@@ -542,6 +546,9 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     mediaStore: AnalysisV2MediaArtifactStore;
     /** Required archive for every normalized image set actually passed to V2 AI. */
     sourceMediaArchive: AnalysisV2SourceMediaArchiveStore;
+    devStandardEvalCapture?: (
+        build: (expiresAt: number) => Promise<DevStandardEvalBundle | null>,
+    ) => Promise<void>;
     ai: AnalysisV2AiStageRuntime;
     reverseLikes: AnalysisV2ReverseLikeCollector;
     normalizeMedia(media: SelectedAnalysisMedia): Promise<Buffer>;
@@ -766,6 +773,68 @@ function mediaSelectionProvenance(
         featureSelectedCount: policy.feature.media.length,
         selectedKinds: Object.freeze(selectedKinds),
     });
+}
+
+async function retainedDevEvalCandidate(input: {
+    requestId: string;
+    outcome: AnalysisV2ProfileAiOutcome;
+    archive: AnalysisV2SourceMediaArchiveStore;
+}): Promise<DevStandardEvalBundle['candidates'][number]> {
+    const { requestId, outcome, archive } = input;
+    if (!outcome.profile || !outcome.triage || !outcome.feature || !outcome.featureOperationKey) {
+        throw new Error('DEV_STANDARD_EVAL_FEATURE_MISSING');
+    }
+    const { profile, triage, candidateId } = outcome;
+    const plan = mediaPolicy(profile, true);
+    const triageIds = new Set(plan.triage.selectionIds);
+    const normalizedIds = new Set(outcome.normalizedSelectionIds);
+    const remainderIds = plan.feature.selectionIds.filter(id => !triageIds.has(id) && normalizedIds.has(id));
+    const read = async (stage: 'triage' | 'feature_remainder', ids: readonly string[]) => {
+        if (!ids.length) return [];
+        const items = await archive.loadBundle({
+            requestId,
+            archiveId: analysisV2SourceMediaArchiveId({ candidateId, stage }),
+            expectedSelectionIds: ids,
+        });
+        if (!items) throw new Error('DEV_STANDARD_EVAL_MEDIA_MISSING');
+        return items;
+    };
+    const [triageMedia, remainderMedia] = await Promise.all([
+        read('triage', triage.analyzedSelectionIds),
+        read('feature_remainder', remainderIds),
+    ]);
+    const byId = new Map([...triageMedia, ...remainderMedia].map(item => [item.selectionId, item.normalizedJpeg]));
+    const media = plan.feature.media.filter(item => normalizedIds.has(item.selectionId)).map(item => {
+        const bytes = byId.get(item.selectionId);
+        if (!bytes) throw new Error('DEV_STANDARD_EVAL_MEDIA_MISSING');
+        return {
+            selectionId: item.selectionId,
+            kind: item.role === 'profile' ? 'profile' as const : 'feed' as const,
+            normalizedJpegBase64: bytes.toString('base64'),
+            ...(item.postId ? { postId: item.postId } : {}),
+        };
+    });
+    const featureInput: FeatureAnalysisInput = {
+        triage,
+        bio: profile.bio ?? null,
+        media,
+        captions: [...outcome.captions],
+        accountProfile: {
+            fullName: profile.fullName ?? null,
+            hasProfileImage: Boolean(profile.profilePicUrl?.trim()),
+            bio: profile.bio ?? null,
+        },
+    };
+    const identity = createFeatureAnalysisResultIdentity(featureInput, AI_STAGE_POLICY_V211_VERSION);
+    if (identity.operationKey !== outcome.featureOperationKey) {
+        throw new Error('DEV_STANDARD_EVAL_FEATURE_IDENTITY_CHANGED');
+    }
+    return {
+        candidateId,
+        input: featureInput,
+        featureOperationKey: identity.operationKey,
+        featureResult: outcome.feature,
+    };
 }
 
 function policySupports(
@@ -3140,6 +3209,44 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 .sort((left, right) => left.featuredRank! - right.featuredRank!)
                 .slice(0, 3)
                 .map(row => row.candidateId);
+            if (dependencies.devStandardEvalCapture && liveRiskPolicyVersion === 'risk-policy-v2.5'
+                && aiJobFence(context).aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION) {
+                await dependencies.devStandardEvalCapture(async expiresAt => {
+                    const finalCandidates = candidates as readonly V2FinalCandidateScore[];
+                    const selected = finalCandidates.filter(row => {
+                        const outcome = outcomeById.get(row.candidateId);
+                        return outcome?.baselineClassification === 'verified_female'
+                            && outcome.feature?.finalGenderDecision === 'verified_female';
+                    }).sort((left, right) =>
+                        Number(right.riskBand === 'high_risk') - Number(left.riskBand === 'high_risk')
+                        || right.displayScore - left.displayScore
+                        || left.candidateId.localeCompare(right.candidateId)
+                    ).slice(0, 3);
+                    if (selected.length !== 3) return null;
+                    const samples = await Promise.all(selected.map(row => retainedDevEvalCandidate({
+                        requestId: context.claim.requestId,
+                        outcome: outcomeById.get(row.candidateId)!,
+                        archive: dependencies.sourceMediaArchive,
+                    })));
+                    return devStandardEvalBundleSchema.parse({
+                        version: 1,
+                        expiresAt,
+                        candidates: samples,
+                        preliminary: preliminary.map((row, index) => ({ ...row, username: `eval_${index + 1}` })),
+                        observed: [...observed],
+                        notCollected: [...notCollected],
+                        partnerOverrides: partner.rows.flatMap(row => {
+                            const evidence = row.result.assessment?.partnerEvidence;
+                            return row.result.assessment?.exclusionContext === 'none'
+                                && (evidence === 'weak' || evidence === 'strong')
+                                ? [{ candidateId: row.candidateId, evidence }] : [];
+                        }),
+                        originalHighRiskIds: finalCandidates
+                            .filter(row => row.riskBand === 'high_risk')
+                            .map(row => row.candidateId),
+                    });
+                });
+            }
             const narrativeBatchHash = sha256(
                 'analysis-v2-narrative-batch-v1',
                 narrativeCandidateIds

@@ -36,6 +36,7 @@ import {
     rearmAnalysisV2FreshAdmissionDispatch,
 } from '@/lib/services/analysis/fresh-plan-admission';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import { bindDevStandardEvalRun } from '@/lib/services/dev-ui/standard-eval-capture';
 import {
     CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING,
     trustedCloudTasksRetryCount,
@@ -267,6 +268,8 @@ async function handlePOST(
                     dispatchToken: delivery.dispatchToken,
                 },
                 {
+                    ...(approval?.planId === 'standard' && process.env.DEV_LIVE_STANDARD_EVAL_SLOT
+                        ? { onClaimed: () => bindDevStandardEvalRun(approval) } : {}),
                     betaCreditCoordinator: createBetaApifyPreflightCoordinator({
                         store: createBetaApifyCreditPoolStore(supabaseAdmin),
                         clientForSlot: createServerBetaApifyCreditClientFactory(),

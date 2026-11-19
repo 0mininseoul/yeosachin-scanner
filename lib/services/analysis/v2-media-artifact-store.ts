@@ -10,6 +10,7 @@ const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const GENERATION_PATTERN = /^[1-9][0-9]{0,31}$/;
 const BUCKET_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{1,61}[a-z0-9])?$/;
+const DEV_LIVE_MEDIA_BUCKET_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]-dev-live-media$/;
 const SELECTION_ID_MAX_LENGTH = 240;
 
 export const ANALYSIS_V2_MEDIA_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024;
@@ -586,8 +587,18 @@ function parseObjectNameIdentity(objectName: string): {
     return identity;
 }
 
-function assertRetainedObjectName(objectName: string): void {
-    if (!/^analysis-v2-retained\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName)) {
+export function isAnalysisV2DevLiveMediaBucketName(bucketName: string): boolean {
+    return typeof bucketName === 'string'
+        && bucketName.endsWith('-dev-live-media')
+        && DEV_LIVE_MEDIA_BUCKET_PATTERN.test(bucketName);
+}
+
+function assertRetainedObjectName(objectName: string, bucketName: string): void {
+    const source = /^analysis-v2-retained\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName);
+    const devEvaluation = isAnalysisV2DevLiveMediaBucketName(bucketName)
+        && objectName.endsWith('.bin')
+        && /^analysis-v2-dev-eval(?:-control)?\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName);
+    if (!source && !devEvaluation) {
         throw new Error(
             'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: object name mismatch.'
         );
@@ -947,7 +958,7 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
         },
 
         async createRetained(object) {
-            assertRetainedObjectName(object.objectName);
+            assertRetainedObjectName(object.objectName, bucketName);
             requiredHash(object.contentSha256, 'retained content hash');
             if (
                 object.contentType !== 'application/octet-stream'
@@ -1050,7 +1061,7 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
         },
 
         async readRetained(object) {
-            assertRetainedObjectName(object.objectName);
+            assertRetainedObjectName(object.objectName, bucketName);
             if (
                 !Number.isSafeInteger(object.maximumBytes)
                 || object.maximumBytes < 16
