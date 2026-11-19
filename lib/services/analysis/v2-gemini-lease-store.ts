@@ -340,6 +340,10 @@ export function createAnalysisV2GeminiLeaseStore(
             // retry the lease cleanup using its still-authoritative fence.
             throw new AnalysisV2GeminiLeasePersistenceError();
         }
+        if (isV2Lease(lease) && denial instanceof AnalysisProviderAdmissionCapacityPendingError) {
+            // The staged Gemini scheduler defers this pre-dispatch capacity denial.
+            throw new AnalysisV2AiCapacityPendingError();
+        }
         throw denial;
     };
     const attachProviderAdmission = async (
