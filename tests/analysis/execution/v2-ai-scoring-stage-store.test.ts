@@ -335,6 +335,49 @@ describe('analysis V2 AI/scoring stage store', () => {
         })).rejects.toThrow('v2.8 outcome requires a v2.8 batch policy');
     });
 
+    it('can resume an exact legacy profile checkpoint after a source revision was added', async () => {
+        const legacy = v28ProfileOutcome();
+        const sourceMediaArchive = {
+            triageSha256: digest('archived triage'),
+            featureRemainderSha256: null,
+        };
+        const payload = { aiStagePolicyVersion: 'ai-stage-policy-v2.8', outcomes: [legacy] };
+        const fake = clientWith({
+            data: {
+                stageKind: 'profile_ai_batch',
+                batch: 0,
+                revision: 1,
+                resultHash: digest('legacy-profile-without-source-ref'),
+                itemCount: 1,
+                payload,
+            },
+            error: null,
+        });
+        fake.rpc.mockResolvedValueOnce({
+            data: null,
+            error: { code: 'P0001', message: 'ANALYSIS_V2_AI_SCORING_STAGE_CONFLICT' },
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        await expect(store.checkpointProfileAiBatch({
+            ...claim('track:profile-ai:batch:0'),
+            batch: 0,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.8',
+            outcomes: [{ ...legacy, sourceMediaArchive }],
+        })).resolves.toMatchObject({ itemCount: 1, resultHash: digest('legacy-profile-without-source-ref') });
+        expect(fake.rpc).toHaveBeenCalledTimes(2);
+        expect(fake.rpc).toHaveBeenNthCalledWith(1,
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({
+                p_payload: { ...payload, outcomes: [{ ...legacy, sourceMediaArchive }] },
+            }),
+        );
+        expect(fake.rpc).toHaveBeenNthCalledWith(2,
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({ p_payload: payload }),
+        );
+    });
+
     it('persists a v2.9 source-bound pre-feature exclusion without a feature operation', async () => {
         const outcome = v29PreFeatureSkipOutcome();
         const payload = {

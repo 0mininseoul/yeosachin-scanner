@@ -556,7 +556,7 @@ function dependencies(
             cleanupTerminal: vi.fn(async () => ({ claimed: 0, deleted: 0, failed: 0 })),
         },
         sourceMediaArchive: {
-            persistBundle: vi.fn(async () => undefined),
+            persistBundle: vi.fn(async ({ archiveId }) => digest(archiveId)),
             loadBundle: vi.fn(async () => null),
         },
         ai: {
@@ -735,11 +735,12 @@ describe('V2 AI and scoring executors', () => {
         expect(allowed(1, 1)).toBe(false);
     });
 
-    it('excludes only high-confidence same-owner men, routes unknowns, and persists every terminal result', async () => {
+    it.each(['production', 'dev'] as const)('routes candidates and persists the appropriate archive references in %s', async environment => {
         const memoryState = memory();
         const male = profile('male.account');
-        const unknown = profile('unknown.account');
+        const unknown = profile('unknown.account', { postCount: 6 });
         const deps = dependencies(memoryState, {
+            ...(environment === 'dev' ? { devStandardEvalCapture: vi.fn() } : {}),
             profileBatches: {
                 loadExactBatch: vi.fn(async () => ({
                     requestedUsernames: ['male.account', 'unknown.account', 'missing.account'],
@@ -776,7 +777,7 @@ describe('V2 AI and scoring executors', () => {
             null, null, 'profile_fetch',
         ]);
         expect(deps.ai.features).toHaveBeenCalledTimes(1);
-        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledTimes(2);
+        expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledTimes(3);
         expect(deps.sourceMediaArchive.persistBundle).toHaveBeenCalledWith(
             expect.objectContaining({
                 archiveId: analysisV2SourceMediaArchiveId({
@@ -785,6 +786,23 @@ describe('V2 AI and scoring executors', () => {
                 }),
             })
         );
+        expect(memoryState.outcomes[0]?.sourceMediaArchive).toEqual(environment === 'production' ? undefined : {
+            triageSha256: digest(analysisV2SourceMediaArchiveId({
+                candidateId: analysisV2CandidateId('male.account'),
+                stage: 'triage',
+            })),
+            featureRemainderSha256: null,
+        });
+        expect(memoryState.outcomes[1]?.sourceMediaArchive).toEqual(environment === 'production' ? undefined : {
+            triageSha256: digest(analysisV2SourceMediaArchiveId({
+                candidateId: analysisV2CandidateId('unknown.account'),
+                stage: 'triage',
+            })),
+            featureRemainderSha256: digest(analysisV2SourceMediaArchiveId({
+                candidateId: analysisV2CandidateId('unknown.account'),
+                stage: 'feature_remainder',
+            })),
+        });
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(1);
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledWith(expect.objectContaining({
             bundleId: analysisV2CandidateBundleId(analysisV2CandidateId('unknown.account')),
@@ -795,9 +813,13 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
-    it('fails closed before checkpointing when a required source-media archive write fails', async () => {
+    it.each(['triage', 'feature_remainder'] as const)('does not start dependent models or checkpoint if the %s archive write fails', async stage => {
         const memoryState = memory();
-        const account = profile('archive.failure');
+        const account = profile('archive.failure', { postCount: 6 });
+        const failingArchive = analysisV2SourceMediaArchiveId({
+            candidateId: analysisV2CandidateId(account.username),
+            stage,
+        });
         const deps = dependencies(memoryState, {
             profileBatches: {
                 loadExactBatch: vi.fn(async () => ({
@@ -810,8 +832,11 @@ describe('V2 AI and scoring executors', () => {
                 })),
             },
             sourceMediaArchive: {
-                persistBundle: vi.fn(async () => {
-                    throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+                persistBundle: vi.fn(async ({ archiveId }) => {
+                    if (archiveId === failingArchive) {
+                        throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+                    }
+                    return digest(archiveId);
                 }),
                 loadBundle: vi.fn(async () => null),
             },
@@ -840,6 +865,9 @@ describe('V2 AI and scoring executors', () => {
                 }),
             })
         )).rejects.toThrow('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+        expect(deps.ai.gender).toHaveBeenCalledTimes(stage === 'triage' ? 0 : 1);
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
         expect(memoryState.outcomes).toEqual([]);
     });
@@ -3433,8 +3461,8 @@ describe('V2 AI and scoring executors', () => {
         const archiveReleases: Array<() => void> = [];
         const sourceMediaArchive: AnalysisV2SourceMediaArchiveStore = {
             persistBundle: vi.fn(async input => {
-                void input;
                 await new Promise<void>(resolve => archiveReleases.push(resolve));
+                return digest(input.archiveId);
             }),
             loadBundle: vi.fn(async () => null),
         };
@@ -3605,8 +3633,9 @@ describe('V2 AI and scoring executors', () => {
                 height: 960,
             })),
             sourceMediaArchive: {
-                persistBundle: vi.fn(async () => {
+                persistBundle: vi.fn(async ({ archiveId }) => {
                     if (failureTarget === 'retained archive') throw new Error(failureCode);
+                    return digest(archiveId);
                 }),
                 loadBundle: vi.fn(async () => null),
             },
@@ -3953,16 +3982,31 @@ describe('V2 AI and scoring executors', () => {
         const women = ['sample.one', 'sample.two', 'sample.three', 'sample.four'];
         const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
         const riskPolicyVersion = 'risk-policy-v2.5' as const;
-        memoryState.outcomes = women.map(username => {
+        const triageSha256 = digest('triage revision');
+        const featureRemainderSha256 = digest('feature remainder revision');
+        memoryState.outcomes = women.map((username, index) => {
             const outcome = verifiedOutcome(username);
+            const profileInput = profile(username, { postCount: index === 0 ? 6 : 0 });
+            const mediaPlan = selectAnalysisMedia({
+                profile: { id: username, imageUrl: profileInput.profilePicUrl! },
+                posts: profileInput.latestPosts!,
+            }, { carouselDiversity: true });
+            outcome.profile = profileInput;
+            outcome.triage = triage(mediaPlan.triage.selectionIds, 'female');
+            outcome.normalizedSelectionIds = mediaPlan.feature.selectionIds;
+            outcome.feature = feature(outcome.normalizedSelectionIds);
+            if (index === 0) {
+                outcome.sourceMediaArchive = { triageSha256, featureRemainderSha256 };
+            }
             outcome.featureOperationKey = createFeatureAnalysisResultIdentity({
                 triage: outcome.triage!,
                 bio: outcome.profile!.bio ?? null,
-                media: [{
-                    selectionId: outcome.normalizedSelectionIds[0]!,
-                    kind: 'profile',
+                media: mediaPlan.feature.media.map(item => ({
+                    selectionId: item.selectionId,
+                    kind: item.role === 'profile' ? 'profile' : 'feed',
                     normalizedJpegBase64: bytes.toString('base64'),
-                }],
+                    ...(item.postId ? { postId: item.postId } : {}),
+                })),
                 captions: [],
                 accountProfile: {
                     fullName: outcome.profile!.fullName ?? null,
@@ -3999,7 +4043,7 @@ describe('V2 AI and scoring executors', () => {
         const expiresAt = 2_000_000_000_000;
         const deps = dependencies(memoryState, {
             sourceMediaArchive: {
-                persistBundle: vi.fn(async () => undefined),
+                persistBundle: vi.fn(async ({ archiveId }) => digest(archiveId)),
                 loadBundle: vi.fn(async ({ expectedSelectionIds }: Parameters<AnalysisV2SourceMediaArchiveStore['loadBundle']>[0]) =>
                     expectedSelectionIds.map(selectionId => ({ selectionId, normalizedJpeg: bytes }))),
             },
@@ -4014,7 +4058,11 @@ describe('V2 AI and scoring executors', () => {
         });
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
         await registry.final_score!(context('final_score', { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, riskPolicyVersion }));
-        expect(deps.sourceMediaArchive.loadBundle).toHaveBeenCalledTimes(3);
+        expect(deps.sourceMediaArchive.loadBundle).toHaveBeenCalledTimes(4);
+        const archivedReads = vi.mocked(deps.sourceMediaArchive.loadBundle).mock.calls.map(([input]) => input);
+        expect(archivedReads.map(input => input.contentSha256)).toEqual([
+            triageSha256, featureRemainderSha256, undefined, undefined,
+        ]);
         expect(deps.normalizeMedia).not.toHaveBeenCalled();
         expect(deps.ai.features).not.toHaveBeenCalled();
         expect(memoryState.final?.candidates).toHaveLength(4);
