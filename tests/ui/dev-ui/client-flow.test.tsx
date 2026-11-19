@@ -392,10 +392,12 @@ describe('Dev actual analysis browser attempt', () => {
         expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual(['/api/dev-ui/live/availability']);
     });
 
-    it('uses the persisted Standard plan for a reopened preflight, exclusion and pending entitlement retries', async () => {
+    it('shows preparation from the first Standard click through the paced entitlement retries and navigation', async () => {
         presentationClock();
         const statusUrl = `/api/analysis/preflight/${orderId}?devAnalysis=live`;
         const entitleUrl = `/api/analysis/preflight/${orderId}/entitle?devAnalysis=live`;
+        const firstEntitlement = Promise.withResolvers<Response>();
+        const admissionPending = { schemaVersion: 1, preflightId: orderId, status: 'admission_pending', backgroundProcessing: true };
         const entitlementBodies: unknown[] = [];
         let exclusionConfirmed = false;
         const fetchSpy = vi.fn(async (url: string, options?: RequestInit) => {
@@ -412,7 +414,9 @@ describe('Dev actual analysis browser attempt', () => {
             }
             if (url === entitleUrl && options?.method === 'POST') {
                 entitlementBodies.push(JSON.parse(options.body as string));
-                return entitlementBodies.length < 3 ? response({ status: 'admission_pending' }) : response({ requestId: runId });
+                if (entitlementBodies.length === 1) return firstEntitlement.promise;
+                if (entitlementBodies.length === 2) return response({ ...admissionPending, retryAfterMs: 30_001 }, 202);
+                return response({ requestId: runId });
             }
             throw new Error('Unexpected API or provider call');
         });
@@ -423,10 +427,81 @@ describe('Dev actual analysis browser attempt', () => {
         expect(entitlementBodies).toEqual([]);
         await openPlansAfterPreview();
         await click('Standard 분석 시작');
-        expect(container.querySelector('[role="status"]')?.textContent).toContain('분석 작업을 준비');
-        await advancePresentation(2_000);
+        const preparation = container.querySelector('[role="status"]');
+        expect(preparation?.textContent).toContain('최신 계정 정보를 확인하고 있어요');
+        expect(container.querySelector('#plan-selection')).toBeNull();
+        await advancePresentation(5_000);
+        expect(entitlementBodies).toEqual([{ planId: 'standard' }]);
+        expect(router.replace).not.toHaveBeenCalled();
+
+        await act(async () => { firstEntitlement.resolve(response({ ...admissionPending, retryAfterMs: 1_000 }, 202)); });
+        await advancePresentation(999);
+        expect(entitlementBodies).toHaveLength(1);
+        await advancePresentation(1);
+        expect(entitlementBodies).toHaveLength(2);
+        await advancePresentation(1_999);
+        expect(entitlementBodies).toHaveLength(2);
+        expect(container.querySelector('[role="status"]')).toBe(preparation);
+        expect(router.replace).not.toHaveBeenCalled();
+
+        await advancePresentation(1);
         expect(entitlementBodies).toEqual([{ planId: 'standard' }, { planId: 'standard' }, { planId: 'standard' }]);
         expect(router.replace).toHaveBeenCalledWith(`/progress/${runId}?devAnalysis=live`);
+        expect(container.querySelector('[role="status"]')).toBe(preparation);
+        await advancePresentation(30_000);
+        expect(entitlementBodies).toHaveLength(3);
+    });
+
+    it('restores the plan and shows the error when the first entitlement fails', async () => {
+        presentationClock();
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
+            if (url.includes('/entitle?')) return response({ error: '계정 정보를 확인하지 못했습니다.' }, 503);
+            return new Response(JSON.stringify(readySnapshot()), { headers: { 'x-dev-live-plan': 'standard' } });
+        }));
+
+        await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await openPlansAfterPreview();
+        await click('Standard 분석 시작');
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe('계정 정보를 확인하지 못했습니다.');
+        expect(container.querySelector('#plan-selection')).not.toBeNull();
+        expect(router.replace).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { status: 'blocked', message: '현재 이 계정은 판독할 수 없습니다.' },
+        { status: 'expired', message: '사전 점검 요청이 만료되었습니다.' },
+        { status: 'pending', message: '사전 점검이 변경되었습니다.' },
+    ])('stops preparation when the status check reports $status instead of the ready preflight', async ({ status, message }) => {
+        presentationClock();
+        let entitlements = 0;
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+            if (url === '/api/dev-ui/live/availability') return response({ available: true });
+            if (url === livePreviewUrl) return response({ state: 'unavailable' });
+            if (url.includes('/entitle?')) {
+                entitlements += 1;
+                return response({ status: 'admission_pending', retryAfterMs: 1_000 }, 202);
+            }
+            if (entitlements && status === 'expired') return response({ code: 'PREFLIGHT_EXPIRED', error: message }, 410);
+            const snapshot = entitlements ? {
+                schemaVersion: 1, preflightId: orderId, expiresAt: '2099-01-01T00:00:00.000Z', exclusionDecision: 'skip', status,
+                ...(status === 'blocked' && { code: 'TARGET_PRIVATE' }),
+            } : readySnapshot();
+            return new Response(JSON.stringify(snapshot), { headers: { 'x-dev-live-plan': 'standard' } });
+        }));
+
+        await render(<DevLiveAnalysis initialPreflightId={orderId} />);
+        await openPlansAfterPreview();
+        await click('Standard 분석 시작');
+        await advancePresentation(1_000);
+        expect(container.querySelector('[role="alert"]')?.textContent).toContain(message);
+        expect(container.textContent).not.toContain('분석 준비 중');
+        expect(container.textContent).not.toContain('조회 중');
+        expect(container.querySelector('#plan-selection')).toBeNull();
+        await advancePresentation(4_000);
+        expect(entitlements).toBe(1);
+        expect(router.replace).not.toHaveBeenCalled();
     });
 
     it('does not transfer a pending entitlement after navigating between ready preflights in the same mounted view', async () => {
@@ -450,6 +525,8 @@ describe('Dev actual analysis browser attempt', () => {
         await render(<DevLiveAnalysis initialPreflightId={orderId} />);
         await openPlansAfterPreview();
         await click('Standard 분석 시작');
+        expect(entitlementUrls).toEqual([entitleUrl]);
+        await advancePresentation(2_000);
         expect(entitlementUrls).toEqual([entitleUrl, entitleUrl]);
         await render(<DevLiveAnalysis initialPreflightId={otherPreflightId} />);
         await advancePresentation(2_000);

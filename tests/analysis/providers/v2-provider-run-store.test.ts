@@ -949,7 +949,13 @@ describe('analysis V2 provider run store', () => {
         ]);
     });
 
-    it('persists a definite start rejection against the exact reservation fence', async () => {
+    it.each([
+        { statusCode: 404, errorType: 'build-not-found', loggedType: 'build-not-found' },
+        { statusCode: 402, errorType: 'usage-limit-exceeded', loggedType: 'usage-limit-exceeded' },
+        { statusCode: 400, errorType: 'unrecognized-provider-detail', loggedType: 'unclassified' },
+    ])('persists a definite start rejection and logs only known details ($loggedType)', async ({
+        statusCode, errorType, loggedType,
+    }) => {
         const { rpc, client } = clientWithRpc();
         rpc
             .mockResolvedValueOnce({ data: null, error: null })
@@ -969,14 +975,26 @@ describe('analysis V2 provider run store', () => {
             credentialSlot: 'primary',
             maxChargeUsd: 0.40205,
         });
-        await binding.checkpoint.onRunStartRejected?.({
-            logicalProvider: 'apify',
-            actorId: identity.actorId,
-            credentialSlot: 'primary',
-            maxChargeUsd: 0.40205,
-            statusCode: 402,
-            errorType: 'usage-limit-exceeded',
-        });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            await binding.checkpoint.onRunStartRejected?.({
+                logicalProvider: 'apify',
+                actorId: identity.actorId,
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.40205,
+                statusCode,
+                errorType,
+            });
+            expect(warn.mock.calls.map(([message]) => JSON.parse(message))).toEqual([{
+                severity: 'WARNING',
+                event: 'analysis_v2_apify_start_rejected',
+                operation: 'relationship-followers',
+                statusCode,
+                errorType: loggedType,
+            }]);
+        } finally {
+            warn.mockRestore();
+        }
 
         expect(rpc.mock.calls.map(([name]) => name)).toEqual([
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.loadRpc,
