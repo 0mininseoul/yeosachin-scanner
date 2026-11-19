@@ -38,6 +38,8 @@ import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
 import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/services/dev-ui/site-access';
 import { readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 
+const SIGNUP_ATTRIBUTION_WINDOW_MS = 10 * 60 * 1000;
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -466,6 +468,22 @@ async function handleGET(
         const attribution = readKakaoSignupAttribution(
             typeof getAttributionCookie === 'function' ? getAttributionCookie(KAKAO_ATTRIBUTION_COOKIE)?.value : undefined,
         );
+        // Keep the signup-time acquisition label on the user for the operator
+        // console. Only a fresh signup qualifies; later logins carry a newer
+        // visit's cookie. The RPC fills the column only when it is still NULL.
+        const signupAttributionLabel = attribution.label;
+        if (signupAttributionLabel && Date.now() - signedUpAt.getTime() < SIGNUP_ATTRIBUTION_WINDOW_MS) {
+            after(async () => {
+                try {
+                    await supabaseAdmin.rpc('set_user_signup_attribution', {
+                        p_user_id: authedUser.id,
+                        p_label: signupAttributionLabel,
+                    });
+                } catch {
+                    // Reporting metadata only; never affects login.
+                }
+            });
+        }
         let errorCode:
             | 'PROVIDER_ERROR'
             | 'INTERNAL_ERROR'

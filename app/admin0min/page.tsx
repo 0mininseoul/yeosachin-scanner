@@ -6,13 +6,14 @@ import {
     classifyOperatorAuthError,
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
-import { AnalysisAuditWorkbench } from '../admin/analysis-audit/workbench';
+import { AdminConsole } from '../admin/console/admin-console';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import { assertDevUiDeployment } from '@/lib/services/dev-ui/deployment';
 import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
 import { DevUiOrderList } from '@/components/dev-ui/order-list';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import '../admin/analysis-audit/console.css';
+import '../admin/console/admin-console.css';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { ...NOINDEX_METADATA, title: '판독 운영 콘솔 — 운영' };
@@ -59,7 +60,7 @@ function ConsoleAccessState({
 
 export default async function AnalysisAuditPage({
     searchParams,
-}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[] }> }) {
+}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[]; view?: string | string[] }> }) {
     const params = await searchParams;
     const destination = adminConsolePath(params.requestId);
     const requestId = new URL(destination, 'https://admin-console.invalid').searchParams.get('requestId') ?? '';
@@ -106,5 +107,5 @@ export default async function AnalysisAuditPage({
     }
     if (decision !== 'authorized') return <ConsoleAccessState state={decision} destination={destination} />;
 
-    return <div className="operator-console"><main className="oc-wrap"><AnalysisAuditWorkbench initialRequestId={requestId} /></main></div>;
+    return <AdminConsole initialRequestId={requestId} initialView={typeof params.view === 'string' ? params.view : undefined} />;
 }

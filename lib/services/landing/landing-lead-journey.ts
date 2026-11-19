@@ -266,6 +266,8 @@ export async function captureAndBindLandingLeadJourney(
         landingCaptureToken?: string | null;
         anonymousDeviceId?: string | null;
         authUserId?: string | null;
+        /** Bounded first-touch label (one of nine fixed values); reporting only. */
+        attributionLabel?: string | null;
         secret?: string;
         env?: Record<string, string | undefined>;
     },
@@ -323,6 +325,18 @@ export async function captureAndBindLandingLeadJourney(
             input.authUserId,
         );
         if (!claimed) throw new Error('LANDING_LEAD_CLAIM_FAILED');
+    }
+    if (input.attributionLabel) {
+        // Reporting metadata only: a failure here must never block the
+        // capture/bind acknowledgement. The RPC fills the label only when NULL.
+        try {
+            await client.rpc('set_landing_lead_journey_attribution', {
+                p_journey_id: captured.journeyId,
+                p_label: input.attributionLabel,
+            });
+        } catch {
+            // Intentionally ignored.
+        }
     }
     return { bound: true, repaired, journeyId: captured.journeyId };
 }

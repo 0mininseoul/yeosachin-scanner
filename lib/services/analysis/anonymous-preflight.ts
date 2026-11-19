@@ -195,6 +195,8 @@ export interface CreateAnonymousPreflightInput {
     captureToken?: string;
     /** Used only to derive a server-side principal HMAC. */
     anonymousDeviceId?: string;
+    /** Bounded first-touch acquisition label stored on the landing journey. */
+    attributionLabel?: string | null;
     env?: Record<string, string | undefined>;
 }
 
@@ -250,6 +252,7 @@ export async function createAnonymousAnalysisV2Preflight(
                     targetInstagramId: input.targetInstagramId,
                     landingCaptureToken: input.landingCaptureToken ?? input.captureToken,
                     anonymousDeviceId: input.anonymousDeviceId,
+                    attributionLabel: input.attributionLabel,
                     env,
                 },
             );

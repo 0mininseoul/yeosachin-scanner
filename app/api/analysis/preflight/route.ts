@@ -84,6 +84,7 @@ import {
 } from '@/lib/services/analysis/anonymous-preflight-claim';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 import { captureAndBindLandingLeadJourney } from '@/lib/services/landing/landing-lead-journey';
+import { attributionLabelFromCookieHeader } from '@/lib/services/admin/client-signals';
 import {
     AccountPrincipalAdmissionError,
     requireActiveAccountClassification,
@@ -274,6 +275,7 @@ async function handleAnonymousPOST(
             claimToken: claim.token,
             landingCaptureToken,
             anonymousDeviceId: deviceValue,
+            attributionLabel: attributionLabelFromCookieHeader(request.headers.get('cookie')),
             env,
         }, { client, landingClient: supabaseAdmin, env });
         preflightId = created.preflightId;
@@ -617,6 +619,7 @@ async function handlePOST(
                     ? undefined : request.headers.get('x-landing-lead-capture-token')?.trim() || undefined,
                 anonymousDeviceId: landingDeviceId,
                 authUserId: user.id,
+                attributionLabel: attributionLabelFromCookieHeader(request.headers.get('cookie')),
                 env: process.env,
             },
         );

@@ -279,11 +279,12 @@ describe('operator console page authentication boundary', () => {
         expect(boundary.getUser).not.toHaveBeenCalled();
     });
 
-    it('renders the real workbench for an authenticated allowlisted operator', async () => {
+    it('renders the operator console for an authenticated allowlisted operator', async () => {
         const html = renderToStaticMarkup(await page());
 
-        expect(html).toContain('판독 운영 콘솔');
-        expect(html).toContain('무료 계정 9개');
+        expect(html).toContain('위장여사친');
+        expect(html).toContain('운영 콘솔 · production');
+        expect(html).toContain('Apify 계정');
         expect(html).not.toContain('접근 권한이 없습니다');
         expect(boundary.redirect).not.toHaveBeenCalled();
     });
@@ -294,7 +295,7 @@ describe('operator console page authentication boundary', () => {
         const html = renderToStaticMarkup(await page());
         expect(html).toContain('관리자 콘솔 접근 권한이 없습니다');
         expect(html).toContain('운영자 계정');
-        expect(html).not.toContain('무료 계정 9개');
+        expect(html).not.toContain('운영 콘솔 · production');
         expect(boundary.redirect).not.toHaveBeenCalled();
     });
 
