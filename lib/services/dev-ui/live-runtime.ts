@@ -183,9 +183,22 @@ function hasRegisteredDevWorkerDatabase(env: DeploymentEnvironment): boolean {
         && registry.deployments.some(entry => runtimeUrl === `https://${entry.supabaseProjectRef}.supabase.co`));
 }
 
+type WorkerRequest = Pick<Request, 'url' | 'method'> & Partial<Pick<Request, 'headers'>>;
+
+function matchesWorkerEndpoint(request: WorkerRequest, origin: string, path: string): boolean {
+    // The provider budget guard checks the configured endpoint in process.
+    if (!request.headers) return request.url === `${origin}${path}`;
+    // Next's self-hosted Proxy URL uses the listener address. The original
+    // Cloud Run host stays in Host. Require the exact HTTPS path, with no suffix or credentials.
+    const url = new URL(request.url);
+    return request.headers.get('host') === new URL(origin).host
+        && url.protocol === 'https:'
+        && request.url === `${url.origin}${path}`;
+}
+
 /** A matched request still goes through the ordinary worker's OIDC and job fences. */
 export function devLiveWorkerRequestBoundary(
-    request: Pick<Request, 'url' | 'method'>,
+    request: WorkerRequest,
     env: DeploymentEnvironment = process.env,
 ): 'not-worker' | 'dev-worker' | 'invalid' {
     const role = env.DEV_LIVE_WORKLOAD;
@@ -198,7 +211,7 @@ export function devLiveWorkerRequestBoundary(
     try {
         const identity = cloudIdentity(env);
         const approval = devLiveOwnerStartEnabled(env) ? DEV_LIVE_OWNER_CAPS : readDevLiveApproval(env);
-        if (request.url !== `${identity.origins[role]}${WORKER_ROUTES[role]}` || !approval) return 'invalid';
+        if (!approval || !matchesWorkerEndpoint(request, identity.origins[role], WORKER_ROUTES[role])) return 'invalid';
         assertLiveFlags(env);
         assertLiveWorkerPolicy(env, role, approval);
         assertStorage(env, identity.projectId, role);

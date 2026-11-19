@@ -101,8 +101,9 @@ const paidWorker = {
     ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: `${project}-dev-live-results`,
 };
 
-function request(url: string, method = 'POST'): Pick<Request, 'url' | 'method'> {
-    return { url, method };
+function request(url: string, method = 'POST', headers: HeadersInit = { host: new URL(url).host }):
+    Pick<Request, 'url' | 'method' | 'headers'> {
+    return { url, method, headers: new Headers(headers) };
 }
 
 beforeEach(() => {
@@ -166,6 +167,50 @@ describe('Dev live analysis runtime placement', () => {
         expect(devLiveWorkerRequestBoundary(request(preflightEndpoint, 'GET'), preflightWorker)).toBe('invalid');
         expect(devLiveWorkerRequestBoundary(request(`${preflightEndpoint}?run=1`), preflightWorker)).toBe('invalid');
         expect(devLiveWorkerRequestBoundary(request(`${paidOrigin}/api/analysis/v2/recover`), paidWorker)).toBe('invalid');
+    });
+
+    it('matches the Cloud Run host when self-hosted Next uses its listener address in the proxy URL', () => {
+        for (const [endpoint, worker] of [
+            [preflightEndpoint, preflightWorker],
+            [paidEndpoint, paidWorker],
+        ] as const) {
+            const { pathname, host } = new URL(endpoint);
+            expect(devLiveWorkerRequestBoundary(
+                request(`https://localhost:8080${pathname}`, 'POST', { host }),
+                worker,
+            )).toBe('dev-worker');
+        }
+    });
+
+    it('rejects proxy requests without the exact Cloud Run host and worker URL path', () => {
+        const { pathname, host } = new URL(preflightEndpoint);
+        const listenerUrl = `https://localhost:8080${pathname}`;
+        const invalid = [
+            request(preflightEndpoint, 'POST', {}),
+            request(preflightEndpoint, 'POST', { host: 'another.run.app' }),
+            request(listenerUrl, 'POST', { 'x-forwarded-host': host }),
+            request(listenerUrl, 'POST', { host: 'another.run.app', 'x-forwarded-host': host }),
+            request(listenerUrl, 'POST', { host: new URL(paidOrigin).host }),
+            request(listenerUrl, 'POST', { host: `${host}:8080` }),
+            request(listenerUrl.replace('https:', 'http:'), 'POST', { host }),
+            request(listenerUrl.replace('https://', 'https://user:password@'), 'POST', { host }),
+            request(`${listenerUrl}?run=1`, 'POST', { host }),
+            request(`${listenerUrl}?`, 'POST', { host }),
+            request(`${listenerUrl}#fragment`, 'POST', { host }),
+            request(`${listenerUrl}/`, 'POST', { host }),
+            request(listenerUrl, 'GET', { host }),
+        ];
+        for (const invalidRequest of invalid) {
+            expect(devLiveWorkerRequestBoundary(invalidRequest, preflightWorker)).toBe('invalid');
+        }
+    });
+
+    it('requires the canonical URL for the in-process provider budget check', () => {
+        expect(devLiveWorkerRequestBoundary({ url: paidEndpoint, method: 'POST' }, paidWorker)).toBe('dev-worker');
+        expect(devLiveWorkerRequestBoundary({
+            url: 'https://localhost:8080/api/analysis/v2/worker',
+            method: 'POST',
+        }, paidWorker)).toBe('invalid');
     });
 
     it.each([
