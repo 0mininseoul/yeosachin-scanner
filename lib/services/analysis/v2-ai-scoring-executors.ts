@@ -204,6 +204,10 @@ export interface AnalysisV2ProfileAiOutcome {
     genderResolutionOperationKey: string | null;
     genderResolutionResultHash: string | null;
     mediaBundlePersisted: boolean;
+    sourceMediaArchive?: Readonly<{
+        triageSha256: string;
+        featureRemainderSha256: string | null;
+    }>;
     /** v2.8 provenance only: aggregate counts, never source URLs/captions/media. */
     mediaSelectionProvenance?: Readonly<{
         triageSelectedCount: number;
@@ -789,19 +793,27 @@ async function retainedDevEvalCandidate(input: {
     const triageIds = new Set(plan.triage.selectionIds);
     const normalizedIds = new Set(outcome.normalizedSelectionIds);
     const remainderIds = plan.feature.selectionIds.filter(id => !triageIds.has(id) && normalizedIds.has(id));
-    const read = async (stage: 'triage' | 'feature_remainder', ids: readonly string[]) => {
+    const read = async (
+        stage: 'triage' | 'feature_remainder',
+        ids: readonly string[],
+        contentSha256?: string | null,
+    ) => {
+        if ((!ids.length && contentSha256) || (ids.length && contentSha256 === null)) {
+            throw new Error('DEV_STANDARD_EVAL_MEDIA_MISSING');
+        }
         if (!ids.length) return [];
         const items = await archive.loadBundle({
             requestId,
             archiveId: analysisV2SourceMediaArchiveId({ candidateId, stage }),
+            ...(contentSha256 ? { contentSha256 } : {}),
             expectedSelectionIds: ids,
         });
         if (!items) throw new Error('DEV_STANDARD_EVAL_MEDIA_MISSING');
         return items;
     };
     const [triageMedia, remainderMedia] = await Promise.all([
-        read('triage', triage.analyzedSelectionIds),
-        read('feature_remainder', remainderIds),
+        read('triage', triage.analyzedSelectionIds, outcome.sourceMediaArchive?.triageSha256),
+        read('feature_remainder', remainderIds, outcome.sourceMediaArchive?.featureRemainderSha256),
     ]);
     const byId = new Map([...triageMedia, ...remainderMedia].map(item => [item.selectionId, item.normalizedJpeg]));
     const media = plan.feature.media.filter(item => normalizedIds.has(item.selectionId)).map(item => {
@@ -1961,6 +1973,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
 ): AnalysisV2StageExecutorRegistry {
     const createContactSheet = dependencies.createContactSheet
         ?? createPartnerSafetyContactSheet;
+    const captureSourceArchiveRevisions = Boolean(dependencies.devStandardEvalCapture);
     const configuredProfileConcurrency = dependencies.profileAiConcurrency;
     const partnerConcurrency = dependencies.partnerSafetyConcurrency
         ?? MAX_PARTNER_SAFETY_CONCURRENCY;
@@ -2128,7 +2141,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             mediaBundlePersisted: false,
                         };
                     }
-                    const triageArchive = dependencies.sourceMediaArchive.persistBundle({
+                    const triageSha256 = await dependencies.sourceMediaArchive.persistBundle({
                         requestId: context.claim.requestId,
                         archiveId: analysisV2SourceMediaArchiveId({
                             candidateId,
@@ -2142,15 +2155,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             return { selectionId: media.selectionId, normalizedJpeg };
                         }),
                     });
+                    const triageArchiveCheckpoint = captureSourceArchiveRevisions
+                        ? { sourceMediaArchive: { triageSha256, featureRemainderSha256: null } }
+                        : {};
                     let gender: Awaited<ReturnType<AnalysisV2AiStageRuntime['gender']>>;
                     try {
-                        gender = await awaitArchivedAi(
-                            dependencies.ai.gender({
-                                media: triageNormalized.media,
-                                ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                            }, aiFence),
-                            triageArchive,
-                        );
+                        gender = await dependencies.ai.gender({
+                            media: triageNormalized.media,
+                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                        }, aiFence);
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return analysisUnavailableOutcome(
@@ -2186,6 +2199,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             genderResolutionOperationKey: null,
                             genderResolutionResultHash: null,
                             mediaBundlePersisted: false,
+                            ...triageArchiveCheckpoint,
                         };
                     }
                     const v29Admission = policySupports(
@@ -2276,19 +2290,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 && triageAssessment.ownerConsistency === 'same_person'
                             )
                     );
-                    const resolverHandle = resolverEligible
-                        && !strictRevenueResolverDeferred
-                        ? dependencies.ai.startGenderResolution({
-                            media: resolverMedia,
-                        }, resolverFence)
-                        : null;
-                    if (resolverHandle) {
-                        startedResolverHandles.push(resolverHandle);
-                    }
+                    const shouldStartResolver = resolverEligible && !strictRevenueResolverDeferred;
                     if (
                         v29Admission !== null
                         && v29Admission !== 'eligible'
-                        && !resolverHandle
+                        && !shouldStartResolver
                     ) {
                         return {
                             candidateId,
@@ -2313,6 +2319,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             genderResolutionOperationKey: null,
                             genderResolutionResultHash: null,
                             mediaBundlePersisted: false,
+                            ...triageArchiveCheckpoint,
                             aiStagePolicyVersion: inputQualityPolicyVersion,
                             v29FeatureAdmission: v29Admission,
                         };
@@ -2324,8 +2331,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         }
                         return { selectionId: media.selectionId, normalizedJpeg };
                     });
-                    const featureArchive = featureRemainderBundle.length > 0
-                        ? dependencies.sourceMediaArchive.persistBundle({
+                    const featureRemainderSha256 = featureRemainderBundle.length > 0
+                        ? await dependencies.sourceMediaArchive.persistBundle({
                             requestId: context.claim.requestId,
                             archiveId: analysisV2SourceMediaArchiveId({
                                 candidateId,
@@ -2333,20 +2340,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             }),
                             media: featureRemainderBundle,
                         })
-                        : Promise.resolve();
-                    const featureTask = awaitArchivedAi(
-                        dependencies.ai.features({
+                        : null;
+                    const resolverHandle = shouldStartResolver
+                        ? dependencies.ai.startGenderResolution({ media: resolverMedia }, resolverFence)
+                        : null;
+                    if (resolverHandle) {
+                        startedResolverHandles.push(resolverHandle);
+                    }
+                    let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
+                    try {
+                        features = await dependencies.ai.features({
                             triage: gender.result,
                             bio: item.profile.bio ?? null,
                             media: normalized.media,
                             captions,
                             ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                        }, aiFence),
-                        featureArchive,
-                    );
-                    let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
-                    try {
-                        features = await featureTask;
+                        }, aiFence);
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return {
@@ -2529,6 +2538,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 genderResolutionResultHash:
                                     readyResolver?.resultHash ?? null,
                                 mediaBundlePersisted,
+                                ...(captureSourceArchiveRevisions
+                                    ? { sourceMediaArchive: { triageSha256, featureRemainderSha256 } }
+                                    : {}),
                                 ...(selectionProvenance
                                     ? {
                                         aiStagePolicyVersion: inputQualityPolicyVersion,

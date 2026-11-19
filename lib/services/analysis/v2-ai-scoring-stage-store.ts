@@ -191,6 +191,10 @@ const profileOutcomeSchema = z.object({
     genderResolutionOperationKey: resolverOperationKeySchema.nullable().optional(),
     genderResolutionResultHash: hashSchema.nullable().optional(),
     mediaBundlePersisted: z.boolean(),
+    sourceMediaArchive: z.object({
+        triageSha256: hashSchema,
+        featureRemainderSha256: hashSchema.nullable(),
+    }).strict().optional(),
     v29FeatureAdmission: z.enum([
         'eligible',
         'nonpersonal_or_official',
@@ -418,6 +422,20 @@ const profileOutcomeSchema = z.object({
     }
     if (value.mediaBundlePersisted !== (value.status === 'verified_female')) {
         context.addIssue({ code: 'custom', message: 'Only verified women retain media bundles.' });
+    }
+    if (value.sourceMediaArchive) {
+        const triageSelections = new Set(value.triage?.analyzedSelectionIds);
+        const hasFeatureRemainder = value.feature !== null
+            && value.normalizedSelectionIds.some(id => !triageSelections.has(id));
+        if (!value.triage || hasFeatureRemainder !== (
+            value.sourceMediaArchive.featureRemainderSha256 !== null
+        )) {
+            context.addIssue({
+                code: 'custom',
+                path: ['sourceMediaArchive'],
+                message: 'Source media archive revisions do not match analyzed selections.',
+            });
+        }
     }
     if (
         value.mediaCoverage.normalizedCount !== value.normalizedSelectionIds.length
@@ -890,7 +908,22 @@ export function createSupabaseAnalysisV2AiScoringStageStore(
                 input.batch,
                 outcomes.length,
                 payload,
-            );
+            ).catch(error => {
+                if (!(error instanceof AnalysisV2AiScoringStageConflictError)
+                    || !outcomes.some(outcome => outcome.sourceMediaArchive)) {
+                    throw error;
+                }
+                // The RPC accepts this replay only if the entire legacy payload matches.
+                const legacyOutcomes = outcomes.map(outcome => {
+                    const legacy = { ...outcome };
+                    delete legacy.sourceMediaArchive;
+                    return legacy;
+                });
+                return checkpoint(input, 'profile_ai_batch', input.batch, outcomes.length, {
+                    ...payload,
+                    outcomes: legacyOutcomes,
+                });
+            });
             return {
                 revision: envelope.revision,
                 resultHash: envelope.resultHash,

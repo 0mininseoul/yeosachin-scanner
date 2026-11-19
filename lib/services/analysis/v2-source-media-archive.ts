@@ -32,11 +32,14 @@ export interface AnalysisV2SourceMediaArchiveStore {
         requestId: string;
         archiveId: string;
         media: readonly AnalysisV2NormalizedMediaBundleItem[];
-    }): Promise<void>;
-    /** Read-only maintenance/replay hook; null means a pre-archive legacy source. */
+    }): Promise<string>;
+    /** Supply the digest for a revision. Without it, look up the legacy fixed-name archive.
+     * Returns null if the requested object is missing.
+     */
     loadBundle(input: {
         requestId: string;
         archiveId: string;
+        contentSha256?: string;
         expectedSelectionIds: readonly string[];
     }): Promise<AnalysisV2LoadedMediaBundleItem[] | null>;
 }
@@ -82,14 +85,16 @@ export function analysisV2SourceMediaArchiveId(input: {
 export function analysisV2SourceMediaArchiveObjectName(input: {
     requestId: string;
     archiveId: string;
+    contentSha256?: string;
 }): string {
     const requestKey = requestArchiveKey(input.requestId);
-    const archiveKey = sha256(
-        `analysis-v2-source-media-archive:v1\n${requiredArchiveId(input.archiveId)}`
-    );
-    if (!HASH_PATTERN.test(requestKey) || !HASH_PATTERN.test(archiveKey)) {
-        throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: invalid key.');
+    const archiveId = requiredArchiveId(input.archiveId);
+    if (input.contentSha256 !== undefined && !HASH_PATTERN.test(input.contentSha256)) {
+        throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: invalid content hash.');
     }
+    const archiveKey = input.contentSha256 === undefined
+        ? sha256(`analysis-v2-source-media-archive:v1\n${archiveId}`)
+        : sha256(`analysis-v2-source-media-revision:v1\n${archiveId}\n${input.contentSha256}`);
     return `analysis-v2-retained/${requestKey}/${archiveKey}.bin`;
 }
 
@@ -98,14 +103,20 @@ export function createAnalysisV2SourceMediaArchiveStore(input: {
 }): AnalysisV2SourceMediaArchiveStore {
     return {
         async persistBundle(value) {
-            const objectName = analysisV2SourceMediaArchiveObjectName(value);
             const bytes = serializeAnalysisV2MediaBundle(value.media);
+            const contentSha256 = sha256(bytes);
+            const objectName = analysisV2SourceMediaArchiveObjectName({
+                requestId: value.requestId,
+                archiveId: value.archiveId,
+                contentSha256,
+            });
             await input.objects.createRetained({
                 objectName,
                 bytes,
-                contentSha256: sha256(bytes),
+                contentSha256,
                 contentType: 'application/octet-stream',
             });
+            return contentSha256;
         },
 
         async loadBundle(value) {
@@ -115,6 +126,9 @@ export function createAnalysisV2SourceMediaArchiveStore(input: {
                 maximumBytes: ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES,
             });
             if (!bytes) return null;
+            if (value.contentSha256 !== undefined && sha256(bytes) !== value.contentSha256) {
+                throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: content mismatch.');
+            }
             return deserializeAnalysisV2MediaBundle(bytes, value.expectedSelectionIds);
         },
     };

@@ -307,6 +307,65 @@ describe('deployment-wide Gemini lease store', () => {
         expect(rpc.mock.calls[1]?.[0]).toContain('release');
     });
 
+    it.each([
+        { label: 'direct denial', replay: false, releaseConfirmed: true },
+        { label: 'denial on replay', replay: true, releaseConfirmed: true },
+        { label: 'uncertain Gemini release', replay: false, releaseConfirmed: false },
+    ])('classifies staged provider capacity after $label', async ({ replay, releaseConfirmed }) => {
+        const operationKey = `feature-analysis:${'c'.repeat(64)}`;
+        const acquire = vi.fn().mockRejectedValue(new AnalysisProviderAdmissionCapacityPendingError());
+        if (replay) acquire.mockRejectedValueOnce(new AnalysisProviderAdmissionPersistenceError());
+        const providerAdmissionStore: AnalysisProviderAdmissionStore = {
+            acquire,
+            renew: vi.fn(),
+            release: vi.fn(),
+            recoverExpired: vi.fn(),
+            resolve: vi.fn(),
+            listExpired: vi.fn(),
+        };
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: [{
+                    outcome: 'acquired',
+                    slot: 3,
+                    lease_claim_token: claimToken,
+                    fence: 7,
+                    expires_at: expiresAt,
+                }],
+                error: null,
+            })
+            .mockResolvedValueOnce(releaseConfirmed
+                ? { data: [{ released: true, lease_state: 'available', fence: 7 }], error: null }
+                : { data: null, error: { code: 'PGRST000' } });
+        const store = createAnalysisV2GeminiLeaseStore({
+            rpc,
+            nowMs: () => 1_000,
+            randomUuid: () => claimToken,
+            env: { NODE_ENV: 'test', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            providerAdmissionStore,
+        });
+        const lease = store.acquire({
+            ...input(),
+            operationKey,
+            stage: 'featureAnalysis',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+        });
+
+        if (releaseConfirmed) {
+            await expect(lease).rejects.toBeInstanceOf(AnalysisV2AiCapacityPendingError);
+        } else {
+            await expect(lease).rejects.toThrow('ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR');
+        }
+        expect(acquire).toHaveBeenCalledTimes(replay ? 2 : 1);
+        expect(providerAdmissionStore.release).not.toHaveBeenCalled();
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc).toHaveBeenNthCalledWith(
+            2,
+            ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.releaseV2Rpc,
+            { p_slot: 3, p_claim_token: claimToken, p_fence: 7, p_operation_key: operationKey },
+        );
+    });
+
     it('releases the Gemini slot and returns a replay typed denial after an unknown first result', async () => {
         const denial = new AnalysisProviderAdmissionCapacityPendingError();
         const acquire = vi.fn()
