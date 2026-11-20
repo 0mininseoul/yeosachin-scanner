@@ -12,10 +12,19 @@ import {
     type LeadInputRow,
     type Tone,
 } from './console-data';
-import { Card, Chip, EmptyRow, ErrorNotice } from './console-ui';
+import { Chip, EmptyRow } from './console-ui';
+import { TablePanel, TableTools, type ActiveFilter } from './table-panel';
 
 type MappingFilter = '' | LeadInputRow['mappingStatus'];
 type StatusFilter = '' | 'completed' | 'failed' | 'processing' | 'not_requested' | 'unknown';
+
+const STATUS_FILTER_LABEL: Record<Exclude<StatusFilter, ''>, string> = {
+    completed: '완료',
+    failed: '실패',
+    processing: '진행 중',
+    not_requested: '미요청',
+    unknown: '기록 없음',
+};
 
 const FAILURE_LABEL: Record<string, string> = {
     TARGET_PRIVATE: '비공개 계정',
@@ -127,34 +136,43 @@ export function PreflightView() {
 
     useEffect(() => { void load(null); }, [load]);
 
-    return <Card>
-        <div className="ac-toolbar">
-            <label className="ac-field">Preflight 상태
-                <select value={status} onChange={event => setStatus(event.target.value as StatusFilter)}>
-                    <option value="">전체</option>
-                    <option value="completed">완료</option>
-                    <option value="failed">실패</option>
-                    <option value="processing">진행 중</option>
-                    <option value="not_requested">미요청</option>
-                    <option value="unknown">기록 없음</option>
-                </select>
-            </label>
-            <label className="ac-field">유저 구분
-                <select value={mapping} onChange={event => setMapping(event.target.value as MappingFilter)}>
-                    <option value="">전체</option>
-                    {Object.entries(MAPPING_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                </select>
-            </label>
-            <label className="ac-field">인스타 아이디
-                <input type="search" value={instagramId} placeholder="대상 또는 제외 계정" onChange={event => setInstagramId(event.target.value)} />
-            </label>
-            <label className="ac-field">시작일<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label>
-            <label className="ac-field">종료일<input type="date" value={to} onChange={event => setTo(event.target.value)} /></label>
-            <span className="ac-spacer" />
-            <span className="ac-meta">입력 1회 = 1행 · 기록 없음 = 상태 기록이 시작되기 전에 preflight가 정리된 입력</span>
-        </div>
-        <ErrorNotice message={error} onRetry={() => void load(null)} />
-        <div className="ac-table-box"><table className="ac-table">
+    const activeFilters: ActiveFilter[] = [
+        ...(status ? [{ key: 'status', label: STATUS_FILTER_LABEL[status], onClear: () => setStatus('') }] : []),
+        ...(mapping ? [{ key: 'mapping', label: MAPPING_LABEL[mapping], onClear: () => setMapping('') }] : []),
+        ...(from || to ? [{ key: 'date', label: `${from || '처음'} ~ ${to || '오늘'}`, onClear: () => { setFrom(''); setTo(''); } }] : []),
+    ];
+
+    return <TablePanel
+        tools={<TableTools
+            summary={<><b>Preflight 입력</b><span className="ac-muted">입력 1회 = 1행 · 입력 최신순</span></>}
+            search={{ value: instagramId, onChange: setInstagramId, label: '인스타 아이디 검색', placeholder: '대상 또는 제외 계정 아이디' }}
+            activeFilters={activeFilters}
+            filters={<>
+                <label className="ac-field">Preflight 상태
+                    <select value={status} onChange={event => setStatus(event.target.value as StatusFilter)}>
+                        <option value="">전체</option>
+                        {(Object.keys(STATUS_FILTER_LABEL) as Exclude<StatusFilter, ''>[]).map(value => <option key={value} value={value}>{STATUS_FILTER_LABEL[value]}</option>)}
+                    </select>
+                </label>
+                <label className="ac-field">유저 구분
+                    <select value={mapping} onChange={event => setMapping(event.target.value as MappingFilter)}>
+                        <option value="">전체</option>
+                        {Object.entries(MAPPING_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                </label>
+                <label className="ac-field">시작일<input type="date" value={from} onChange={event => setFrom(event.target.value)} /></label>
+                <label className="ac-field">종료일<input type="date" value={to} onChange={event => setTo(event.target.value)} /></label>
+                <span className="ac-meta">기록 없음 = 상태 기록이 시작되기 전에 preflight가 정리된 입력</span>
+            </>}
+        />}
+        error={error}
+        onRetry={() => void load(null)}
+        loading={loading}
+        loadedLabel={`${rows.length}건 불러옴`}
+        hasNext={nextCursor !== null}
+        onLoadMore={() => { if (nextCursor) void load(nextCursor); }}
+    >
+        <table className="ac-table">
             <caption className="ac-sr">Preflight 입력 기록</caption>
             <thead><tr><th scope="col">입력 일시</th><th scope="col">유저</th><th scope="col">유입 경로</th><th scope="col">분석 대상 · 제외 계정</th><th scope="col">Preflight 상태</th><th scope="col">결과 · 실패 사유</th></tr></thead>
             <tbody>
@@ -171,10 +189,6 @@ export function PreflightView() {
                     </tr>;
                 })}
             </tbody>
-        </table></div>
-        <div className="ac-pager" aria-live="polite">
-            <span>{loading ? '입력 기록을 불러오는 중…' : `${rows.length}건을 불러왔습니다${nextCursor ? ' · 다음 페이지 있음' : ''}`}</span>
-            <button type="button" className="ac-btn ac-btn--sm" disabled={loading || !nextCursor} onClick={() => void load(nextCursor)}>{loading ? '불러오는 중…' : '다음 25건'}</button>
-        </div>
-    </Card>;
+        </table>
+    </TablePanel>;
 }

@@ -3,7 +3,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { PAGE_SIZE, errorMessage, formatCount, formatDateTime, formatKrw, requestJson } from './console-data';
-import { Card, Chip, EmptyRow, ErrorNotice } from './console-ui';
+import { Chip, EmptyRow } from './console-ui';
+import { TablePanel, TableTools } from './table-panel';
 import { UserStatsPanel } from './user-stats-panel';
 
 type UserRow = Record<string, string | number | boolean | null> & { id: string };
@@ -49,7 +50,13 @@ function lifecycleTone(value: UserRow[string]): 'ok' | 'warn' | 'block' | 'none'
     return 'none';
 }
 
-export function UsersView() {
+export type UsersTab = 'stats' | 'table';
+
+export function UsersView({ tab }: { tab: UsersTab }) {
+    return tab === 'stats' ? <UserStatsPanel /> : <UsersTable />;
+}
+
+function UsersTable() {
     const [search, setSearch] = useState('');
     const [debounced, setDebounced] = useState('');
     const [rows, setRows] = useState<UserRow[]>([]);
@@ -88,16 +95,19 @@ export function UsersView() {
 
     useEffect(() => { void load(null); }, [load]);
 
-    return <div className="ac-stack"><UserStatsPanel /><Card>
-        <div className="ac-toolbar">
-            <label className="ac-field ac-field--grow">검색
-                <input type="search" value={search} placeholder="이름 · 닉네임 · 이메일 · 전화번호" onChange={event => setSearch(event.target.value)} />
-            </label>
-            <span className="ac-spacer" />
-            <span className="ac-meta">가입 최신순 · 행을 펼치면 유저 DB의 모든 컬럼을 볼 수 있습니다</span>
-        </div>
-        <ErrorNotice message={error} onRetry={() => void load(null)} />
-        <div className="ac-table-box"><table className="ac-table">
+    return <TablePanel
+        tools={<TableTools
+            summary={<><b>유저 DB</b><span className="ac-muted">가입 최신순 · 행을 펼치면 모든 컬럼</span></>}
+            search={{ value: search, onChange: setSearch, label: '유저 검색', placeholder: '이름 · 닉네임 · 이메일 · 전화번호' }}
+        />}
+        error={error}
+        onRetry={() => void load(null)}
+        loading={loading}
+        loadedLabel={`${rows.length}명 불러옴`}
+        hasNext={nextCursor !== null}
+        onLoadMore={() => { if (nextCursor) void load(nextCursor); }}
+    >
+        <table className="ac-table">
             <caption className="ac-sr">유저 목록</caption>
             <thead><tr>
                 <th scope="col">가입 시각</th><th scope="col">이름</th><th scope="col">연락처</th>
@@ -136,10 +146,6 @@ export function UsersView() {
                     </Fragment>;
                 })}
             </tbody>
-        </table></div>
-        <div className="ac-pager" aria-live="polite">
-            <span>{loading ? '유저 목록을 불러오는 중…' : `${rows.length}명을 불러왔습니다${nextCursor ? ' · 다음 페이지 있음' : ''}`}</span>
-            <button type="button" className="ac-btn ac-btn--sm" disabled={loading || !nextCursor} onClick={() => void load(nextCursor)}>{loading ? '불러오는 중…' : '다음 25명'}</button>
-        </div>
-    </Card></div>;
+        </table>
+    </TablePanel>;
 }
