@@ -20,16 +20,16 @@ import {
     type ConsoleOverview,
 } from './console-data';
 import { AccountsView } from './accounts-view';
-import { LeadsView } from './leads-view';
+import { PreflightView } from './preflight-view';
 import { OrderDetailView } from './order-detail-view';
 import { OrdersView } from './orders-view';
 import { OverviewView } from './overview-view';
 import { UsersView } from './users-view';
 
-type View = 'overview' | 'orders' | 'users' | 'accounts' | 'leads';
+type View = 'overview' | 'orders' | 'users' | 'accounts' | 'preflight';
 type Selection = { requestId: string | null; order: AdminOrderRow | null };
 
-const VIEWS: readonly View[] = ['overview', 'orders', 'users', 'accounts', 'leads'];
+const VIEWS: readonly View[] = ['overview', 'orders', 'preflight', 'users', 'accounts'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const TITLES: Record<View, { title: string; description: string }> = {
@@ -37,7 +37,7 @@ const TITLES: Record<View, { title: string; description: string }> = {
     orders: { title: '주문 감사', description: '결제 완료된 모든 주문 · 결제 시각 최신순 · 감사 번들이 있으면 함께 표시합니다.' },
     users: { title: '유저', description: '유저 DB의 모든 컬럼과 유저별 결제·분석 입력 합계' },
     accounts: { title: 'Apify 계정', description: '잔액 스냅샷과 배차 상태 · 유료 1개 + 무료 9개' },
-    leads: { title: '리드', description: '유저가 분석할 계정을 입력한 기록 · 최신순' },
+    preflight: { title: 'Preflight', description: '분석할 계정 입력 1회 = 1행 · 사전 점검 완료·실패·미요청과 실패 사유' },
 };
 
 function NavIcon({ view }: { view: View }) {
@@ -46,10 +46,12 @@ function NavIcon({ view }: { view: View }) {
     if (view === 'orders') return <svg {...common}><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg>;
     if (view === 'users') return <svg {...common}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" /></svg>;
     if (view === 'accounts') return <svg {...common}><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /></svg>;
+    if (view === 'preflight') return <svg {...common}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>;
     return <svg {...common}><circle cx="9" cy="8" r="4" /><path d="M2 21c0-3.9 3.1-7 7-7s7 3.1 7 7M17 4a4 4 0 0 1 0 8M22 21c0-2.9-1.7-5.4-4.2-6.4" /></svg>;
 }
 
 function parseView(value: string | undefined): View {
+    if (value === 'leads') return 'preflight';
     return VIEWS.includes(value as View) ? value as View : 'overview';
 }
 
@@ -272,7 +274,7 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
             onRefreshPaid={() => void refreshPaid()}
         />;
     } else {
-        body = <LeadsView />;
+        body = <PreflightView />;
     }
 
     return <div className="ac-app">

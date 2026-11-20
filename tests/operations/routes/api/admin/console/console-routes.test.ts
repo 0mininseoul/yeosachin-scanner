@@ -21,6 +21,7 @@ import { GET as getLeadInputs } from '../../../../../../app/api/admin/lead-input
 import { GET as getOrderCustomers } from '../../../../../../app/api/admin/order-customers/route';
 import { GET as getOrders } from '../../../../../../app/api/admin/orders/route';
 import { GET as getUsers } from '../../../../../../app/api/admin/users/route';
+import { GET as getUserStats } from '../../../../../../app/api/admin/user-stats/route';
 
 const operatorId = '423e4567-e89b-42d3-a456-426614174001';
 const requestId = '623e4567-e89b-42d3-a456-426614174003';
@@ -31,6 +32,16 @@ const leadRow = {
     attributionLabel: 'UTM: 인스타그램',
     targetInstagramId: 'target.account',
     excludedInstagramId: 'excluded.account',
+    preflightId: '923e4567-e89b-42d3-a456-426614174006',
+    preflightStatus: 'failed',
+    preflightStage: 'profile',
+    preflightErrorCode: 'TARGET_PRIVATE',
+    preflightOutcomeAt: '2026-11-19T05:06:00.000+00:00',
+    preflightFollowersCount: null,
+    preflightFollowingCount: null,
+    preflightIsPrivate: null,
+    preflightRequiredPlanId: null,
+    preflightScreenAvailable: false,
     cursorCreatedAt: '2026-11-19T05:05:00.000+00:00',
     cursorId: '723e4567-e89b-42d3-a456-426614174004',
 };
@@ -61,10 +72,13 @@ describe('operator console routes', () => {
         expect(response.status).toBe(200);
         expect(response.headers.get('Cache-Control')).toBe('private, no-store');
         const body = await response.json();
-        expect(body.rows).toEqual([{
+        expect(body.rows).toHaveLength(1);
+        expect(body.rows[0]).toMatchObject({
             inputAt: leadRow.inputAt, mappingStatus: 'authenticated_user', userName: '김민연',
             attributionLabel: 'UTM: 인스타그램', targetInstagramId: 'target.account', excludedInstagramId: 'excluded.account',
-        }]);
+            preflightStatus: 'failed', preflightErrorCode: 'TARGET_PRIVATE', preflightScreenAvailable: false,
+        });
+        expect(body.rows[0]).not.toHaveProperty('cursorId');
         expect(typeof body.nextCursor).toBe('string');
         expect(mocks.rpc).toHaveBeenCalledWith('load_admin_lead_inputs', expect.objectContaining({
             p_instagram_id: 'excluded.account', p_page_size: 2,
@@ -73,6 +87,7 @@ describe('operator console routes', () => {
 
     it('rejects unknown lead query keys and tampered cursors', async () => {
         expect((await getLeadInputs(new Request('https://example.test/api/admin/lead-inputs?context=target'))).status).toBe(400);
+        expect((await getLeadInputs(new Request('https://example.test/api/admin/lead-inputs?preflightStatus=done'))).status).toBe(400);
         expect((await getLeadInputs(new Request('https://example.test/api/admin/lead-inputs?cursor=bogus'))).status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
@@ -147,5 +162,27 @@ describe('operator console routes', () => {
         expect(mocks.rpc).toHaveBeenCalledWith('load_admin_users', expect.objectContaining({ p_search: '김', p_page_size: 26 }));
         mocks.decision.mockReturnValueOnce('forbidden');
         expect((await getUsers(new Request('https://example.test/api/admin/users'))).status).toBe(403);
+    });
+
+    it('forwards the preflight status filter to the lead RPC', async () => {
+        mocks.rpc.mockResolvedValue({ data: { rows: [] }, error: null });
+        const response = await getLeadInputs(new Request('https://example.test/api/admin/lead-inputs?preflightStatus=not_requested'));
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith('load_admin_lead_inputs', expect.objectContaining({ p_preflight_status: 'not_requested' }));
+    });
+
+    it('serves user demographics and daily signups', async () => {
+        mocks.rpc.mockResolvedValue({ data: {
+            total: 3, paidUsers: 1,
+            byGenderAge: [{ gender: 'female', ageBand: '25_29', users: 1, paidUsers: 1 }],
+            bySource: [{ source: 'UTM: 인스타그램', users: 1, paidUsers: 1 }],
+            daily: [{ day: '2026-11-19', signups: 1 }],
+        }, error: null });
+        const response = await getUserStats();
+        expect(response.status).toBe(200);
+        expect((await response.json()).byGenderAge[0]).toEqual({ gender: 'female', ageBand: '25_29', users: 1, paidUsers: 1 });
+        expect(mocks.rpc).toHaveBeenCalledWith('load_admin_user_stats', expect.objectContaining({ p_days: 30 }));
+        mocks.rpc.mockResolvedValue({ data: { total: 'x' }, error: null });
+        expect((await getUserStats()).status).toBe(503);
     });
 });

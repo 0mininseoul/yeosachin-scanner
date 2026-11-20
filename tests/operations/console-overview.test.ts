@@ -11,7 +11,8 @@ import {
     parseSegmentationTotal,
 } from '@/lib/services/admin/amplitude-dashboard';
 import { assembleConsoleOverview, overviewRpcSchema } from '@/lib/services/admin/console-overview';
-import { adminOrderStatus, inventoryEnvelopeSchema, type AdminOrderRow } from '@/app/admin/console/console-data';
+import { adminOrderStatus, inventoryEnvelopeSchema, type AdminOrderRow, type LeadInputRow } from '@/app/admin/console/console-data';
+import { preflightStatusOf } from '@/app/admin/console/preflight-view';
 import {
     AdminConsoleCursorInvalidError,
     decodeLeadCursor,
@@ -177,5 +178,21 @@ describe('console order status', () => {
         }));
         expect(inventoryEnvelopeSchema.safeParse({ inventory }).success).toBe(true);
         expect(inventoryEnvelopeSchema.safeParse({ inventory, secondary: { credentialSlot: 'secondary' } }).success).toBe(true);
+    });
+});
+
+describe('preflight status labels', () => {
+    const lead = (patch: Partial<LeadInputRow>): LeadInputRow => ({
+        inputAt: '2026-11-19T05:00:00.000Z', mappingStatus: 'anonymous_device', userName: null, attributionLabel: null,
+        targetInstagramId: 't', excludedInstagramId: null, preflightId: null, preflightStatus: null, preflightStage: null,
+        preflightErrorCode: null, preflightOutcomeAt: null, preflightFollowersCount: null, preflightFollowingCount: null,
+        preflightIsPrivate: null, preflightRequiredPlanId: null, preflightScreenAvailable: false, ...patch,
+    });
+
+    it('distinguishes not requested, unknown, completed and failed', () => {
+        expect(preflightStatusOf(lead({}))).toEqual({ tone: 'none', label: '미요청' });
+        expect(preflightStatusOf(lead({ preflightId: '50000000-0000-4000-8000-000000000001' }))).toEqual({ tone: 'none', label: '기록 없음' });
+        expect(preflightStatusOf(lead({ preflightId: '50000000-0000-4000-8000-000000000001', preflightStatus: 'completed' })).label).toBe('완료');
+        expect(preflightStatusOf(lead({ preflightStatus: 'failed', preflightErrorCode: 'RATE_LIMITED' })).label).toBe('실패');
     });
 });

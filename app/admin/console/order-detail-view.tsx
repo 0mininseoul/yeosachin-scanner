@@ -212,6 +212,20 @@ function StagePanel({ requestId, spec }: { requestId: string; spec: NumberedStag
     </Card>;
 }
 
+/** The user's actual result page, opened with the operator's read access. */
+function ResultEmbed({ requestId }: { requestId: string }) {
+    const src = `/result/${encodeURIComponent(requestId)}`;
+    return <Card
+        title="실제 결과 화면"
+        description="유저가 보는 결과 페이지를 운영자 권한으로 그대로 불러옵니다 · 공유·피드백 버튼은 누르지 마세요"
+        actions={<a className="ac-btn ac-btn--sm" href={src} target="_blank" rel="noreferrer">새 탭에서 열기 ↗</a>}
+    >
+        <div className="ac-result-frame">
+            <iframe title={`결과 화면 ${requestId}`} src={src} loading="lazy" />
+        </div>
+    </Card>;
+}
+
 function CustomerFacts({ customer, planId }: { customer: OrderCustomer | undefined; planId: string }) {
     return <Card className="ac-facts ac-facts--customer">
         <div className="ac-fact"><span>고객</span><strong>{customer?.userName ?? '미상'}</strong></div>
@@ -239,6 +253,7 @@ function OrderOnlyView({ order, note }: { order: AdminOrderRow; note: string }) 
             <Card className="ac-kpi"><div className="ac-kpi-l">요청 ID</div><div className="ac-kpi-v ac-kpi-v--text ac-tabular">{shortId(order.requestId)}</div><div className="ac-meta">주문 {shortId(order.orderId)}</div></Card>
         </div>
         <p className="ac-alert ac-alert--soft" role="note">{note}</p>
+        {order.requestId && order.orderStatus === 'completed' ? <ResultEmbed requestId={order.requestId} /> : null}
     </div>;
 }
 
@@ -345,6 +360,8 @@ export function OrderDetailView({ requestId, order, onSummary }: {
                 <span>{divergence.kind === 'unknown' ? '이 단계의 선언 또는 수집 수가 미상이라 이탈 여부를 확정할 수 없습니다.' : divergence.missing > 0 ? `선언 ${formatCount(firstSpec.declared)}건 중 ${formatCount(firstSpec.collected)}건만 처리되어 ${divergence.missing.toLocaleString('ko-KR')}건이 부족합니다.` : '수집 수가 선언 수를 초과합니다.'}</span>
             </div> : null}
         </Card>
+
+        <ResultEmbed requestId={summary.requestId} />
 
         {active ? <StagePanel key={`${summary.requestId}:${active.key}`} requestId={summary.requestId} spec={active} /> : null}
     </div>;

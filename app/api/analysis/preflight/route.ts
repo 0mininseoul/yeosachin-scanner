@@ -84,7 +84,7 @@ import {
     requestClientIp,
 } from '@/lib/services/analysis/anonymous-preflight-claim';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
-import { captureAndBindLandingLeadJourney } from '@/lib/services/landing/landing-lead-journey';
+import { captureAndBindLandingLeadJourney, landingJourneyIdFromCaptureToken } from '@/lib/services/landing/landing-lead-journey';
 import { attributionLabelFromCookieHeader } from '@/lib/services/admin/client-signals';
 import {
     AccountPrincipalAdmissionError,
@@ -174,6 +174,7 @@ async function handleAnonymousPOST(
     const failed = (status: number, code: string, message: string): NextResponse => {
         void recordPreflightFailure({
             ...(preflightId ? { preflightId } : {}),
+            landingJourneyId: landingJourneyIdFromCaptureToken(request.headers.get('x-landing-lead-capture-token')),
             stage: 'request',
             errorCode: preflightFailureReason(code),
         });
@@ -402,6 +403,7 @@ async function handlePOST(
         void recordPreflightFailure({
             ...(userId ? { userId } : {}),
             ...(preflightId ? { preflightId } : {}),
+            landingJourneyId: landingJourneyIdFromCaptureToken(request.headers.get('x-landing-lead-capture-token')),
             stage: 'request',
             errorCode: preflightFailureReason(code),
         });

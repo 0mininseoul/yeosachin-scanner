@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { z } from 'zod';
 import { PAGE_SIZE, errorMessage, formatCount, formatDateTime, formatKrw, requestJson } from './console-data';
 import { Card, Chip, EmptyRow, ErrorNotice } from './console-ui';
+import { UserStatsPanel } from './user-stats-panel';
 
 type UserRow = Record<string, string | number | boolean | null> & { id: string };
 
@@ -87,7 +88,7 @@ export function UsersView() {
 
     useEffect(() => { void load(null); }, [load]);
 
-    return <Card>
+    return <div className="ac-stack"><UserStatsPanel /><Card>
         <div className="ac-toolbar">
             <label className="ac-field ac-field--grow">검색
                 <input type="search" value={search} placeholder="이름 · 닉네임 · 이메일 · 전화번호" onChange={event => setSearch(event.target.value)} />
@@ -140,5 +141,5 @@ export function UsersView() {
             <span>{loading ? '유저 목록을 불러오는 중…' : `${rows.length}명을 불러왔습니다${nextCursor ? ' · 다음 페이지 있음' : ''}`}</span>
             <button type="button" className="ac-btn ac-btn--sm" disabled={loading || !nextCursor} onClick={() => void load(nextCursor)}>{loading ? '불러오는 중…' : '다음 25명'}</button>
         </div>
-    </Card>;
+    </Card></div>;
 }

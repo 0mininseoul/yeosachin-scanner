@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     AdminConsoleCursorInvalidError,
     leadMappingStatusSchema,
+    leadPreflightFilterSchema,
     loadAdminLeadInputs,
     type AdminLeadInputQuery,
 } from '@/lib/services/admin/console-records';
@@ -11,7 +12,7 @@ import { normalizeLeadInstagramId } from '@/lib/services/leads/contracts';
 
 export const dynamic = 'force-dynamic';
 
-const ALLOWED_KEYS = new Set(['mappingStatus', 'instagramId', 'from', 'to', 'cursor', 'pageSize']);
+const ALLOWED_KEYS = new Set(['mappingStatus', 'preflightStatus', 'instagramId', 'from', 'to', 'cursor', 'pageSize']);
 const dateTime = z.string().datetime({ offset: true });
 
 function single(params: URLSearchParams, key: string): string | null {
@@ -24,6 +25,7 @@ function parseLeadInputQuery(url: string): AdminLeadInputQuery {
     const params = new URL(url).searchParams;
     for (const key of params.keys()) if (!ALLOWED_KEYS.has(key)) throw new Error('INVALID_QUERY');
     const mappingStatus = single(params, 'mappingStatus');
+    const preflightStatus = single(params, 'preflightStatus');
     const rawInstagramId = single(params, 'instagramId');
     const from = single(params, 'from');
     const to = single(params, 'to');
@@ -37,6 +39,7 @@ function parseLeadInputQuery(url: string): AdminLeadInputQuery {
     if (pageSize !== null && !/^(?:[1-9]|[1-4][0-9]|50)$/.test(pageSize)) throw new Error('INVALID_QUERY');
     return {
         mappingStatus: mappingStatus === null ? undefined : leadMappingStatusSchema.parse(mappingStatus),
+        preflightStatus: preflightStatus === null ? undefined : leadPreflightFilterSchema.parse(preflightStatus),
         instagramId: instagramId ?? undefined,
         from: parsedFrom,
         to: parsedTo,
