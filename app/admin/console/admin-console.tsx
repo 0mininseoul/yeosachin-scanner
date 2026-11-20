@@ -25,11 +25,13 @@ import { OrderDetailView } from './order-detail-view';
 import { OrdersView } from './orders-view';
 import { OverviewView } from './overview-view';
 import { UsersView, type UsersTab } from './users-view';
+import { PipelineView } from './pipeline-view';
+import type { PipelineMap } from '@/lib/services/admin/pipeline-map';
 
-type View = 'overview' | 'orders' | 'users' | 'accounts' | 'preflight';
+type View = 'overview' | 'orders' | 'users' | 'accounts' | 'preflight' | 'pipeline';
 type Selection = { requestId: string | null; order: AdminOrderRow | null };
 
-const VIEWS: readonly View[] = ['overview', 'orders', 'preflight', 'users', 'accounts'];
+const VIEWS: readonly View[] = ['overview', 'orders', 'preflight', 'users', 'pipeline', 'accounts'];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const TITLES: Record<View, { title: string; description: string }> = {
@@ -38,6 +40,7 @@ const TITLES: Record<View, { title: string; description: string }> = {
     users: { title: '유저', description: '가입자 통계와 유저 DB 테이블' },
     accounts: { title: 'Apify 계정', description: '잔액 스냅샷과 배차 상태 · 유료 1개 + 무료 9개' },
     preflight: { title: 'Preflight', description: '분석할 계정 입력 1회 = 1행 · 사전 점검 완료·실패·미요청과 실패 사유' },
+    pipeline: { title: '파이프라인', description: '대상 계정 입력부터 결과 공개까지 실제 코드의 실행 순서 · 단계를 누르면 상세가 나옵니다.' },
 };
 
 function NavIcon({ view }: { view: View }) {
@@ -46,6 +49,7 @@ function NavIcon({ view }: { view: View }) {
     if (view === 'orders') return <svg {...common}><path d="M8 6h13M8 12h13M8 18h13" /><path d="M3 6h.01M3 12h.01M3 18h.01" /></svg>;
     if (view === 'users') return <svg {...common}><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" /></svg>;
     if (view === 'accounts') return <svg {...common}><rect x="2" y="6" width="20" height="13" rx="2" /><path d="M2 10h20M6 15h4" /></svg>;
+    if (view === 'pipeline') return <svg {...common}><rect x="3" y="3" width="6" height="6" rx="1.5" /><rect x="15" y="3" width="6" height="6" rx="1.5" /><rect x="9" y="15" width="6" height="6" rx="1.5" /><path d="M6 9v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9M12 13v2" /></svg>;
     if (view === 'preflight') return <svg {...common}><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>;
     return <svg {...common}><circle cx="9" cy="8" r="4" /><path d="M2 21c0-3.9 3.1-7 7-7s7 3.1 7 7M17 4a4 4 0 0 1 0 8M22 21c0-2.9-1.7-5.4-4.2-6.4" /></svg>;
 }
@@ -63,7 +67,7 @@ function writeLocation(view: View, requestId: string | null, usersTab?: UsersTab
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
-export function AdminConsole({ initialRequestId, initialView, initialTab }: { initialRequestId: string; initialView?: string; initialTab?: string }) {
+export function AdminConsole({ initialRequestId, initialView, initialTab, pipelineMap }: { initialRequestId: string; initialView?: string; initialTab?: string; pipelineMap?: PipelineMap }) {
     const [view, setView] = useState<View>(() => (UUID.test(initialRequestId) ? 'orders' : parseView(initialView)));
     const [usersTab, setUsersTab] = useState<UsersTab>(() => (initialTab === 'table' ? 'table' : 'stats'));
     const [searchOpen, setSearchOpen] = useState(false);
@@ -287,6 +291,8 @@ export function AdminConsole({ initialRequestId, initialView, initialTab }: { in
             onToggle={row => void toggleExclusion(row)}
             onRefreshPaid={() => void refreshPaid()}
         />;
+    } else if (view === 'pipeline') {
+        body = pipelineMap ? <PipelineView map={pipelineMap} /> : <p className="ac-alert ac-alert--soft">파이프라인 맵을 불러오지 못했습니다.</p>;
     } else {
         body = <PreflightView />;
     }
