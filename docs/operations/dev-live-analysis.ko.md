@@ -41,7 +41,7 @@ Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검�
 
 - 워커 공용 Vertex `VERTEX_AI_PER_RUN_BUDGET_USD`, `VERTEX_AI_PER_ORDER_BUDGET_USD`, `VERTEX_AI_DAILY_BUDGET_USD`는 양수이며 Basic 기준 `$2` 이하다. 운영자 시작 모드에서는 각 실행에 발급한 Dev 비용 원장 한도를 사용한다.
 - Apify는 두 워커에 `APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 지정한다. 정식 분석 워커에는 `APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_LIKERS_MAX_ESTIMATED_COST_USD_PER_OPERATION`, `APIFY_COMMENTS_MAX_ESTIMATED_COST_USD_PER_OPERATION`을 추가한다. 공용 설정은 양수이며 Basic 기준 `$5` 이하다.
-- 1회 상한은 Basic에서 Apify Actor 요금 `$5`와 Vertex `$2`, 승인된 Standard 대상에서 Apify Actor 요금 `$6`과 Vertex `$4`이다. Dev DB의 공용 예약 원장은 각 호출 전 같은 승인 ID의 공급자별 누적액을 검사한다. 한도를 넘는 호출은 차단한다. Vertex는 호출의 전체 입력 한도까지 선예약하고 완전한 사용량이 기록된 경우에만 차액을 반환한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
+- 1회 상한은 Basic에서 Apify Actor 요금 `$5`와 Vertex `$2`, 승인된 Standard 대상에서 Apify Actor 요금 `$6`과 Vertex `$4`이다. Dev DB의 공용 예약 원장은 각 호출 전 같은 승인 ID의 공급자별 누적액을 검사한다. 한도를 넘는 호출은 차단한다. Vertex는 실제 전송할 프롬프트와 응답 스키마, 선택된 JPEG 수, 추론을 포함한 출력 상한으로 보수적으로 선예약한다. 완전한 사용량이나 명시적 HTTP `429` 응답으로 비용을 확인한 경우에만 차액을 반환한다. 디스크, GCS/R2, 데이터 전송, 공급자 요금제 조건의 별도 비용은 이 실행 한도에 포함되지 않는다.
 
 ## 운영자 시작과 검증
 
@@ -58,6 +58,8 @@ Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검�
 - 진행 상태 응답은 완료 작업 수와 별도로 DB가 앞서 보존한 진행률을 읽는다. 현재 완료 수로 산출한 하한과 전체 0~100% 범위를 검사한다. 이를 통해 기존 진행률을 보존하면서 실패 상태를 화면에 표시한다.
 - 11월 20일 03:40 KST Dev Standard는 후보 이미지 처리 재시도 중 `ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR`로 종료됐다. 같은 실행의 Cloud Storage 집계에서 조건부 쓰기 412 응답 11건, 기존 객체 메타데이터 조회 성공 11건, 본문 조회 성공 10건이 확인됐다. 임시 객체 11개의 생성·삭제 기록은 DB와 일치했다. 보존 경로를 후보와 단계에만 고정한 상태에서 재시도 이미지 묶음의 바이트 길이가 달라지면, 본문을 읽기 전에 같은 오류가 발생하는 것을 모의 저장소에서 재현했다. 객체별 로그와 종료 후 정리된 후보 매핑이 없어 당시 후보와 세부 단계는 식별할 수 없다. 이제 보존 경로는 이미지 묶음의 해시를 포함하며, 추론 비교에서 워커가 실제 사용한 묶음을 읽도록 분석 체크포인트에 해당 해시를 기록한다. 같은 입력을 재시도하면 기존 객체를 재사용한다.
 - 같은 실행의 03:19~03:21 KST에는 이전 작업의 Gemini 슬롯이 풀린 뒤에도 공급자 동시 실행 원장에 예약 3건이 잠시 남아 있었다. 이 상태에서 공급자 슬롯을 얻지 못한 후보 분석은 호출 전에 `AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR`로 처리됐다. 단계형 분석은 새로 확보한 Gemini 슬롯의 반환을 확인한 경우 이 거절을 용량 대기로 넘긴다. 원장 저장이나 슬롯 반환의 성공 여부가 불확실하면 기존의 안전한 오류 경로를 유지한다. 이후 산발적으로 기록된 동일 감사 코드는 로그만으로 원인을 확정할 수 없었다.
+- 11월 20일 11:24 KST에 시작한 Dev Standard는 12:16에 Vertex 사전 예산 검사로 종료됐다. 종료 원장의 추정액 `$2.411691`에 다음 특징 분석의 전체 모델 컨텍스트 기준 선예약 `$1.634304`를 더하면 승인된 `$4`를 넘겼다. 워커 로그에는 `DEV_LIVE_BUDGET_EXCEEDED`, 요청의 종료 코드에는 `ANALYSIS_V2_JOB_HANDLER_FAILED`가 남았다. 이제 Dev는 실제 요청의 입력 크기와 출력 상한을 사용해 예약액을 계산한다. [Vertex 이미지 토큰화](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-understanding) · [Vertex 구조화 출력](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/control-generated-output)
+- 해당 실패 요청의 승인은 13:51 KST에 만료됐다. 이미지 보존본 183개와 개별 모델 응답 일부가 남아 있다. 후보 AI 작업 8개 중 완료된 작업은 없고, 종료 처리 후 관계·프로필 실행 입력과 단계 체크포인트는 조회되지 않는다. 최종 점수, 재생 입력 번들, 추론 비교용 보존본도 생성되지 않았다. 이 자료만으로는 종료된 요청을 재개하거나 같은 입력을 사용한 별도 오프라인 재생을 완료할 수 없다.
 - 후보 코드, Dev 도메인, DB 식별자, Cloud Run IAM, 큐 상태를 확인한다. 단위 검증은 인증 실패, 같은 요청 재전송, 대상 불일치, 승인 만료, 비용 상한, 공급자 호출 없는 가용성 조회를 포함한다.
 ## Standard 추론 수준 비교
 

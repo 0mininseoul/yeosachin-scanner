@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
+import { MediaResolution, type GenerateContentParameters } from '@google/genai';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { hashAnalysisTestEntitlementJti } from '@/lib/services/analysis/test-entitlement-jti';
+import { estimateDevLiveVertexReservation } from '@/lib/services/dev-ui/live-vertex-reservation';
 
 type OwnerApproval = {
     id: string;
@@ -19,6 +21,31 @@ const ownerId = randomUUID();
 const fixtureEmail = 'owner@invalid.test';
 const target = 'public_fixture';
 const grantParameters = '$1::uuid, $2::timestamptz, $3::timestamptz, $4::integer, $5::integer';
+
+const featurePrompt = '한글 "평가"\nﷺ';
+const featureSchema = { type: 'object', properties: { summary: { type: 'string', description: '후보 평가' } } };
+
+function featureRequest() {
+    return {
+        model: 'gemini-3.7-flash',
+        contents: [{
+            role: 'user',
+            parts: [
+                { text: featurePrompt },
+                { inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } },
+                { inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } },
+            ],
+        }],
+        config: {
+            candidateCount: 1,
+            responseMimeType: 'application/json',
+            responseJsonSchema: featureSchema,
+            httpOptions: { retryOptions: { attempts: 1 } },
+            mediaResolution: MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+            maxOutputTokens: 8_192,
+        },
+    } satisfies GenerateContentParameters;
+}
 
 let db: PGlite;
 
@@ -360,6 +387,65 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserve({ ...grant, expiresAt: new Date(Date.parse(grant.expiresAt) + 1).toISOString() }, 'apify', 1))
             .rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
         await expect(reserve({ ...grant, aiMaxCents: 399 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+    });
+
+    it('admits a representative feature request after the prior usage and still enforces the $4 ledger cap', async () => {
+        await configureStandard();
+        const grant = await startStandard();
+        const settled = 2_411_691;
+        await expect(reserve(grant, 'vertex', settled)).resolves.toBe(true);
+        await expect(reserve(grant, 'vertex', 1_634_304)).resolves.toBe(false);
+
+        const estimate = estimateDevLiveVertexReservation(featureRequest(), 'global');
+        const inputTokens = Buffer.byteLength(JSON.stringify(featurePrompt).normalize('NFKD'))
+            + Buffer.byteLength(JSON.stringify(featureSchema).normalize('NFKD')) + 2 * 1_120 + 2_048;
+        expect(estimate).toMatchObject({
+            inputTokens,
+            outputTokens: 8_192,
+            totalCostUsd: (inputTokens * 1.5 + 8_192 * 7.5) / 1_000_000,
+        });
+        const amount = Math.ceil(estimate!.totalCostUsd * 1_000_000);
+        await expect(reserve(grant, 'vertex', amount)).resolves.toBe(true);
+        const remaining = 4_000_000 - settled - amount;
+        await expect(reserve(grant, 'vertex', remaining + 1)).resolves.toBe(false);
+        await expect(reserve(grant, 'vertex', remaining)).resolves.toBe(true);
+        await expect(reserve(grant, 'vertex', 1)).resolves.toBe(false);
+    });
+
+    it('rejects model, transport, and payload changes outside the Dev request envelope', () => {
+        const request = featureRequest();
+        const estimate = (params: GenerateContentParameters = request, location = 'global') => (
+            estimateDevLiveVertexReservation(params, location)
+        );
+        const config = (overrides: Partial<NonNullable<GenerateContentParameters['config']>>) => ({
+            ...request, config: { ...request.config, ...overrides },
+        });
+        const part = (overrides: typeof request.contents[0]['parts']) => ({
+            ...request, contents: [{ role: 'user', parts: overrides }],
+        });
+        expect(estimate(request, 'us-central1')).toBeNull();
+        expect(estimate({ ...request, model: 'gemini-unpriced' })).toBeNull();
+        expect(estimate(config({ candidateCount: 2 }))).toBeNull();
+        expect(estimate(config({ httpOptions: { retryOptions: { attempts: 2 } } }))).toBeNull();
+        expect(estimate(config({
+            httpOptions: { retryOptions: { attempts: 1 }, extraBody: { tools: [] } },
+        }))).toBeNull();
+        expect(estimate(config({ systemInstruction: 'unpriced text' }))).toBeNull();
+        expect(estimate(config({ responseJsonSchema: undefined }))).toBeNull();
+        for (const output of [undefined, 0, 1.5, 65_537]) {
+            expect(estimate(config({ maxOutputTokens: output }))).toBeNull();
+        }
+        expect(estimate(part([{ text: featurePrompt }, { text: 'extra text part' }]))).toBeNull();
+        expect(estimate(part([
+            { text: featurePrompt }, { inlineData: { mimeType: 'audio/wav', data: 'AAAA' } },
+        ]))).toBeNull();
+        expect(estimate(part([
+            { text: featurePrompt }, ...Array.from({ length: 12 }, () => (
+                { inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } }
+            )),
+        ]))).toBeNull();
+        expect(estimate(part([{ text: 'a'.repeat(1_048_576) }]))).toBeNull();
+        expect(estimate(config({ mediaResolution: undefined }))).toEqual(estimate());
     });
 
     it('replays fresh Standard admission with the exact grant nonce and rejects a different plan, hash or revoked grant', async () => {

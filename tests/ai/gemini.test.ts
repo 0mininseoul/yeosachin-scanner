@@ -136,7 +136,10 @@ describe('analyzeWithGemini generation retry policy', () => {
         await expect(analyzeWithGemini('prompt', undefined, {
             schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
         })).rejects.toThrow('DEV_LIVE_BUDGET_EXCEEDED');
-        expect(mocks.reserveDevAttempt).toHaveBeenCalledWith(grant, 'gemini-3.1-flash-lite', 'global', 128);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, expect.objectContaining({
+            model: 'gemini-3.1-flash-lite',
+            config: expect.objectContaining({ maxOutputTokens: 128 }),
+        }), 'global');
         expect(mocks.generateContent).not.toHaveBeenCalled();
         expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
     });
@@ -157,8 +160,52 @@ describe('analyzeWithGemini generation retry policy', () => {
             budgetGuard: budgetGuard as unknown as VertexAiBudgetGuard,
         })).resolves.toEqual({ value: 'ok' });
         expect(budgetGuard.reserve).not.toHaveBeenCalled();
-        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, 'gemini-3.1-flash-lite', 'global', 128);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(
+            grant, mocks.generateContent.mock.calls[0][0], 'global',
+        );
         expect(mocks.settleDevAttempt).toHaveBeenCalledOnce();
+    });
+
+    it('reserves against the same structured request and sliced image parts dispatched to Vertex', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        const schema = z.object({ value: z.string().describe('후보 평가') }).strict();
+
+        await expect(analyzeWithGemini('한글 입력', ['first', 'second', 'omitted'], {
+            ...stageAuditOptions(),
+            stage: 'genderTriage',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            model: 'gemini-3-flash-preview',
+            mediaResolution: 'MEDIUM',
+            maxOutputTokens: 1_024,
+            maxImages: 2,
+            schema,
+        })).resolves.toEqual({ value: 'ok' });
+
+        const [request] = mocks.generateContent.mock.calls[0];
+        expect(request).toMatchObject({
+            contents: [{
+                role: 'user',
+                parts: [
+                    { text: '한글 입력' },
+                    { inlineData: { mimeType: 'image/jpeg', data: 'first' } },
+                    { inlineData: { mimeType: 'image/jpeg', data: 'second' } },
+                ],
+            }],
+            config: {
+                responseJsonSchema: zodToGeminiResponseJsonSchema(schema),
+                candidateCount: 1,
+                maxOutputTokens: 1_024,
+            },
+        });
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, request, 'global');
+        expect(mocks.reserveDevAttempt.mock.calls[0][1]).toBe(request);
+        expect(mocks.reserveDevAttempt.mock.invocationCallOrder[0])
+            .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
     });
 
     it('disables SDK retry for a reserved Dev attempt and settles only complete usage', async () => {
