@@ -2,6 +2,8 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { Analytics } from "@vercel/analytics/next";
 import { AmplitudeProvider } from "@/components/amplitude-provider";
+import { EmailLoginAvailability } from "@/components/email-login";
+import { pgReviewCredential } from "@/app/login/pg-review/account";
 import { appOriginForServer } from "@/lib/constants/app-url";
 import { DEV_UI_APP_ORIGIN, isDevUiDeploymentContext } from "@/lib/constants/dev-ui";
 import "./globals.css";
@@ -92,7 +94,9 @@ export default function RootLayout({
             테스트 환경
           </div>
         )}
-        {devUi ? children : <AmplitudeProvider>{children}</AmplitudeProvider>}
+        <EmailLoginAvailability enabled={!devUi && pgReviewCredential() !== null}>
+          {devUi ? children : <AmplitudeProvider>{children}</AmplitudeProvider>}
+        </EmailLoginAvailability>
         {!devUi && <Analytics />}
       </body>
     </html>
