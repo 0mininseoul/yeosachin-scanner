@@ -915,14 +915,14 @@ async function seedFreeAllocatorFixture(input: {
     snapshotUsage?: number;
     snapshotObservedSql?: string;
     onlySlot?: string;
-} = {}): Promise<void> {
-    await db.query(
+} = {}, database = db): Promise<void> {
+    await database.query(
         `INSERT INTO public.analysis_preflights (
             id, expires_at, beta_entry_provenance, analysis_entry_channel
         ) VALUES ($1, clock_timestamp() + interval '30 minutes', NULL, 'standard')`,
         [freePreflightId],
     );
-    await db.query(
+    await database.query(
         `UPDATE public.analysis_apify_credit_snapshots
          SET monthly_limit_usd = $1, monthly_usage_usd = $2,
              billing_cycle_start_at = clock_timestamp() - interval '1 day',
@@ -932,7 +932,7 @@ async function seedFreeAllocatorFixture(input: {
         [input.snapshotLimit ?? 0.0052, input.snapshotUsage ?? 0],
     );
     if (input.onlySlot) {
-        await db.query(
+        await database.query(
             `UPDATE public.analysis_apify_credit_snapshots
              SET health_state = 'unhealthy', monthly_limit_usd = NULL,
                  monthly_usage_usd = NULL, billing_cycle_start_at = NULL,
@@ -972,3 +972,109 @@ async function insertProviderRun(input: {
         ],
     );
 }
+
+describe('ordinary B-lite initial profile budget', () => {
+    let isolated: PGlite;
+    const reserveSql = 'SELECT public.reserve_analysis_blite_apify_preflight_run_v1($1,$2,$3) AS result';
+    const claim = [freePreflightId, freeClaimToken, freeInputHash];
+    const reserveBlite = () => isolated.query<{ result: { created: boolean; run: {
+        maxChargeUsd: number; credentialSlot: string;
+    } } }>(reserveSql, claim).then(result => result.rows[0].result);
+
+    beforeAll(async () => {
+        isolated = await PGlite.create({ extensions: { pgcrypto } });
+        await isolated.exec(bootstrap);
+        await isolated.exec(migration);
+        const baseline = readFileSync(join(process.cwd(), 'supabase/dev-ui/production-baseline.sql'), 'utf8');
+        const costTable = baseline.match(/CREATE TABLE public\.analysis_preflight_acquisition_cost_events \([\s\S]*?\n\);/)![0];
+        await isolated.exec(costTable);
+        await isolated.exec(`
+            ALTER TABLE public.analysis_preflight_acquisition_cost_events ADD PRIMARY KEY(billing_identity_hash);
+            ALTER TABLE public.analysis_preflights
+                ADD COLUMN precheckout_blite_cohort BOOLEAN DEFAULT true, ADD COLUMN deadline_at TIMESTAMPTZ,
+                ADD COLUMN target_input_hash TEXT, ADD COLUMN pii_scrubbed_at TIMESTAMPTZ,
+                ADD COLUMN lease_token UUID, ADD COLUMN lease_expires_at TIMESTAMPTZ,
+                ADD COLUMN admission_status TEXT, ADD COLUMN admission_claim_token UUID,
+                ADD COLUMN admission_generation INTEGER, ADD COLUMN admission_requested_at TIMESTAMPTZ,
+                ADD COLUMN admission_lease_expires_at TIMESTAMPTZ;
+            ALTER TABLE public.analysis_preflight_provider_runs
+                ALTER COLUMN operation_key SET DEFAULT 'target-profile-fallback',
+                ADD COLUMN usage_reconciliation_attempt_count INT DEFAULT 0,
+                ADD COLUMN usage_reconciliation_attempted_at TIMESTAMPTZ,
+                ADD COLUMN manual_resolution_evidence_hash TEXT, ADD COLUMN manual_resolved_at TIMESTAMPTZ,
+                ADD CONSTRAINT analysis_preflight_provider_run_cost_check CHECK(max_charge_usd=0.0026);
+        `);
+        for (const name of [
+            'analysis_preflight_provider_run_json', 'reserve_analysis_preflight_provider_run_fixed_20260904',
+            'reserve_analysis_v2_fresh_admission_provider_run_fixed_20260904',
+            'checkpoint_analysis_preflight_provider_run_started', 'checkpoint_analysis_preflight_provider_run_terminal',
+            'reject_analysis_preflight_provider_run_start', 'reconcile_analysis_preflight_provider_run_usage',
+            'record_analysis_preflight_provider_cost_event',
+            'resolve_analysis_preflight_provider_run_no_run',
+        ]) {
+            const definition = baseline.match(new RegExp(
+                `CREATE FUNCTION public\\.${name}\\([\\s\\S]*?\\n    AS (\\$\\w*\\$)[\\s\\S]*?\\n\\1;`,
+            ))?.[0];
+            if (!definition) throw new Error(`Missing production baseline function ${name}`);
+            await isolated.exec(definition.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'));
+        }
+        await isolated.exec(readFileSync(join(process.cwd(),
+            'supabase/migrations/20261121130000_blite_apify_initial_profile_budget.sql'), 'utf8'));
+    });
+
+    beforeEach(async () => {
+        await isolated.exec('TRUNCATE public.analysis_preflights, public.analysis_preflight_provider_runs, public.analysis_preflight_acquisition_cost_events');
+        await seedFreeAllocatorFixture({ onlySlot: 'tenth' }, isolated);
+        await isolated.query(`UPDATE public.analysis_preflights SET status='processing', lease_token=$1,
+            lease_expires_at=now()+interval '5 minutes', deadline_at=now()+interval '90 seconds',
+            target_input_hash=$2`, [freeClaimToken, freeInputHash]);
+    });
+    afterAll(async () => { await isolated.close(); });
+
+    it('charges exact-nine capacity, replays the frozen cap, and records usage up to that cap', async () => {
+        await isolated.exec("UPDATE public.analysis_apify_credit_snapshots SET monthly_limit_usd=0.0029 WHERE credential_slot='tenth'");
+        await expect(reserveBlite()).rejects.toThrow('ANALYSIS_APIFY_FREE_POOL_CAPACITY_UNAVAILABLE');
+        await isolated.exec("UPDATE public.analysis_apify_credit_snapshots SET monthly_limit_usd=0.003 WHERE credential_slot='tenth'");
+        await expect(reserveBlite()).resolves.toMatchObject({ created: true, run: { maxChargeUsd: 0.003, credentialSlot: 'tenth' } });
+        await expect(reserveBlite()).resolves.toMatchObject({ created: false, run: { maxChargeUsd: 0.003, credentialSlot: 'tenth' } });
+        const started = 'SELECT public.checkpoint_analysis_preflight_provider_run_started($1,$2,$3,\'tenth\',$4,\'TestRun12345\')';
+        await expect(isolated.query(started, [...claim, 0.0026])).rejects.toThrow('IDENTITY_CONFLICT');
+        await isolated.query(started, [...claim, 0.003]);
+        const finish = `SELECT public.checkpoint_analysis_preflight_provider_run_terminal(
+            $1,$2,$3,'tenth',0.003,'TestRun12345','succeeded',$4)`;
+        await expect(isolated.query(finish, [...claim, 0.0031])).rejects.toThrow('INVALID');
+        await isolated.query(finish, [...claim, 0.0028]);
+        const costs = await isolated.query(`SELECT max_charge_usd::real AS cap, actual_usage_usd::real AS actual
+            FROM public.analysis_preflight_acquisition_cost_events`);
+        expect(costs.rows).toEqual([{ cap: 0.003, actual: 0.0028 }]);
+    });
+
+    it('adopts a legacy reservation and keeps ordinary and fresh writers on their original cap', async () => {
+        const ordinary = "SELECT public.reserve_analysis_preflight_provider_run($1,$2,$3,'tenth',$4)";
+        await isolated.query(ordinary, [...claim, 0.0026]);
+        await expect(reserveBlite()).resolves.toMatchObject({ created: false, run: { maxChargeUsd: 0.0026, credentialSlot: 'tenth' } });
+        await expect(isolated.query(ordinary, [...claim, 0.003])).rejects.toThrow('INVALID');
+        await expect(isolated.query("SELECT public.reserve_analysis_v2_fresh_admission_provider_run($1,1,$2,$3,'tenth',0.003)", claim))
+            .rejects.toThrow('INVALID');
+    });
+
+    it.each([
+        'precheckout_blite_cohort=false', "analysis_entry_channel='betatest'",
+        "beta_entry_provenance='ordinary_entry'", "status='ready'",
+        'lease_token=NULL', "deadline_at=now()-interval '1 second'",
+        "target_input_hash=repeat('b',64)",
+    ])('rejects an ineligible or stale preflight (%s)', async change => {
+        await isolated.exec(`UPDATE public.analysis_preflights SET ${change}`);
+        await expect(reserveBlite()).rejects.toThrow('FENCE_MISMATCH');
+    });
+
+    it('grants the new reserve RPC only to the service role', async () => {
+        const acl = await isolated.query(`SELECT role, has_function_privilege(role,
+            'public.reserve_analysis_blite_apify_preflight_run_v1(uuid,uuid,text)', 'EXECUTE') AS allowed
+            FROM unnest(ARRAY['anon','authenticated','service_role']) AS role`);
+        expect(acl.rows).toEqual([
+            { role: 'anon', allowed: false }, { role: 'authenticated', allowed: false },
+            { role: 'service_role', allowed: true },
+        ]);
+    });
+});

@@ -1,4 +1,7 @@
-import { isApifyCredentialSlot } from '../lib/services/instagram/providers/types';
+import {
+    APIFY_FREE_CREDENTIAL_SLOTS,
+    isApifyCredentialSlot,
+} from '../lib/services/instagram/providers/types';
 
 export const AMBIGUOUS_START_CONFIRMATION =
     'I_VERIFIED_EXACT_APIFY_ACTOR_SLOT_AND_TIME_WINDOW_HAS_NO_RUN';
@@ -22,6 +25,19 @@ export function isAmbiguousStartOperationKey(
     return OPERATION_KEY_PATTERN.test(value);
 }
 
+type AmbiguousStartMaxChargeUsd = '0.002600000000' | '0.003000000000';
+
+export function isAmbiguousStartMaxChargeUsd(
+    value: string,
+    operationKey: AmbiguousStartOperationKey,
+    credentialSlot: string,
+): value is AmbiguousStartMaxChargeUsd {
+    return value === '0.002600000000'
+        || (value === '0.003000000000'
+            && operationKey === 'target-profile-fallback'
+            && APIFY_FREE_CREDENTIAL_SLOTS.some(slot => slot === credentialSlot));
+}
+
 export interface AmbiguousStartResolveOptions {
     mode: 'resolve';
     preflightId: string;
@@ -30,7 +46,7 @@ export interface AmbiguousStartResolveOptions {
     logicalProvider: 'apify';
     actorId: 'apify/instagram-profile-scraper';
     credentialSlot: string;
-    maxChargeUsd: '0.002600000000';
+    maxChargeUsd: AmbiguousStartMaxChargeUsd;
     reservedAt: string;
     evidenceReferenceFile: string;
 }
@@ -146,7 +162,9 @@ export function parseAmbiguousStartOptions(argv: string[]): AmbiguousStartOption
     if (logicalProvider !== 'apify') fail('unsupported --logical-provider');
     if (actorId !== 'apify/instagram-profile-scraper') fail('unsupported --actor-id');
     if (!isApifyCredentialSlot(credentialSlot)) fail('unsupported --credential-slot');
-    if (maxChargeUsd !== '0.002600000000') fail('--max-charge-usd must be 0.002600000000');
+    if (!isAmbiguousStartMaxChargeUsd(maxChargeUsd, operationKey, credentialSlot)) {
+        fail('--max-charge-usd must be 0.002600000000 or the supported B-lite reservation amount');
+    }
     if (!ISO_TIMESTAMP_PATTERN.test(reservedAt) || !Number.isFinite(Date.parse(reservedAt))) {
         fail('--reserved-at must be an ISO timestamp with timezone');
     }

@@ -295,6 +295,79 @@ describe('preflight provider-run adapter', () => {
         }));
     });
 
+    it('fences a new B-lite start and its actual usage to the reserved $0.003 cap', async () => {
+        const identity = preflightProviderIdentity('quinary', 0.003);
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: null })
+            .mockResolvedValueOnce({
+                data: { created: true, run: row('starting', { maxChargeUsd: 0.003 }) },
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: row('running', { maxChargeUsd: 0.003 }), error: null })
+            .mockResolvedValueOnce({ data: row('succeeded', { maxChargeUsd: 0.003 }), error: null })
+            .mockResolvedValueOnce({
+                data: row('succeeded', { maxChargeUsd: 0.003, actualUsageUsd: 0.0029 }),
+                error: null,
+            });
+        const store = createPreflightProviderRunStore({ rpc });
+        const { checkpoint } = await bindPreflightProviderRunCheckpoint({
+            store,
+            claim: { preflightId, claimToken },
+            inputHash,
+            identity: preflightProviderIdentity('primary'),
+            freePool: true,
+            preferBliteHeadroom: true,
+        });
+
+        expect(checkpoint).toMatchObject(identity);
+        await checkpoint.onBeforeRunStart?.(identity);
+        await checkpoint.onRunStarted?.(runId);
+        await checkpoint.onCostRunFinished?.({
+            ...identity, runId, status: 'succeeded', usageTotalUsd: null,
+        });
+        const receipt = {
+            preflightId, inputHash, ...identity, runId,
+            status: 'succeeded' as const,
+            providerFinishedAt: '2026-07-14T18:04:00.000Z',
+        };
+        await expect(store.reconcileUsage({ ...receipt, actualUsageUsd: 0.0031 }))
+            .rejects.toThrow('VALIDATION_ERROR');
+        await expect(store.reconcileUsage({ ...receipt, actualUsageUsd: 0.0029 }))
+            .resolves.toMatchObject({ maxChargeUsd: 0.003, actualUsageUsd: 0.0029 });
+
+        const names = PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES;
+        expect(rpc.mock.calls).toEqual([
+            [names.loadRpc, expect.any(Object)],
+            [names.reserveBliteFreeRpc, { p_preflight_id: preflightId, p_claim_token: claimToken, p_input_hash: inputHash }],
+            [names.checkpointStartedRpc, expect.objectContaining({ p_max_charge_usd: 0.003, p_run_id: runId })],
+            [names.checkpointTerminalRpc, expect.objectContaining({ p_max_charge_usd: 0.003, p_run_id: runId })],
+            [names.reconcileUsageRpc, expect.objectContaining({
+                p_max_charge_usd: 0.003, p_actual_usage_usd: 0.0029,
+            })],
+        ]);
+    });
+
+    it('uses the legacy reservation only when the B-lite RPC is missing', async () => {
+        const input = { preflightId, claimToken, inputHash, ...preflightProviderIdentity('primary') };
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: { code: 'PGRST202' } })
+            .mockResolvedValueOnce({
+                data: { created: true, run: row('starting') },
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: null, error: { code: '42501' } });
+        const store = createPreflightProviderRunStore({ rpc });
+
+        await expect(store.reserveBliteFree!(input)).resolves.toMatchObject({
+            created: true,
+            run: { maxChargeUsd: 0.0026 },
+        });
+        expect(rpc).toHaveBeenNthCalledWith(2, PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            expect.objectContaining({ p_max_charge_usd: 0.0026, p_credential_slot: null }));
+        await expect(store.reserveBliteFree!(input)).rejects.toThrow('42501');
+        expect(rpc).toHaveBeenCalledTimes(3);
+    });
+
     it('refreshes a capacity-blocked free pool before choosing a new provider slot', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({ data: null, error: null })

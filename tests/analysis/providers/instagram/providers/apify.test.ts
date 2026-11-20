@@ -2489,6 +2489,41 @@ describe('apifyProvider', () => {
         }));
     });
 
+    it('passes the reserved B-lite cap to the full-profile Actor with the same input', async () => {
+        const { client, call } = mockClient([profileItem('target')]);
+        const provider = makeApifyProvider({ client, env: {} });
+        const onBeforeRunStart = vi.fn();
+        const onRunStarted = vi.fn();
+
+        await expect(provider.getProfile!('target', {
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.003,
+            onBeforeRunStart,
+            onRunStarted,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject({ username: 'target' });
+        expect(call).toHaveBeenCalledExactlyOnceWith(
+            { usernames: ['target'] },
+            expect.objectContaining({ maxItems: 2, maxTotalChargeUsd: 0.003 }),
+        );
+        expect(onBeforeRunStart).toHaveBeenCalledWith(expect.objectContaining({ maxChargeUsd: 0.003 }));
+    });
+
+    it('reads an existing B-lite run from the summary path at its original cap', async () => {
+        const { client, call } = mockClient([profileItem('target')]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfileSummary!('target', {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.003,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject({ username: 'target' });
+        expect(call).not.toHaveBeenCalled();
+    });
+
     it('preserves queued-start cancellation before a new profile Actor reservation', async () => {
         const { client, call, waitForFinish } = mockClient([profileItem('target')]);
         const provider = makeApifyProvider({ client, env: {} });

@@ -691,7 +691,16 @@ describe('B-lite single-collection preflight', () => {
         const completedRun = {
             ...storedRun('succeeded'),
             credentialSlot: selectPreflightApifyCredentialSlot(preflightId, env),
+            maxChargeUsd: 0.003 as const,
         };
+        runs.reserveBliteFree = vi.fn(async () => ({
+            created: true,
+            run: {
+                ...storedRun('starting'),
+                credentialSlot: completedRun.credentialSlot,
+                maxChargeUsd: 0.003 as const,
+            },
+        }));
         vi.mocked(runs.load)
             .mockResolvedValueOnce(null)
             .mockResolvedValueOnce(null)
@@ -728,13 +737,21 @@ describe('B-lite single-collection preflight', () => {
 
         await expect(processPreflight(preflightId, options))
             .rejects.toMatchObject({ message: 'PREFLIGHT_WORKER_RETRY' });
-        expect(getFullProfile).toHaveBeenCalledOnce();
+        expect(getFullProfile).toHaveBeenCalledExactlyOnceWith(
+            claimed.targetInstagramId, expect.objectContaining({ maxChargeUsd: 0.003 }),
+        );
+        expect(runs.reserveBliteFree).toHaveBeenCalledOnce();
+        expect(runs.reserveFree).not.toHaveBeenCalled();
         expect(store.releaseClaim).toHaveBeenCalledOnce();
 
         await expect(processPreflight(preflightId, options)).resolves.toBe('ready');
         expect(activateBliteCohort).toHaveBeenCalledTimes(2);
         expect(getFullProfile).toHaveBeenCalledOnce();
-        expect(getFallbackProfile).toHaveBeenCalledOnce();
+        expect(getFallbackProfile).toHaveBeenCalledExactlyOnceWith(
+            claimed.targetInstagramId,
+            expect.objectContaining({ maxChargeUsd: 0.003, resumeRunId: completedRun.runId }),
+        );
+        expect(runs.reserveBliteFree).toHaveBeenCalledOnce();
         expect(store.finalizeReady).toHaveBeenCalledOnce();
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
         expect(finalizeReadyWithSource).not.toHaveBeenCalled();
