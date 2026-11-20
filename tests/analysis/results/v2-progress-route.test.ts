@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
     loadForOwner: vi.fn(),
+    loadDagState: vi.fn(),
     demoFindForOwner: vi.fn(),
     loadFixture: vi.fn(),
     isResultAuthoritativelyPublished: vi.fn(),
@@ -14,6 +15,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
 vi.mock('@/lib/services/analysis/v2-progress-store', () => ({
     analysisV2ProgressStore: { loadForOwner: mocks.loadForOwner },
+}));
+vi.mock('@/lib/services/analysis/v2-dag-state-store', () => ({
+    createSupabaseAnalysisV2DagStateStore: () => ({ load: mocks.loadDagState }),
 }));
 vi.mock('@/lib/services/demo-analysis/store', () => ({
     demoAnalysisStore: { findForOwner: mocks.demoFindForOwner },
@@ -156,6 +160,7 @@ describe('analysis V2 owner progress route', () => {
             }],
         });
         mocks.demoFindForOwner.mockResolvedValue(null);
+        mocks.loadDagState.mockResolvedValue(null);
         mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(true);
         mocks.requireActiveAccountClassification.mockResolvedValue({
@@ -177,6 +182,7 @@ describe('analysis V2 owner progress route', () => {
         expect(response.headers.get('x-analytics-eligible')).toBeNull();
         expect(mocks.demoFindForOwner).not.toHaveBeenCalled();
         expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
     });
 
     it('validates route identifiers safely and keeps malformed production pagination generic', async () => {
@@ -192,14 +198,19 @@ describe('analysis V2 owner progress route', () => {
             new Request(`https://example.com/api/analysis/progress/${requestId}?limit=201`),
             context()
         );
-        expect([malformedId.status, malformedCursor.status, excessiveLimit.status])
-            .toEqual([400, 400, 400]);
+        const malformedReviewStamp = await GET(
+            new Request(`https://example.com/api/analysis/progress/${requestId}?reviewAfterDone=-2`),
+            context()
+        );
+        expect([malformedId.status, malformedCursor.status, excessiveLimit.status, malformedReviewStamp.status])
+            .toEqual([400, 400, 400, 400]);
         expect(malformedId.headers.get('x-analytics-eligible')).toBeNull();
         expect(malformedCursor.headers.get('x-analytics-eligible')).toBeNull();
         expect(excessiveLimit.headers.get('x-analytics-eligible')).toBeNull();
-        expect(mocks.getUser).toHaveBeenCalledTimes(2);
-        expect(mocks.demoFindForOwner).toHaveBeenCalledTimes(2);
+        expect(mocks.getUser).toHaveBeenCalledTimes(3);
+        expect(mocks.demoFindForOwner).toHaveBeenCalledTimes(3);
         expect(mocks.loadForOwner).not.toHaveBeenCalled();
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
     });
 
     it('owner-scopes recovery reads and returns a validated no-store envelope', async () => {
@@ -218,6 +229,7 @@ describe('analysis V2 owner progress route', () => {
             eventLimit: 25,
             includeCandidateMedia: true,
         });
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toMatchObject({
             schemaVersion: 1,
             snapshot: {
@@ -229,6 +241,48 @@ describe('analysis V2 owner progress route', () => {
             },
             events: [{ seq: 1, eventCode: 'PROFILE_SCREENED' }],
         });
+    });
+
+    it('reads the completed mutual and profile manifests for an opted-in owner even without count events', async () => {
+        const current = snapshot();
+        mocks.loadForOwner.mockResolvedValue({
+            snapshot: { ...current, tracks: { ...current.tracks, relationshipAi: {
+                ...current.tracks.relationshipAi, done: 9, total: 44,
+            } } },
+            events: [{
+                schemaVersion: 1, requestId, seq: 1, revision: 1, occurredAt,
+                state: 'confirmed', eventCode: 'TARGET_PROFILE_READY', copyCode: 'TARGET_PROFILE_READY',
+                aggregateCount: null,
+            }],
+        });
+        mocks.loadDagState.mockResolvedValue({
+            relationships: { detectedMutualCount: 390, detailedSelectedPublicCount: 210 },
+            profileFetchBatches: [{ itemCount: 30 }, { itemCount: 30 }, { itemCount: 30 }],
+            profileAiBatches: [{ itemCount: 30 }, { itemCount: 12 }],
+        });
+        const request = (query: string) => new Request(`https://example.com/api/analysis/progress/${requestId}?${query}`);
+
+        const first = await GET(request('reviewAfterDone=-1'), context());
+        expect(first.status).toBe(200);
+        expect((await first.json()).snapshot.mutualReview).toEqual({ mutualCount: 390, reviewedCount: 42 });
+        expect(mocks.loadDagState).toHaveBeenCalledExactlyOnceWith(requestId);
+        expect(mocks.loadForOwner.mock.invocationCallOrder[0]).toBeLessThan(mocks.loadDagState.mock.invocationCallOrder[0]!);
+
+        const unchanged = await GET(request('reviewAfterDone=9'), context());
+        expect(unchanged.status).toBe(200);
+        expect((await unchanged.json()).snapshot).not.toHaveProperty('mutualReview');
+        expect(mocks.loadDagState).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps regular owner progress available if the supplemental count read fails', async () => {
+        mocks.loadDagState.mockRejectedValue(new Error('database read unavailable'));
+        const response = await GET(
+            new Request(`https://example.com/api/analysis/progress/${requestId}?reviewAfterDone=-1`),
+            context(),
+        );
+        expect(response.status).toBe(200);
+        expect((await response.json()).snapshot).not.toHaveProperty('mutualReview');
+        expect(mocks.loadDagState).toHaveBeenCalledExactlyOnceWith(requestId);
     });
 
     it('fails closed before owner progress reads for a retired account', async () => {
@@ -404,10 +458,11 @@ describe('analysis V2 owner progress route', () => {
     it('maps an owner-hidden row to 404 without leaking existence', async () => {
         mocks.loadForOwner.mockResolvedValue(null);
         const response = await GET(
-            new Request(`https://example.com/api/analysis/progress/${requestId}`),
+            new Request(`https://example.com/api/analysis/progress/${requestId}?reviewAfterDone=-1`),
             context()
         );
         expect(response.status).toBe(404);
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
     });
 
     it('serves a failed owner snapshot with retained track and aggregate progress', async () => {
@@ -427,9 +482,10 @@ describe('analysis V2 owner progress route', () => {
             events: [],
         });
 
-        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}`), context());
+        const response = await GET(new Request(`https://example.com/api/analysis/progress/${requestId}?reviewAfterDone=-1`), context());
 
         expect(response.status).toBe(200);
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toMatchObject({
             snapshot: { status: 'failed', progressBp: current.progressBp, tracks: { relationshipAi } },
         });
@@ -443,11 +499,12 @@ describe('analysis V2 owner progress route', () => {
         mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
 
         const response = await GET(
-            new Request(`https://example.com/api/analysis/progress/${requestId}`),
+            new Request(`https://example.com/api/analysis/progress/${requestId}?reviewAfterDone=-1`),
             context(),
         );
 
         expect(response.status).toBe(200);
+        expect(mocks.loadDagState).not.toHaveBeenCalled();
         await expect(response.json()).resolves.toMatchObject({
             snapshot: {
                 status: 'queued',

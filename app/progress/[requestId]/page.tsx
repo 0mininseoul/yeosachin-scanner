@@ -17,6 +17,7 @@ import {
 import {
     analysisDurationProgressCopy,
     analysisV2EventCopy,
+    analysisV2MutualReviewProgressCopy,
 } from '@/lib/services/analysis/owner-view-presentation';
 import { preferredProgressNarration } from '@/lib/services/analysis/v2-progress-client-state';
 import {
@@ -318,13 +319,7 @@ export default function ProgressPage({ params }: PageProps) {
         );
     }
 
-    // Track units can be synthetic (for example n/100), so only the explicit
-    // active-profile ordinal/total pair is presented as a profile count.
-    const activeProfileCount = data.activeProfile
-        && data.activeProfile.currentOrdinal !== undefined
-        && data.activeProfile.totalCount !== undefined
-        ? { ordinal: data.activeProfile.currentOrdinal, total: data.activeProfile.totalCount }
-        : null;
+    const mutualReviewProgress = analysisV2MutualReviewProgressCopy(data.events, data.mutualReview);
     const narration = preferredProgressNarration(data.progressStep, data.events);
     const activity = narration
         ? narration === data.progressStep ? narration : analysisV2EventCopy(narration)
@@ -407,11 +402,11 @@ export default function ProgressPage({ params }: PageProps) {
                         />
                     </div>
                 )}
-                {data.activeProfile && (
+                {(data.activeProfile || mutualReviewProgress) && (
                     <p data-amp-mask className="mt-3 break-all text-center text-[14px] leading-relaxed text-fg-dim">
-                        @{data.activeProfile.maskedUsername}
-                        {activeProfileCount && (
-                            <span className="num block">현재 {activeProfileCount.ordinal}번째 / 대상 {activeProfileCount.total}개</span>
+                        {data.activeProfile && `@${data.activeProfile.maskedUsername}`}
+                        {mutualReviewProgress && (
+                            <span className="num block break-keep">{mutualReviewProgress}</span>
                         )}
                     </p>
                 )}

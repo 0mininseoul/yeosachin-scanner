@@ -546,6 +546,11 @@ const progressTrackSchema = z.object({
     }
 });
 
+export const progressMutualReviewV1Schema = z.object({
+    mutualCount: z.number().int().nonnegative().max(10_000),
+    reviewedCount: z.number().int().nonnegative().max(10_000),
+}).strict().refine(value => value.reviewedCount <= value.mutualCount);
+
 export const progressSnapshotV1Schema = z.object({
     schemaVersion: z.literal(ANALYSIS_V2_SCHEMA_VERSION),
     requestId: uuidSchema,
@@ -572,6 +577,7 @@ export const progressSnapshotV1Schema = z.object({
         callPhase: progressCallPhaseSchema.optional(),
     }).strict().nullable(),
     candidateMedia: z.array(progressCandidateMediaSchema).max(20).default([]),
+    mutualReview: progressMutualReviewV1Schema.optional(),
     /** True only when a completed snapshot is temporarily hidden by publication lag. */
     publicationLagReset: z.boolean().optional(),
     etaRange: z.object({
@@ -634,6 +640,7 @@ export const progressSnapshotV1Schema = z.object({
         || !value.backgroundProcessing
         || value.activeProfile !== null
         || value.candidateMedia.length !== 0
+        || value.mutualReview !== undefined
         || value.etaRange !== null
         || value.lastEventSeq !== 0
         || Object.values(value.tracks).some(track => (

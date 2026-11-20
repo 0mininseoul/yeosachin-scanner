@@ -1,3 +1,4 @@
+import type { ProgressEventV1, ProgressSnapshotV1 } from '@/lib/contracts/analysis-v2';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 
 export type OwnerProgressStatus =
@@ -92,6 +93,31 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
     const latestCopyCode = input.events.at(-1)?.copyCode;
     return (latestCopyCode && analysisV2EventCopy(latestCopyCode))
         || '서버에서 판독을 진행하고 있습니다.';
+}
+
+export function analysisV2MutualReviewProgressCopy(
+    events: readonly ProgressEventV1[],
+    review: ProgressSnapshotV1['mutualReview'],
+): string | null {
+    let mutualCount = review?.mutualCount ?? 0;
+    let reviewedCount = review?.reviewedCount ?? 0;
+    if (!review) {
+        for (const event of events) {
+            const count = event.aggregateCount;
+            if (event.state !== 'confirmed' || count === null || count < 1) continue;
+            if (event.eventCode === 'RELATIONSHIP_PROGRESS' && event.copyCode === 'RELATIONSHIPS_COLLECTED') {
+                mutualCount = Math.max(mutualCount, count);
+            } else if (event.eventCode === 'PROFILE_SCREENED' && event.copyCode === 'PROFILES_SCREENED') {
+                // Concurrent checkpoints may arrive with an older cumulative total.
+                reviewedCount = Math.max(reviewedCount, count);
+            }
+        }
+    }
+
+    if (!review && mutualCount === 0) return null;
+    const mutual = `맞팔 ${mutualCount.toLocaleString('ko-KR')}명`;
+    if (reviewedCount === 0 || reviewedCount > mutualCount) return `${mutual} 확인`;
+    return `${mutual} 중 공개 계정 ${reviewedCount.toLocaleString('ko-KR')}명 검토 완료`;
 }
 
 export function analysisDurationProgressCopy(isDevPresentation: boolean): string {

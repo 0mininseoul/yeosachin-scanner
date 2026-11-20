@@ -86,18 +86,24 @@ function matchingScreenedCandidateIndex(
 export function mergeScreenedCandidateHistory(
     current: readonly ScreenedCandidate[],
     incoming: readonly ScreenedCandidate[],
+    active: ActiveCandidateMedia | null = null,
 ): readonly ScreenedCandidate[] {
-    let next: readonly ScreenedCandidate[] = current;
-    for (const candidate of incoming) {
+    let next = mergeActiveCandidate(current, active);
+    for (const [incomingIndex, candidate] of incoming.entries()) {
         const index = matchingScreenedCandidateIndex(next, candidate);
         if (index < 0) {
-            next = [...next, {
-                ...candidate,
-                occurrence: nextOccurrence(next),
-            }];
-            if (next.length > MAX_SCREENED_CANDIDATES) {
-                next = next.slice(next.length - MAX_SCREENED_CANDIDATES);
-            }
+            // The server emits its window oldest first. An unseen row before
+            // a known row belongs before that newer overlap, even when the
+            // same stale prefix arrives after its last local eviction.
+            const insertionIndex = incoming.slice(incomingIndex + 1).reduce((before, later) => {
+                const overlap = matchingScreenedCandidateIndex(next, later);
+                return overlap < 0 ? before : Math.min(before, overlap);
+            }, next.length);
+            next = [
+                ...next.slice(0, insertionIndex),
+                { ...candidate, occurrence: nextOccurrence(next) },
+                ...next.slice(insertionIndex),
+            ];
             continue;
         }
         const existing = next[index]!;
@@ -121,7 +127,11 @@ export function mergeScreenedCandidateHistory(
             ];
         }
     }
-    return next;
+    // Keep all existing occurrences available to match the overlapping server
+    // window before dropping the oldest ones.
+    return next.length > MAX_SCREENED_CANDIDATES
+        ? next.slice(-MAX_SCREENED_CANDIDATES)
+        : next;
 }
 
 function sameCandidate(
@@ -192,7 +202,7 @@ export function candidateTileKey(
     copyIndex: number,
     mediaIndex: number,
 ): string {
-    return `${occurrence}:${copyIndex}:${mediaIndex}`;
+    return `${candidateCopyKey(occurrence, copyIndex)}:${mediaIndex}`;
 }
 
 export function progressCopyDistance(firstStart: number, secondStart: number): number {
@@ -216,6 +226,13 @@ export function nextDriftOffset(
  * can replace stale media.
  */
 export function appendScreenedCandidate(
+    current: readonly ScreenedCandidate[],
+    active: ActiveCandidateMedia | null,
+): readonly ScreenedCandidate[] {
+    return mergeScreenedCandidateHistory(current, [], active);
+}
+
+function mergeActiveCandidate(
     current: readonly ScreenedCandidate[],
     active: ActiveCandidateMedia | null,
 ): readonly ScreenedCandidate[] {
@@ -249,14 +266,11 @@ export function appendScreenedCandidate(
         ];
     }
 
-    const next = [...current, {
+    return [...current, {
         ...(active.candidateKey !== undefined ? { candidateKey: active.candidateKey } : {}),
         username: active.maskedUsername,
         occurrence: nextOccurrence(current),
         imageUrl: active.imageUrl,
         feedImageUrls: feedImages(active),
     }];
-    return next.length > MAX_SCREENED_CANDIDATES
-        ? next.slice(next.length - MAX_SCREENED_CANDIDATES)
-        : next;
 }

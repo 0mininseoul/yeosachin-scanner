@@ -4,7 +4,12 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { isDevLiveAnalysisRequest, withDevLiveRead } from '@/lib/services/dev-ui/live-analysis';
 import { shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
-import { ANALYSIS_V2_SCHEMA_VERSION, progressReadV1Schema } from '@/lib/contracts/analysis-v2';
+import {
+    ANALYSIS_V2_SCHEMA_VERSION,
+    progressMutualReviewV1Schema,
+    progressReadV1Schema,
+} from '@/lib/contracts/analysis-v2';
+import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
 import { demoResponseHeaders, isDemoOperator, projectDemoProgress } from '@/lib/services/demo-analysis/demo-analysis';
 import { demoAnalysisStore } from '@/lib/services/demo-analysis/store';
@@ -20,6 +25,7 @@ const sequenceSchema = z.string().regex(/^\d{1,16}$/).transform(Number)
     .pipe(z.number().int().min(0).max(Number.MAX_SAFE_INTEGER));
 const limitSchema = z.string().regex(/^\d{1,3}$/).transform(Number)
     .pipe(z.number().int().min(1).max(200));
+const reviewStampSchema = z.union([z.literal('-1').transform(() => -1), sequenceSchema]);
 
 const PRIVATE_NO_STORE_HEADERS = {
     'Cache-Control': 'private, no-store, max-age=0',
@@ -35,6 +41,21 @@ function json(body: unknown, status: number) {
 
 function demoJson(body: unknown, status: number) {
     return NextResponse.json(body, { status, headers: demoResponseHeaders() });
+}
+
+async function loadMutualReview(requestId: string) {
+    try {
+        const state = await createSupabaseAnalysisV2DagStateStore().load(requestId);
+        if (!state?.relationships) return undefined;
+        const review = progressMutualReviewV1Schema.safeParse({
+            mutualCount: state.relationships.detectedMutualCount,
+            reviewedCount: (state.profileAiBatches ?? []).reduce((total, batch) => total + batch.itemCount, 0),
+        });
+        return review.success ? review.data : undefined;
+    } catch {
+        // Supplemental display counts must not interrupt the owner progress read.
+        return undefined;
+    }
 }
 
 async function handleGET(
@@ -75,7 +96,10 @@ async function handleGET(
         const eventLimit = url.searchParams.has('limit')
             ? limitSchema.safeParse(url.searchParams.get('limit'))
             : { success: true as const, data: 100 };
-        if (!afterSequence.success || !eventLimit.success) {
+        const reviewStamp = url.searchParams.has('reviewAfterDone')
+            ? reviewStampSchema.safeParse(url.searchParams.get('reviewAfterDone'))
+            : { success: true as const, data: null };
+        if (!afterSequence.success || !eventLimit.success || !reviewStamp.success) {
             return demoRecognized
                 ? demoJson({ error: 'Invalid progress request.' }, 400)
                 : json({ error: 'Invalid progress request.' }, 400);
@@ -155,6 +179,14 @@ async function handleGET(
             schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
             ...pendingProgress,
         });
+        const done = response.snapshot.tracks.relationshipAi.done;
+        if (reviewStamp.data !== null && response.snapshot.status === 'processing'
+            && done > 0 && done !== reviewStamp.data) {
+            const mutualReview = await loadMutualReview(requestId.data);
+            if (mutualReview) {
+                return json({ ...response, snapshot: { ...response.snapshot, mutualReview } }, 200);
+            }
+        }
         return json(response, 200);
     } catch {
         console.error('[analysis-v2-progress] owner progress read failed');
