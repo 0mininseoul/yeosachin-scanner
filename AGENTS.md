@@ -164,3 +164,11 @@ yeosachin-scanner/
 - 조회는 `git worktree list`로 확인한 로컬 canonical `main` worktree의 `.env.local`에 있는 Amplitude 키를 사용해 공식 Amplitude REST API로 수행한다. 현재 feature worktree의 `.env.local`이나 connector의 기본 프로젝트를 대체 경로로 사용하지 않는다.
 - 읽기 API 호출은 `.env.local`의 프로젝트 API key(`NEXT_PUBLIC_AMPLITUDE_API_KEY` 또는 명시된 서버용 키)와 secret key(`AMPLITUDE_SECRET_KEY`)를 사용한다. 키가 없거나 프로젝트가 `yeosachin`인지 확인할 수 없으면 조회를 중단하고 connector로 우회하지 않는다.
 - 키·secret·Authorization 헤더·원시 export 파일은 터미널 출력, 로그, 커밋, 문서, 채팅에 남기지 않는다. `.env.local`은 직접 `source`하지 말고 안전한 환경 주입 방식으로 읽으며, 조회 결과의 user/device ID와 raw event payload도 응답에 그대로 복사하지 않는다.
+
+### 6. 분석 파이프라인 맵 동기화
+
+- 운영 콘솔 `파이프라인` 메뉴(`/admin0min?view=pipeline`)는 preflight 입력부터 결과 공개까지의 실제 실행 순서를 그린다. 정의는 `lib/services/admin/pipeline-map.ts`에 있다.
+- 분석 프로세스를 바꾸는 작업(입력·preflight·플랜·결제/이행·실행 승인·Cloud Tasks 진입, DAG 단계·의존성·트랙, 수집 provider 순서, AI 단계, 점수 정책, 결과 확정·공개·이미지 보관)을 하면, 같은 PR에서 이 맵이 여전히 맞는지 점검하고 필요하면 업데이트한다. PR 설명에 점검 결과(업데이트함 / 변경 없음과 이유)를 한 줄로 남긴다.
+- 워커 단계는 `AnalysisV2StageId`로 묶여 있어 단계가 추가·변경되면 타입체크가 실패한다. 숫자는 코드 상수를 직접 읽으므로 자동 반영되지만, 단계 설명·외부 서비스·실패 처리·연결선은 사람이 점검해야 한다.
+- 맵을 바꾸면 `npm test -- tests/operations/pipeline-map.test.ts`로 코드 경로·연결·배치를 확인한다.
+

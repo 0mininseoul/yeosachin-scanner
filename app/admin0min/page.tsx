@@ -8,6 +8,7 @@ import {
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import { AdminConsole } from '../admin/console/admin-console';
+import { buildPipelineMap } from '@/lib/services/admin/pipeline-map';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import { assertDevUiDeployment } from '@/lib/services/dev-ui/deployment';
 import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
@@ -137,5 +138,6 @@ export default async function AnalysisAuditPage({
         initialRequestId={requestId}
         initialView={typeof params.view === 'string' ? params.view : undefined}
         initialTab={typeof params.tab === 'string' ? params.tab : undefined}
+        pipelineMap={buildPipelineMap()}
     />;
 }
