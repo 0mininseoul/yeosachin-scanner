@@ -20,6 +20,7 @@
 | 결제·주문·대기 등록 | app/api/earlybird/, lib/services/earlybird/ | commerce/checkout-policy.test.ts, commerce/ |
 | 계정·권한·인증 | lib/services/identity/, app/auth/ | identity/request-credentials.test.ts, identity/ |
 | 운영자 조회·감사 | app/admin0min/, app/admin/analysis-audit/workbench.tsx, app/api/admin/ | operations/console-model.test.ts, operations/ |
+| 운영 콘솔 파이프라인 맵 (분석 흐름을 바꾸면 함께 점검) | lib/services/admin/pipeline-map.ts, app/admin/console/pipeline-view.tsx | operations/pipeline-map.test.ts |
 | 비공개 migration 원본 검증 | scripts/verify-supabase-private-source.ts, scripts/supabase-private-source.ts | operations/tools/verify-supabase-private-source.test.ts |
 | 배포·queue·identity epoch | scripts/deploy-*, configure-*, capacity-identity-epoch/ | infra/ |
 | 페이지·컴포넌트·데모 | app/, components/, hooks/, lib/services/demo-analysis/ | ui/ 및 기능별 routes/ |
