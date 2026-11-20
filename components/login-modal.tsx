@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import Link from 'next/link';
 import { BrandMark, Eyebrow } from './case-ui';
 import { AuthButtons } from './auth-buttons';
+import { EmailLogin } from './email-login';
 
 // Login as an overlay modal (used from the landing hero instead of routing to /login).
 export function LoginModal({
@@ -35,7 +36,7 @@ export function LoginModal({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-5" role="dialog" aria-modal="true" aria-label="로그인">
             <div className="absolute inset-0 bg-ink/80 backdrop-blur-sm" onClick={onClose} />
 
-            <div className="relative w-full max-w-[400px] border border-line bg-ink-2 px-6 pb-6 pt-5 shadow-2xl">
+            <div className="relative max-h-[calc(100dvh-2.5rem)] w-full max-w-[400px] overflow-y-auto overscroll-contain border border-line bg-ink-2 px-6 pb-6 pt-5 shadow-2xl">
                 <button
                     onClick={onClose}
                     aria-label="닫기"
@@ -58,6 +59,7 @@ export function LoginModal({
                 </div>
 
                 <AuthButtons redirectTo={redirectTo} />
+                <EmailLogin />
 
                 <p className="mt-5 text-center text-[12px] leading-relaxed text-fg-mute">
                     인증 시{' '}
