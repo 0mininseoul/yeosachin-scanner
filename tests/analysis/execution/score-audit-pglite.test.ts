@@ -23,6 +23,10 @@ const riskPolicyV25Migration = readFileSync(new URL(
     '../../../supabase/migrations/20260728180000_add_risk_policy_v25.sql',
     import.meta.url,
 ), 'utf8');
+const scorePrecisionMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20261120161000_match_score_audit_storage_precision.sql',
+    import.meta.url,
+), 'utf8');
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const resultHash = 'a'.repeat(64);
 const preMigrationRequestId = 'aa000000-e89b-42d3-a456-426614174000';
@@ -135,6 +139,7 @@ beforeAll(async () => {
         riskPolicyV25Migration,
         '-- Extend the audit capture/materialization gates',
     ));
+    await db.exec(scorePrecisionMigration);
 }, 60_000);
 
 afterAll(async () => { await db.close(); }, 30_000);
@@ -656,6 +661,44 @@ describe('analysis score audit database materializer', () => {
         );
         expect(rows.rows.filter(row => row.risk_band === 'high_risk')).toHaveLength(2);
         expect(rows.rows.filter(row => row.risk_band === 'caution')).toHaveLength(2);
+    });
+
+    it.each([
+        { scoreOffset: 0, expectedStatus: 'ready', expectedStored: '2.6667' },
+        { scoreOffset: -0.0001, expectedStatus: 'inconsistent', expectedStored: '2.6666' },
+    ])('audits a repeating pre-score stored as $expectedStored', async ({
+        scoreOffset, expectedStatus, expectedStored,
+    }) => {
+        const policyVersion = 'risk-policy-v2.5';
+        const input: RiskPolicyInput = {
+            uniqueTargetPostsLikedByCandidate: 0,
+            boundedCandidateCommentsOnTarget: 0,
+            reverseLikeStatus: 'not_collected',
+            hasCandidateToTargetTagOrCaptionMention: false,
+            hasTargetToCandidateTagOrCaptionMention: false,
+            recentFemaleMutualRank: null,
+            appearanceGrade: 2,
+            exposureScore: 0,
+            accountContext: 'personal',
+            hasWeakPartnerEvidence: false,
+            hasStrongPartnerEvidence: false,
+        };
+        const candidate = canonicalFixtureCandidate('fractional', 'fractional', input, policyVersion);
+        const risk = candidate.risk as ReturnType<typeof calculateRiskPolicy>;
+        // Move both together so only the component-sum check can reject the one-unit drift.
+        candidate.risk = {
+            ...risk,
+            preScore: risk.preScore + scoreOffset,
+            rawScore: risk.rawScore + scoreOffset,
+        };
+        const fixtureId = crypto.randomUUID();
+        const status = await materializeCapturedFixture(fixtureId, '4'.repeat(64), [candidate], policyVersion);
+        const stored = await db.query<{ pre_score: string }>(
+            'SELECT pre_score::text FROM public.analysis_v2_score_audit_source_rows WHERE request_id = $1',
+            [fixtureId],
+        );
+        expect(stored.rows).toEqual([{ pre_score: expectedStored }]);
+        expect(status).toBe(expectedStatus);
     });
 
     it('keeps the v2.5 version when hard-TTL terminalizes retained audit evidence', async () => {
