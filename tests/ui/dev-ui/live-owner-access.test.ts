@@ -28,14 +28,15 @@ const id = '4cee181d-59f2-49c3-8001-0e53a4f379a4';
 const attempt = 'd34dd847-cd00-4460-91e7-3926356aad67';
 const approval = { id, targetInstagramId: 'dev_fixture', approvedAt: '2026-11-19T01:00:00.000Z',
     expiresAt: '2026-11-19T01:30:00.000Z', apifyMaxCents: 500, aiMaxCents: 200 };
-const standardApproval = { ...approval, planId: 'standard', expiresAt: '2026-11-19T03:30:00.000Z', apifyMaxCents: 600, aiMaxCents: 400 };
+const standardApproval = { ...approval, planId: 'standard', expiresAt: '2026-11-19T03:30:00.000Z', apifyMaxCents: 600, aiMaxCents: 1_800 };
 const standardKey = 'dev-live:owner:standard:' + id;
 const standardPreflight = { id, idempotency_key: standardKey, target_instagram_id: approval.targetInstagramId, user_id: 'synthetic-owner' };
 
-function start(origin = host, plan?: 'basic' | 'standard') {
+function start(origin = host, plan?: 'basic' | 'standard', vertexCap: string | null = '1800') {
     return new Request(endpoint, { method: 'POST', headers: {
         origin, 'content-type': 'application/json', 'x-dev-live-attempt-id': attempt,
         ...(plan ? { 'x-dev-live-plan': plan } : {}),
+        ...(plan === 'standard' && vertexCap !== null ? { 'x-dev-live-vertex-max-cents': vertexCap } : {}),
     }, body: JSON.stringify({ targetInstagramId: approval.targetInstagramId }) });
 }
 
@@ -108,19 +109,37 @@ describe('owner-start live Dev approval', () => {
         const handler = vi.fn(async () => NextResponse.json({}, { status: 202 }));
 
         expect((await withDevLiveApproval(start(host, 'basic'), handler)).status).toBe(409);
+        expect((await withDevLiveApproval(start(host, 'standard', null), handler)).status).toBe(409);
+        expect((await withDevLiveApproval(start(host, 'standard', '400'), handler)).status).toBe(409);
         expect(mocks.rpc).not.toHaveBeenCalled();
         expect((await withDevLiveApproval(start(host, 'standard'), handler)).status).toBe(202);
-        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_v2', {
+        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_v3', {
             p_user_id: 'synthetic-owner', p_target_instagram_id: approval.targetInstagramId, p_attempt_id: attempt,
         });
         expect(handler).toHaveBeenCalledWith({ id: 'synthetic-owner' }, {
             ...standardApproval, idempotencyKey: standardKey, nonce: 'dev-live-' + id,
         });
 
-        mocks.rpc.mockResolvedValue({ data: { ...standardApproval, aiMaxCents: 401 }, error: null });
+        mocks.rpc.mockResolvedValue({ data: { ...standardApproval, aiMaxCents: 400 }, error: null });
         handler.mockClear();
         expect((await withDevLiveApproval(start(host, 'standard'), handler)).status).toBe(503);
         expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('continues a bound $4 Standard preflight using its original grant', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
+        const query = { select: () => query, eq: () => query,
+            maybeSingle: async () => ({ data: standardPreflight }) };
+        mocks.from.mockReturnValue(query);
+        const legacy = { ...standardApproval, aiMaxCents: 400 };
+        mocks.rpc.mockResolvedValue({ data: legacy, error: null });
+        const handler = vi.fn(async () => NextResponse.json({}, { status: 202 }));
+
+        expect((await withDevLiveApproval(start(host, 'standard', null), handler, id)).status).toBe(202);
+        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_lookup_v2', {
+            p_grant_id: id, p_user_id: 'synthetic-owner', p_target_instagram_id: approval.targetInstagramId,
+        });
+        expect(handler).toHaveBeenCalledWith({ id: 'synthetic-owner' }, expect.objectContaining({ aiMaxCents: 400 }));
     });
 
     it('reports Standard readiness without issuing a grant', async () => {
@@ -134,7 +153,7 @@ describe('owner-start live Dev approval', () => {
         expect(await response.json()).toEqual({ available: true, recentPreflightId: null,
             standardTarget: approval.targetInstagramId, standardAvailable: true });
         expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual([
-            'dev_live_owner_start_ready_v1', 'dev_live_owner_start_ready_v2',
+            'dev_live_owner_start_ready_v1', 'dev_live_owner_start_ready_v3',
         ]);
         expect(mocks.budget).not.toHaveBeenCalled();
     });

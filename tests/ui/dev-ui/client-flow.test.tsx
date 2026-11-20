@@ -312,6 +312,7 @@ describe('Dev actual analysis browser attempt', () => {
     it.each(['basic', 'standard'] as const)('reuses the %s attempt after a lost response and page remount', async planId => {
         const attempts: (string | null)[] = [];
         const startPlans: (string | null)[] = [];
+        const vertexCaps: (string | null)[] = [];
         const startBodies: unknown[] = [];
         const basicStorageKey = 'dev-live-attempt:dev_fixture_retry';
         const basicAttemptId = '123e4567-e89b-42d3-a456-426614174001';
@@ -322,6 +323,7 @@ describe('Dev actual analysis browser attempt', () => {
             const headers = new Headers(options?.headers);
             attempts.push(headers.get('x-dev-live-attempt-id'));
             startPlans.push(headers.get('x-dev-live-plan'));
+            vertexCaps.push(headers.get('x-dev-live-vertex-max-cents'));
             startBodies.push(JSON.parse(options?.body as string));
             throw new Error('synthetic connection loss');
         }));
@@ -338,7 +340,7 @@ describe('Dev actual analysis browser attempt', () => {
                     target.dispatchEvent(new Event('input', { bubbles: true }));
                 });
                 if (planId === 'standard') {
-                    expect(container.textContent).toMatch(/Standard.*Apify.*\$6.*Vertex.*\$4.*\$10/);
+                    expect(container.textContent).toMatch(/Standard.*Apify.*\$6.*Vertex.*\$18.*\$24/);
                 } else {
                     expect(container.textContent).toMatch(/Basic.*\$7/);
                 }
@@ -354,6 +356,8 @@ describe('Dev actual analysis browser attempt', () => {
             expect(attempts[0]).toMatch(/^[\w-]{36}$/u);
             expect(attempts[1]).toBe(attempts[0]);
             expect(startPlans).toEqual([planId, planId]);
+            const expectedVertexCap = planId === 'standard' ? '1800' : null;
+            expect(vertexCaps).toEqual([expectedVertexCap, expectedVertexCap]);
             expect(startBodies).toEqual([{ targetInstagramId: 'dev_fixture_retry' }, { targetInstagramId: 'dev_fixture_retry' }]);
             if (planId === 'standard') {
                 expect(attempts[0]).not.toBe(basicAttemptId);

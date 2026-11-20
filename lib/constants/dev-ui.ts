@@ -3,6 +3,8 @@ import deploymentRegistry from '../../config/dev-ui-deployment.json';
 export const DEV_UI_APP_ORIGIN = 'https://dev.yeosachin.com';
 export const DEV_UI_DEPLOYMENT_REJECTED = 'DEV_UI_DEPLOYMENT_REJECTED';
 export const DEV_UI_ROBOTS_HEADER = 'noindex, nofollow, noarchive';
+export const DEV_LIVE_STANDARD_CAPS = Object.freeze({ apifyMaxCents: 600, aiMaxCents: 1_800 });
+export const DEV_LIVE_STANDARD_VERTEX_CAP_HEADER = 'x-dev-live-vertex-max-cents';
 
 export type DeploymentEnvironment = Readonly<Record<string, string | undefined>>;
 

@@ -25,15 +25,14 @@ const grantParameters = '$1::uuid, $2::timestamptz, $3::timestamptz, $4::integer
 const featurePrompt = '한글 "평가"\nﷺ';
 const featureSchema = { type: 'object', properties: { summary: { type: 'string', description: '후보 평가' } } };
 
-function featureRequest() {
+function featureRequest(imageCount = 2) {
     return {
         model: 'gemini-3.7-flash',
         contents: [{
             role: 'user',
             parts: [
                 { text: featurePrompt },
-                { inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } },
-                { inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } },
+                ...Array.from({ length: imageCount }, () => ({ inlineData: { mimeType: 'image/jpeg', data: '/9j/2Q==' } })),
             ],
         }],
         config: {
@@ -71,13 +70,13 @@ async function configureStandard(username = target) {
 }
 
 async function standardReady(username = target, userId = ownerId) {
-    const result = await db.query<{ ready: boolean }>('SELECT public.dev_live_owner_start_ready_v2($1, $2) AS ready', [userId, username]);
+    const result = await db.query<{ ready: boolean }>('SELECT public.dev_live_owner_start_ready_v3($1, $2) AS ready', [userId, username]);
     return result.rows[0].ready;
 }
 
-async function startStandard(attemptId = randomUUID(), username = target, userId = ownerId): Promise<StandardOwnerApproval> {
+async function startStandard(attemptId = randomUUID(), username = target, userId = ownerId, version: 2 | 3 = 3): Promise<StandardOwnerApproval> {
     const result = await db.query<{ approval: StandardOwnerApproval }>(
-        'SELECT public.dev_live_owner_start_v2($1, $2, $3) AS approval', [userId, username, attemptId],
+        `SELECT public.dev_live_owner_start_v${version}($1, $2, $3) AS approval`, [userId, username, attemptId],
     );
     return result.rows[0].approval;
 }
@@ -220,19 +219,25 @@ describe('Dev owner-start grant SQL', () => {
     afterAll(async () => { await db?.close(); });
 
     it('exposes only read or owner-start RPCs to service role and leaves readiness read-only', async () => {
-        const { rows } = await db.query<{ executable: boolean; writable: boolean }>(`
-            SELECT has_function_privilege(rolname, pg_proc.oid, 'EXECUTE') AS executable,
+        const { rows } = await db.query<{ rolname: string; proname: string; executable: boolean; writable: boolean }>(`
+            SELECT rolname, proname, has_function_privilege(rolname, pg_proc.oid, 'EXECUTE') AS executable,
                    (has_table_privilege(rolname, 'dev_live_budget.owner_starts', 'INSERT')
                        OR has_table_privilege(rolname, 'dev_live_budget.standard_owner_policy', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')) AS writable
             FROM pg_roles CROSS JOIN pg_proc
             WHERE rolname IN ('anon', 'authenticated', 'service_role')
-              AND pronamespace = 'public'::regnamespace AND proname LIKE 'dev_live_owner_start_%'
+              AND (
+                  (pronamespace = 'public'::regnamespace AND proname LIKE 'dev_live_owner_start_%')
+                  OR (pronamespace = 'dev_live_budget'::regnamespace AND proname = 'start_standard_owner_run')
+              )
             ORDER BY rolname, proname
         `);
-        expect(rows.map(row => row.executable)).toEqual([
-            false, false, false, false, false, false,
-            false, false, false, false, false, false,
-            true, true, true, true, true, true,
+        expect(rows).toHaveLength(27);
+        const executable = rows.filter(row => row.executable);
+        expect(executable.every(row => row.rolname === 'service_role')).toBe(true);
+        expect(executable.map(row => row.proname)).toEqual([
+            'dev_live_owner_start_lookup_v1', 'dev_live_owner_start_lookup_v2',
+            'dev_live_owner_start_ready_v1', 'dev_live_owner_start_ready_v2', 'dev_live_owner_start_ready_v3',
+            'dev_live_owner_start_v1', 'dev_live_owner_start_v2', 'dev_live_owner_start_v3',
         ]);
         expect(rows.every(row => !row.writable)).toBe(true);
         await configureStandard();
@@ -351,7 +356,7 @@ describe('Dev owner-start grant SQL', () => {
         const basic = await start(basicAttempt);
         const [standard, replay] = await Promise.all([startStandard(standardAttempt), startStandard(standardAttempt)]);
         expect(standard).toEqual(replay);
-        expect(standard).toMatchObject({ planId: 'standard', targetInstagramId: target, apifyMaxCents: 600, aiMaxCents: 400 });
+        expect(standard).toMatchObject({ planId: 'standard', targetInstagramId: target, apifyMaxCents: 600, aiMaxCents: 1_800 });
         expect(Date.parse(standard.expiresAt) - Date.parse(standard.approvedAt)).toBe(150 * 60_000);
         await expect(lookupStandard(standard)).resolves.toEqual(standard);
         await expect(lookupStandard(standard, 'another')).resolves.toBeNull();
@@ -373,43 +378,55 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserve(grant, 'apify', 1_000_001)).resolves.toBe(false);
         await expect(reserve(grant, 'apify', 1_000_000)).resolves.toBe(true);
         await expect(reserve(grant, 'apify', 1)).resolves.toBe(false);
-        await expect(reserve(grant, 'vertex', 4_000_001)).resolves.toBe(false);
-        await expect(reserve(grant, 'vertex', 3_999_999, reservationId)).resolves.toBe(true);
+        await expect(reserve(grant, 'vertex', 5_000_001)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        for (const amount of [5_000_000, 5_000_000, 5_000_000]) {
+            await expect(reserve(grant, 'vertex', amount)).resolves.toBe(true);
+        }
+        await expect(reserve(grant, 'vertex', 3_000_001)).resolves.toBe(false);
+        await expect(reserve(grant, 'vertex', 2_999_999, reservationId)).resolves.toBe(true);
         await expect(reserve(grant, 'vertex', 1, reservationId)).rejects.toThrow();
         await expect(reserve(grant, 'vertex', 1)).resolves.toBe(true);
         await expect(reserve(grant, 'vertex', 1)).resolves.toBe(false);
         expect((await db.query(
-            'SELECT public.dev_live_budget_settle_vertex_v1($1, $2, 3999998) AS settled',
+            'SELECT public.dev_live_budget_settle_vertex_v1($1, $2, 2999998) AS settled',
             [grant.id, reservationId],
         )).rows).toEqual([{ settled: true }]);
         await expect(reserve(grant, 'vertex', 1)).resolves.toBe(true);
         await expect(reserve(grant, 'vertex', 1)).resolves.toBe(false);
         await expect(reserve({ ...grant, expiresAt: new Date(Date.parse(grant.expiresAt) + 1).toISOString() }, 'apify', 1))
             .rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
-        await expect(reserve({ ...grant, aiMaxCents: 399 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        await expect(reserve({ ...grant, aiMaxCents: 1_801 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
     });
 
-    it('admits a representative feature request after the prior usage and still enforces the $4 ledger cap', async () => {
+    it('preserves a prior $4 grant and admits the same representative feature request on a fresh $18 grant', async () => {
         await configureStandard();
-        const grant = await startStandard();
-        const settled = 2_411_691;
-        await expect(reserve(grant, 'vertex', settled)).resolves.toBe(true);
-        await expect(reserve(grant, 'vertex', 1_634_304)).resolves.toBe(false);
+        const oldAttemptId = randomUUID();
+        const oldGrant = await startStandard(oldAttemptId, target, ownerId, 2);
+        expect(oldGrant.aiMaxCents).toBe(400);
+        await db.exec(await readSql('live-owner-start-standard'));
+        await expect(lookupStandard(oldGrant)).resolves.toEqual(oldGrant);
+        await expect(startStandard(oldAttemptId)).rejects.toThrow('DEV_LIVE_OWNER_START_UNAVAILABLE');
 
-        const estimate = estimateDevLiveVertexReservation(featureRequest(), 'global');
+        const grant = await startStandard();
+        expect(grant.aiMaxCents).toBe(1_800);
+        const settled = 3_922_786;
+        await expect(reserve(oldGrant, 'vertex', settled)).resolves.toBe(true);
+        await expect(reserve({ ...oldGrant, aiMaxCents: grant.aiMaxCents }, 'vertex', 1))
+            .rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        await expect(reserve(grant, 'vertex', settled)).resolves.toBe(true);
+
+        const imageCount = 11;
+        const estimate = estimateDevLiveVertexReservation(featureRequest(imageCount), 'global');
         const inputTokens = Buffer.byteLength(JSON.stringify(featurePrompt).normalize('NFKD'))
-            + Buffer.byteLength(JSON.stringify(featureSchema).normalize('NFKD')) + 2 * 1_120 + 2_048;
+            + Buffer.byteLength(JSON.stringify(featureSchema).normalize('NFKD')) + imageCount * 1_120 + 2_048;
         expect(estimate).toMatchObject({
             inputTokens,
             outputTokens: 8_192,
             totalCostUsd: (inputTokens * 1.5 + 8_192 * 7.5) / 1_000_000,
         });
         const amount = Math.ceil(estimate!.totalCostUsd * 1_000_000);
+        await expect(reserve(oldGrant, 'vertex', amount)).resolves.toBe(false);
         await expect(reserve(grant, 'vertex', amount)).resolves.toBe(true);
-        const remaining = 4_000_000 - settled - amount;
-        await expect(reserve(grant, 'vertex', remaining + 1)).resolves.toBe(false);
-        await expect(reserve(grant, 'vertex', remaining)).resolves.toBe(true);
-        await expect(reserve(grant, 'vertex', 1)).resolves.toBe(false);
     });
 
     it('rejects model, transport, and payload changes outside the Dev request envelope', () => {

@@ -127,21 +127,65 @@ describe('analyzeWithGemini generation retry policy', () => {
         vi.restoreAllMocks();
     });
 
-    it('refuses a Dev attempt that could not reserve its authorized budget', async () => {
+    it('refuses a staged Dev attempt before acquiring audit or provider leases when the budget is exhausted', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };
+        const audit = stageAuditOptions();
         mocks.requireDevApproval.mockReturnValue(grant);
         mocks.reserveDevAttempt.mockRejectedValueOnce(new Error('DEV_LIVE_BUDGET_EXCEEDED'));
 
         await expect(analyzeWithGemini('prompt', undefined, {
-            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128, skipTokenLog: true,
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
         })).rejects.toThrow('DEV_LIVE_BUDGET_EXCEEDED');
         expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, expect.objectContaining({
             model: 'gemini-3.1-flash-lite',
             config: expect.objectContaining({ maxOutputTokens: 128 }),
         }), 'global');
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
         expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
+        const audit = stageAuditOptions();
+        audit.onBeforeAttempt.mockRejectedValueOnce(new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'));
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+        })).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        expect(mocks.reserveDevAttempt.mock.invocationCallOrder[0])
+            .toBeLessThan(audit.onBeforeAttempt.mock.invocationCallOrder[0]);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('releases a confirmed Dev reservation without entering audit when cancelled during reservation', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
+        const audit = stageAuditOptions();
+        const controller = new AbortController();
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockImplementationOnce(async () => {
+            controller.abort();
+            return reservation;
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            abortSignal: controller.signal,
+        })).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
     it('reserves an owner-start run independently of the shared daily ledger', async () => {

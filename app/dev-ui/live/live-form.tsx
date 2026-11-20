@@ -15,6 +15,7 @@ import {
 } from '@/components/analysis-preflight-presentation';
 import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
 import { PreflightPendingStatus } from '@/components/preflight-pending-status';
+import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_VERTEX_CAP_HEADER } from '@/lib/constants/dev-ui';
 import { normalizeInstagramUsername } from '@/lib/services/analysis/v2-client-credentials';
 import { preflightAcceptedV1Schema, preflightStatusV1Schema, type PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
@@ -23,6 +24,8 @@ const planHeader = 'x-dev-live-plan';
 const ownerAttemptStoragePrefix = 'dev-live-attempt:';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const defaultRetryDelayMs = 2_000;
+const standardApifyUsd = DEV_LIVE_STANDARD_CAPS.apifyMaxCents / 100;
+const standardVertexUsd = DEV_LIVE_STANDARD_CAPS.aiMaxCents / 100;
 type LivePlanId = 'basic' | 'standard';
 type Admission = { preflightId: string; planId: LivePlanId; retryAfterMs?: number };
 
@@ -51,6 +54,9 @@ async function call(
         headers: {
             'Content-Type': 'application/json',
             ...(ownerStart && { 'x-dev-live-attempt-id': ownerStart.attemptId, [planHeader]: ownerStart.planId }),
+            ...(ownerStart?.planId === 'standard' && {
+                [DEV_LIVE_STANDARD_VERTEX_CAP_HEADER]: String(DEV_LIVE_STANDARD_CAPS.aiMaxCents),
+            }),
         },
         body: JSON.stringify(body),
         cache: 'no-store',
@@ -337,7 +343,7 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                         {standardTarget && <p data-amp-mask className="mt-3 text-sm text-fg-dim">Standard 대상은 @{standardTarget}입니다.</p>}
                         {!canStartPlan && <p role="status" className="mt-3 text-sm text-fg-dim">현재 Standard 사전 점검을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
                         {displayedPlanId && <p className="mt-3 text-sm text-fg-dim">{displayedPlanId === 'standard'
-                            ? '공개 테스트 계정을 Standard로 판독합니다. 사전 점검부터 분석 1회에 Apify 최대 $6, Vertex 최대 $4로 총 $10까지 사용합니다.'
+                            ? `공개 테스트 계정을 Standard로 판독합니다. 사전 점검부터 분석 1회에 Apify 최대 $${standardApifyUsd}, Vertex 최대 $${standardVertexUsd}로 총 $${standardApifyUsd + standardVertexUsd}까지 사용합니다.`
                             : '공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 1회 최대 $7의 분석 예산을 사용합니다.'}</p>}
                         <label className="mt-4 flex items-start gap-2 text-sm"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} /> 실제 사전 점검에서 분석 예산을 사용합니다.</label>
                         <div className="mt-5">
