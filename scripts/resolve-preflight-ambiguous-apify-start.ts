@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import {
+    isAmbiguousStartMaxChargeUsd,
     isAmbiguousStartOperationKey,
     parseAmbiguousStartOptions,
     type AmbiguousStartOperationKey,
@@ -43,11 +44,16 @@ function projectCandidate(value: unknown): PiiFreeCandidate {
     const row = record(value);
     const maxChargeUsd = Number(row.maxChargeUsd);
     const operationKey = stringField(row, 'operationKey');
-    if (!Number.isFinite(maxChargeUsd) || maxChargeUsd !== 0.0026) {
-        throw new Error('RPC returned an invalid maxChargeUsd');
-    }
+    const credentialSlot = stringField(row, 'credentialSlot');
     if (!isAmbiguousStartOperationKey(operationKey)) {
         throw new Error('RPC returned an invalid operationKey');
+    }
+    const exactCharge = maxChargeUsd.toFixed(12);
+    if (
+        maxChargeUsd !== Number(exactCharge)
+        || !isAmbiguousStartMaxChargeUsd(exactCharge, operationKey, credentialSlot)
+    ) {
+        throw new Error('RPC returned an invalid maxChargeUsd');
     }
     return {
         preflightId: stringField(row, 'preflightId'),
@@ -55,7 +61,7 @@ function projectCandidate(value: unknown): PiiFreeCandidate {
         inputHash: stringField(row, 'inputHash'),
         logicalProvider: stringField(row, 'logicalProvider'),
         actorId: stringField(row, 'actorId'),
-        credentialSlot: stringField(row, 'credentialSlot'),
+        credentialSlot,
         maxChargeUsd,
         reservedAt: stringField(row, 'reservedAt'),
     };

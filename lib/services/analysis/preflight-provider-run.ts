@@ -14,6 +14,7 @@ import {
 import {
     APIFY_PROFILE_ACTOR_ID,
     APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+    APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD,
 } from '@/lib/services/instagram/providers/apify';
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import type { ClaimedPreflight } from './preflight';
@@ -37,6 +38,7 @@ const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(
 export const PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     loadRpc: 'load_analysis_preflight_provider_run',
     reserveRpc: 'reserve_analysis_preflight_provider_run',
+    reserveBliteFreeRpc: 'reserve_analysis_blite_apify_preflight_run_v1',
     checkpointStartedRpc: 'checkpoint_analysis_preflight_provider_run_started',
     checkpointRejectedRpc: 'reject_analysis_preflight_provider_run_start',
     checkpointTerminalRpc: 'checkpoint_analysis_preflight_provider_run_terminal',
@@ -73,6 +75,9 @@ export type PreflightProviderRunStatus =
     | 'aborted'
     | 'timed_out';
 
+type PreflightProfileChargeUsd = typeof APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD
+    | typeof APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD;
+
 export interface StoredPreflightProviderRun {
     preflightId: string;
     operationKey: string;
@@ -80,7 +85,7 @@ export interface StoredPreflightProviderRun {
     logicalProvider: 'apify';
     actorId: typeof APIFY_PROFILE_ACTOR_ID;
     credentialSlot: ApifyCredentialSlot;
-    maxChargeUsd: typeof APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD;
+    maxChargeUsd: PreflightProfileChargeUsd;
     status: PreflightProviderRunStatus;
     runId: string | null;
     actualUsageUsd: number | null;
@@ -103,7 +108,7 @@ interface ProviderIdentity {
     logicalProvider: 'apify';
     actorId: typeof APIFY_PROFILE_ACTOR_ID;
     credentialSlot: ApifyCredentialSlot;
-    maxChargeUsd: typeof APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD;
+    maxChargeUsd: PreflightProfileChargeUsd;
 }
 
 export interface PreflightProviderRunStore {
@@ -114,6 +119,10 @@ export interface PreflightProviderRunStore {
     }>;
     /** Atomically selects and persists a fresh free-pool slot in the database. */
     reserveFree?(input: RunClaimInput & Omit<ProviderIdentity, 'credentialSlot'>): Promise<{
+        created: boolean;
+        run: StoredPreflightProviderRun;
+    }>;
+    reserveBliteFree?(input: RunClaimInput & Omit<ProviderIdentity, 'credentialSlot'>): Promise<{
         created: boolean;
         run: StoredPreflightProviderRun;
     }>;
@@ -199,7 +208,7 @@ function parseMoney(value: unknown, nullable: boolean): number | null {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid money.');
     }
     const result = Number(value);
-    if (!Number.isFinite(result) || result < 0 || result > APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD) {
+    if (!Number.isFinite(result) || result < 0 || result > APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD) {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid money.');
     }
     return result;
@@ -279,13 +288,21 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid run state.');
     }
     const maxChargeUsd = parseMoney(row.maxChargeUsd, false);
-    if (maxChargeUsd !== APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD) {
+    if (
+        maxChargeUsd !== APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD
+        && (maxChargeUsd !== APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD
+            || row.operationKey !== INITIAL_PROFILE_OPERATION_KEY
+            || !APIFY_FREE_CREDENTIAL_SLOTS.some(slot => slot === credentialSlot))
+    ) {
         throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid charge identity.');
     }
     const reservedAt = parseTimestamp(row.reservedAt, false)!;
     const runStartedAt = parseTimestamp(row.runStartedAt, true);
     const terminalizedAt = parseTimestamp(row.terminalizedAt, true);
     const actualUsageUsd = parseMoney(row.actualUsageUsd, true);
+    if (actualUsageUsd !== null && actualUsageUsd > maxChargeUsd) {
+        throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: usage exceeds charge identity.');
+    }
     const usageReconciledAt = parseTimestamp(row.usageReconciledAt, true);
     if (
         (status === 'starting' && (
@@ -324,7 +341,7 @@ function parseRun(value: unknown): StoredPreflightProviderRun {
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
         credentialSlot,
-        maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+        maxChargeUsd,
         status: status as PreflightProviderRunStatus,
         runId: runId as string | null,
         actualUsageUsd,
@@ -443,8 +460,7 @@ function assertRunClaim(
 export function createPreflightProviderRunStore(
     client: PreflightProviderRunClient
 ): PreflightProviderRunStore & PreflightProviderRunReconciliationStore {
-    async function rpc(name: string, params: Record<string, unknown>, label: string) {
-        const { data, error } = await client.rpc(name, params);
+    function rpcData({ data, error }: RpcResult, label: string) {
         if (error) {
             if (error.message?.startsWith('ANALYSIS_APIFY_FREE_POOL_CAPACITY_UNAVAILABLE')) {
                 throw new AnalysisProviderAdmissionCapacityPendingError();
@@ -454,6 +470,10 @@ export function createPreflightProviderRunStore(
             );
         }
         return data;
+    }
+
+    async function rpc(name: string, params: Record<string, unknown>, label: string) {
+        return rpcData(await client.rpc(name, params), label);
     }
 
     const params = (input: RunClaimInput) => ({
@@ -466,6 +486,35 @@ export function createPreflightProviderRunStore(
         p_credential_slot: input.credentialSlot,
         p_max_charge_usd: input.maxChargeUsd,
     });
+
+    function parseReservation(data: unknown, input: RunClaimInput) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
+        }
+        const value = data as Record<string, unknown>;
+        if (typeof value.created !== 'boolean') {
+            throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
+        }
+        const run = parseRun(value.run);
+        assertRunClaim(run, input);
+        return { created: value.created, run };
+    }
+
+    async function reserveFree(input: RunClaimInput & Omit<ProviderIdentity, 'credentialSlot'>) {
+        assertClaimInput(input);
+        const reservation = parseReservation(await rpc(
+            PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            {
+                ...params(input),
+                p_credential_slot: null,
+                p_max_charge_usd: input.maxChargeUsd,
+            },
+            'free-pool reserve failed',
+        ), input);
+        assertFreeIdentity(reservation.run, input);
+        assertFreeSlot(reservation.run);
+        return reservation;
+    }
 
     return {
         async load(input) {
@@ -482,46 +531,36 @@ export function createPreflightProviderRunStore(
         },
         async reserve(input) {
             assertClaimInput(input);
-            const data = await rpc(
+            const reservation = parseReservation(await rpc(
                 PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
                 identityParams(input),
                 'reserve failed'
-            );
-            if (!data || typeof data !== 'object' || Array.isArray(data)) {
-                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
-            }
-            const value = data as Record<string, unknown>;
-            if (typeof value.created !== 'boolean') {
-                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
-            }
-            const run = parseRun(value.run);
-            assertRunClaim(run, input);
-            assertIdentity(run, input);
-            return { created: value.created, run };
+            ), input);
+            assertIdentity(reservation.run, input);
+            return reservation;
         },
-        async reserveFree(input) {
+        reserveFree,
+        async reserveBliteFree(input) {
             assertClaimInput(input);
-            const data = await rpc(
-                PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
-                {
-                    ...params(input),
-                    p_credential_slot: null,
-                    p_max_charge_usd: input.maxChargeUsd,
-                },
-                'free-pool reserve failed'
+            const result = await client.rpc(
+                PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reserveBliteFreeRpc,
+                params(input),
             );
-            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            if (result.error?.code === 'PGRST202') {
+                // Workers can roll out before the additive database migration.
+                return reserveFree(input);
+            }
+            const reservation = parseReservation(rpcData(result, 'B-lite free-pool reserve failed'), input);
+            if (
+                reservation.run.operationKey !== INITIAL_PROFILE_OPERATION_KEY
+                || (reservation.created
+                    && reservation.run.maxChargeUsd !== APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD)
+            ) {
                 throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
             }
-            const value = data as Record<string, unknown>;
-            if (typeof value.created !== 'boolean') {
-                throw new Error('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR: invalid reservation.');
-            }
-            const run = parseRun(value.run);
-            assertRunClaim(run, input);
-            assertFreeIdentity(run, input);
-            assertFreeSlot(run);
-            return { created: value.created, run };
+            assertFreeIdentity(reservation.run, { ...input, maxChargeUsd: reservation.run.maxChargeUsd });
+            assertFreeSlot(reservation.run);
+            return reservation;
         },
         async checkpointStarted(input) {
             assertClaimInput(input);
@@ -859,13 +898,14 @@ export async function reconcileSettledPreflightProviderCosts(
 }
 
 export function preflightProviderIdentity(
-    credentialSlot: ApifyCredentialSlot
+    credentialSlot: ApifyCredentialSlot,
+    maxChargeUsd: PreflightProfileChargeUsd = APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
 ): ProviderIdentity {
     return Object.freeze({
         logicalProvider: 'apify',
         actorId: APIFY_PROFILE_ACTOR_ID,
         credentialSlot,
-        maxChargeUsd: APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD,
+        maxChargeUsd,
     });
 }
 
@@ -876,6 +916,8 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     identity: ProviderIdentity;
     /** New anonymous/B-lite/free admission uses the database best-fit fence. */
     freePool?: boolean;
+    /** Initial B-lite collection can reserve the full Actor execution limit. */
+    preferBliteHeadroom?: boolean;
     refreshFreePoolCredits?: () => Promise<void>;
     operationKey?: string;
     /** Fresh paid admission runs on the paid worker route while its provider-run
@@ -903,7 +945,9 @@ export async function bindPreflightProviderRunCheckpoint(input: {
             // A durable row is authoritative, including legacy paid-slot rows.
             // New reservations are fenced to the nine-slot free pool below;
             // replay must never remap an already-started external run.
-            assertFreeIdentity(current, input.identity);
+            assertFreeIdentity(current, input.preferBliteHeadroom
+                ? { ...input.identity, maxChargeUsd: current.maxChargeUsd }
+                : input.identity);
         } else {
             assertIdentity(current, input.identity);
         }
@@ -915,14 +959,7 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     };
     const assertCostEvent = (event: ProviderCostRunStarted): StoredPreflightProviderRun => {
         const stored = requireCurrent();
-        if (input.freePool) {
-            assertFreeIdentity(event, input.identity);
-            if (event.credentialSlot !== stored.credentialSlot) {
-                throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
-            }
-        } else {
-            assertIdentity(event, input.identity);
-        }
+        assertIdentity(event, stored);
         if (!stored.runId || event.runId !== stored.runId) {
             throw new Error('PREFLIGHT_PROVIDER_RUN_IDENTITY_CONFLICT');
         }
@@ -988,7 +1025,9 @@ export async function bindPreflightProviderRunCheckpoint(input: {
     }
 
     if (input.freePool) {
-        if (!input.store.reserveFree) {
+        const reserveBliteFree = input.preferBliteHeadroom && input.store.reserveBliteFree;
+        const reserveFree = reserveBliteFree || input.store.reserveFree;
+        if (!reserveFree) {
             throw new Error('ANALYSIS_PROVIDER_ADMISSION_CAPACITY_PENDING');
         }
         const reservationInput = {
@@ -999,7 +1038,7 @@ export async function bindPreflightProviderRunCheckpoint(input: {
         };
         let reserved;
         try {
-            reserved = await input.store.reserveFree(reservationInput);
+            reserved = await reserveFree(reservationInput);
         } catch (error) {
             if (!(error instanceof AnalysisProviderAdmissionCapacityPendingError)
                 || !input.refreshFreePoolCredits) throw error;
@@ -1009,12 +1048,14 @@ export async function bindPreflightProviderRunCheckpoint(input: {
                 // Preserve the capacity defer when usage reads or persistence fail.
                 throw error;
             }
-            reserved = await input.store.reserveFree(reservationInput);
+            reserved = await reserveFree(reservationInput);
         }
         current = reserved.run;
-        assertFreeIdentity(current, input.identity);
+        assertFreeIdentity(current, reserveBliteFree
+            ? { ...input.identity, maxChargeUsd: current.maxChargeUsd }
+            : input.identity);
         assertFreeSlot(current);
-        const freeIdentity = preflightProviderIdentity(current.credentialSlot);
+        const freeIdentity = preflightProviderIdentity(current.credentialSlot, current.maxChargeUsd);
         const withFreeAdmission = async (
             checkpoint: ProviderRunCheckpoint,
         ): Promise<ProviderRunCheckpoint> => {

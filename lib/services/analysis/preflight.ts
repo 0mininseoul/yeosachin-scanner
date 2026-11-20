@@ -2380,7 +2380,8 @@ export async function processPreflight(
             const identity = preflightProviderIdentity(
                 existingRun?.credentialSlot
                     ?? betaHold?.credentialSlot
-                    ?? 'primary'
+                    ?? 'primary',
+                existingRun?.maxChargeUsd,
             );
             const bound = await bindProviderRun({
                 store: providerRuns,
@@ -2388,6 +2389,7 @@ export async function processPreflight(
                 inputHash,
                 identity,
                 freePool: !isBetatest && !betaHold,
+                preferBliteHeadroom: !isBetatest && !betaHold,
                 ...(isBetatest && betaHold
                     ? {
                         providerAdmissionWorkloadRole: 'paid' as const,
@@ -2489,7 +2491,9 @@ export async function processPreflight(
                         store: providerRuns,
                         claim,
                         inputHash,
-                        identity: preflightProviderIdentity(existingRun.credentialSlot),
+                        identity: preflightProviderIdentity(
+                            existingRun.credentialSlot, existingRun.maxChargeUsd
+                        ),
                         freePool: true,
                     });
                     profile = await (dependencies.getFallbackProfile ?? getApifyProfileSummary)(
@@ -2553,7 +2557,7 @@ export async function processPreflight(
                 store: providerRuns,
                 claim,
                 inputHash,
-                identity: preflightProviderIdentity(existingRun.credentialSlot),
+                identity: preflightProviderIdentity(existingRun.credentialSlot, existingRun.maxChargeUsd),
                 freePool: !isBetatest && !betaHold,
                 ...(isBetatest && betaHold
                     ? {

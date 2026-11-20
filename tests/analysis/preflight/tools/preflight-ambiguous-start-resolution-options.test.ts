@@ -57,6 +57,25 @@ describe('ambiguous preflight start resolution CLI options', () => {
         });
     });
 
+    it('accepts the B-lite cap only for the initial free-pool profile run', () => {
+        const withHeadroom = resolveArguments.map(argument =>
+            argument === '--max-charge-usd=0.002600000000'
+                ? '--max-charge-usd=0.003000000000'
+                : argument
+        );
+        expect(parseAmbiguousStartOptions(withHeadroom)).toMatchObject({
+            maxChargeUsd: '0.003000000000',
+        });
+        for (const [from, to] of [
+            ['--operation-key=target-profile-fallback', '--operation-key=target-profile-fresh-admission:g4'],
+            ['--credential-slot=quinary', '--credential-slot=secondary'],
+        ] as const) {
+            expect(() => parseAmbiguousStartOptions(
+                withHeadroom.map(argument => argument === from ? to : argument),
+            )).toThrow(/--max-charge-usd must be/);
+        }
+    });
+
     it('accepts every named Apify slot and rejects unknown slots', () => {
         for (const credentialSlot of [
             'primary', 'secondary', 'tertiary', 'quaternary', 'quinary',

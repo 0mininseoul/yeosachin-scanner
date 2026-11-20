@@ -947,6 +947,10 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         if (
             !includePosts
             && maximumChargeUsd > APIFY_PROFILE_SUMMARY_MAX_CHARGE_USD + Number.EPSILON
+            // An expired B-lite fence may resume its existing full-profile run
+            // through the ordinary preflight summary path.
+            && !((context?.resumeRunId || context?.startReserved)
+                && maximumChargeUsd === APIFY_PROFILE_SUMMARY_RUN_MAX_CHARGE_USD)
         ) {
             throw new Error(
                 'SCRAPING_BUDGET_ERROR: Apify profile summary charge exceeds its fixed ceiling.'
