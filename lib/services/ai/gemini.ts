@@ -1074,6 +1074,7 @@ export async function analyzeWithGemini<T>(
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
         let budgetSettled = false;
+        let devUnusedSettlementFailed = false;
         let devRateLimitSettlementError: Error | null = null;
         try {
             if (abortSignal?.aborted) {
@@ -1163,52 +1164,66 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     attemptStartedAt = performance.now();
-                    if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                        try {
-                            await onBeforeAttempt({
-                                requestId,
-                                modelName,
-                                location: GOOGLE_CLOUD_LOCATION,
-                                stage,
-                                thinkingLevel: resolvedThinkingLevel,
-                                mediaCount: selectedImages.length,
-                                mediaResolution: resolvedMediaResolution,
-                                promptVersion: resolvedPromptVersion!,
-                                schemaVersion: resolvedSchemaVersion!,
-                                maxOutputTokens: resolvedMaxOutputTokens
-                                    ?? stagePolicy.maxOutputTokens,
-                                attempt: attemptNumber,
-                                retryCount: attemptNumber - 1,
-                                costRoute: resolvedCostRoute,
-                            });
-                        } catch (error) {
-                            if (
-                                error instanceof GeminiPreDispatchAdmissionError
-                                || error instanceof Error
-                                    && AI_ADMISSION_SIGNAL_CODES.has(error.message)
-                            ) {
-                                throw error;
-                            }
-                            throw new Error(
-                                'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
-                            );
-                        }
-                        if (abortSignal?.aborted) {
-                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
-                        }
-                    }
-
-                    if (abortSignal?.aborted) {
-                        throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
-                    }
+                    // Stage audit acquires provider leases as well as writing the attempt.
+                    // Check the Dev cap before it can acquire either.
                     const devReservation = devLiveBudget && devLiveApproval
                         ? await devLiveBudget.reserveDevLiveVertexAttempt(
                             devLiveApproval, generationRequest, GOOGLE_CLOUD_LOCATION,
                         )
                         : null;
-                    if (abortSignal?.aborted) {
-                        throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                    try {
+                        if (abortSignal?.aborted) {
+                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                        }
+                        if (stage && requestId && stagePolicy && onBeforeAttempt) {
+                            try {
+                                await onBeforeAttempt({
+                                    requestId,
+                                    modelName,
+                                    location: GOOGLE_CLOUD_LOCATION,
+                                    stage,
+                                    thinkingLevel: resolvedThinkingLevel,
+                                    mediaCount: selectedImages.length,
+                                    mediaResolution: resolvedMediaResolution,
+                                    promptVersion: resolvedPromptVersion!,
+                                    schemaVersion: resolvedSchemaVersion!,
+                                    maxOutputTokens: resolvedMaxOutputTokens
+                                        ?? stagePolicy.maxOutputTokens,
+                                    attempt: attemptNumber,
+                                    retryCount: attemptNumber - 1,
+                                    costRoute: resolvedCostRoute,
+                                });
+                            } catch (error) {
+                                if (
+                                    error instanceof GeminiPreDispatchAdmissionError
+                                    || error instanceof Error
+                                        && AI_ADMISSION_SIGNAL_CODES.has(error.message)
+                                ) {
+                                    throw error;
+                                }
+                                throw new Error(
+                                    'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
+                                );
+                            }
+                        }
+                        if (abortSignal?.aborted) {
+                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                        }
+                    } catch (error) {
+                        // Return the unused budget before leaving the Dev dispatch slot.
+                        if (devLiveBudget && devReservation) {
+                            try {
+                                await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0)
+                                    .catch(() => devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0));
+                            } catch {
+                                devUnusedSettlementFailed = true;
+                                console.error('Dev Vertex unused reservation settlement could not be confirmed.');
+                                throw new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
+                            }
+                        }
+                        throw error;
                     }
+
                     providerDispatchStarted = true;
                     let generated;
                     try {
@@ -1251,7 +1266,7 @@ export async function analyzeWithGemini<T>(
                     }
                     budgetSettled = true;
                 }
-                if (abortSignal?.aborted) {
+                if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                     throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 }
                 if (
@@ -1424,7 +1439,7 @@ export async function analyzeWithGemini<T>(
                 }
                 budgetSettled = true;
             }
-            if (abortSignal?.aborted) {
+            if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                 lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
                 console.error('--- AnalyzeWithGemini End (Failed) ---');

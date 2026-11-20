@@ -1,13 +1,13 @@
 import 'server-only';
 
 import { z } from 'zod';
+import { DEV_LIVE_STANDARD_CAPS } from '@/lib/constants/dev-ui';
 
 export const DEV_LIVE_PREFLIGHT_KEY_PREFIX = 'dev-live:';
 export const DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX = 'dev-live:owner:';
 export const DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX = 'dev-live:owner:standard:';
 export const DEV_LIVE_OWNER_START_ATTEMPT = 'x-dev-live-attempt-id';
 export const DEV_LIVE_OWNER_CAPS = Object.freeze({ apifyMaxCents: 500, aiMaxCents: 200 });
-const STANDARD_OWNER_CAPS = Object.freeze({ apifyMaxCents: 600, aiMaxCents: 400 });
 export const DEV_LIVE_RUNNER_PLAN = 'basic' as const;
 export type DevLivePlan = 'basic' | 'standard';
 
@@ -27,8 +27,8 @@ const basicApprovalSchema = z.object({
 const standardApprovalSchema = z.object({
     ...approvalFields,
     planId: z.literal('standard'),
-    apifyMaxCents: z.literal(STANDARD_OWNER_CAPS.apifyMaxCents),
-    aiMaxCents: z.literal(STANDARD_OWNER_CAPS.aiMaxCents),
+    apifyMaxCents: z.literal(DEV_LIVE_STANDARD_CAPS.apifyMaxCents),
+    aiMaxCents: z.union([z.literal(400), z.literal(DEV_LIVE_STANDARD_CAPS.aiMaxCents)]),
 }).strict();
 
 export type DevLiveApproval = z.infer<typeof basicApprovalSchema> & {

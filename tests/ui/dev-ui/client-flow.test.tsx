@@ -338,7 +338,7 @@ describe('Dev actual analysis browser attempt', () => {
                     target.dispatchEvent(new Event('input', { bubbles: true }));
                 });
                 if (planId === 'standard') {
-                    expect(container.textContent).toMatch(/Standard.*Apify.*\$6.*Vertex.*\$4.*\$10/);
+                    expect(container.textContent).toMatch(/Standard.*Apify.*\$6.*Vertex.*\$18.*\$24/);
                 } else {
                     expect(container.textContent).toMatch(/Basic.*\$7/);
                 }
@@ -353,7 +353,8 @@ describe('Dev actual analysis browser attempt', () => {
             expect(attempts).toHaveLength(2);
             expect(attempts[0]).toMatch(/^[\w-]{36}$/u);
             expect(attempts[1]).toBe(attempts[0]);
-            expect(startPlans).toEqual([planId, planId]);
+            const expectedPlan = planId === 'standard' ? 'standard:1800' : 'basic';
+            expect(startPlans).toEqual([expectedPlan, expectedPlan]);
             expect(startBodies).toEqual([{ targetInstagramId: 'dev_fixture_retry' }, { targetInstagramId: 'dev_fixture_retry' }]);
             if (planId === 'standard') {
                 expect(attempts[0]).not.toBe(basicAttemptId);

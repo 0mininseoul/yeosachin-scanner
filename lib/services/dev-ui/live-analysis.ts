@@ -3,7 +3,7 @@ import 'server-only';
 import type { User } from '@supabase/supabase-js';
 import type { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { DEV_UI_APP_ORIGIN } from '@/lib/constants/dev-ui';
+import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_START_PLAN, DEV_UI_APP_ORIGIN } from '@/lib/constants/dev-ui';
 import { preflightRequestV1Schema } from '@/lib/contracts/analysis-v2';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { requireActiveE2eTestRunner } from '@/lib/services/identity/account-principal-store';
@@ -96,12 +96,12 @@ async function requireLiveWebAccess(user: User): Promise<void> {
     await requireActiveE2eTestRunner(user, DEV_LIVE_RUNNER_PLAN);
 }
 
-type OwnerStartRpc = `dev_live_owner_start${'' | '_lookup' | '_ready'}_v${1 | 2}`;
+type OwnerStartRpc = `dev_live_owner_start${'' | '_lookup' | '_ready'}_v${1 | 2 | 3}`;
 
 async function ownerStartRpc(name: OwnerStartRpc, args?: Record<string, string>): Promise<unknown> {
     const { data, error } = await supabaseAdmin.rpc(name, args);
     if (error) {
-        if ((name === 'dev_live_owner_start_v1' || name === 'dev_live_owner_start_v2') && error.code === 'P0001'
+        if ((name === 'dev_live_owner_start_v1' || name === 'dev_live_owner_start_v3') && error.code === 'P0001'
             && error.message === 'DEV_LIVE_OWNER_START_UNAVAILABLE') {
             throw new Error('DEV_LIVE_START_ATTEMPT_EXPIRED');
         }
@@ -136,10 +136,12 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
     if (!input.success) return null;
     const standard = devLiveStandardTarget() === input.data.targetInstagramId;
     const acknowledgedPlan = request.headers.get(devLivePlanHeader);
-    if (standard ? acknowledgedPlan !== 'standard' : acknowledgedPlan !== null && acknowledgedPlan !== 'basic') {
+    if (standard
+        ? acknowledgedPlan !== DEV_LIVE_STANDARD_START_PLAN
+        : acknowledgedPlan !== null && acknowledgedPlan !== 'basic') {
         throw new Error('DEV_LIVE_PLAN_CHANGED');
     }
-    const descriptor = await ownerStartRpc(standard ? 'dev_live_owner_start_v2' : 'dev_live_owner_start_v1', {
+    const descriptor = await ownerStartRpc(standard ? 'dev_live_owner_start_v3' : 'dev_live_owner_start_v1', {
         p_user_id: user.id,
         p_target_instagram_id: input.data.targetInstagramId,
         p_attempt_id: attempt.data,
@@ -147,6 +149,7 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
     const approval = standard
         ? parseDevLiveStandardApproval(descriptor, input.data.targetInstagramId)
         : parseDevLiveOwnerApproval(descriptor);
+    if (standard && approval?.aiMaxCents !== DEV_LIVE_STANDARD_CAPS.aiMaxCents) return null;
     return approval?.targetInstagramId === input.data.targetInstagramId ? approval : null;
 }
 
@@ -188,7 +191,7 @@ export function withDevLiveApproval(
             if (error instanceof Error && error.message === 'DEV_LIVE_PLAN_CHANGED') {
                 return devUiJson({
                     code: 'DEV_LIVE_PLAN_CHANGED',
-                    error: '분석 플랜이 바뀌었습니다. 페이지를 새로고침하고 예산을 확인해 주세요.',
+                    error: '분석 플랜이나 예산이 바뀌었습니다. 페이지를 새로고침하고 예산을 확인해 주세요.',
                 }, 409);
             }
             if (error instanceof Error && error.message === 'DEV_LIVE_START_ATTEMPT_EXPIRED') {
@@ -233,7 +236,7 @@ export function handleDevLiveAvailability(request: Request): Promise<NextRespons
             if (devLiveOwnerStartEnabled()) {
                 const available = await ownerStartRpc('dev_live_owner_start_ready_v1', { p_user_id: user.id }) === true;
                 const target = available ? devLiveStandardTarget() : null;
-                const standardReady = target && await ownerStartRpc('dev_live_owner_start_ready_v2', {
+                const standardReady = target && await ownerStartRpc('dev_live_owner_start_ready_v3', {
                     p_user_id: user.id, p_target_instagram_id: target,
                 }).catch(() => false) === true;
                 return devUiJson({
