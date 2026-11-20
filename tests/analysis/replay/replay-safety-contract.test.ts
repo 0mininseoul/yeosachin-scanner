@@ -5,6 +5,8 @@ const liveSource = new URL('../../../lib/services/analysis/replay/replay-live-so
 const stagedAdapter = new URL('../../../lib/services/analysis/replay/replay-staged-ai-adapter.ts', import.meta.url);
 const resolverExperimentAdapter =
     new URL('../../../lib/services/analysis/replay/resolver-experiment-ai-adapter.ts', import.meta.url);
+const devStandardEvalRunner =
+    new URL('../../../lib/services/dev-ui/standard-eval-runner.ts', import.meta.url);
 const runner = new URL('../../../lib/services/analysis/replay/replay-runner.ts', import.meta.url);
 const cli = new URL('../../../scripts/replay-analysis-v2.ts', import.meta.url);
 const libRoot = new URL('../../../lib/', import.meta.url);
@@ -52,6 +54,7 @@ describe('analysis V2 replay safety contract', () => {
             }
         }
         expect(capabilityIssuers.sort()).toEqual([
+            devStandardEvalRunner.pathname,
             replayCapability.pathname,
             resolverExperimentAdapter.pathname,
             stagedAdapter.pathname,
