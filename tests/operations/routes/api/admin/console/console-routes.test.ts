@@ -19,6 +19,8 @@ vi.mock('@/lib/services/analysis/score-audit', async () => {
 import { GET as getOverview } from '../../../../../../app/api/admin/overview/route';
 import { GET as getLeadInputs } from '../../../../../../app/api/admin/lead-inputs/route';
 import { GET as getOrderCustomers } from '../../../../../../app/api/admin/order-customers/route';
+import { GET as getOrders } from '../../../../../../app/api/admin/orders/route';
+import { GET as getUsers } from '../../../../../../app/api/admin/users/route';
 
 const operatorId = '423e4567-e89b-42d3-a456-426614174001';
 const requestId = '623e4567-e89b-42d3-a456-426614174003';
@@ -109,5 +111,41 @@ describe('operator console routes', () => {
     it('fails closed when the overview RPC errors', async () => {
         mocks.rpc.mockResolvedValue({ data: null, error: { message: 'boom' } });
         expect((await getOverview()).status).toBe(503);
+    });
+
+    it('lists paid orders with a cursor and normalized gender', async () => {
+        const order = (id: string) => ({
+            orderId: id, requestId: null, orderStatus: 'completed', planId: 'basic', targetInstagramId: 't.one',
+            excludedInstagramId: null, paidAt: '2026-08-30T10:00:00+00:00', paidAmountKrw: 14900, userName: '이현준',
+            gender: 'male', birthyear: '1994', attributionLabel: null, deviceLabel: null, bundle: null,
+            costSnapshot: { knownUsd: 0.8, conservativeUsd: 1, complete: false, usageUnknown: false },
+            cursorPaidAt: '2026-08-30T10:00:00+00:00', cursorId: id,
+        });
+        mocks.rpc.mockResolvedValue({ data: { rows: [order('30000000-0000-4000-8000-000000000001'), order('30000000-0000-4000-8000-000000000002')] }, error: null });
+        const response = await getOrders(new Request('https://example.test/api/admin/orders?pageSize=1'));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.rows).toHaveLength(1);
+        expect(body.rows[0]).toMatchObject({ gender: '남성', costSnapshot: { knownUsd: 0.8 } });
+        expect(body.rows[0]).not.toHaveProperty('cursorId');
+        expect(typeof body.nextCursor).toBe('string');
+        expect(mocks.rpc).toHaveBeenCalledWith('load_admin_orders', { p_cursor_paid_at: null, p_cursor_id: null, p_page_size: 2 });
+        expect((await getOrders(new Request('https://example.test/api/admin/orders?cursor=bogus'))).status).toBe(400);
+        expect((await getOrders(new Request('https://example.test/api/admin/orders?status=paid'))).status).toBe(400);
+    });
+
+    it('returns every user column without the internal cursor field', async () => {
+        mocks.rpc.mockResolvedValue({ data: { rows: [{
+            id: '10000000-0000-4000-8000-000000000001', email: 'a@x.kr', name: '김민연', phone_number: '010-1111-2222',
+            is_paid_user: true, paid_order_count: 2, cursor_created_at: '2026-11-19T01:00:00+00:00',
+        }] }, error: null });
+        const response = await getUsers(new Request('https://example.test/api/admin/users?search=%20%EA%B9%80%20'));
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.rows[0]).toEqual({ id: '10000000-0000-4000-8000-000000000001', email: 'a@x.kr', name: '김민연', phone_number: '010-1111-2222', is_paid_user: true, paid_order_count: 2 });
+        expect(body.nextCursor).toBeNull();
+        expect(mocks.rpc).toHaveBeenCalledWith('load_admin_users', expect.objectContaining({ p_search: '김', p_page_size: 26 }));
+        mocks.decision.mockReturnValueOnce('forbidden');
+        expect((await getUsers(new Request('https://example.test/api/admin/users'))).status).toBe(403);
     });
 });

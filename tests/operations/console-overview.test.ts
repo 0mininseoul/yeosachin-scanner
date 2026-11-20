@@ -11,6 +11,7 @@ import {
     parseSegmentationTotal,
 } from '@/lib/services/admin/amplitude-dashboard';
 import { assembleConsoleOverview, overviewRpcSchema } from '@/lib/services/admin/console-overview';
+import { adminOrderStatus, inventoryEnvelopeSchema, type AdminOrderRow } from '@/app/admin/console/console-data';
 import {
     AdminConsoleCursorInvalidError,
     decodeLeadCursor,
@@ -134,5 +135,47 @@ describe('console records helpers', () => {
         expect(displayGender('female')).toBe('여성');
         expect(displayGender('남성')).toBe('남성');
         expect(displayGender('other')).toBeNull();
+    });
+});
+
+describe('console order status', () => {
+    const base: AdminOrderRow = {
+        orderId: '30000000-0000-4000-8000-000000000001', requestId: null, orderStatus: 'completed', planId: 'basic',
+        targetInstagramId: 't.one', excludedInstagramId: null, paidAt: '2026-11-18T00:00:00.000Z', paidAmountKrw: 14900,
+        userName: null, gender: null, birthyear: null, attributionLabel: null, deviceLabel: null, bundle: null, costSnapshot: null,
+    };
+    const now = Date.parse('2026-11-20T00:00:00.000Z');
+
+    it('keeps completed orders without a bundle visible but neutral', () => {
+        expect(adminOrderStatus(base, now)).toMatchObject({ tone: 'none', label: '번들 없음' });
+    });
+
+    it('flags analysis that is still running a day after payment', () => {
+        expect(adminOrderStatus({ ...base, orderStatus: 'analysis_in_progress' }, now)).toMatchObject({ tone: 'warn', label: '분석 지연' });
+        expect(adminOrderStatus({ ...base, orderStatus: 'paid', paidAt: '2026-11-19T20:00:00.000Z' }, now)).toMatchObject({ tone: 'none', label: '분석 중' });
+    });
+
+    it('separates finished refunds from refunds that still need action', () => {
+        expect(adminOrderStatus({ ...base, orderStatus: 'refunded' }, now).tone).toBe('none');
+        expect(adminOrderStatus({ ...base, orderStatus: 'overflow_refund_required' }, now).tone).toBe('warn');
+    });
+
+    it('uses the bundle verdict when one exists', () => {
+        expect(adminOrderStatus({ ...base, bundle: {
+            version: 1, completenessStatus: 'inconsistent', gapCodes: [], costStatus: 'complete', knownUsd: 1, conservativeUsd: 1,
+            assembledAt: '2026-11-18T00:00:00.000Z', retentionState: 'retained',
+        } }, now)).toMatchObject({ tone: 'block', label: '차단' });
+    });
+
+    it('accepts the paid-refresh response that also carries the secondary snapshot', () => {
+        const slots = ['primary', 'secondary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary', 'octonary', 'nonary', 'tenth'];
+        const inventory = slots.map(slot => ({
+            credentialSlot: slot, workloadRole: slot === 'secondary' ? 'paid' : 'free', healthState: 'healthy', freshnessState: 'fresh',
+            monthlyLimitUsd: 5, monthlyUsageUsd: 1, effectiveRemainingUsd: 4,
+            billingCycleStartAt: '2026-11-01T00:00:00.000Z', billingCycleEndAt: '2026-12-01T00:00:00.000Z', cycleResetAt: '2026-12-01T00:00:00.000Z',
+            observedAt: '2026-11-19T00:00:00.000Z', refreshedAt: '2026-11-19T00:00:00.000Z', manuallyExcluded: false,
+        }));
+        expect(inventoryEnvelopeSchema.safeParse({ inventory }).success).toBe(true);
+        expect(inventoryEnvelopeSchema.safeParse({ inventory, secondary: { credentialSlot: 'secondary' } }).success).toBe(true);
     });
 });

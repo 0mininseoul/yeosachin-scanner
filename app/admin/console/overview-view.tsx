@@ -3,13 +3,13 @@
 import { useMemo, useState } from 'react';
 import type { ApifyAccountCreditInventoryRow } from '@/lib/contracts/apify-account-credit-inventory';
 import { APIFY_FREE_CREDENTIAL_SLOTS } from '@/lib/services/instagram/providers/types';
-import type { OrderAuditListRow } from '@/lib/services/analysis/order-audit-list';
 import {
     accountTone,
+    adminOrderStatus,
     formatCount,
     formatUsd,
-    listRowStatus,
     remainingRatio,
+    type AdminOrderRow,
     type ConsoleOverview,
     type OverviewBucket,
 } from './console-data';
@@ -63,9 +63,9 @@ export function OverviewView({
     onRetryOverview: () => void;
     inventory: readonly ApifyAccountCreditInventoryRow[] | null;
     inventoryError: string | null;
-    orders: readonly OrderAuditListRow[];
+    orders: readonly AdminOrderRow[];
     ordersLoading: boolean;
-    onOpenOrder: (requestId: string) => void;
+    onOpenOrder: (row: AdminOrderRow) => void;
     onOpenAccounts: () => void;
     onOpenOrders: () => void;
 }) {
@@ -76,16 +76,19 @@ export function OverviewView({
     const freeTones = free.map(item => accountTone(item.row).tone);
 
     const attention = useMemo<AttentionItem[]>(() => {
-        const orderItems = orders.map(row => ({ row, status: listRowStatus(row) }))
-            .filter(item => item.status.tone !== 'ok')
-            .map(item => ({
-                key: `order:${item.row.requestId}`,
-                tone: item.status.tone === 'block' ? 'block' as const : 'warn' as const,
-                title: `주문 @${item.row.targetInstagramId ?? '대상 미상'}`,
-                detail: item.row.gapCodes.length > 0 ? `${item.status.reason} · ${item.row.gapCodes.join(', ')}` : item.status.reason,
-                action: '주문 열기',
-                onOpen: () => onOpenOrder(item.row.requestId),
-            }));
+        const orderItems = orders.map(row => ({ row, status: adminOrderStatus(row) }))
+            .filter(item => item.status.tone === 'warn' || item.status.tone === 'block')
+            .map(item => {
+                const gaps = item.row.bundle?.gapCodes ?? [];
+                return {
+                    key: `order:${item.row.orderId}`,
+                    tone: item.status.tone === 'block' ? 'block' as const : 'warn' as const,
+                    title: `주문 @${item.row.targetInstagramId} · ${item.status.label}`,
+                    detail: gaps.length > 0 ? `${item.status.reason} · ${gaps.join(', ')}` : item.status.reason,
+                    action: '주문 열기',
+                    onOpen: () => onOpenOrder(item.row),
+                };
+            });
         const accountItems = inventory ? inventory
             .map(row => ({ row, tone: accountTone(row) }))
             .filter(item => item.tone.tone === 'warn' || item.tone.tone === 'block')

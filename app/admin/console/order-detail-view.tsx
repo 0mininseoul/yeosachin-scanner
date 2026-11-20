@@ -20,10 +20,14 @@ import {
     formatKrw,
     formatUsd,
     knownCostLabel,
+    adminOrderStatus,
     loadOrderCustomers,
+    orderCost,
+    orderCustomerOf,
     orderStatus,
     requestJson,
     shortId,
+    type AdminOrderRow,
     type OrderCustomer,
     type Tone,
 } from './console-data';
@@ -208,18 +212,50 @@ function StagePanel({ requestId, spec }: { requestId: string; spec: NumberedStag
     </Card>;
 }
 
-export function OrderDetailView({ requestId, onSummary }: {
-    requestId: string;
+function CustomerFacts({ customer, planId }: { customer: OrderCustomer | undefined; planId: string }) {
+    return <Card className="ac-facts ac-facts--customer">
+        <div className="ac-fact"><span>고객</span><strong>{customer?.userName ?? '미상'}</strong></div>
+        <div className="ac-fact"><span>성별 · 출생연도</span><strong>{[customer?.gender, customer?.birthyear].filter(Boolean).join(' · ') || '미상'}</strong></div>
+        <div className="ac-fact"><span>디바이스</span><strong>{customer?.deviceLabel ?? '미상'}</strong></div>
+        <div className="ac-fact"><span>유입 경로</span><strong>{customer?.attributionLabel ?? '미상'}</strong></div>
+        <div className="ac-fact"><span>결제 금액</span><strong>{formatKrw(customer?.paidAmountKrw)}</strong><small>{planId}</small></div>
+    </Card>;
+}
+
+/** Paid order without a permanent audit bundle: show the order facts honestly. */
+function OrderOnlyView({ order, note }: { order: AdminOrderRow; note: string }) {
+    const status = adminOrderStatus(order);
+    const cost = orderCost(order);
+    return <div className="ac-stack">
+        <div className="ac-row ac-row--wrap">
+            <Chip tone={status.tone}>{status.label}</Chip>
+            <span>{status.reason}</span>
+            <span className="ac-meta">· 결제 {formatDateTime(order.paidAt)} · {order.planId} · 주문 상태 {order.orderStatus}</span>
+        </div>
+        <CustomerFacts customer={orderCustomerOf(order)} planId={order.planId} />
+        <div className="ac-kpis">
+            <Card className="ac-kpi"><div className="ac-kpi-l">분석 대상</div><div className="ac-kpi-v ac-kpi-v--text">@{order.targetInstagramId}</div><div className="ac-meta">{order.excludedInstagramId ? `제외 @${order.excludedInstagramId}` : '제외 계정 없음'}</div></Card>
+            <Card className="ac-kpi"><div className="ac-kpi-l">실측 원가</div><div className="ac-kpi-v">{cost.known}</div><div className="ac-meta">{cost.conservative ? `보수 추정 ${cost.conservative}` : order.costSnapshot || order.bundle ? '확정' : '원가 기록 없음'}</div></Card>
+            <Card className="ac-kpi"><div className="ac-kpi-l">요청 ID</div><div className="ac-kpi-v ac-kpi-v--text ac-tabular">{shortId(order.requestId)}</div><div className="ac-meta">주문 {shortId(order.orderId)}</div></Card>
+        </div>
+        <p className="ac-alert ac-alert--soft" role="note">{note}</p>
+    </div>;
+}
+
+export function OrderDetailView({ requestId, order, onSummary }: {
+    requestId: string | null;
+    order: AdminOrderRow | null;
     onSummary: (summary: OrderAuditSummary | null) => void;
 }) {
     const [summary, setSummary] = useState<OrderAuditSummary | null>(null);
-    const [customer, setCustomer] = useState<OrderCustomer | undefined>(undefined);
+    const [customer, setCustomer] = useState<OrderCustomer | undefined>(order ? orderCustomerOf(order) : undefined);
     const [error, setError] = useState<string | null>(null);
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(Boolean(requestId) && order?.bundle !== null);
     const [selected, setSelected] = useState<string | null>(null);
     const [reload, setReload] = useState(0);
 
     useEffect(() => {
+        if (!requestId || order?.bundle === null) return;
         const controller = new AbortController();
         const params = new URLSearchParams({ section: 'summary', pageSize: String(PAGE_SIZE) });
         requestJson(`/api/admin/order-audit/${encodeURIComponent(requestId)}?${params.toString()}`, orderAuditLoadPayloadSchema, { signal: controller.signal })
@@ -235,15 +271,22 @@ export function OrderDetailView({ requestId, onSummary }: {
                 setError(errorMessage(caught, '주문 번들을 불러오지 못했습니다.'));
             })
             .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-        loadOrderCustomers([requestId], controller.signal)
-            .then(map => { if (!controller.signal.aborted) setCustomer(map.get(requestId)); })
-            .catch(() => { if (!controller.signal.aborted) setCustomer(undefined); });
+        if (!order) {
+            loadOrderCustomers([requestId], controller.signal)
+                .then(map => { if (!controller.signal.aborted) setCustomer(map.get(requestId)); })
+                .catch(() => { if (!controller.signal.aborted) setCustomer(undefined); });
+        }
         return () => controller.abort();
-    }, [onSummary, reload, requestId]);
+    }, [onSummary, order, reload, requestId]);
 
     const specs = useMemo(() => (summary ? stageSpecs(summary).map((spec, index) => ({ ...spec, number: index + 1 })) : []), [summary]);
     const divergence = useMemo(() => deriveFirstDivergence(specs.map(spec => ({ key: spec.key, declared: spec.declared, collected: spec.collected }))), [specs]);
 
+    if (order && (order.bundle === null || !requestId)) {
+        return <OrderOnlyView order={order} note={order.orderStatus === 'completed'
+            ? '이 주문은 영구 감사 번들이 없어 증거 단계별 목록을 볼 수 없습니다. (감사 번들은 2026-09-04 이후 조립된 주문부터 있습니다.)'
+            : '분석이 끝나지 않았거나 환불된 주문이라 감사 번들이 없습니다.'} />;
+    }
     if (loading && !summary) return <Loading label="주문 번들을 불러오는 중…" />;
     if (error || !summary) return <ErrorNotice message={error ?? '주문 번들을 찾지 못했습니다.'} onRetry={() => { setLoading(true); setError(null); setReload(value => value + 1); }} />;
 
@@ -260,13 +303,7 @@ export function OrderDetailView({ requestId, onSummary }: {
             <span className="ac-meta">· 조립 {formatDateTime(summary.assembledAt)} · v{summary.version} · {summary.planId} · {summary.accessMode} · 번들 해시 <span className="ac-tabular">{shortId(summary.bundleHash)}</span></span>
         </div>
 
-        <Card className="ac-facts ac-facts--customer">
-            <div className="ac-fact"><span>고객</span><strong>{customer?.userName ?? '미상'}</strong></div>
-            <div className="ac-fact"><span>성별 · 출생연도</span><strong>{[customer?.gender, customer?.birthyear].filter(Boolean).join(' · ') || '미상'}</strong></div>
-            <div className="ac-fact"><span>디바이스</span><strong>{customer?.deviceLabel ?? '미상'}</strong></div>
-            <div className="ac-fact"><span>유입 경로</span><strong>{customer?.attributionLabel ?? '미상'}</strong></div>
-            <div className="ac-fact"><span>결제 금액</span><strong>{formatKrw(customer?.paidAmountKrw)}</strong><small>{summary.planId}</small></div>
-        </Card>
+        <CustomerFacts customer={customer} planId={summary.planId} />
 
         <div className="ac-kpis">
             <Card className="ac-kpi"><div className="ac-kpi-l">실측 원가</div><div className="ac-kpi-v">{knownCostLabel(summary.cost.knownUsd, summary.cost.status)}</div><div className="ac-meta">직접 귀속된 알려진 USD</div></Card>
@@ -309,6 +346,6 @@ export function OrderDetailView({ requestId, onSummary }: {
             </div> : null}
         </Card>
 
-        {active ? <StagePanel key={`${requestId}:${active.key}`} requestId={requestId} spec={active} /> : null}
+        {active ? <StagePanel key={`${summary.requestId}:${active.key}`} requestId={summary.requestId} spec={active} /> : null}
     </div>;
 }

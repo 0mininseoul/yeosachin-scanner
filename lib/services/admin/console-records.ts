@@ -121,3 +121,137 @@ export async function loadAdminOrderCustomers(
     return z.object({ rows: z.array(orderCustomerRowSchema).max(50) }).parse(data).rows
         .map(row => ({ ...row, gender: displayGender(row.gender) }));
 }
+
+/* ---------- paid order list (every paid order, bundle when present) ---------- */
+
+const usdValue = z.coerce.number().finite().nonnegative();
+const orderStatusSchema = z.enum([
+    'payment_pending', 'payment_failed', 'paid', 'analysis_in_progress', 'completed',
+    'overflow_refund_required', 'cancelled', 'refund_pending', 'refunded',
+]);
+
+const adminOrderRowSchema = z.object({
+    orderId: z.string().uuid(),
+    requestId: z.string().uuid().nullable(),
+    orderStatus: orderStatusSchema,
+    planId: z.string().max(16),
+    targetInstagramId: z.string().max(30),
+    excludedInstagramId: z.string().max(30).nullable(),
+    paidAt: timestamp,
+    paidAmountKrw: z.number().int().nonnegative().nullable(),
+    userName: z.string().max(255).nullable(),
+    gender: z.string().max(20).nullable(),
+    birthyear: z.string().max(4).nullable(),
+    attributionLabel: attributionLabel.nullable(),
+    deviceLabel: z.string().max(40).nullable(),
+    bundle: z.object({
+        version: z.number().int().positive(),
+        completenessStatus: z.enum(['complete', 'partial', 'inconsistent', 'failed']),
+        gapCodes: z.array(z.string().max(96)).max(32),
+        costStatus: z.enum(['complete', 'partial', 'unknown', 'not_available']),
+        knownUsd: usdValue.nullable(),
+        conservativeUsd: usdValue.nullable(),
+        assembledAt: timestamp,
+        retentionState: z.enum(['retained', 'pending', 'fenced', 'unknown']),
+    }).nullable(),
+    costSnapshot: z.object({
+        knownUsd: usdValue.nullable(),
+        conservativeUsd: usdValue.nullable(),
+        complete: z.boolean(),
+        usageUnknown: z.boolean(),
+    }).nullable(),
+    cursorPaidAt: timestamp,
+    cursorId: z.string().uuid(),
+});
+
+export type AdminOrderRow = Omit<z.infer<typeof adminOrderRowSchema>, 'cursorPaidAt' | 'cursorId'>;
+
+const orderCursorSchema = z.object({ p: timestamp, i: z.string().uuid() }).strict();
+
+export function encodeOrderCursor(paidAt: string, id: string): string {
+    return Buffer.from(JSON.stringify({ p: paidAt, i: id })).toString('base64url');
+}
+
+export function decodeOrderCursor(value: string): { paidAt: string; id: string } {
+    try {
+        const parsed = orderCursorSchema.parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+        return { paidAt: parsed.p, id: parsed.i };
+    } catch {
+        throw new AdminConsoleCursorInvalidError();
+    }
+}
+
+export async function loadAdminOrders(
+    client: RpcClient,
+    query: { cursor?: string; pageSize: number },
+): Promise<{ rows: AdminOrderRow[]; nextCursor: string | null }> {
+    const cursor = query.cursor ? decodeOrderCursor(query.cursor) : null;
+    const { data, error } = await client.rpc('load_admin_orders', {
+        p_cursor_paid_at: cursor?.paidAt ?? null,
+        p_cursor_id: cursor?.id ?? null,
+        p_page_size: query.pageSize + 1,
+    });
+    if (error) throw new Error('ADMIN_ORDERS_UNAVAILABLE');
+    const rows = z.object({ rows: z.array(adminOrderRowSchema).max(51) }).parse(data).rows;
+    const page = rows.slice(0, query.pageSize);
+    const last = page[page.length - 1];
+    return {
+        rows: page.map(row => {
+            const { cursorPaidAt, cursorId, ...rest } = row;
+            void cursorPaidAt; void cursorId;
+            return { ...rest, gender: displayGender(rest.gender) };
+        }),
+        nextCursor: rows.length > query.pageSize && last ? encodeOrderCursor(last.cursorPaidAt, last.cursorId) : null,
+    };
+}
+
+/* ---------- users (every column of public.users + order/lead totals) ---------- */
+
+const userFieldValue = z.union([z.string().max(2048), z.number(), z.boolean(), z.null()]);
+
+const adminUserRowSchema = z.object({
+    id: z.string().uuid(),
+    cursor_created_at: z.string(),
+}).catchall(userFieldValue);
+
+export type AdminUserRow = Record<string, string | number | boolean | null> & { id: string };
+
+const userCursorSchema = z.object({ c: z.string().min(1).max(64), i: z.string().uuid() }).strict();
+
+export function encodeUserCursor(createdAt: string, id: string): string {
+    return Buffer.from(JSON.stringify({ c: createdAt, i: id })).toString('base64url');
+}
+
+export function decodeUserCursor(value: string): { createdAt: string; id: string } {
+    try {
+        const parsed = userCursorSchema.parse(JSON.parse(Buffer.from(value, 'base64url').toString('utf8')));
+        return { createdAt: parsed.c, id: parsed.i };
+    } catch {
+        throw new AdminConsoleCursorInvalidError();
+    }
+}
+
+export async function loadAdminUsers(
+    client: RpcClient,
+    query: { search?: string; cursor?: string; pageSize: number },
+): Promise<{ rows: AdminUserRow[]; nextCursor: string | null }> {
+    const cursor = query.cursor ? decodeUserCursor(query.cursor) : null;
+    const { data, error } = await client.rpc('load_admin_users', {
+        p_search: query.search ?? null,
+        p_cursor_created_at: cursor?.createdAt ?? null,
+        p_cursor_id: cursor?.id ?? null,
+        p_page_size: query.pageSize + 1,
+    });
+    if (error) throw new Error('ADMIN_USERS_UNAVAILABLE');
+    const rows = z.object({ rows: z.array(adminUserRowSchema).max(51) }).parse(data).rows;
+    const page = rows.slice(0, query.pageSize);
+    const last = page[page.length - 1];
+    return {
+        rows: page.map(row => {
+            const { cursor_created_at: cursorCreatedAt, ...rest } = row;
+            void cursorCreatedAt;
+            return rest as AdminUserRow;
+        }),
+        nextCursor: rows.length > query.pageSize && last ? encodeUserCursor(last.cursor_created_at, last.id) : null,
+    };
+}

@@ -261,3 +261,12 @@ td.ac-empty { text-align: center; }
     .ac-search { flex: 1 1 220px; min-width: 0; }
     .ac-pool { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------- users ---------- */
+.ac-field--grow { flex: 1 1 320px; max-width: 420px; }
+.ac-field--grow input { width: 100%; }
+.ac-user-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0 24px; margin: 0; padding: 14px 18px; background: #fafbfc; }
+.ac-user-fields div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px dashed var(--ac-line); font-size: 13px; }
+.ac-user-fields dt { color: var(--ac-muted); font-weight: 500; }
+.ac-user-fields dt small { display: block; font-size: 11px; color: #8a929e; }
+.ac-user-fields dd { margin: 0; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
