@@ -44,29 +44,47 @@ export default async function OperatorPreflightScreenPage({ params }: { params: 
         return <Shell title="잘못된 preflight ID"><p className="mt-4 text-[14px] text-fg-dim">주소를 확인해 주세요.</p></Shell>;
     }
 
-    const { data: row, error } = await supabaseAdmin.from('analysis_preflights').select('*').eq('id', preflightId).maybeSingle();
-    if (error) {
+    const [live, archived] = await Promise.all([
+        supabaseAdmin.from('analysis_preflights').select('*').eq('id', preflightId).maybeSingle(),
+        supabaseAdmin.from('admin_preflight_screen_archive').select('*').eq('preflight_id', preflightId).maybeSingle(),
+    ]);
+    if (live.error && archived.error) {
         return <Shell title="불러오지 못했습니다"><p className="mt-4 text-[14px] text-fg-dim">잠시 후 다시 시도해 주세요.</p></Shell>;
     }
-    if (!row) {
-        return <Shell title="화면을 다시 만들 수 없습니다"><p className="mt-4 text-[14px] text-fg-dim">이 preflight는 보관 기간이 지나 정리됐습니다. 콘솔 목록의 상태와 수치만 남아 있습니다.</p></Shell>;
-    }
+    const row = live.data as Record<string, unknown> | null;
+    const archive = archived.data as Record<string, unknown> | null;
 
     let screen: Extract<PreflightStatusV1, { status: 'ready' }> | null = null;
-    let reason = '이 preflight는 완료 상태가 아닙니다.';
+    let source: 'live' | 'archive' | null = null;
+    let reason = row ? '이 preflight는 완료 상태가 아닙니다.' : '이 preflight는 보관 기간이 지나 정리됐고, 운영자 보관본도 없습니다.';
+    const replay = (input: Record<string, unknown>) => {
+        const stored = storedPreflightFromRow(input);
+        if (!stored.readySnapshot) return null;
+        // Replay the ready state as the user saw it, regardless of later expiry or checkout.
+        const dto = publicPreflightStatusDto({ ...stored, status: 'ready', expiresAt: FAR_FUTURE });
+        return dto.status === 'ready' ? dto : null;
+    };
     try {
-        const stored = storedPreflightFromRow(row as Record<string, unknown>);
-        if (stored.readySnapshot && (row as { pii_scrubbed_at?: string | null }).pii_scrubbed_at == null) {
-            // Replay the ready state as the user saw it, regardless of later expiry or checkout.
-            const dto = publicPreflightStatusDto({ ...stored, status: 'ready', expiresAt: FAR_FUTURE });
-            if (dto.status === 'ready') screen = dto;
-        } else if (stored.readySnapshot || (row as { ready_at?: string | null }).ready_at) {
-            reason = '개인정보 보관 기간이 지나 대상 프로필이 정리됐습니다. 콘솔 목록의 수치만 남아 있습니다.';
+        if (row && row.pii_scrubbed_at == null) {
+            screen = replay(row);
+            if (screen) source = 'live';
+        }
+        if (!screen && archive) {
+            screen = replay({ ...archive, id: archive.preflight_id, status: 'ready', error_code: null });
+            if (screen) source = 'archive';
+        }
+        if (!screen && row && (row.ready_at || row.pii_scrubbed_at)) {
+            reason = '대상 프로필이 정리됐고, 운영자 보관본이 만들어지기 전의 preflight입니다.';
         }
     } catch {
         reason = '저장된 스냅샷 형식을 읽을 수 없습니다.';
     }
 
     if (!screen) return <Shell title="화면을 다시 만들 수 없습니다"><p className="mt-4 text-[14px] text-fg-dim">{reason}</p></Shell>;
-    return <Shell title={`@${screen.target.username}`}><PreflightScreen preflight={screen} /></Shell>;
+    return <Shell title={`@${screen.target.username}`}>
+        {source === 'archive'
+            ? <p className="mt-2 text-[12px] text-fg-dim">운영자 보관본 · 유저 화면은 만료됐습니다{archive?.captured_at ? ` · 보관 ${new Date(String(archive.captured_at)).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` : ''} · 프로필 사진은 인스타그램 링크 만료로 안 보일 수 있습니다</p>
+            : null}
+        <PreflightScreen preflight={screen} />
+    </Shell>;
 }
