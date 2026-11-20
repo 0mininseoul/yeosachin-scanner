@@ -35,7 +35,6 @@ export function EmailLogin() {
                 이메일로 로그인
             </button>
             <form id={formId} action={signIn} hidden={!expanded} data-amp-mask className="mt-4 space-y-3">
-                <p className="text-xs text-fg-dim">발급받은 심사 계정으로 로그인하세요.</p>
                 <label className="block text-sm text-fg">
                     이메일
                     <input name="email" type="email" autoComplete="username" maxLength={254}
