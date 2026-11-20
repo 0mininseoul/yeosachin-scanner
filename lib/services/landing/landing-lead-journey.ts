@@ -177,6 +177,24 @@ export function readCaptureToken(
     return { tokenHash };
 }
 
+/**
+ * Journey id for a raw capture token, or null when the token is missing or not
+ * signed by this deployment. Used only to attach failure reasons to a lead.
+ */
+export function landingJourneyIdFromCaptureToken(
+    token: string | null | undefined,
+    env: Record<string, string | undefined> = process.env,
+): string | null {
+    const value = token?.trim();
+    if (!value) return null;
+    try {
+        const parsed = readCaptureToken(value, landingLeadCaptureSecret(env));
+        return parsed ? captureTokenJourneyId(parsed.tokenHash) : null;
+    } catch {
+        return null;
+    }
+}
+
 export function captureTokenJourneyId(tokenHash: string): string {
     if (!/^[a-f0-9]{64}$/.test(tokenHash)) throw new Error('LANDING_LEAD_CAPTURE_HASH_INVALID');
     return captureJourneyId(tokenHash);

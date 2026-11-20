@@ -25,6 +25,8 @@ interface RecordPreflightFailureInput {
     preflightId?: string;
     stage: PreflightFailureStage;
     errorCode: PreflightFailureReason;
+    /** Landing journey of the input, so the operator console can show why it failed. */
+    landingJourneyId?: string | null;
 }
 
 interface RecordPreflightFailureDependencies {
@@ -86,6 +88,7 @@ export async function recordPreflightFailure(
     if (
         (input.userId !== undefined && input.userId !== null && !UUID_PATTERN.test(input.userId))
         || (input.preflightId !== undefined && !UUID_PATTERN.test(input.preflightId))
+        || (input.landingJourneyId !== undefined && input.landingJourneyId !== null && !UUID_PATTERN.test(input.landingJourneyId))
         || !REASONS.has(input.errorCode)
     ) return false;
     try {
@@ -94,6 +97,7 @@ export async function recordPreflightFailure(
             .insert({
                 ...(input.userId ? { user_id: input.userId } : {}),
                 ...(input.preflightId ? { preflight_id: input.preflightId } : {}),
+                ...(input.landingJourneyId ? { landing_journey_id: input.landingJourneyId } : {}),
                 stage: input.stage,
                 error_code: input.errorCode,
             });
