@@ -141,7 +141,7 @@ describe('console records helpers', () => {
 
 describe('console order status', () => {
     const base: AdminOrderRow = {
-        orderId: '30000000-0000-4000-8000-000000000001', requestId: null, orderStatus: 'completed', planId: 'basic',
+        orderId: '30000000-0000-4000-8000-000000000001', requestId: null, orderStatus: 'completed', preflightId: null, preflightScreenArchived: false, planId: 'basic',
         targetInstagramId: 't.one', excludedInstagramId: null, paidAt: '2026-11-18T00:00:00.000Z', paidAmountKrw: 14900,
         userName: null, gender: null, birthyear: null, attributionLabel: null, deviceLabel: null, bundle: null, costSnapshot: null,
     };

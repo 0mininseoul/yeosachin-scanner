@@ -130,7 +130,7 @@ describe('operator console routes', () => {
 
     it('lists paid orders with a cursor and normalized gender', async () => {
         const order = (id: string) => ({
-            orderId: id, requestId: null, orderStatus: 'completed', planId: 'basic', targetInstagramId: 't.one',
+            orderId: id, requestId: null, orderStatus: 'completed', preflightId: null, preflightScreenArchived: false, planId: 'basic', targetInstagramId: 't.one',
             excludedInstagramId: null, paidAt: '2026-08-30T10:00:00+00:00', paidAmountKrw: 14900, userName: '이현준',
             gender: 'male', birthyear: '1994', attributionLabel: null, deviceLabel: null, bundle: null,
             costSnapshot: { knownUsd: 0.8, conservativeUsd: 1, complete: false, usageUnknown: false },

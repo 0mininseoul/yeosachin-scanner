@@ -236,6 +236,11 @@ function CustomerFacts({ customer, planId }: { customer: OrderCustomer | undefin
     </Card>;
 }
 
+function PreflightScreenLink({ order }: { order: AdminOrderRow | null }) {
+    if (!order?.preflightId || !order.preflightScreenArchived) return null;
+    return <a className="ac-btn ac-btn--sm" href={`/admin0min/preflight/${order.preflightId}`} target="_blank" rel="noreferrer">결제 전 본 preflight 화면 ↗</a>;
+}
+
 /** Paid order without a permanent audit bundle: show the order facts honestly. */
 function OrderOnlyView({ order, note }: { order: AdminOrderRow; note: string }) {
     const status = adminOrderStatus(order);
@@ -245,6 +250,7 @@ function OrderOnlyView({ order, note }: { order: AdminOrderRow; note: string }) 
             <Chip tone={status.tone}>{status.label}</Chip>
             <span>{status.reason}</span>
             <span className="ac-meta">· 결제 {formatDateTime(order.paidAt)} · {order.planId} · 주문 상태 {order.orderStatus}</span>
+            <span className="ac-push"><PreflightScreenLink order={order} /></span>
         </div>
         <CustomerFacts customer={orderCustomerOf(order)} planId={order.planId} />
         <div className="ac-kpis">
@@ -316,6 +322,7 @@ export function OrderDetailView({ requestId, order, onSummary }: {
             <Chip tone={status.tone}>{status.label}</Chip>
             <span>{status.reason}</span>
             <span className="ac-meta">· 조립 {formatDateTime(summary.assembledAt)} · v{summary.version} · {summary.planId} · {summary.accessMode} · 번들 해시 <span className="ac-tabular">{shortId(summary.bundleHash)}</span></span>
+            <span className="ac-push"><PreflightScreenLink order={order} /></span>
         </div>
 
         <CustomerFacts customer={customer} planId={summary.planId} />
