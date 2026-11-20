@@ -1,11 +1,9 @@
 'use client';
 
 import Image from 'next/image';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
     activeCandidateMediaKey,
-    appendScreenedCandidate,
-    candidateCopyKey,
     candidateTileKey,
     flattenScreenedCandidateMedia,
     mergeScreenedCandidateHistory,
@@ -13,7 +11,6 @@ import {
     nextDriftOffset,
     progressCopyDistance,
     type ActiveCandidateMedia,
-    type ScreenedCandidateMediaTile,
     type ScreenedCandidate,
 } from '@/lib/services/analysis/progress-faces';
 import type { ProgressCandidateMediaV1 } from '@/lib/contracts/analysis-v2';
@@ -26,6 +23,11 @@ const PROGRESS_RAIL_MAX_WIDTH_PX = 460;
 const DEFAULT_PROGRESS_COPY_COUNT = 3;
 const MAX_FACE_TILE_RETRIES = 2;
 const FACE_TILE_RETRY_DELAY_MS = 1_000;
+
+interface RailImageState {
+    src: string;
+    status: 'ready' | 'recovering' | 'recovered' | 'unavailable';
+}
 
 /**
  * Size the repeated rail copies so the max-width progress viewport can scroll
@@ -61,136 +63,31 @@ export function progressRailCopyGeometry(tileCount: number) {
 const DRIFT_PX_PER_SECOND = 26;
 
 function FaceTile({
-    src,
+    displaySrc,
     current,
+    onError,
 }: {
-    src: string | undefined;
+    displaySrc: string;
     current: boolean;
+    onError: () => void;
 }) {
-    /*
-     * Signed image URLs rotate independently of a tile's identity. Keep the
-     * last image that actually loaded in the visible slot while probing a new
-     * URL off-screen. A transient 403/timeout therefore cannot replace a
-     * useful face with initials or a broken-image/placeholder tile.
-     */
-    const [lastGoodSrc, setLastGoodSrc] = useState<string | undefined>();
-    const [pendingSrc, setPendingSrc] = useState<string | undefined>();
-    const [exhaustedSrc, setExhaustedSrc] = useState<string | undefined>();
-    const [retryVersion, setRetryVersion] = useState(0);
-    const retryStateRef = useRef(new Map<string, {
-        attempts: number;
-        timer: ReturnType<typeof setTimeout> | undefined;
-    }>());
-
-    useEffect(() => {
-        for (const [candidate, state] of retryStateRef.current) {
-            if (candidate === src) continue;
-            if (state.timer !== undefined) clearTimeout(state.timer);
-            retryStateRef.current.delete(candidate);
-        }
-    }, [src]);
-
-    useEffect(() => () => {
-        for (const state of retryStateRef.current.values()) {
-            if (state.timer !== undefined) clearTimeout(state.timer);
-        }
-        retryStateRef.current.clear();
-    }, []);
-
-    const scheduleRetry = (candidate: string) => {
-        const state = retryStateRef.current.get(candidate) ?? {
-            attempts: 0,
-            timer: undefined,
-        };
-        if (state.timer !== undefined) clearTimeout(state.timer);
-        if (state.attempts >= MAX_FACE_TILE_RETRIES) {
-            setExhaustedSrc(candidate);
-            setPendingSrc(currentPending => (
-                currentPending === candidate ? undefined : currentPending
-            ));
-            retryStateRef.current.set(candidate, state);
-            return;
-        }
-
-        state.attempts += 1;
-        state.timer = setTimeout(() => {
-            state.timer = undefined;
-            setRetryVersion(version => version + 1);
-        }, FACE_TILE_RETRY_DELAY_MS * state.attempts);
-        retryStateRef.current.set(candidate, state);
-    };
-
-    const onImageLoad = (loadedSrc: string) => {
-        if (loadedSrc !== src) return;
-        const retryState = retryStateRef.current.get(loadedSrc);
-        if (retryState?.timer !== undefined) clearTimeout(retryState.timer);
-        retryStateRef.current.delete(loadedSrc);
-        setExhaustedSrc(currentExhausted => (
-            currentExhausted === loadedSrc ? undefined : currentExhausted
-        ));
-        setLastGoodSrc(loadedSrc);
-        setPendingSrc(currentPending => (
-            currentPending === loadedSrc ? undefined : currentPending
-        ));
-    };
-
-    const onImageError = (failedImageSrc: string) => {
-        if (failedImageSrc === lastGoodSrc) setLastGoodSrc(undefined);
-        setPendingSrc(currentPending => currentPending ?? failedImageSrc);
-        scheduleRetry(failedImageSrc);
-    };
-
-    const exhaustedCurrentSrc = exhaustedSrc === src;
-    // A source with no prior good image stays invisible while its first probe
-    // loads. Once it errors, only the invisible probe is retried; an exhausted
-    // source stays blank instead of looping a broken image forever.
-    const sourceChanged = src !== undefined && src !== lastGoodSrc;
-    const activePendingSrc = pendingSrc === src ? pendingSrc : undefined;
-    const displaySrc = lastGoodSrc;
-    const probeSrc = exhaustedCurrentSrc
-        ? undefined
-        : activePendingSrc ?? (sourceChanged ? src : undefined);
-    const hasVisibleImage = displaySrc !== undefined;
     return (
         <div
-            className={`relative shrink-0 overflow-hidden ${
-                hasVisibleImage
-                    ? `border bg-panel ${current
-                        ? 'border-blood shadow-[0_0_16px_-2px_rgba(228,19,42,0.45)]'
-                        : 'border-line-2'}`
-                    : 'border-transparent bg-transparent'
-            }`}
+            className={`relative shrink-0 overflow-hidden border bg-panel ${current
+                ? 'border-blood shadow-[0_0_16px_-2px_rgba(228,19,42,0.45)]'
+                : 'border-line-2'}`}
             style={{ width: TILE_PX, height: TILE_PX }}
         >
-            {displaySrc ? (
-                <Image
-                    src={displaySrc}
-                    alt=""
-                    width={TILE_PX}
-                    height={TILE_PX}
-                    unoptimized
-                    loading="lazy"
-                    className="h-full w-full object-cover"
-                    onLoad={() => onImageLoad(displaySrc)}
-                    onError={() => onImageError(displaySrc)}
-                />
-            ) : null}
-            {probeSrc && probeSrc !== displaySrc ? (
-                <Image
-                    key={`probe:${retryVersion}`}
-                    src={probeSrc}
-                    alt=""
-                    width={TILE_PX}
-                    height={TILE_PX}
-                    unoptimized
-                    loading="eager"
-                    aria-hidden="true"
-                    data-progress-retry="true"
-                    className="pointer-events-none absolute h-px w-px opacity-0"
-                    onLoad={() => onImageLoad(probeSrc)}
-                    onError={() => onImageError(probeSrc)}
-                />
-            ) : null}
+            <Image
+                src={displaySrc}
+                alt=""
+                width={TILE_PX}
+                height={TILE_PX}
+                unoptimized
+                loading="lazy"
+                className="h-full w-full object-cover"
+                onError={onError}
+            />
         </div>
     );
 }
@@ -201,27 +98,50 @@ function safeProgressImageUrl(imageUrl: string | undefined, allowLocalAssets: bo
     return src?.startsWith('/api/image-proxy?') ? src : undefined;
 }
 
-function CandidateMediaTile({
-    tile,
-    copyIndex,
-    current,
-    allowLocalAssets,
+function FaceTileProbe({
+    probeSrc,
+    onReady,
 }: {
-    tile: ScreenedCandidateMediaTile;
-    copyIndex: number;
-    current: boolean;
-    allowLocalAssets: boolean;
+    probeSrc: string;
+    onReady: () => void;
 }) {
-    /* Heartbeats contain signed, owner-scoped proxy paths. Keep the rendering
-       boundary defensive too: a malformed heartbeat must not turn the browser
-       into a raw Instagram-CDN client or a blank placeholder tile. */
-    const safeSrc = safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets);
-    if (!safeSrc) return null;
-    return <FaceTile
-        key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex)}
-        src={safeSrc}
-        current={current && tile.mediaIndex === 0}
-    />;
+    const [attempt, setAttempt] = useState(0);
+    const retryRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const mounted = useRef(false);
+
+    useLayoutEffect(() => {
+        mounted.current = true;
+        return () => {
+            mounted.current = false;
+            clearTimeout(retryRef.current);
+            retryRef.current = undefined;
+        };
+    }, []);
+
+    return (
+        <Image
+            key={attempt}
+            src={probeSrc}
+            alt=""
+            width={TILE_PX}
+            height={TILE_PX}
+            unoptimized
+            loading="eager"
+            aria-hidden="true"
+            data-progress-retry="true"
+            className="absolute h-px w-px opacity-0"
+            onLoad={() => {
+                if (mounted.current) onReady();
+            }}
+            onError={() => {
+                if (!mounted.current || retryRef.current !== undefined || attempt >= MAX_FACE_TILE_RETRIES) return;
+                retryRef.current = setTimeout(() => {
+                    retryRef.current = undefined;
+                    setAttempt(attempt + 1);
+                }, FACE_TILE_RETRY_DELAY_MS * (attempt + 1));
+            }}
+        />
+    );
 }
 
 /* Drifts the row sideways forever by wrapping through repeated copies of itself.
@@ -233,12 +153,12 @@ function CandidateMediaTile({
  * Yields while a finger is held down, the way the review strip does; scrolling
  * by hand is a reasonable thing to want and fighting it is not.
  */
-function useFaceDrift(faceCount: number) {
+function useFaceDrift(hasVisibleRail: boolean) {
     const ref = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const el = ref.current;
-        if (!el || faceCount === 0) return;
+        if (!el || !hasVisibleRail) return;
         if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
         const copyElements = el.querySelectorAll<HTMLElement>('[data-progress-copy]');
         if (copyElements.length < 2) return;
@@ -249,8 +169,11 @@ function useFaceDrift(faceCount: number) {
         let pressed = false;
 
         const onPressStart = () => { pressed = true; };
-        const onPressEnd = () => { pressed = false; };
-        const onVisibility = () => { last = 0; };
+        const onPressEnd = () => {
+            pressed = false;
+            last = 0;
+            carry = 0;
+        };
 
         const tick = (now: number) => {
             frame = requestAnimationFrame(tick);
@@ -276,22 +199,22 @@ function useFaceDrift(faceCount: number) {
 
         el.addEventListener('pointerdown', onPressStart, { passive: true });
         el.addEventListener('touchstart', onPressStart, { passive: true });
-        for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
+        for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'blur'] as const) {
             window.addEventListener(event, onPressEnd, { passive: true });
         }
-        document.addEventListener('visibilitychange', onVisibility);
+        document.addEventListener('visibilitychange', onPressEnd);
         frame = requestAnimationFrame(tick);
 
         return () => {
             cancelAnimationFrame(frame);
             el.removeEventListener('pointerdown', onPressStart);
             el.removeEventListener('touchstart', onPressStart);
-            for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const) {
+            for (const event of ['pointerup', 'pointercancel', 'touchend', 'touchcancel', 'blur'] as const) {
                 window.removeEventListener(event, onPressEnd);
             }
-            document.removeEventListener('visibilitychange', onVisibility);
+            document.removeEventListener('visibilitychange', onPressEnd);
         };
-    }, [faceCount]);
+    }, [hasVisibleRail]);
 
     return ref;
 }
@@ -319,6 +242,7 @@ export function ProgressFaces({
 }) {
     const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
     const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
+    const [imageStates, setImageStates] = useState<ReadonlyMap<string, RailImageState>>(() => new Map());
     const serverCandidates = useMemo(() => candidateMedia.map(({
         candidateKey,
         maskedUsername,
@@ -343,17 +267,9 @@ export function ProgressFaces({
        a prop that changes over time, and an effect would paint the old row once
        before correcting it. The stable snapshot key makes repeated heartbeats a
        no-op while allowing the same candidate to be enriched with feed media. */
-    if (active && snapshotKey !== lastSnapshotKey) {
+    if ((active || candidateMedia.length > 0) && snapshotKey !== lastSnapshotKey) {
         setLastSnapshotKey(snapshotKey);
-        setCandidates(current => {
-            const withActive = appendScreenedCandidate(current, active);
-            return mergeScreenedCandidateHistory(withActive, serverCandidates);
-        });
-    }
-
-    if (!active && candidateMedia.length > 0 && snapshotKey !== lastSnapshotKey) {
-        setLastSnapshotKey(snapshotKey);
-        setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates));
+        setCandidates(current => mergeScreenedCandidateHistory(current, serverCandidates, active));
     }
 
     const mediaTiles = useMemo(() => {
@@ -363,51 +279,91 @@ export function ProgressFaces({
             .filter((url): url is string => Boolean(safeProgressImageUrl(url ?? undefined, true)))
             .map((imageUrl, mediaIndex) => ({ ...(candidateKey !== undefined ? { candidateKey } : {}), username,
                 occurrence, mediaIndex, imageUrl }))) : flattenScreenedCandidateMedia(candidates);
-        return pool.filter(tile => Boolean(safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets)));
+        return pool.flatMap(tile => {
+            const src = safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets);
+            return src ? [{ ...tile, src, key: `${tile.occurrence}:${tile.mediaIndex}` }] : [];
+        });
     }, [allowLocalAssets, candidates]);
-    // Geometry, drift, and rendering all use the same safe real-media pool;
-    // media-less or malformed candidates cannot create invisible gaps.
-    const railRef = useFaceDrift(mediaTiles.length);
-    const { copyCount } = progressRailCopyGeometry(mediaTiles.length);
-
-    if (mediaTiles.length < MIN_SCREENED_CANDIDATES_TO_SHOW) return null;
-
+    const tileKeys = useMemo(() => new Set(mediaTiles.map(tile => tile.key)), [mediaTiles]);
+    const displayedTiles = mediaTiles.flatMap(tile => {
+        const image = imageStates.get(tile.key);
+        const displaySrc = image?.status === 'ready' || image?.status === 'recovered'
+            ? safeProgressImageUrl(image.src, allowLocalAssets)
+            : undefined;
+        return displaySrc ? [{ ...tile, displaySrc }] : [];
+    });
+    // A source uses its last successfully decoded image while a new signature
+    // is loading. All copies share that image and omit pending or failed tiles.
+    const hasVisibleRail = displayedTiles.length >= MIN_SCREENED_CANDIDATES_TO_SHOW;
+    const railRef = useFaceDrift(hasVisibleRail);
+    const { copyCount } = progressRailCopyGeometry(displayedTiles.length);
     const newestOccurrence = candidates.at(-1)?.occurrence;
 
+    function recordImageState(key: string, src: string, loaded: boolean) {
+        setImageStates(current => {
+            const existing = current.get(key);
+            let status: RailImageState['status'];
+            if (loaded) {
+                if (existing?.src === src && existing.status !== 'recovering') return current;
+                status = existing?.src === src ? 'recovered' : 'ready';
+            } else {
+                // Duplicate errors and errors from an old display source cannot
+                // clear a replacement or start another recovery wave.
+                if (existing?.src !== src || (existing.status !== 'ready' && existing.status !== 'recovered')) {
+                    return current;
+                }
+                status = existing.status === 'ready' ? 'recovering' : 'unavailable';
+            }
+            return new Map([...current].filter(([key]) => tileKeys.has(key))).set(key, { src, status });
+        });
+    }
+
+    if (mediaTiles.length === 0) return null;
+
     return (
-        /* Faded at both edges so the row reads as a window onto something longer
-           rather than as a list that happens to be cut off. */
-        <div
-            className="relative -mx-5 mt-5"
-            style={{
-                maskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
-                WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
-            }}
-        >
-            <div
-                ref={railRef}
-                aria-hidden="true"
-                className="scroll-thin flex gap-2.5 overflow-x-auto px-5"
-            >
-                {/* Enough explicit copies cover the viewport while one wraps. */}
-                {Array.from({ length: copyCount }, (_, copyIndex) => (
-                    <div
-                        key={`copy-${copyIndex}`}
-                        data-progress-copy
-                        className="flex shrink-0 gap-2.5"
-                    >
-                        {mediaTiles.map(tile => (
-                            <CandidateMediaTile
-                                allowLocalAssets={allowLocalAssets}
-                                key={`${candidateCopyKey(tile.occurrence, copyIndex)}:${tile.mediaIndex}`}
-                                tile={tile}
-                                copyIndex={copyIndex}
-                                current={tile.occurrence === newestOccurrence}
-                            />
-                        ))}
-                    </div>
-                ))}
+        <>
+            <div className="pointer-events-none absolute h-0 w-0 overflow-hidden" aria-hidden="true">
+                {mediaTiles.map(tile => {
+                    const image = imageStates.get(tile.key);
+                    if (image?.src === tile.src && image.status !== 'recovering') return null;
+                    return <FaceTileProbe
+                        key={`${tile.key}:${tile.src}`}
+                        probeSrc={tile.src}
+                        onReady={() => recordImageState(tile.key, tile.src, true)}
+                    />;
+                })}
             </div>
-        </div>
+            {hasVisibleRail && <div
+                className="relative -mx-5 mt-5"
+                style={{
+                    maskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
+                    WebkitMaskImage: 'linear-gradient(90deg, transparent, #000 40px, #000 calc(100% - 40px), transparent)',
+                }}
+            >
+                <div
+                    ref={railRef}
+                    aria-hidden="true"
+                    className="scroll-thin flex gap-2.5 overflow-x-auto px-5"
+                >
+                    {/* Enough explicit copies cover the viewport while one wraps. */}
+                    {Array.from({ length: copyCount }, (_, copyIndex) => (
+                        <div
+                            key={`copy-${copyIndex}`}
+                            data-progress-copy
+                            className="flex shrink-0 gap-2.5"
+                        >
+                            {displayedTiles.map(tile => (
+                                <FaceTile
+                                    key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex)}
+                                    displaySrc={tile.displaySrc}
+                                    current={tile.occurrence === newestOccurrence && tile.mediaIndex === 0}
+                                    onError={() => recordImageState(tile.key, tile.displaySrc, false)}
+                                />
+                            ))}
+                        </div>
+                    ))}
+                </div>
+            </div>}
+        </>
     );
 }
