@@ -1,13 +1,14 @@
 import 'server-only';
 
+import type { GenerateContentParameters } from '@google/genai';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
-import { estimateVertexAiPreDispatchCost } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
+import { estimateDevLiveVertexReservation } from './live-vertex-reservation';
 
 export const DEV_LIVE_BUDGET_UNAVAILABLE = 'DEV_LIVE_BUDGET_UNAVAILABLE';
 export const DEV_LIVE_BUDGET_EXCEEDED = 'DEV_LIVE_BUDGET_EXCEEDED';
@@ -22,12 +23,6 @@ const APIFY_ACTORS = new Set([
     'datadoping/instagram-likes-scraper',
     'apify/instagram-comment-scraper',
 ]);
-
-// Google publishes these context and output limits for all three exact model IDs.
-// Reserve for the full context, including unseen schema and multimedia tokens.
-const VERTEX_MODELS = new Set(['gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.7-flash']);
-const VERTEX_MAX_CONTEXT_TOKENS = 1_048_576;
-const VERTEX_MAX_OUTPUT_TOKENS = 65_536;
 
 type Provider = 'apify' | 'vertex';
 const workerApproval = new AsyncLocalStorage<DevLiveApproval>();
@@ -122,18 +117,11 @@ export async function reserveDevLiveApifyStart(approval: DevLiveApproval, actorI
 
 export function reserveDevLiveVertexAttempt(
     approval: DevLiveApproval,
-    modelName: string,
+    request: GenerateContentParameters,
     location: string,
-    maxOutputTokens: number | undefined,
 ): Promise<DevLiveCostReservation> {
-    if (location !== 'global' || !VERTEX_MODELS.has(modelName)
-        || maxOutputTokens === undefined || !Number.isSafeInteger(maxOutputTokens)
-        || maxOutputTokens < 1 || maxOutputTokens > VERTEX_MAX_OUTPUT_TOKENS) {
-        throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
-    }
-    const cap = estimateVertexAiPreDispatchCost({
-        modelName, location, inputTokens: VERTEX_MAX_CONTEXT_TOKENS, maxOutputTokens,
-    });
+    const cap = estimateDevLiveVertexReservation(request, location);
+    if (!cap) throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
     return reserve(approval, 'vertex', cap.totalCostUsd);
 }
 

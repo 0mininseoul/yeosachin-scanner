@@ -1021,8 +1021,8 @@ export async function analyzeWithGemini<T>(
     const configuredBudgetGuard = ['1', 'true', 'yes', 'on'].includes(
         process.env.VERTEX_AI_BUDGET_GUARD_ENABLED?.trim().toLowerCase() ?? '',
     );
-    // Owner-start runs reserve the full context in their separate durable
-    // grant. The shared daily ledger would combine distinct Dev runs.
+    // Owner-start runs reserve against their separate durable grant.
+    // The shared daily ledger would combine distinct Dev runs.
     const resolvedBudgetGuard = devLiveApproval && process.env.DEV_LIVE_ANALYSIS_MODE === 'owner_start'
         ? null
         : suppliedBudgetGuard ?? (configuredBudgetGuard
@@ -1153,6 +1153,11 @@ export async function analyzeWithGemini<T>(
                         }
                         : {}),
                 };
+                const generationRequest = {
+                    model: modelName,
+                    contents: [{ role: 'user', parts }],
+                    config,
+                };
                 const dispatch = async () => {
                     if (abortSignal?.aborted) {
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
@@ -1198,7 +1203,7 @@ export async function analyzeWithGemini<T>(
                     }
                     const devReservation = devLiveBudget && devLiveApproval
                         ? await devLiveBudget.reserveDevLiveVertexAttempt(
-                            devLiveApproval, modelName, GOOGLE_CLOUD_LOCATION, resolvedMaxOutputTokens,
+                            devLiveApproval, generationRequest, GOOGLE_CLOUD_LOCATION,
                         )
                         : null;
                     if (abortSignal?.aborted) {
@@ -1207,11 +1212,7 @@ export async function analyzeWithGemini<T>(
                     providerDispatchStarted = true;
                     let generated;
                     try {
-                        generated = await client.models.generateContent({
-                            model: modelName,
-                            contents: [{ role: 'user', parts }],
-                            config,
-                        });
+                        generated = await client.models.generateContent(generationRequest);
                     } catch (error) {
                         // Settle only the single Dev call that Vertex explicitly rejected.
                         if (devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
