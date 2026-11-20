@@ -135,6 +135,8 @@ export const adminOrdersSchema = z.object({
             'payment_pending', 'payment_failed', 'paid', 'analysis_in_progress', 'completed',
             'overflow_refund_required', 'cancelled', 'refund_pending', 'refunded',
         ]),
+        preflightId: z.string().uuid().nullable(),
+        preflightScreenArchived: z.boolean(),
         planId: z.string(),
         targetInstagramId: z.string(),
         excludedInstagramId: z.string().nullable(),

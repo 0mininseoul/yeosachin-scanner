@@ -158,6 +158,8 @@ const adminOrderRowSchema = z.object({
     orderId: z.string().uuid(),
     requestId: z.string().uuid().nullable(),
     orderStatus: orderStatusSchema,
+    preflightId: z.string().uuid().nullable(),
+    preflightScreenArchived: z.boolean(),
     planId: z.string().max(16),
     targetInstagramId: z.string().max(30),
     excludedInstagramId: z.string().max(30).nullable(),
