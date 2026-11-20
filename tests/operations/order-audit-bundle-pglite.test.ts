@@ -7,6 +7,10 @@ const migration = readFileSync(new URL(
     '../../supabase/migrations/20260904130000_add_permanent_order_audit_bundle.sql',
     import.meta.url,
 ), 'utf8');
+const reverseScoreMigration = readFileSync(new URL(
+    '../../supabase/migrations/20261120160000_allow_current_order_audit_reverse_score.sql',
+    import.meta.url,
+), 'utf8');
 
 const REQUEST_ID = '80000000-0000-4000-8000-000000000001';
 const PREVIOUS_REQUEST_ID = '80000000-0000-4000-8000-000000000002';
@@ -496,10 +500,51 @@ describe('permanent order audit bundle SQL behavior', () => {
             VALUES ($1, $2)
         `, [ORDER_ID, REQUEST_ID]);
         await db.exec(migration);
+        await db.exec(reverseScoreMigration);
     });
 
     afterAll(async () => {
         await db?.close();
+    });
+
+    it('accepts only supported reverse-like status and score pairs on retained evidence', async () => {
+        const requestId = '80000000-0000-4000-8000-000000000017';
+        await db.query(`
+            INSERT INTO public.analysis_requests(
+                id, selected_plan_id_snapshot, plan_access_mode_snapshot, status,
+                policy_versions_snapshot, created_at
+            ) VALUES ($1, 'basic', 'production', 'processing', '{}'::jsonb, $2)
+        `, [requestId, NOW]);
+        await db.query('SELECT public.assemble_analysis_order_audit_bundle($1)', [requestId]);
+
+        const insertEvidence = (ordinal: number, signal: string, status: string | null, score: number | null) =>
+            db.query(`
+                INSERT INTO public.analysis_order_audit_interactions(
+                    request_id, version, ordinal, signal, evidence_id,
+                    reverse_like_status, reverse_component_score
+                ) VALUES ($1, 1, $2, $3, 'post-ref', $4, $5)
+            `, [requestId, ordinal, signal, status, score]);
+        await insertEvidence(1, 'target_post_like', null, null);
+        await insertEvidence(2, 'candidate_post_like', 'observed', 3);
+        await insertEvidence(3, 'candidate_post_like', 'not_observed', 0);
+        await insertEvidence(4, 'candidate_post_like', 'not_collected', 0);
+
+        for (const [signal, status, score] of [
+            ['candidate_post_like', 'observed', 0],
+            ['candidate_post_like', 'observed', 4],
+            ['candidate_post_like', 'not_observed', 5],
+            ['candidate_post_like', 'not_collected', 3],
+            ['candidate_post_like', 'not_collected', 5],
+            ['candidate_post_like', 'unknown', 0],
+            ['candidate_post_like', 'observed', null],
+            ['candidate_post_like', null, 5],
+            ['target_post_like', 'observed', 5],
+        ] as const) {
+            await expect(insertEvidence(5, signal, status, score)).rejects.toMatchObject({
+                code: '23514',
+                constraint: 'analysis_order_audit_interaction_reverse_check',
+            });
+        }
     });
 
     it('keeps the purge wrapper service-only and the exact implementation private', async () => {
@@ -816,8 +861,8 @@ describe('permanent order audit bundle SQL behavior', () => {
         `, [REQUEST_ID]);
         await db.query(`
             INSERT INTO public.analysis_v2_reverse_like_rows(
-                request_id, candidate_id, evidence_ref_ids
-            ) VALUES ($1, 'candidate:one', ARRAY['candidate-post-1'])
+                request_id, candidate_id, component_score, evidence_ref_ids
+            ) VALUES ($1, 'candidate:one', 5, ARRAY['candidate-post-1'])
         `, [REQUEST_ID]);
 
         const second = await db.query<{ payload: unknown }>(
@@ -877,14 +922,19 @@ describe('permanent order audit bundle SQL behavior', () => {
             distinct_count: '1002',
             max_ordinal: '1002',
         });
-        const reverseOrdinal = await db.query<{ min_ordinal: string; max_ordinal: string }>(
-            `SELECT min(ordinal)::TEXT AS min_ordinal, max(ordinal)::TEXT AS max_ordinal
+        const reverseEvidence = await db.query(
+            `SELECT ordinal, evidence_id, reverse_like_status, reverse_component_score::INTEGER AS score
                FROM public.analysis_order_audit_interactions
               WHERE request_id = $1 AND version = 2
                 AND signal = 'candidate_post_like'`,
             [REQUEST_ID],
         );
-        expect(reverseOrdinal.rows[0]).toEqual({ min_ordinal: '1002', max_ordinal: '1002' });
+        expect(reverseEvidence.rows).toEqual([{
+            ordinal: 1002,
+            evidence_id: 'candidate-post-1',
+            reverse_like_status: 'observed',
+            score: 5,
+        }]);
         expect(String(secondCounts.rows[0]?.interaction_collected))
             .toBe(secondInteractionOrdinals.rows[0]?.count);
 
