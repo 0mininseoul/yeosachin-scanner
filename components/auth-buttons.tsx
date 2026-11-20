@@ -64,15 +64,17 @@ export function AuthButtons({
     redirectTo = '/analyze',
     disabled = false,
     promptKakaoLogin = false,
+    kakaoLabel = '카카오로 3초 만에 시작하기',
 }: {
     redirectTo?: string;
     disabled?: boolean;
     promptKakaoLogin?: boolean;
+    kakaoLabel?: string;
 }) {
     const [pending, setPending] = useState<'kakao' | 'google' | null>(null);
     const signInStarted = useRef(false);
     const busy = disabled || pending !== null;
-    const kakaoText = '카카오로 3초 만에 시작하기';
+    const kakaoText = kakaoLabel;
 
     const signIn = async (provider: OAuthProvider) => {
         if (disabled || signInStarted.current) return;

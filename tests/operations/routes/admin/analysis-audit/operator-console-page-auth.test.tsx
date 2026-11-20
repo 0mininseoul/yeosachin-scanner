@@ -47,7 +47,7 @@ async function unavailablePage(request?: string) {
     expect(html).toContain('관리자 콘솔을 일시적으로 이용할 수 없습니다');
     expect(html).toContain('다시 확인');
     expect(html).not.toContain('무료 계정 9개');
-    expect(html).not.toContain('카카오로 3초 만에 시작하기');
+    expect(html).not.toContain('카카오 계정으로 로그인');
     expect(boundary.redirect).not.toHaveBeenCalled();
     return html;
 }
@@ -56,7 +56,7 @@ async function loginPage(request?: string | string[]) {
     const result = await page(request);
     const html = renderToStaticMarkup(result);
     expect(html).toContain('관리자 콘솔 로그인');
-    expect(html).toContain('카카오로 3초 만에 시작하기');
+    expect(html).toContain('카카오 계정으로 로그인');
     expect(html).not.toContain('무료 계정 9개');
     expect(boundary.redirect).not.toHaveBeenCalled();
     return result;
@@ -160,7 +160,7 @@ describe('operator console page authentication boundary', () => {
             const html = renderToStaticMarkup(result);
             expect(html).toContain('카카오 로그인을 완료하지 못했습니다');
             expect(html).toContain('아래 버튼을 눌러 새 로그인을 시작해 주세요');
-            expect(html).toContain('카카오로 3초 만에 시작하기');
+            expect(html).toContain('카카오 계정으로 로그인');
             expect(boundary.signInWithOAuth).not.toHaveBeenCalled();
         },
     );

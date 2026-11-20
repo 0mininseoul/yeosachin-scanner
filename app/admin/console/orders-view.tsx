@@ -10,7 +10,8 @@ import {
     type AdminOrderRow,
     type OrderCustomer,
 } from './console-data';
-import { Card, Chip, EmptyRow, ErrorNotice, Segmented } from './console-ui';
+import { Chip, EmptyRow, Segmented } from './console-ui';
+import { TablePanel, TableTools, type ActiveFilter } from './table-panel';
 
 type StatusFilter = 'all' | 'attention' | 'ok';
 type PlanFilter = 'all' | 'basic' | 'standard' | 'plus';
@@ -25,6 +26,8 @@ export function CustomerCell({ customer }: { customer: OrderCustomer | undefined
     </>;
 }
 
+const STATUS_LABEL: Record<StatusFilter, string> = { all: '전체', attention: '확인 필요', ok: '정상' };
+
 export function OrdersView({ rows, loading, error, hasNext, onNext, onRetry, onOpen }: {
     rows: readonly AdminOrderRow[];
     loading: boolean;
@@ -36,37 +39,58 @@ export function OrdersView({ rows, loading, error, hasNext, onNext, onRetry, onO
 }) {
     const [status, setStatus] = useState<StatusFilter>('all');
     const [plan, setPlan] = useState<PlanFilter>('all');
-    const decorated = rows.map(row => ({ row, status: adminOrderStatus(row) }));
+    const [query, setQuery] = useState('');
+    const decorated = rows.map(row => ({ row, status: adminOrderStatus(row), customer: orderCustomerOf(row) }));
     const attentionCount = decorated.filter(item => item.status.tone === 'warn' || item.status.tone === 'block').length;
     const okCount = decorated.filter(item => item.status.tone === 'ok').length;
+    const needle = query.trim().replace(/^@+/, '').toLowerCase();
     const visible = decorated.filter(item => {
         const tone = item.status.tone;
         const statusMatch = status === 'all' || (status === 'attention' ? tone === 'warn' || tone === 'block' : tone === 'ok');
-        return statusMatch && (plan === 'all' || item.row.planId === plan);
+        const textMatch = !needle
+            || item.row.targetInstagramId.toLowerCase().includes(needle)
+            || (item.row.excludedInstagramId ?? '').toLowerCase().includes(needle)
+            || (item.customer?.userName ?? '').toLowerCase().includes(needle);
+        return statusMatch && textMatch && (plan === 'all' || item.row.planId === plan);
     });
+    const activeFilters: ActiveFilter[] = [
+        ...(status !== 'all' ? [{ key: 'status', label: STATUS_LABEL[status], onClear: () => setStatus('all') }] : []),
+        ...(plan !== 'all' ? [{ key: 'plan', label: `요금제 ${plan}`, onClear: () => setPlan('all') }] : []),
+    ];
+    const filtered = visible.length !== rows.length;
 
-    return <Card>
-        <div className="ac-toolbar">
-            <Segmented
-                label="주문 상태 필터"
-                value={status}
-                onChange={setStatus}
-                options={[
-                    { value: 'all', label: <>전체 <em>{rows.length}</em></> },
-                    { value: 'attention', label: <>확인 필요 <em>{attentionCount}</em></> },
-                    { value: 'ok', label: <>정상 <em>{okCount}</em></> },
-                ]}
-            />
-            <label className="ac-field ac-field--inline">요금제
-                <select value={plan} onChange={event => setPlan(event.target.value as PlanFilter)}>
-                    <option value="all">전체</option><option value="basic">basic</option><option value="standard">standard</option><option value="plus">plus</option>
-                </select>
-            </label>
-            <span className="ac-spacer" />
-            <span className="ac-meta">결제 완료 주문 · 결제 시각 최신순 · 필터는 불러온 {rows.length}건에 적용</span>
-        </div>
-        <ErrorNotice message={error} onRetry={onRetry} />
-        <div className="ac-table-box"><table className="ac-table">
+    return <TablePanel
+        tools={<TableTools
+            summary={<><b>결제 주문</b><span className="ac-muted">{filtered ? `${visible.length} / ${rows.length}건` : `${rows.length}건`} · 결제 시각 최신순</span></>}
+            search={{ value: query, onChange: setQuery, label: '주문 검색', placeholder: '대상 · 제외 계정 · 고객 이름' }}
+            activeFilters={activeFilters}
+            filters={<>
+                <Segmented
+                    label="주문 상태 필터"
+                    value={status}
+                    onChange={setStatus}
+                    options={[
+                        { value: 'all', label: <>전체 <em>{rows.length}</em></> },
+                        { value: 'attention', label: <>확인 필요 <em>{attentionCount}</em></> },
+                        { value: 'ok', label: <>정상 <em>{okCount}</em></> },
+                    ]}
+                />
+                <label className="ac-field ac-field--inline">요금제
+                    <select value={plan} onChange={event => setPlan(event.target.value as PlanFilter)}>
+                        <option value="all">전체</option><option value="basic">basic</option><option value="standard">standard</option><option value="plus">plus</option>
+                    </select>
+                </label>
+                <span className="ac-meta">검색·필터는 불러온 주문에 적용됩니다</span>
+            </>}
+        />}
+        error={error}
+        onRetry={onRetry}
+        loading={loading}
+        loadedLabel={`${rows.length}건 불러옴`}
+        hasNext={hasNext}
+        onLoadMore={onNext}
+    >
+        <table className="ac-table">
             <caption className="ac-sr">결제 주문 목록</caption>
             <thead><tr>
                 <th scope="col">대상 · 결제 시각</th><th scope="col">고객</th><th scope="col">유입 경로</th>
@@ -76,11 +100,11 @@ export function OrdersView({ rows, loading, error, hasNext, onNext, onRetry, onO
             </tr></thead>
             <tbody>
                 {visible.length === 0 && !loading ? <EmptyRow colSpan={8}>{error ? '주문 목록을 확인할 수 없습니다.' : '조건에 맞는 주문이 없습니다.'}</EmptyRow> : null}
-                {visible.map(({ row, status: rowStatus }) => {
+                {visible.map(({ row, status: rowStatus, customer }) => {
                     const cost = orderCost(row);
                     return <tr key={row.orderId} className={rowStatus.tone === 'block' ? 'is-block' : rowStatus.tone === 'warn' ? 'is-flag' : undefined}>
                         <td><button type="button" className="ac-link" onClick={() => onOpen(row)}>@{row.targetInstagramId}</button><span className="ac-sub">{formatDateTime(row.paidAt)}{row.excludedInstagramId ? ` · 제외 @${row.excludedInstagramId}` : ''}</span></td>
-                        <td><CustomerCell customer={orderCustomerOf(row)} /></td>
+                        <td><CustomerCell customer={customer} /></td>
                         <td>{row.attributionLabel ?? <span className="ac-muted">미상</span>}</td>
                         <td className="ac-num"><b className="ac-strong">{formatKrw(row.paidAmountKrw)}</b><span className="ac-sub">{row.planId}</span></td>
                         <td className="ac-num"><b className="ac-strong">{cost.known}</b>{cost.conservative ? <span className="ac-sub">보수 추정 {cost.conservative}</span> : null}</td>
@@ -90,10 +114,6 @@ export function OrdersView({ rows, loading, error, hasNext, onNext, onRetry, onO
                     </tr>;
                 })}
             </tbody>
-        </table></div>
-        <div className="ac-pager" aria-live="polite">
-            <span>{loading ? '주문 목록을 불러오는 중…' : `${rows.length}건을 불러왔습니다${hasNext ? ' · 다음 페이지 있음' : ''}`}</span>
-            <button type="button" className="ac-btn ac-btn--sm" disabled={loading || !hasNext} onClick={onNext}>{loading ? '불러오는 중…' : '다음 25건'}</button>
-        </div>
-    </Card>;
+        </table>
+    </TablePanel>;
 }

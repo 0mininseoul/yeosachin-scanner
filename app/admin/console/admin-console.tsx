@@ -24,7 +24,7 @@ import { PreflightView } from './preflight-view';
 import { OrderDetailView } from './order-detail-view';
 import { OrdersView } from './orders-view';
 import { OverviewView } from './overview-view';
-import { UsersView } from './users-view';
+import { UsersView, type UsersTab } from './users-view';
 
 type View = 'overview' | 'orders' | 'users' | 'accounts' | 'preflight';
 type Selection = { requestId: string | null; order: AdminOrderRow | null };
@@ -35,7 +35,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const TITLES: Record<View, { title: string; description: string }> = {
     overview: { title: '개요', description: '지금 조치가 필요한 항목과 리소스 상태를 한 화면에서 확인합니다.' },
     orders: { title: '주문 감사', description: '결제 완료된 모든 주문 · 결제 시각 최신순 · 감사 번들이 있으면 함께 표시합니다.' },
-    users: { title: '유저', description: '유저 DB의 모든 컬럼과 유저별 결제·분석 입력 합계' },
+    users: { title: '유저', description: '가입자 통계와 유저 DB 테이블' },
     accounts: { title: 'Apify 계정', description: '잔액 스냅샷과 배차 상태 · 유료 1개 + 무료 9개' },
     preflight: { title: 'Preflight', description: '분석할 계정 입력 1회 = 1행 · 사전 점검 완료·실패·미요청과 실패 사유' },
 };
@@ -55,15 +55,23 @@ function parseView(value: string | undefined): View {
     return VIEWS.includes(value as View) ? value as View : 'overview';
 }
 
-function writeLocation(view: View, requestId: string | null) {
+function writeLocation(view: View, requestId: string | null, usersTab?: UsersTab) {
     const url = new URL(window.location.href);
     if (view === 'overview' && !requestId) url.searchParams.delete('view'); else url.searchParams.set('view', view);
     if (requestId) url.searchParams.set('requestId', requestId); else url.searchParams.delete('requestId');
+    if (view === 'users' && usersTab) url.searchParams.set('tab', usersTab); else url.searchParams.delete('tab');
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
-export function AdminConsole({ initialRequestId, initialView }: { initialRequestId: string; initialView?: string }) {
+export function AdminConsole({ initialRequestId, initialView, initialTab }: { initialRequestId: string; initialView?: string; initialTab?: string }) {
     const [view, setView] = useState<View>(() => (UUID.test(initialRequestId) ? 'orders' : parseView(initialView)));
+    const [usersTab, setUsersTab] = useState<UsersTab>(() => (initialTab === 'table' ? 'table' : 'stats'));
+    const [searchOpen, setSearchOpen] = useState(false);
+    const mainRef = useRef<HTMLElement>(null);
+    const scrollTop = useCallback(() => {
+        mainRef.current?.scrollTo({ top: 0 });
+        window.scrollTo({ top: 0 });
+    }, []);
     const [selection, setSelection] = useState<Selection | null>(
         UUID.test(initialRequestId) ? { requestId: initialRequestId, order: null } : null,
     );
@@ -177,17 +185,23 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
         setDetailSummary(null);
         setInventoryActionError(null);
         setSearchError(null);
-        writeLocation(next, null);
-        window.scrollTo({ top: 0 });
-    }, []);
+        writeLocation(next, null, next === 'users' ? usersTab : undefined);
+        scrollTop();
+    }, [scrollTop, usersTab]);
+
+    const switchUsersTab = useCallback((next: UsersTab) => {
+        setUsersTab(next);
+        writeLocation('users', null, next);
+        scrollTop();
+    }, [scrollTop]);
 
     const openOrder = useCallback((order: AdminOrderRow) => {
         setView('orders');
         setSelection({ requestId: order.requestId, order });
         setDetailSummary(null);
         writeLocation('orders', order.requestId);
-        window.scrollTo({ top: 0 });
-    }, []);
+        scrollTop();
+    }, [scrollTop]);
 
     const openRequest = useCallback((requestId: string) => {
         const known = orders.find(row => row.requestId === requestId);
@@ -196,17 +210,17 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
         setSelection({ requestId, order: null });
         setDetailSummary(null);
         writeLocation('orders', requestId);
-        window.scrollTo({ top: 0 });
-    }, [openOrder, orders]);
+        scrollTop();
+    }, [openOrder, orders, scrollTop]);
 
     const onSearch = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         const value = search.trim();
         setSearchError(null);
-        if (UUID.test(value)) { openRequest(value.toLowerCase()); setSearch(''); return; }
+        if (UUID.test(value)) { openRequest(value.toLowerCase()); setSearch(''); setSearchOpen(false); return; }
         const target = value.replace(/^@+/, '').toLowerCase();
         const match = orders.find(row => row.targetInstagramId.toLowerCase() === target);
-        if (match) { openOrder(match); setSearch(''); return; }
+        if (match) { openOrder(match); setSearch(''); setSearchOpen(false); return; }
         setSearchError(target ? '불러온 주문에서 찾지 못했습니다. 요청 ID로 검색해 보세요.' : null);
     };
 
@@ -261,7 +275,7 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
             onOpen={openOrder}
         />;
     } else if (view === 'users') {
-        body = <UsersView />;
+        body = <UsersView tab={usersTab} />;
     } else if (view === 'accounts') {
         body = <AccountsView
             inventory={inventory}
@@ -276,6 +290,8 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
     } else {
         body = <PreflightView />;
     }
+
+    const fixedLayout = !selection && (view === 'orders' || view === 'preflight' || (view === 'users' && usersTab === 'table'));
 
     return <div className="ac-app">
         <aside className="ac-side">
@@ -298,7 +314,7 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
             </nav>
             <div className="ac-side-foot"><span className="ac-live-dot" />operator session<br />응답 캐시 private / no-store<br />확인할 수 없는 값은 <b>미상</b>으로 표시</div>
         </aside>
-        <main className="ac-main"><div className="ac-wrap">
+        <main ref={mainRef} className={`ac-main${fixedLayout ? ' is-fixed' : ''}`}><div className="ac-wrap">
             <header className="ac-top">
                 <div>
                     <div className="ac-crumb">{selection
@@ -308,15 +324,37 @@ export function AdminConsole({ initialRequestId, initialView }: { initialRequest
                     <p>{header.description}</p>
                 </div>
                 <div className="ac-top-tools">
-                    <form className="ac-search" role="search" onSubmit={onSearch}>
+                    {searchOpen || search ? <form className="ac-search" role="search" onSubmit={onSearch}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
                         <label className="ac-sr" htmlFor="ac-search-input">요청 ID 또는 대상 검색</label>
-                        <input id="ac-search-input" type="search" value={search} placeholder="요청 ID 또는 @대상으로 바로 열기" onChange={event => setSearch(event.target.value)} />
-                    </form>
+                        <input
+                            id="ac-search-input"
+                            type="search"
+                            value={search}
+                            autoFocus
+                            placeholder="요청 ID 또는 @대상으로 바로 열기"
+                            onChange={event => setSearch(event.target.value)}
+                            onKeyDown={event => { if (event.key === 'Escape') { setSearch(''); setSearchOpen(false); setSearchError(null); } }}
+                            onBlur={() => { if (!search) setSearchOpen(false); }}
+                        />
+                    </form> : <button type="button" className="ac-icon-btn ac-icon-btn--lg" onClick={() => setSearchOpen(true)} aria-label="요청 ID 또는 대상으로 주문 열기" title="요청 ID 또는 @대상으로 주문 열기">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+                        <span>주문 바로 열기</span>
+                    </button>}
                     <span className="ac-meta">{syncedAt ? `동기화 ${formatDateTime(syncedAt)}` : '동기화 중'}</span>
                     <button type="button" className="ac-btn" onClick={refreshAll}>새로고침</button>
                 </div>
             </header>
+            {view === 'users' && !selection ? <div className="ac-subtabs" role="tablist" aria-label="유저 화면">
+                {(['stats', 'table'] as const).map(tab => <button
+                    key={tab}
+                    type="button"
+                    role="tab"
+                    aria-selected={usersTab === tab}
+                    className={usersTab === tab ? 'is-on' : undefined}
+                    onClick={() => switchUsersTab(tab)}
+                >{tab === 'stats' ? '통계' : 'DB 테이블'}</button>)}
+            </div> : null}
             {searchError ? <p className="ac-alert ac-alert--soft" role="status">{searchError}</p> : null}
             {body}
         </div></main>
