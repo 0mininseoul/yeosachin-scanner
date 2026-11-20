@@ -112,6 +112,7 @@ function Harness({
     return <>
         <output data-testid="progress">{loading ? 'loading' : `${data?.status}:${data?.progress}`}</output>
         <output data-testid="history">{data?.events.length ?? -1}</output>
+        <output data-testid="mutual-review">{data?.mutualReview ? `${data.mutualReview.mutualCount}:${data.mutualReview.reviewedCount}` : ''}</output>
         <output data-testid="error-kind">{errorKind}</output>
         <output data-testid="error">{error}</output>
         <output data-testid="refreshing">{String(refreshing)}</output>
@@ -343,14 +344,19 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(displayed()).toBe('undefined:undefined');
     });
 
-    it('presents parallel work, accessible overall progress and explicit profile ordinal without track counts', async () => {
+    it('shows the confirmed request-wide mutual and review counts without batch ordinals', async () => {
         vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
-        const base = snapshot(REQUEST_A, { progressBp: 2500, lastEventSeq: 1 });
+        const base = snapshot(REQUEST_A, { progressBp: 2500, revision: 3, lastEventSeq: 3 });
         current.set(REQUEST_A, { ...base, tracks: {
             ...base.tracks,
             relationshipAi: { state: 'running', stageCode: 'PROFILE_SCREENING', done: 25, total: 100, progressBp: 2500 },
             interactions: { state: 'running', stageCode: 'INTERACTIONS_RUNNING', done: 50, total: 100, progressBp: 5000 },
         } });
+        currentEvents.set(REQUEST_A, [
+            { ...event(REQUEST_A), eventCode: 'RELATIONSHIP_PROGRESS', copyCode: 'RELATIONSHIPS_COLLECTED', aggregateCount: 186 },
+            { ...event(REQUEST_A, 2, 2), copyCode: 'PROFILES_SCREENED', aggregateCount: 60 },
+            { ...event(REQUEST_A, 3, 3), copyCode: 'PROFILES_SCREENED', aggregateCount: 30 },
+        ]);
         await renderPage();
         const meter = container.querySelector('[role="progressbar"]');
         expect(meter?.getAttribute('aria-label')).toBe('전체 진행률');
@@ -360,12 +366,63 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(container.querySelector('h1')?.textContent).toBe('맞팔 계정을 판독하고 있습니다.');
         const rows = [...container.querySelectorAll('li')].map(row => row.textContent);
         expect(rows).toEqual(['맞팔·AI 판독진행 중', '위험 단서 수집진행 중', '위험도·총평 정리대기']);
-        expect(container.textContent).toContain('현재 10번째 / 대상 30개');
+        expect(container.textContent).toContain('맞팔 186명 중 공개 계정 60명 검토 완료');
+        expect(container.textContent).not.toMatch(/현재 10번째|대상 30개/);
         expect(container.textContent).not.toMatch(/25 \/ 100|50%|50 \/ 100/);
         expect(container.textContent).toContain('테스트 분석은 약 45초 동안 진행돼요');
         expect(container.querySelector('a[href="/mypage"]')?.textContent).toContain('보관함으로 이동');
         expect(mocks.push).not.toHaveBeenCalled();
         expect(vi.mocked(fetch).mock.calls.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true);
+    });
+
+    it('shows only the confirmed mutual count until a compatible review checkpoint exists', async () => {
+        const progress = snapshot(REQUEST_A, { activeProfile: null, revision: 5, lastEventSeq: 5 });
+        current.set(REQUEST_A, progress);
+        currentEvents.set(REQUEST_A, [
+            { ...event(REQUEST_A), eventCode: 'RELATIONSHIP_PROGRESS', copyCode: 'RELATIONSHIPS_COLLECTED', aggregateCount: 79 },
+            { ...event(REQUEST_A, 2, 2), eventCode: 'RELATIONSHIP_PROGRESS', copyCode: 'ANALYSIS_FAILED', aggregateCount: 120 },
+            { ...event(REQUEST_A, 3, 3), copyCode: 'PROFILES_SCREENED', state: 'provisional', aggregateCount: 30 },
+            { ...event(REQUEST_A, 4, 4), copyCode: 'PROFILE_SCREENED_CONFIRMED', aggregateCount: 45 },
+            { ...event(REQUEST_A, 5, 5), copyCode: 'PROFILES_SCREENED', aggregateCount: 80 },
+        ]);
+        await renderPage();
+        expect(container.textContent).toContain('맞팔 79명 확인');
+        expect(container.textContent).not.toContain('검토 완료');
+    });
+
+    it('uses the manifest counts when the live event stream lacks review events', async () => {
+        vi.stubEnv('NEXT_PUBLIC_DEPLOYMENT_ROLE', 'dev');
+        mocks.useSearchParams.mockReturnValue(new URLSearchParams('devAnalysis=live'));
+        const base = snapshot(REQUEST_A, { revision: 2, lastEventSeq: 1 });
+        const progress = { ...base, tracks: { ...base.tracks, relationshipAi: {
+            ...base.tracks.relationshipAi, done: 9, total: 44, progressBp: 2_500,
+        } } };
+        current.set(REQUEST_A, { ...progress, mutualReview: { mutualCount: 390, reviewedCount: 42 } });
+        currentEvents.set(REQUEST_A, [{ ...event(REQUEST_A),
+            eventCode: 'TARGET_PROFILE_READY', copyCode: 'TARGET_PROFILE_READY', aggregateCount: null,
+        }]);
+        await renderPage();
+        expect(fetchUrls[0]).toContain('reviewAfterDone=-1');
+        expect(container.textContent).toContain('맞팔 390명 중 공개 계정 42명 검토 완료');
+
+        current.set(REQUEST_A, { ...progress, revision: 3 });
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        expect(fetchUrls.at(-1)).toContain('reviewAfterDone=9');
+        expect(container.textContent).toContain('맞팔 390명 중 공개 계정 42명 검토 완료');
+    });
+
+    it('resets retained review counts and the query stamp when the owner changes requests', async () => {
+        const previous = current.get(REQUEST_A)!;
+        current.set(REQUEST_A, { ...previous, tracks: {
+            ...previous.tracks,
+            relationshipAi: { ...previous.tracks.relationshipAi, done: 1, progressBp: 10_000 },
+        }, mutualReview: { mutualCount: 390, reviewedCount: 42 } });
+        await render(REQUEST_A);
+        expect(container.querySelector('[data-testid="mutual-review"]')?.textContent).toBe('390:42');
+
+        await render(REQUEST_B);
+        expect(container.querySelector('[data-testid="mutual-review"]')?.textContent).toBe('');
+        expect(fetchUrls.at(-1)).toContain('reviewAfterDone=-1');
     });
 
     it('keeps production demo reads on variable timing and hides partial profile counts', async () => {
@@ -381,6 +438,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(container.textContent).not.toContain('45초');
         expect(container.textContent).not.toContain('현재 10번째');
         expect(container.textContent).not.toContain('대상 30개');
+        expect(container.textContent).not.toMatch(/맞팔 \d+명/);
 
     });
 
@@ -457,7 +515,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await renderPage();
         if (state === 'failed') {
             expect(container.querySelector('h1')?.textContent).toBe('판독에 실패했습니다');
-            expect(fetchUrls).toEqual([`/api/analysis/progress/${REQUEST_A}?devAnalysis=live&afterSeq=0&limit=200`]);
+            expect(fetchUrls).toEqual([`/api/analysis/progress/${REQUEST_A}?devAnalysis=live&afterSeq=0&limit=200&reviewAfterDone=-1`]);
         }
         expect(container.querySelector('a[href="/mypage"]')).toBeNull();
         expect(container.textContent).not.toContain('다시 조회');
@@ -607,8 +665,14 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
     });
 
     it('preserves display progress while publication lag returns a queued snapshot, then reaches 100 after publication', async () => {
+        const previous = current.get(REQUEST_A)!;
+        current.set(REQUEST_A, { ...previous, tracks: {
+            ...previous.tracks,
+            relationshipAi: { ...previous.tracks.relationshipAi, done: 1, progressBp: 10_000 },
+        }, mutualReview: { mutualCount: 390, reviewedCount: 42 } });
         await render();
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('1');
+        expect(container.querySelector('[data-testid="mutual-review"]')?.textContent).toBe('390:42');
         await act(async () => {
             vi.advanceTimersByTime(15_000);
             await Promise.resolve();
@@ -654,6 +718,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await act(async () => { await refetch?.(); });
         expect(Number(displayed().split(':')[1])).toBeGreaterThanOrEqual(beforePublicationLag);
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('0');
+        expect(container.querySelector('[data-testid="mutual-review"]')?.textContent).toBe('');
 
         await act(async () => {
             vi.advanceTimersByTime(10_000);
@@ -663,6 +728,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
 
         await act(async () => { await refetch?.(); });
         expect(fetchUrls.at(-1)).toContain('afterSeq=0');
+        expect(fetchUrls.at(-1)).toContain('reviewAfterDone=-1');
         expect(container.querySelector('[data-testid="history"]')?.textContent).toBe('0');
 
         current.set(REQUEST_A, snapshot(REQUEST_A, {

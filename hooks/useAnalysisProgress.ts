@@ -36,6 +36,7 @@ interface AnalysisProgress {
     tracks: ProgressSnapshotV1['tracks'] | null;
     activeProfile: ProgressSnapshotV1['activeProfile'];
     candidateMedia: ProgressSnapshotV1['candidateMedia'];
+    mutualReview: ProgressSnapshotV1['mutualReview'];
     etaRange: ProgressSnapshotV1['etaRange'];
     publicationLagReset: boolean;
     events: ProgressEventV1[];
@@ -151,6 +152,10 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
     const v2EventsRef = useRef<ProgressEventV1[]>([]);
     const v2LastEventSeqRef = useRef(0);
     const v2RevisionRef = useRef(-1);
+    const v2MutualReviewRef = useRef<{
+        done: number;
+        counts: NonNullable<ProgressSnapshotV1['mutualReview']>;
+    } | null>(null);
     const fetchQueuedRef = useRef(false);
     const v2DisplayStateRef = useRef<ProgressDisplayState>(
         createProgressDisplayState()
@@ -181,9 +186,13 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
         const run = async () => {
             try {
                 const progressUrl = v2ProgressUrlRef.current;
+                const pagination = `afterSeq=${v2LastEventSeqRef.current}&limit=200`;
+                const reviewCursor = `&reviewAfterDone=${v2MutualReviewRef.current?.done ?? -1}`;
                 let response = await fetch(
                     progressUrl
-                        ? `${progressUrl}${devLive ? '?devAnalysis=live&' : '?'}afterSeq=${v2LastEventSeqRef.current}&limit=200`
+                        ? `${progressUrl}${devLive ? '?devAnalysis=live&' : '?'}${pagination}${
+                            progressUrl.startsWith('/api/analysis/progress/') ? reviewCursor : ''
+                        }`
                         : `/api/analysis/status/${encodeURIComponent(requestId)}`,
                     { cache: 'no-store', signal: controller.signal }
                 );
@@ -203,7 +212,7 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
                 ) {
                     v2ProgressUrlRef.current = payload.progressUrl;
                     response = await fetch(
-                        `${payload.progressUrl}?afterSeq=${v2LastEventSeqRef.current}&limit=200`,
+                        `${payload.progressUrl}?${pagination}${reviewCursor}`,
                         { cache: 'no-store', signal: controller.signal }
                     );
                     if (!isCurrent()) return;
@@ -241,15 +250,24 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
                         // authoritative read starts from the reset boundary.
                         v2EventsRef.current = [];
                         v2LastEventSeqRef.current = 0;
-                    } else if (progress.events.length > 0) {
-                        v2LastEventSeqRef.current = Math.max(
-                            v2LastEventSeqRef.current,
-                            progress.events.at(-1)!.seq
-                        );
-                        v2EventsRef.current = mergeProgressEvents(
-                            v2EventsRef.current,
-                            progress.events
-                        );
+                        v2MutualReviewRef.current = null;
+                    } else {
+                        if (progress.snapshot.mutualReview) {
+                            v2MutualReviewRef.current = {
+                                done: progress.snapshot.tracks.relationshipAi.done,
+                                counts: progress.snapshot.mutualReview,
+                            };
+                        }
+                        if (progress.events.length > 0) {
+                            v2LastEventSeqRef.current = Math.max(
+                                v2LastEventSeqRef.current,
+                                progress.events.at(-1)!.seq
+                            );
+                            v2EventsRef.current = mergeProgressEvents(
+                                v2EventsRef.current,
+                                progress.events
+                            );
+                        }
                     }
                     const retainedEvents = v2EventsRef.current;
                     v2RevisionRef.current = progress.snapshot.revision;
@@ -286,6 +304,7 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
                         tracks: progress.snapshot.tracks,
                         activeProfile: progress.snapshot.activeProfile,
                         candidateMedia: progress.snapshot.candidateMedia,
+                        mutualReview: v2MutualReviewRef.current?.counts,
                         etaRange: progress.snapshot.etaRange,
                         publicationLagReset: progress.snapshot.publicationLagReset === true,
                         events: retainedEvents,
@@ -319,6 +338,7 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
                     tracks: null,
                     activeProfile: null,
                     candidateMedia: [],
+                    mutualReview: undefined,
                     etaRange: null,
                     publicationLagReset: false,
                     events: [],
@@ -334,6 +354,7 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
                     v2EventsRef.current = [];
                     v2LastEventSeqRef.current = 0;
                     v2RevisionRef.current = -1;
+                    v2MutualReviewRef.current = null;
                     v2DisplayInputRef.current = null;
                     v2DisplayStateRef.current = createProgressDisplayState();
                     fetchQueuedRef.current = false;
@@ -371,6 +392,7 @@ export function useAnalysisProgress(requestId: string, devLive = false) {
         v2EventsRef.current = [];
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
+        v2MutualReviewRef.current = null;
         fetchQueuedRef.current = false;
         v2DisplayStateRef.current = createProgressDisplayState();
         v2DisplayInputRef.current = null;
