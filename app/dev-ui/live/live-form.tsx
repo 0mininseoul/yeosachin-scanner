@@ -15,7 +15,7 @@ import {
 } from '@/components/analysis-preflight-presentation';
 import { PrecheckoutImmersive } from '@/components/precheckout-immersive';
 import { PreflightPendingStatus } from '@/components/preflight-pending-status';
-import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_VERTEX_CAP_HEADER } from '@/lib/constants/dev-ui';
+import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_START_PLAN } from '@/lib/constants/dev-ui';
 import { normalizeInstagramUsername } from '@/lib/services/analysis/v2-client-credentials';
 import { preflightAcceptedV1Schema, preflightStatusV1Schema, type PreflightStatusV1 } from '@/lib/contracts/analysis-v2';
 
@@ -53,9 +53,9 @@ async function call(
         method,
         headers: {
             'Content-Type': 'application/json',
-            ...(ownerStart && { 'x-dev-live-attempt-id': ownerStart.attemptId, [planHeader]: ownerStart.planId }),
-            ...(ownerStart?.planId === 'standard' && {
-                [DEV_LIVE_STANDARD_VERTEX_CAP_HEADER]: String(DEV_LIVE_STANDARD_CAPS.aiMaxCents),
+            ...(ownerStart && {
+                'x-dev-live-attempt-id': ownerStart.attemptId,
+                [planHeader]: ownerStart.planId === 'standard' ? DEV_LIVE_STANDARD_START_PLAN : ownerStart.planId,
             }),
         },
         body: JSON.stringify(body),

@@ -32,11 +32,10 @@ const standardApproval = { ...approval, planId: 'standard', expiresAt: '2026-11-
 const standardKey = 'dev-live:owner:standard:' + id;
 const standardPreflight = { id, idempotency_key: standardKey, target_instagram_id: approval.targetInstagramId, user_id: 'synthetic-owner' };
 
-function start(origin = host, plan?: 'basic' | 'standard', vertexCap: string | null = '1800') {
+function start(origin = host, plan?: string) {
     return new Request(endpoint, { method: 'POST', headers: {
         origin, 'content-type': 'application/json', 'x-dev-live-attempt-id': attempt,
         ...(plan ? { 'x-dev-live-plan': plan } : {}),
-        ...(plan === 'standard' && vertexCap !== null ? { 'x-dev-live-vertex-max-cents': vertexCap } : {}),
     }, body: JSON.stringify({ targetInstagramId: approval.targetInstagramId }) });
 }
 
@@ -109,10 +108,10 @@ describe('owner-start live Dev approval', () => {
         const handler = vi.fn(async () => NextResponse.json({}, { status: 202 }));
 
         expect((await withDevLiveApproval(start(host, 'basic'), handler)).status).toBe(409);
-        expect((await withDevLiveApproval(start(host, 'standard', null), handler)).status).toBe(409);
-        expect((await withDevLiveApproval(start(host, 'standard', '400'), handler)).status).toBe(409);
+        expect((await withDevLiveApproval(start(host, 'standard'), handler)).status).toBe(409);
+        expect((await withDevLiveApproval(start(host, 'standard:400'), handler)).status).toBe(409);
         expect(mocks.rpc).not.toHaveBeenCalled();
-        expect((await withDevLiveApproval(start(host, 'standard'), handler)).status).toBe(202);
+        expect((await withDevLiveApproval(start(host, 'standard:1800'), handler)).status).toBe(202);
         expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_v3', {
             p_user_id: 'synthetic-owner', p_target_instagram_id: approval.targetInstagramId, p_attempt_id: attempt,
         });
@@ -122,7 +121,7 @@ describe('owner-start live Dev approval', () => {
 
         mocks.rpc.mockResolvedValue({ data: { ...standardApproval, aiMaxCents: 400 }, error: null });
         handler.mockClear();
-        expect((await withDevLiveApproval(start(host, 'standard'), handler)).status).toBe(503);
+        expect((await withDevLiveApproval(start(host, 'standard:1800'), handler)).status).toBe(503);
         expect(handler).not.toHaveBeenCalled();
     });
 
@@ -135,7 +134,7 @@ describe('owner-start live Dev approval', () => {
         mocks.rpc.mockResolvedValue({ data: legacy, error: null });
         const handler = vi.fn(async () => NextResponse.json({}, { status: 202 }));
 
-        expect((await withDevLiveApproval(start(host, 'standard', null), handler, id)).status).toBe(202);
+        expect((await withDevLiveApproval(start(host, 'standard'), handler, id)).status).toBe(202);
         expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_lookup_v2', {
             p_grant_id: id, p_user_id: 'synthetic-owner', p_target_instagram_id: approval.targetInstagramId,
         });

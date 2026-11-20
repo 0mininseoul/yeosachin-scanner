@@ -3,7 +3,7 @@ import 'server-only';
 import type { User } from '@supabase/supabase-js';
 import type { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_VERTEX_CAP_HEADER, DEV_UI_APP_ORIGIN } from '@/lib/constants/dev-ui';
+import { DEV_LIVE_STANDARD_CAPS, DEV_LIVE_STANDARD_START_PLAN, DEV_UI_APP_ORIGIN } from '@/lib/constants/dev-ui';
 import { preflightRequestV1Schema } from '@/lib/contracts/analysis-v2';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { requireActiveE2eTestRunner } from '@/lib/services/identity/account-principal-store';
@@ -136,9 +136,8 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
     if (!input.success) return null;
     const standard = devLiveStandardTarget() === input.data.targetInstagramId;
     const acknowledgedPlan = request.headers.get(devLivePlanHeader);
-    const acknowledgedVertexCap = request.headers.get(DEV_LIVE_STANDARD_VERTEX_CAP_HEADER);
     if (standard
-        ? acknowledgedPlan !== 'standard' || acknowledgedVertexCap !== String(DEV_LIVE_STANDARD_CAPS.aiMaxCents)
+        ? acknowledgedPlan !== DEV_LIVE_STANDARD_START_PLAN
         : acknowledgedPlan !== null && acknowledgedPlan !== 'basic') {
         throw new Error('DEV_LIVE_PLAN_CHANGED');
     }

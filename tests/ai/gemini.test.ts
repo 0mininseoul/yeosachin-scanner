@@ -146,6 +146,16 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
         expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+
+        const reservation = { grantId: grant.id, reservationId: 'another-reservation' };
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        })).resolves.toEqual({ value: 'ok' });
+        expect(audit.onBeforeAttempt).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
     });
 
     it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {
@@ -167,7 +177,10 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
-    it('releases a confirmed Dev reservation without entering audit when cancelled during reservation', async () => {
+    it.each([
+        { failures: 1, code: 'AI_GENERATION_DEADLINE_EXCEEDED' },
+        { failures: 2, code: 'DEV_LIVE_BUDGET_UNAVAILABLE' },
+    ])('retries the same unused Dev reservation at zero after cancellation ($code)', async ({ failures, code }) => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };
         const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation' };
@@ -178,12 +191,15 @@ describe('analyzeWithGemini generation retry policy', () => {
             controller.abort();
             return reservation;
         });
+        for (let index = 0; index < failures; index++) {
+            mocks.settleDevAttempt.mockRejectedValueOnce(new Error('synthetic settlement fault'));
+        }
 
         await expect(analyzeWithGemini('prompt', undefined, {
             ...audit, stage: 'genderTriage', schema: responseSchema,
             abortSignal: controller.signal,
-        })).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
-        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+        })).rejects.toThrow(code);
+        expect(mocks.settleDevAttempt.mock.calls).toEqual([[reservation, 0], [reservation, 0]]);
         expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });

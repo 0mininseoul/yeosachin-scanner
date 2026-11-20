@@ -1074,6 +1074,7 @@ export async function analyzeWithGemini<T>(
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
         let budgetSettled = false;
+        let devUnusedSettlementFailed = false;
         let devRateLimitSettlementError: Error | null = null;
         try {
             if (abortSignal?.aborted) {
@@ -1211,7 +1212,14 @@ export async function analyzeWithGemini<T>(
                     } catch (error) {
                         // Return the unused budget before leaving the Dev dispatch slot.
                         if (devLiveBudget && devReservation) {
-                            await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0);
+                            try {
+                                await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0)
+                                    .catch(() => devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0));
+                            } catch {
+                                devUnusedSettlementFailed = true;
+                                console.error('Dev Vertex unused reservation settlement could not be confirmed.');
+                                throw new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
+                            }
                         }
                         throw error;
                     }
@@ -1258,7 +1266,7 @@ export async function analyzeWithGemini<T>(
                     }
                     budgetSettled = true;
                 }
-                if (abortSignal?.aborted) {
+                if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                     throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 }
                 if (
@@ -1431,7 +1439,7 @@ export async function analyzeWithGemini<T>(
                 }
                 budgetSettled = true;
             }
-            if (abortSignal?.aborted) {
+            if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                 lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
