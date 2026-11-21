@@ -17,22 +17,25 @@ const approvalFields = {
     id: devLiveApprovalId,
     targetInstagramId: instagramIdSchema,
     approvedAt: z.string().datetime(),
-    expiresAt: z.string().datetime(),
 };
 const basicApprovalSchema = z.object({
     ...approvalFields,
+    expiresAt: z.string().datetime(),
     apifyMaxCents: z.number().int().positive().max(DEV_LIVE_OWNER_CAPS.apifyMaxCents),
     aiMaxCents: z.number().int().positive().max(DEV_LIVE_OWNER_CAPS.aiMaxCents),
 }).strict();
 const standardApprovalSchema = z.object({
     ...approvalFields,
     planId: z.literal('standard'),
+    expiresAt: z.string().datetime().nullable(),
     apifyMaxCents: z.literal(DEV_LIVE_STANDARD_CAPS.apifyMaxCents),
     aiMaxCents: z.union([z.literal(400), z.literal(DEV_LIVE_STANDARD_CAPS.aiMaxCents)]),
 }).strict();
 
-export type DevLiveApproval = z.infer<typeof basicApprovalSchema> & {
-    planId: DevLivePlan;
+type DevLiveApprovalDescriptor = (z.infer<typeof basicApprovalSchema> & { planId: 'basic' })
+    | z.infer<typeof standardApprovalSchema>;
+
+export type DevLiveApproval = DevLiveApprovalDescriptor & {
     idempotencyKey: string;
     nonce: string;
 };
@@ -49,32 +52,38 @@ export function devLiveStandardTarget(env: Record<string, string | undefined> = 
     return target.success ? target.data : null;
 }
 
-function activeApproval(value: unknown, planId: DevLivePlan, prefix: string, now: number): DevLiveApproval | null {
-    const parsed = (planId === 'standard' ? standardApprovalSchema : basicApprovalSchema).safeParse(value);
-    if (!parsed.success) return null;
-    const approval = parsed.data;
+function activeApproval(approval: DevLiveApprovalDescriptor, prefix: string, now: number): DevLiveApproval | null {
     const startsAt = Date.parse(approval.approvedAt);
-    const expiresAt = Date.parse(approval.expiresAt);
-    const maxApprovalDurationMs = (planId === 'standard' ? 150 : 30) * 60_000;
-    if (!Number.isFinite(now) || !Number.isFinite(startsAt) || !Number.isFinite(expiresAt)
-        || now < startsAt || now >= expiresAt || expiresAt - startsAt > maxApprovalDurationMs) return null;
+    if (!Number.isFinite(now) || !Number.isFinite(startsAt) || now < startsAt) return null;
+    if (approval.expiresAt === null) {
+        if (approval.aiMaxCents !== DEV_LIVE_STANDARD_CAPS.aiMaxCents) return null;
+    } else {
+        const expiresAt = Date.parse(approval.expiresAt);
+        const maxApprovalDurationMs = (approval.planId === 'standard' ? 150 : 30) * 60_000;
+        if (!Number.isFinite(expiresAt) || now >= expiresAt || expiresAt - startsAt > maxApprovalDurationMs) return null;
+    }
     return {
         ...approval,
-        planId,
         idempotencyKey: prefix + approval.id,
         nonce: `dev-live-${approval.id}`,
     };
 }
 
+function parseBasicApproval(value: unknown, prefix: string, now: number): DevLiveApproval | null {
+    const parsed = basicApprovalSchema.safeParse(value);
+    return parsed.success ? activeApproval({ ...parsed.data, planId: 'basic' }, prefix, now) : null;
+}
+
 export function parseDevLiveOwnerApproval(value: unknown, now = Date.now()): DevLiveApproval | null {
-    const approval = activeApproval(value, 'basic', DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX, now);
+    const approval = parseBasicApproval(value, DEV_LIVE_OWNER_PREFLIGHT_KEY_PREFIX, now);
     return approval?.apifyMaxCents === DEV_LIVE_OWNER_CAPS.apifyMaxCents
         && approval.aiMaxCents === DEV_LIVE_OWNER_CAPS.aiMaxCents ? approval : null;
 }
 
 export function parseDevLiveStandardApproval(value: unknown, targetInstagramId: string, now = Date.now()): DevLiveApproval | null {
-    const approval = activeApproval(value, 'standard', DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX, now);
-    return approval?.targetInstagramId === targetInstagramId ? approval : null;
+    const parsed = standardApprovalSchema.safeParse(value);
+    if (!parsed.success || parsed.data.targetInstagramId !== targetInstagramId) return null;
+    return activeApproval(parsed.data, DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX, now);
 }
 
 export function readDevLiveApproval(
@@ -84,7 +93,7 @@ export function readDevLiveApproval(
     if (env.DEV_LIVE_ANALYSIS_ARMED !== 'true' || env.DEV_LIVE_ANALYSIS_MODE !== undefined
         || !env.DEV_LIVE_ANALYSIS_APPROVAL) return null;
     try {
-        return activeApproval(JSON.parse(env.DEV_LIVE_ANALYSIS_APPROVAL), 'basic', DEV_LIVE_PREFLIGHT_KEY_PREFIX, now);
+        return parseBasicApproval(JSON.parse(env.DEV_LIVE_ANALYSIS_APPROVAL), DEV_LIVE_PREFLIGHT_KEY_PREFIX, now);
     } catch {
         return null;
     }

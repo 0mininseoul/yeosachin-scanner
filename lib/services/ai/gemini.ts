@@ -419,7 +419,7 @@ export interface AnalyzeWithGeminiOptions<T> {
     startingAttempt?: number;
     /** Optional caller budget; counts attempts from startingAttempt and never exceeds four. */
     maxAttempts?: number;
-    /** Feature analysis may explicitly retry strict response rejections; all other stages remain fail-fast. */
+    /** Allows a stateless feature replay to retry a strict response rejection. */
     retryResponseRejections?: boolean;
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
     /** Shared monetary guard. v2.12 supplies a process default; tests/replay may inject one. */
@@ -770,10 +770,41 @@ async function emitAttemptTelemetry<T>(
         if (error instanceof Error && error.name === 'AnalysisV2AiResultFenceError') {
             throw error;
         }
-        throw new Error(
-            'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt result was not durably stored.'
-        );
+        throw durableAuditFailure('result', telemetry.stage, error);
     }
+}
+
+const DURABLE_AUDIT_REASON_CODES = new Set([
+    'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR',
+    'ANALYSIS_V2_AI_RESULT_REPLAY_BLOCKED',
+    'ANALYSIS_V2_AI_ATTEMPT_VALIDATION_ERROR',
+    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_AI_ATTEMPT_CONFLICT',
+    'ANALYSIS_V2_AI_ATTEMPT_FENCE_MISMATCH',
+    'ANALYSIS_V2_AI_ATTEMPT_JOB_FENCE_MISMATCH',
+    'ANALYSIS_V2_AI_ATTEMPT_NOT_RETRYABLE',
+    'ANALYSIS_V2_AI_ATTEMPT_NOT_READY',
+    'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_GEMINI_LEASE_FENCE_MISMATCH',
+    'ANALYSIS_PROVIDER_ADMISSION_PERSISTENCE_ERROR',
+    'ANALYSIS_PROVIDER_ADMISSION_FENCE_MISMATCH',
+    'ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT',
+    'ANALYSIS_PROVIDER_ADMISSION_CLAIM_CONFLICT',
+    'ANALYSIS_PROVIDER_ADMISSION_RESOLUTION_PENDING',
+]);
+
+function durableAuditFailure(
+    boundary: 'intent' | 'result', stage: AiStageName | null, error: unknown,
+): Error {
+    const message = error instanceof Error ? error.message : '';
+    const prefix = message.split(':', 1)[0];
+    const reason = DURABLE_AUDIT_REASON_CODES.has(prefix) ? prefix : 'unknown';
+    const databaseCode = reason === 'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR'
+        ? message.match(/\(((?:PGRST[0-9]{3}|[0-9][0-9A-Z]{4}))\)\.$/)?.[1] ?? null
+        : null;
+    console.warn(JSON.stringify({ event: 'gemini_durable_audit_failed', boundary, stage, reason, databaseCode }));
+    return new Error(`AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt ${boundary} was not durably stored.`);
 }
 
 async function emitRequestTelemetry<T>(
@@ -1014,10 +1045,10 @@ export async function analyzeWithGemini<T>(
     const devLiveApproval = devLiveBudget?.requireDevLiveProviderApproval();
     const resolvedMaxAttempts = maxAttempts
         ?? stagePolicy?.maxAttempts;
-    // An explicit escalation route may opt into the feature-stage response retry even though the
-    // v2.12 stage default is fail-fast. A false stage default must not erase that route decision.
-    const resolvedRetryResponseRejections = retryResponseRejections
-        || stagePolicy?.retryResponseRejections === true;
+    // The durable intent ledger only allows another attempt after a confirmed 429.
+    // Return a recorded response rejection to the caller's repair or fallback path.
+    const resolvedRetryResponseRejections = statelessReplay
+        && (retryResponseRejections || stagePolicy?.retryResponseRejections === true);
     const configuredBudgetGuard = ['1', 'true', 'yes', 'on'].includes(
         process.env.VERTEX_AI_BUDGET_GUARD_ENABLED?.trim().toLowerCase() ?? '',
     );
@@ -1201,9 +1232,7 @@ export async function analyzeWithGemini<T>(
                                 ) {
                                     throw error;
                                 }
-                                throw new Error(
-                                    'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR: Gemini attempt intent was not durably stored.'
-                                );
+                                throw durableAuditFailure('intent', stage, error);
                             }
                         }
                         if (abortSignal?.aborted) {

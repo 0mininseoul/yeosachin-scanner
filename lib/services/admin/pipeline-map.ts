@@ -227,7 +227,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: 'Gemini',
         numbers: [{ label: '외모·노출 배점', value: points(W.appearanceExposure) }],
-        failure: 'AI 응답이 깨지면 재시도하고, 계속 실패하면 격리 상태로 멈춥니다.',
+        failure: '호출 제한은 허용된 횟수 안에서 재시도합니다. 응답 검증이 실패하면 기존 보정 또는 후보별 판독 불가 처리를 적용합니다.',
         code: ['lib/services/ai/v2-staged-analysis.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts'],
     },
     private_names: {

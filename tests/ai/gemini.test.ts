@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
+import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
 
 const mocks = vi.hoisted(() => ({
     generateContent: vi.fn(),
@@ -689,7 +690,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledTimes(1);
     });
 
-    it('retries schema-invalid responses only for the opted-in feature stage', async () => {
+    it('retries schema-invalid responses for an opted-in stateless feature replay', async () => {
         vi.spyOn(console, 'error').mockImplementation(() => undefined);
         vi.spyOn(console, 'log').mockImplementation(() => undefined);
         const attemptTelemetry = vi.fn();
@@ -703,6 +704,7 @@ describe('analyzeWithGemini generation retry policy', () => {
             stage: 'featureAnalysis',
             maxAttempts: 2,
             retryResponseRejections: true,
+            replayCapability: issueReplayStatelessCapability(),
             ...stageAuditOptions(),
             onAttemptTelemetry: attemptTelemetry,
         });
@@ -711,6 +713,31 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledTimes(2);
         expect(attemptTelemetry.mock.calls.map(call => call[0].disposition))
             .toEqual(['response_rejected', 'success']);
+    });
+
+    it('returns the original strict rejection when the durable ledger has terminalized the attempt', async () => {
+        let terminal = false;
+        const onBeforeAttempt = vi.fn(async () => {
+            if (terminal) throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.');
+        });
+        const onAttemptTelemetry = vi.fn(async () => { terminal = true; });
+        mocks.generateContent.mockResolvedValueOnce(responseWithText(JSON.stringify({ wrong: true })));
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage: 'featureAnalysis',
+            maxAttempts: 2,
+            retryResponseRejections: true,
+            ...stageAuditOptions(),
+            onBeforeAttempt,
+            onAttemptTelemetry,
+        })).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+
+        expect(onBeforeAttempt).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ attempt: 1, disposition: 'response_rejected' }),
+        );
     });
 
     it('emits PII-free feature response rejection diagnostics for aggregation', async () => {
@@ -1298,6 +1325,29 @@ describe('analyzeWithGemini stage request policy', () => {
         expect(mocks.generateContent).toHaveBeenCalledOnce();
         expect(onBeforeAttempt.mock.invocationCallOrder[0])
             .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
+    });
+
+    it('reports only the stage, audit boundary and allowlisted database reason before dispatch', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+        try {
+            await expect(analyzeWithGemini('prompt', undefined, {
+                schema: responseSchema,
+                stage: 'genderTriage',
+                requestId: stageRequestId,
+                onBeforeAttempt: vi.fn().mockRejectedValue(new Error(
+                    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: private diagnostic (40P01).'
+                )),
+                onAttemptTelemetry: vi.fn(),
+            })).rejects.toThrow('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR');
+            expect(warn).toHaveBeenCalledWith(JSON.stringify({
+                event: 'gemini_durable_audit_failed', boundary: 'intent', stage: 'genderTriage',
+                reason: 'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR', databaseCode: '40P01',
+            }));
+            expect(JSON.stringify(warn.mock.calls)).not.toContain('private diagnostic');
+            expect(mocks.generateContent).not.toHaveBeenCalled();
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it.each([
