@@ -199,6 +199,75 @@ afterAll(async () => {
 });
 
 describe('analysis V2 live scheduler migration', () => {
+    it('changes only the Dev shared feature lease ceiling and rejects the production catalog', async () => {
+        const safeBaseline = await readFile(
+            path.join(process.cwd(), 'supabase/dev-ui/production-baseline.sql'), 'utf8'
+        );
+        const acquireDefinition = safeBaseline.match(
+            /^CREATE FUNCTION public\.acquire_analysis_v2_scheduler_gemini_lease_v1\([\s\S]*?^\$_\$;$/m
+        )?.[0];
+        expect(acquireDefinition).toBeDefined();
+        const devOverride = await readFile(
+            path.join(process.cwd(), 'supabase/dev-ui/live-standard-feature-concurrency.sql'), 'utf8'
+        );
+        const devDb = await PGlite.create();
+        try {
+            await devDb.exec(`
+                CREATE TABLE public.analysis_requests (
+                    id uuid PRIMARY KEY, pipeline_version text, status text, policy_versions_snapshot jsonb
+                );
+                CREATE TABLE public.analysis_v2_gemini_leases (
+                    slot smallint PRIMARY KEY, state text, fence bigint, request_id uuid,
+                    job_key text, operation_key text, attempt smallint, lease_claim_token uuid,
+                    stage text, expires_at timestamptz, quarantined_at timestamptz, updated_at timestamptz
+                );
+                INSERT INTO public.analysis_v2_gemini_leases (slot, state)
+                SELECT slot, 'available' FROM generate_series(1, 8) slot;
+                CREATE FUNCTION public.analysis_v2_valid_ai_operation_key(text)
+                RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+                CREATE FUNCTION public.acquire_analysis_v2_gemini_lease_v2(uuid,text,text,text,integer,uuid,integer)
+                RETURNS TABLE(outcome text, slot smallint, lease_claim_token uuid, fence bigint, expires_at timestamptz)
+                LANGUAGE sql AS $$ SELECT 'acquired'::text, 8::smallint, $6, 1::bigint, now() $$;
+                ${acquireDefinition}
+            `);
+            await expect(devDb.exec(devOverride)).rejects.toThrow('DEV_LIVE_FEATURE_CAP_WRONG_DATABASE');
+            await devDb.exec('ROLLBACK');
+            await devDb.exec(`
+                CREATE SCHEMA dev_ui;
+                CREATE TABLE dev_ui.runs (id integer);
+                CREATE SCHEMA dev_live_budget;
+                CREATE TABLE dev_live_budget.standard_owner_policy (id integer);
+                CREATE FUNCTION public.dev_live_owner_start_v4(uuid,text,uuid)
+                RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+            `);
+            await devDb.exec(devOverride);
+            await devDb.exec(devOverride);
+            await devDb.query(`
+                INSERT INTO public.analysis_requests VALUES
+                ($1, 'v2', 'processing',
+                 '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.11","scheduler":"ai-scheduler-v1"}')
+            `, [requestId]);
+            await expect(devDb.exec(devOverride)).rejects.toThrow('DEV_LIVE_FEATURE_CAP_REQUIRES_IDLE_WORKERS');
+            await devDb.exec('ROLLBACK');
+            const acquireFeature = async (held: number) => {
+                await devDb.query(`
+                    UPDATE public.analysis_v2_gemini_leases SET
+                       state = CASE WHEN slot <= $1 THEN 'leased' ELSE 'available' END,
+                       stage = 'featureAnalysis', expires_at = now() + interval '4 minutes'
+                `, [held]);
+                return devDb.query(`
+                    SELECT outcome FROM public.acquire_analysis_v2_scheduler_gemini_lease_v1(
+                        $1, 'track:profile-ai:batch:0', $2, 'featureAnalysis', 1, $3, 240
+                    )
+                `, [requestId, `feature-analysis:${'b'.repeat(64)}`, jobClaim]);
+            };
+            expect((await acquireFeature(5)).rows).toEqual([{ outcome: 'acquired' }]);
+            expect((await acquireFeature(6)).rows).toEqual([{ outcome: 'capacity_pending' }]);
+        } finally {
+            await devDb.close();
+        }
+    });
+
     it('admits v2.10 only after its forward migration while preserving exact scheduler snapshots', async () => {
         const v29RequestId = '133e4567-e89b-42d3-a456-426614174000';
         const v29JobClaim = '143e4567-e89b-42d3-a456-426614174000';
