@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAnalysisV2RecoveryAvailable } from '@/lib/services/analysis/v2-execution-gate';
-import { recoverAnalysisV2Jobs } from '@/lib/services/analysis/v2-recovery';
+import { recoverAnalysisV2Jobs, recoverDevLiveStandardDispatches } from '@/lib/services/analysis/v2-recovery';
 import {
     recoverExpiredProfileProviderCanaries,
 } from '@/lib/services/analysis/profile-provider-canary-recovery';
@@ -13,14 +13,20 @@ import {
 } from '@/lib/services/media/result-image-purge';
 import { observeRoute } from '@/lib/observability/request';
 import { assertAnalysisWorkerWorkloadRole } from '@/lib/services/analysis/workload-role';
+import { devLiveWorkerRequestBoundary } from '@/lib/services/dev-ui/live-runtime';
 
 export const maxDuration = 300;
 
 async function handlePOST(request: Request) {
+    const devRecovery = process.env.DEV_LIVE_WORKLOAD !== undefined
+        || process.env.K_SERVICE?.startsWith('dev-live-');
     let config;
     try {
         config = getAnalysisV2MaintenanceAuthConfig();
         assertAnalysisWorkerWorkloadRole('paid');
+        if (devRecovery && devLiveWorkerRequestBoundary(request) !== 'dev-worker') {
+            throw new Error('DEV_LIVE_MAINTENANCE_UNAVAILABLE');
+        }
     } catch {
         return NextResponse.json({ code: 'MAINTENANCE_UNAVAILABLE' }, { status: 503 });
     }
@@ -29,6 +35,14 @@ async function handlePOST(request: Request) {
         { config }
     )) {
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
+    }
+    if (devRecovery) {
+        try {
+            const summary = await recoverDevLiveStandardDispatches();
+            return NextResponse.json(summary, { status: summary.failed === 0 ? 200 : 500 });
+        } catch {
+            return NextResponse.json({ code: 'RECOVERY_FAILED' }, { status: 500 });
+        }
     }
     if (!isAnalysisV2RecoveryAvailable()) {
         return NextResponse.json({ code: 'V2_PIPELINE_UNAVAILABLE' }, { status: 503 });

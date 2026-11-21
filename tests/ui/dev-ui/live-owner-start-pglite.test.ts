@@ -200,13 +200,33 @@ describe('Dev owner-start grant SQL', () => {
             .toEqual([{ plan_id: 'basic', standard_policy_id: null }]);
         expect((await db.query('SELECT 1 FROM dev_live_budget.standard_owner_policy')).rows).toHaveLength(0);
         await installPreflightOverlays();
+        await db.exec(`
+            ALTER TABLE public.analysis_preflights ADD COLUMN consumed_request_id uuid;
+            CREATE TABLE public.analysis_requests (
+                id uuid PRIMARY KEY, preflight_id uuid, user_id uuid, pipeline_version text,
+                status text, selected_plan_id_snapshot text
+            );
+            CREATE TABLE public.analysis_pipeline_jobs (
+                request_id uuid, job_key text, status text, dispatch_state text DEFAULT 'pending',
+                dispatch_generation integer DEFAULT 0, dispatch_reservation_token uuid,
+                dispatch_reserved_at timestamptz, dispatched_at timestamptz, dispatch_task_name text,
+                lease_expires_at timestamptz, recovery_not_before timestamptz,
+                scheduler_not_before_at timestamptz
+            );
+            CREATE FUNCTION public.list_analysis_v2_dispatchable_jobs(integer)
+            RETURNS void LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
+        `);
+        const recoverySql = await readSql('live-standard-dispatch-recovery');
+        await db.exec(recoverySql);
+        await db.exec(recoverySql);
     });
 
     beforeEach(async () => {
         await db.exec(`
             TRUNCATE dev_live_budget.reservations, dev_live_budget.owner_starts, dev_live_budget.grants,
                 dev_live_budget.standard_owner_policy;
-            TRUNCATE public.analysis_preflights, public.account_classification_audit,
+            TRUNCATE public.analysis_pipeline_jobs, public.analysis_requests, public.analysis_preflights,
+                public.account_classification_audit,
                 public.account_e2e_test_runners, auth.identities, auth.users;
         `);
         await db.query(`
@@ -407,6 +427,35 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserve({ ...grant, aiMaxCents: 1_801 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
     });
 
+    it('caps a burst of concurrent durable Standard Vertex reservations until usage settles', async () => {
+        await configureStandard();
+        const grant = await startDurableStandard();
+        for (const amount of [5_000_000, 5_000_000, 5_000_000, 2_200_000]) {
+            const priorId = randomUUID();
+            await expect(reserve(grant, 'vertex', amount, priorId)).resolves.toBe(true);
+            await db.query('SELECT public.dev_live_budget_settle_vertex_v1($1, $2, $3)', [grant.id, priorId, amount]);
+        }
+
+        const ids = Array.from({ length: 8 }, () => randomUUID());
+        const admitted = await Promise.all(ids.map(id => reserve(grant, 'vertex', 153_875, id)));
+        const admittedIds = ids.filter((_id, index) => admitted[index]);
+        expect(admittedIds).toHaveLength(5);
+        await expect(db.query(
+            'SELECT ai_committed_micros FROM dev_live_budget.grants WHERE grant_id = $1',
+            [grant.id],
+        )).resolves.toMatchObject({ rows: [{ ai_committed_micros: 17_969_375 }] });
+
+        await Promise.all(admittedIds.map(id => db.query(
+            'SELECT public.dev_live_budget_settle_vertex_v1($1, $2, 50000)',
+            [grant.id, id],
+        )));
+        await expect(reserve(grant, 'vertex', 153_875)).resolves.toBe(true);
+        await expect(db.query(
+            'SELECT ai_committed_micros FROM dev_live_budget.grants WHERE grant_id = $1',
+            [grant.id],
+        )).resolves.toMatchObject({ rows: [{ ai_committed_micros: 17_603_875 }] });
+    });
+
     it('keeps new Standard approvals active beyond the old window without reopening expired grants', async () => {
         await configureStandard();
         const legacyAttempt = randomUUID();
@@ -537,6 +586,56 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserveAdmission('standard', '0'.repeat(64))).rejects.toThrow('ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE');
         await db.exec('UPDATE dev_live_budget.standard_owner_policy SET enabled = false');
         await expect(reserveAdmission('standard', jti)).rejects.toThrow('ANALYSIS_V2_REVENUE_SETTLEMENT_FENCE');
+    });
+
+    it('recovers only due jobs fenced to the active Dev Standard approval', async () => {
+        await configureStandard();
+        const durable = await startDurableStandard();
+        const finite = await startStandard();
+        const addRequest = async (grant: BudgetApproval, consumed: boolean) => {
+            const requestId = randomUUID();
+            const preflightId = randomUUID();
+            await db.query(`
+                INSERT INTO public.analysis_preflights (
+                    id, user_id, idempotency_key, target_instagram_id, access_mode, consumed_request_id
+                ) VALUES ($1, $2, $3, $4, 'test_entitlement', $5)
+            `, [preflightId, ownerId, `dev-live:owner:standard:${grant.id}`, target, consumed ? requestId : null]);
+            await db.query(`
+                INSERT INTO public.analysis_requests VALUES ($1, $2, $3, 'v2', 'processing', 'standard')
+            `, [requestId, preflightId, ownerId]);
+            return requestId;
+        };
+        const correctRequest = await addRequest(durable, true);
+        const finiteRequest = await addRequest(finite, true);
+        const detachedRequest = await addRequest(durable, false);
+        await db.query(`
+            INSERT INTO public.analysis_pipeline_jobs (
+                request_id, job_key, status, recovery_not_before, scheduler_not_before_at, lease_expires_at
+            ) VALUES
+                ($1, 'eligible', 'pending', now() - interval '1 hour', NULL, NULL),
+                ($1, 'future-recovery', 'pending', now() + interval '1 hour', NULL, NULL),
+                ($1, 'future-scheduler', 'pending', now() - interval '1 hour', now() + interval '1 hour', NULL),
+                ($1, 'active-lease', 'processing', now() - interval '1 hour', NULL, now() + interval '1 hour'),
+                ($2, 'finite-grant', 'pending', now() - interval '1 hour', NULL, NULL),
+                ($3, 'detached-preflight', 'pending', now() - interval '1 hour', NULL, NULL)
+        `, [correctRequest, finiteRequest, detachedRequest]);
+        const list = () => db.query(
+            'SELECT request_id, job_key FROM public.list_dev_live_standard_dispatchable_jobs_v1(100)',
+        );
+        await db.exec('SET ROLE service_role');
+        try {
+            await expect(list()).resolves.toMatchObject({
+                rows: [{ request_id: correctRequest, job_key: 'eligible' }],
+            });
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+        const secondActiveRequest = await addRequest(await startDurableStandard(), true);
+        await expect(list()).resolves.toMatchObject({ rows: [] });
+        await db.query("UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1", [secondActiveRequest]);
+        await expect(list()).resolves.toMatchObject({ rows: [{ request_id: correctRequest, job_key: 'eligible' }] });
+        await db.exec('UPDATE dev_live_budget.standard_owner_policy SET enabled = false');
+        await expect(list()).resolves.toMatchObject({ rows: [] });
     });
 
     it('blocks Standard spending after owner, policy or expiry checks fail', async () => {

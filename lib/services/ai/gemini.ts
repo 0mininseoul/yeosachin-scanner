@@ -151,8 +151,8 @@ interface GeminiGenerationLimiterState {
     stages: Map<string, AsyncSemaphore>;
 }
 
-// A full-context reservation may briefly hold most of the Dev grant. Let the
-// current call settle before the next attempt reserves against the same grant.
+// Basic and legacy Dev grants can tie up most of their smaller budgets in one
+// reservation. Serialize those calls through settlement.
 const devLiveGenerationSlot = new AsyncSemaphore(1);
 
 const processScope = globalThis as typeof globalThis & {
@@ -1043,6 +1043,12 @@ export async function analyzeWithGemini<T>(
         ? await import('@/lib/services/dev-ui/live-budget')
         : null;
     const devLiveApproval = devLiveBudget?.requireDevLiveProviderApproval();
+    // Run the current owner-start Standard grant under the normal stage and shared
+    // limits. Its database ledger reserves the maximum atomically across workers.
+    const useDevStandardConcurrency = process.env.DEV_LIVE_WORKLOAD === 'paid'
+        && process.env.DEV_LIVE_ANALYSIS_MODE === 'owner_start'
+        && devLiveApproval?.planId === 'standard'
+        && devLiveApproval.expiresAt === null;
     const resolvedMaxAttempts = maxAttempts
         ?? stagePolicy?.maxAttempts;
     // The durable intent ledger only allows another attempt after a confirmed 429.
@@ -1281,7 +1287,9 @@ export async function analyzeWithGemini<T>(
                 response = await runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
-                    devLiveBudget ? () => devLiveGenerationSlot.run(dispatch, abortSignal) : dispatch,
+                    devLiveBudget && !useDevStandardConcurrency
+                        ? () => devLiveGenerationSlot.run(dispatch, abortSignal)
+                        : dispatch,
                     abortSignal,
                 );
             } catch (generationError) {

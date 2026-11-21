@@ -1503,6 +1503,8 @@ describe('Gemini response JSON Schema mapping', () => {
 describe('analyzeWithGemini process concurrency', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        mocks.reserveDevAttempt.mockReset();
+        mocks.settleDevAttempt.mockReset().mockResolvedValue(undefined);
         mocks.tokenUsageInsert.mockResolvedValue({ error: null });
         vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
         vi.stubEnv('VERTEX_AI_COST_OPTIMIZED', 'false');
@@ -1531,6 +1533,112 @@ describe('analyzeWithGemini process concurrency', () => {
             maximumActive: () => maximumActive,
         };
     }
+
+    it('uses the normal feature and shared generation limits for Dev owner-start Standard', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+        const approval = { planId: 'standard', expiresAt: null };
+        mocks.requireDevApproval.mockReturnValue(approval);
+        mocks.reserveDevAttempt.mockResolvedValue({ reservationId: 'synthetic-reservation' });
+
+        const deferred = deferredGenerations();
+        const audit = stageAuditOptions();
+        const start = (stage: 'featureAnalysis' | 'genderTriage') => analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema,
+            stage,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            ...audit,
+        });
+        const active: Array<ReturnType<typeof start>> = [];
+        const begin = async (stage: 'featureAnalysis' | 'genderTriage') => {
+            // Stage each import of the mocked budget module, then hold every SDK call open.
+            active.push(start(stage));
+            await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(active.length));
+        };
+        for (let i = 0; i < 3; i++) await begin('featureAnalysis');
+        await expect(start('featureAnalysis')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(3);
+
+        for (let i = 0; i < 5; i++) await begin('genderTriage');
+        await expect(start('genderTriage')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        expect(deferred.maximumActive()).toBe(8);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(8);
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(8);
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+
+        deferred.releases.splice(0).forEach(release => release());
+        await expect(Promise.all(active)).resolves.toHaveLength(8);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(8);
+    });
+
+    it.each([
+        ['paid', 'basic', '2026-11-21T06:00:00.000Z', 'owner_start'],
+        ['paid', 'basic', '2026-11-21T06:00:00.000Z', undefined],
+        ['paid', 'standard', '2026-11-21T06:00:00.000Z', 'owner_start'],
+        ['preflight', 'standard', null, 'owner_start'],
+    ] as const)('serializes Dev %s %s with expiry %s in mode %s', async (role, planId, expiresAt, mode) => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', role);
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', mode);
+        mocks.requireDevApproval.mockReturnValue({ planId, expiresAt });
+        mocks.reserveDevAttempt.mockResolvedValue({ reservationId: 'synthetic-reservation' });
+
+        const deferred = deferredGenerations();
+        const options = {
+            schema: responseSchema,
+            stage: 'genderTriage' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11' as const,
+            ...stageAuditOptions(),
+        };
+        const first = analyzeWithGemini('prompt', undefined, options);
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(1));
+        const second = analyzeWithGemini('prompt', undefined, options);
+        await vi.waitFor(() => expect(mocks.requireDevApproval).toHaveBeenCalledTimes(2));
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(1);
+        deferred.releases.shift()?.();
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(2));
+        deferred.releases.shift()?.();
+        await Promise.all([first, second]);
+        expect(deferred.maximumActive()).toBe(1);
+    });
+
+    it('does not start audit or Vertex work for a parallel Dev Standard reservation that exceeds the cap', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+        mocks.requireDevApproval.mockReturnValue({ planId: 'standard', expiresAt: null });
+
+        const limit = 18_000_000;
+        const reservationMicros = 153_875;
+        // Simulate charges and reservations already committed by other workers.
+        let committed = 8_200_000 + 62 * reservationMicros;
+        const reservation = { reservationId: 'synthetic-reservation' };
+        mocks.reserveDevAttempt.mockImplementation(async () => {
+            if (committed + reservationMicros > limit) throw new Error('DEV_LIVE_BUDGET_EXCEEDED');
+            committed += reservationMicros;
+            return reservation;
+        });
+        mocks.settleDevAttempt.mockImplementation(async (_reservation: unknown, actual: number) => {
+            committed += Math.ceil(actual * 1_000_000) - reservationMicros;
+        });
+
+        const deferred = deferredGenerations();
+        const audit = stageAuditOptions();
+        const options = {
+            schema: responseSchema,
+            stage: 'featureAnalysis' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11' as const,
+            ...audit,
+        };
+        const first = analyzeWithGemini('prompt', undefined, options);
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(1));
+        await expect(analyzeWithGemini('prompt', undefined, options)).rejects.toThrow('DEV_LIVE_BUDGET_EXCEEDED');
+        expect(committed).toBeLessThan(limit);
+        expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(1);
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+        deferred.releases.shift()?.();
+        await expect(first).resolves.toEqual({ value: 'ok' });
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, expect.any(Number));
+    });
 
     it('caps all process-shared generations at eight', async () => {
         const deferred = deferredGenerations();

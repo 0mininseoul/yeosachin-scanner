@@ -35,7 +35,11 @@ Ascentum Dev에서 최신 프로필 확인용 기존 DB 래퍼가 명시적 `sec
 
 ## 실행 정책 및 비용
 
-Dev 유료 큐의 전달 재시도는 운영 유료 큐와 같은 최대 8회, 최대 1시간, 백오프 40–300초, 최대 두 배 증가 4회로 설정한다. 워커는 일반 작업을 최대 7회 시도하므로 큐의 전달 한도가 먼저 끝나면 작업이 대기 상태에 고립될 수 있다. Dev 큐의 동시 전달 수와 공급자 예산은 별도로 제한한다.
+Dev Standard 동등성 검증에서는 운영과 같은 큐 동시 전달 수·재시도와 Cloud Run 리비전 최대 인스턴스 수를 사용한다. 정식 분석은 동시 8개·초당 8개·최대 8회·1시간, 사전 점검은 동시 32개·초당 32개·최대 8회·30분이다. 둘 다 백오프 40–300초와 최대 두 배 증가 4회를 사용한다. 유료 워커 서비스 최대 인스턴스는 10개, 리비전은 8개다. 사전 점검은 서비스와 리비전 각각 32개다.
+
+새 Dev 운영자 Standard 승인의 Vertex 호출은 운영 스케줄러와 같은 동시성 제한을 적용한다. 운영자 Basic과 기존 유한 승인에는 Dev의 추가 직렬 제한이 적용된다. 같은 승인 아래 동시에 도착한 선예약은 하나의 DB 거래씩 상한을 검사한다. SDK 내부 호출은 Dev 정산이 추적하는 단일 시도로 제한한다.
+
+Dev 유료 작업 재전달은 [Dev 전용 SQL](../../supabase/dev-ui/live-standard-dispatch-recovery.sql)을 운영자 Standard 승인 SQL 뒤에 적용하고 `DEV_LIVE_STANDARD_RECOVERY_ENABLED=true`를 설정한다. 서울 Dev Cloud Scheduler에서 전용 `dev-live-paid-maintenance` OIDC 신원으로 Dev 유료 워커의 `/api/analysis/v2/recover`를 운영과 같은 5분 간격으로 호출한다. audience는 Dev 유료 워커의 등록 origin이다. 새 Standard 승인과 소비된 Dev 사전 점검에 연결된 활성 분석이 한 건일 때만 기한이 도래한 작업을 재전달한다. 운영 전체 복구, 카나리 복구, 이미지 보존 정리 및 사전 점검 유지보수는 해당 Dev 경로에 묶지 않는다.
 
 Dev 웹은 `ANALYSIS_V2_ADMISSION_ENABLED=true`로 설정하고, 사전 점검에 기록할 정책을 운영과 맞춘다. `ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT`, `ANALYSIS_V2_NARRATIVE_V28_ROLLOUT`, `ANALYSIS_V2_AI_MICROBATCH_V29_ROLLOUT`, `ANALYSIS_V2_GENDER_SUMMARY_QUALITY_V211_ROLLOUT`, `ANALYSIS_V2_AI_SCHEDULER_ROLLOUT`에는 `production`을 지정하고, `ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT`에는 `off`를 지정한다.
 

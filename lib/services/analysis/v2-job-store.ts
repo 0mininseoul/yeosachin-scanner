@@ -31,6 +31,7 @@ export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     releaseClaimRpc: 'release_analysis_v2_job_claim',
     completeAndFanoutRpc: 'complete_analysis_v2_job_and_fanout',
     listDispatchableRpc: 'list_analysis_v2_dispatchable_jobs',
+    listDevStandardDispatchableRpc: 'list_dev_live_standard_dispatchable_jobs_v1',
 });
 
 export const ANALYSIS_V2_JOB_STATUSES = [
@@ -176,6 +177,7 @@ export interface AnalysisV2JobStore {
     ): Promise<AnalysisV2JobIdentity[]>;
     listDispatchable(input?: {
         limit?: number;
+        scope?: 'dev-live-standard';
     }): Promise<AnalysisV2DispatchableJob[]>;
 }
 
@@ -936,7 +938,9 @@ export function createSupabaseAnalysisV2JobStore(
                 throw new Error('ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid recovery limit.');
             }
             const { data, error } = await client.rpc(
-                ANALYSIS_V2_DATABASE_NAMES.listDispatchableRpc,
+                input.scope === 'dev-live-standard'
+                    ? ANALYSIS_V2_DATABASE_NAMES.listDevStandardDispatchableRpc
+                    : ANALYSIS_V2_DATABASE_NAMES.listDispatchableRpc,
                 {
                     p_limit: limit,
                 }
