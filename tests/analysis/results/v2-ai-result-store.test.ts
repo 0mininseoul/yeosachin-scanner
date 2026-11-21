@@ -371,6 +371,19 @@ describe('analysis V2 AI result store', () => {
         });
     });
 
+    it('retries only the same result checkpoint after a PostgreSQL statement timeout', async () => {
+        const fake = rpcClient({ data: terminalized(), error: null });
+        fake.rpc.mockResolvedValueOnce({
+            data: null,
+            error: { code: '57014', message: 'canceling statement due to statement timeout' },
+        });
+        const store = createAnalysisV2AiResultStore(fake.client);
+
+        await expect(store.terminalizeSuccess(terminalInput(), resultSchema)).resolves.toEqual(generatedCheckpoint());
+        expect(fake.rpc).toHaveBeenCalledTimes(2);
+        expect(fake.rpc.mock.calls[1]).toEqual(fake.rpc.mock.calls[0]);
+    });
+
     it('rejects a non-strict result before an RPC can charge or persist', async () => {
         const fake = rpcClient();
         const store = createAnalysisV2AiResultStore(fake.client);

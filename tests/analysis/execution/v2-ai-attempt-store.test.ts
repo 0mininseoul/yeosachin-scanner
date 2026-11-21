@@ -223,6 +223,35 @@ describe('analysis V2 AI attempt store', () => {
         );
     });
 
+    it('retries a statement timeout once with the original intent token and metadata', async () => {
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: '57014', message: 'canceling statement due to statement timeout' },
+            })
+            .mockImplementation(async (_, params: Record<string, unknown>) => ({
+                data: { ...reservedRecord({ reservationToken: String(params.p_reservation_token) }), created: true },
+                error: null,
+            }));
+        const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));
+
+        await expect(store.reserve(reservationInput())).resolves.toMatchObject({ created: true, attempt: 1 });
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
+    });
+
+    it.each([
+        { code: '57014', message: 'canceling statement due to statement timeout', calls: 2 },
+        { code: '57014', message: 'canceling statement due to user request', calls: 1 },
+        { code: '08006', message: 'connection failure', calls: 1 },
+    ])('keeps a failed or ambiguous $code reservation bounded to $calls RPC calls', async ({ code, message, calls }) => {
+        const rpc = vi.fn().mockResolvedValue({ data: null, error: { code, message } });
+        const store = createAnalysisV2AiAttemptStore(rpcClient(rpc));
+
+        await expect(store.reserve(reservationInput())).rejects.toThrow(`reservation failed (${code})`);
+        expect(rpc).toHaveBeenCalledTimes(calls);
+    });
+
     it('rejects created=true when the database does not echo its reservation token', async () => {
         const rpc = vi.fn().mockImplementation(() => Promise.resolve({
             data: { ...reservedRecord(), created: true },
