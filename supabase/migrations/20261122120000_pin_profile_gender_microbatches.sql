@@ -24,6 +24,7 @@ DECLARE
     v_pipeline TEXT;
     v_plan TEXT;
     v_snapshot JSONB;
+    v_lease_expires_at TIMESTAMPTZ;
 BEGIN
     IF p_claim_token IS NULL OR p_job_key IS NULL OR p_job_key !~ '^track:profile-ai:batch:(0|[1-9][0-9]*)$'
        OR p_input_hash IS NULL OR p_input_hash !~ '^[0-9a-f]{64}$' THEN
@@ -42,12 +43,14 @@ BEGIN
            '{"pipeline":"v2","risk":"risk-policy-v2.4","aiStage":"ai-stage-policy-v2.11","scheduler":"ai-scheduler-v1"}'::JSONB,
            '{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.11","scheduler":"ai-scheduler-v1"}'::JSONB
        ) THEN RAISE EXCEPTION 'ANALYSIS_V2_PROFILE_GENDER_PLAN_POLICY_MISMATCH'; END IF;
-    PERFORM 1 FROM public.analysis_pipeline_jobs j
+    SELECT j.lease_expires_at INTO v_lease_expires_at FROM public.analysis_pipeline_jobs j
      WHERE j.request_id = p_request_id AND j.job_key = p_job_key AND j.track = 'profile_ai'
        AND j.kind = 'ai' AND j.job_key = 'track:profile-ai:batch:' || j.batch::TEXT
-       AND j.status = 'processing' AND j.input_hash = p_input_hash AND j.lease_token = p_claim_token
-       AND j.lease_expires_at > pg_catalog.clock_timestamp() FOR UPDATE;
-    IF NOT FOUND THEN RAISE EXCEPTION 'ANALYSIS_V2_PROFILE_GENDER_PLAN_FENCE_MISMATCH'; END IF;
+       AND j.status = 'processing' AND j.input_hash = p_input_hash AND j.lease_token = p_claim_token FOR UPDATE;
+    -- A job may expire while waiting to acquire the row lock.
+    IF NOT FOUND OR v_lease_expires_at IS NULL OR v_lease_expires_at <= pg_catalog.clock_timestamp() THEN
+        RAISE EXCEPTION 'ANALYSIS_V2_PROFILE_GENDER_PLAN_FENCE_MISMATCH';
+    END IF;
     SELECT p.groups INTO v_groups FROM public.analysis_v2_profile_gender_plans p
      WHERE p.request_id = p_request_id AND p.job_key = p_job_key AND p.input_hash = p_input_hash;
     IF FOUND THEN RETURN pg_catalog.jsonb_build_object('kind','pinned','groups',v_groups); END IF;
