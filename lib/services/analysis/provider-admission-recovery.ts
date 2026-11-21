@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     analysisProviderAdmissionStore,
     type AnalysisProviderAdmissionRecoveryCursor,
@@ -22,6 +24,24 @@ export interface AnalysisProviderAdmissionRecoverySummary {
     skipped: number;
     failed: number;
     hasMore: boolean;
+}
+
+const devRecoverySummarySchema = z.object({
+    scanned: z.number().int().nonnegative(),
+    recovered: z.number().int().nonnegative(),
+    resolved: z.number().int().nonnegative(),
+    skipped: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    hasMore: z.boolean(),
+    geminiSlotsReaped: z.number().int().nonnegative(),
+}).strict();
+
+export async function recoverDevLiveStandardProviderAdmissions() {
+    const { data, error } = await supabaseAdmin.rpc('recover_dev_live_standard_provider_admissions_v1', {
+        p_limit: ANALYSIS_PROVIDER_ADMISSION_RECOVERY_PAGE_SIZE,
+    });
+    if (error) throw new Error('DEV_STANDARD_PROVIDER_ADMISSION_RECOVERY_FAILED');
+    return devRecoverySummarySchema.parse(data);
 }
 
 type RecoveryCandidateHandler = (

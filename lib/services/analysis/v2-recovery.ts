@@ -42,6 +42,7 @@ import {
 } from './beta-apify-credit-settlement-runtime';
 import { getBetaApifyCreditPoolRuntimeConfig } from './beta-apify-credit-runtime';
 import {
+    recoverDevLiveStandardProviderAdmissions,
     recoverExpiredAnalysisProviderAdmissions,
     type AnalysisProviderAdmissionRecoverySummary,
 } from './provider-admission-recovery';
@@ -261,16 +262,29 @@ async function recoverDispatchableJobs(
     return summary;
 }
 
-/** Runs queue delivery recovery for authorized Dev Standard jobs only. */
-export async function recoverDevLiveStandardDispatches(
-    dependencies: { store?: AnalysisV2JobStore; lookup?: RecoveryLookup; dispatch?: RecoveryDispatch } = {},
-): Promise<DispatchRecoverySummary> {
+/** Recover proven-expired leases before redelivering authorized Dev Standard jobs. */
+export async function recoverDevLiveStandard(
+    dependencies: {
+        store?: AnalysisV2JobStore;
+        lookup?: RecoveryLookup;
+        dispatch?: RecoveryDispatch;
+        recoverLeases?: typeof recoverDevLiveStandardProviderAdmissions;
+    } = {},
+) {
+    let providerAdmissions: Awaited<ReturnType<typeof recoverDevLiveStandardProviderAdmissions>> | null = null;
+    try {
+        providerAdmissions = await (dependencies.recoverLeases ?? recoverDevLiveStandardProviderAdmissions)();
+    } catch {
+        // Preserve queue recovery if the lease RPC is unavailable during rollout or contention.
+    }
+
     const store = dependencies.store ?? analysisV2JobStore;
     const jobs = await store.listDispatchable({ limit: ANALYSIS_V2_RECOVERY_MAX_JOBS, scope: 'dev-live-standard' });
-    return recoverDispatchableJobs(
+    const dispatch = await recoverDispatchableJobs(
         jobs, store, dependencies.lookup ?? lookupAnalysisV2Task,
         dependencies.dispatch ?? dispatchAnalysisV2Job, ANALYSIS_V2_RECOVERY_CONCURRENCY,
     );
+    return { ...dispatch, providerAdmissions, failed: dispatch.failed + (providerAdmissions?.failed ?? 1) };
 }
 
 export async function recoverAnalysisV2Jobs(

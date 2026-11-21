@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import type {
     AnalysisV2SchedulerOperationStore,
     AnalysisV2SchedulerStage,
@@ -167,7 +168,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
             ) {
                 throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_VALIDATION_ERROR');
             }
-            const { data, error } = await client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES.claimRpc,
                 {
                     p_request_id: input.requestId.toLowerCase(),
@@ -178,7 +179,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_operation_claim_token: proposedToken.toLowerCase(),
                     p_lease_seconds: OPERATION_LEASE_SECONDS,
                 },
-            );
+            ));
             if (error) {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '
@@ -223,7 +224,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                 throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_FENCE_MISMATCH');
             }
             const value = schema.parse(operation.value);
-            const { data, error } = await client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES.commitRpc,
                 {
                     p_request_id: input.requestId.toLowerCase(),
@@ -234,7 +235,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_operation_claim_token: operation.claimToken,
                     p_result_json: value,
                 },
-            );
+            ));
             if (error || data !== true) {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '
@@ -249,7 +250,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
             if (!expectedClaim || expectedClaim !== operation.claimToken) {
                 throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_FENCE_MISMATCH');
             }
-            const { data, error } = await client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES.deferRpc,
                 {
                     p_request_id: input.requestId.toLowerCase(),
@@ -260,7 +261,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_operation_claim_token: operation.claimToken,
                     p_reason: operation.reason,
                 },
-            );
+            ));
             if (error || typeof data !== 'string') {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '

@@ -4,7 +4,7 @@ import {
     type AnalysisV2DispatchableJob,
     type AnalysisV2JobStore,
 } from '../../../lib/services/analysis/v2-job-store';
-import { recoverAnalysisV2Jobs, recoverDevLiveStandardDispatches } from '../../../lib/services/analysis/v2-recovery';
+import { recoverAnalysisV2Jobs, recoverDevLiveStandard } from '../../../lib/services/analysis/v2-recovery';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -123,12 +123,29 @@ describe('analysis V2 dispatch recovery', () => {
             .mockRejectedValueOnce(new Error('lookup unavailable'));
         const dispatch = vi.fn(async () => undefined);
 
-        await expect(recoverDevLiveStandardDispatches({ store: jobStore, lookup, dispatch })).resolves.toEqual({
-            scanned: 3, dispatched: 1, taskPresent: 1, lostRace: 0, failed: 1,
+        const providerAdmissions = { scanned: 3, recovered: 2, resolved: 1, skipped: 2, failed: 0, hasMore: false, geminiSlotsReaped: 1 };
+        const recoverLeases = vi.fn(async () => providerAdmissions);
+        await expect(recoverDevLiveStandard({ store: jobStore, lookup, dispatch, recoverLeases })).resolves.toEqual({
+            scanned: 3, dispatched: 1, taskPresent: 1, lostRace: 0, failed: 1, providerAdmissions,
         });
+        expect(recoverLeases).toHaveBeenCalledOnce();
+        expect(recoverLeases.mock.invocationCallOrder[0]).toBeLessThan(
+            vi.mocked(jobStore.listDispatchable).mock.invocationCallOrder[0],
+        );
         expect(jobStore.listDispatchable).toHaveBeenCalledExactlyOnceWith({ limit: 100, scope: 'dev-live-standard' });
         expect(jobStore.rearmDispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ jobKey: missing.jobKey }));
         expect(dispatch).toHaveBeenCalledExactlyOnceWith(missing.requestId, missing.jobKey);
+    });
+
+    it('still checks delivery when the separate lease recovery is unavailable', async () => {
+        const jobStore = store([job('track:profile-ai:batch:0', 'pending')]);
+        const dispatch = vi.fn(async () => undefined);
+        const recoverLeases = vi.fn(async () => { throw new Error('lease RPC unavailable'); });
+
+        await expect(recoverDevLiveStandard({ store: jobStore, dispatch, recoverLeases })).resolves.toEqual({
+            scanned: 1, dispatched: 1, taskPresent: 0, lostRace: 0, failed: 1, providerAdmissions: null,
+        });
+        expect(dispatch).toHaveBeenCalledOnce();
     });
 
     it('dispatches pending/reserved jobs and preserves task identities that still exist', async () => {

@@ -13,27 +13,11 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.list_dev_live_standard_dispatchable_jobs_v1(p_limit integer DEFAULT 100)
-RETURNS TABLE (
-    request_id uuid,
-    job_key text,
-    job_status text,
-    dispatch_state text,
-    dispatch_generation integer,
-    reservation_token uuid,
-    dispatch_reserved_at timestamptz,
-    dispatched_at timestamptz,
-    task_name text,
-    lease_expires_at timestamptz
-)
-LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
+-- The dispatch and provider-recovery RPCs must share the same approval/owner fence.
+CREATE OR REPLACE FUNCTION dev_live_budget.active_standard_recovery_request_v1()
+RETURNS uuid
+LANGUAGE sql STABLE SET search_path = ''
 AS $$
-BEGIN
-    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
-        RAISE EXCEPTION 'ANALYSIS_V2_INVALID_JOB_SCAN_INPUT';
-    END IF;
-
-    RETURN QUERY
     WITH authorized AS (
         SELECT analysis.id, count(*) OVER () AS active_count
         FROM public.analysis_requests AS analysis
@@ -55,13 +39,40 @@ BEGIN
               owner_start.user_id, owner_start.target_instagram_id
           )
     )
+    SELECT id FROM authorized WHERE active_count = 1;
+$$;
+
+REVOKE ALL ON FUNCTION dev_live_budget.active_standard_recovery_request_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.list_dev_live_standard_dispatchable_jobs_v1(p_limit integer DEFAULT 100)
+RETURNS TABLE (
+    request_id uuid,
+    job_key text,
+    job_status text,
+    dispatch_state text,
+    dispatch_generation integer,
+    reservation_token uuid,
+    dispatch_reserved_at timestamptz,
+    dispatched_at timestamptz,
+    task_name text,
+    lease_expires_at timestamptz
+)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+BEGIN
+    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 100 THEN
+        RAISE EXCEPTION 'ANALYSIS_V2_INVALID_JOB_SCAN_INPUT';
+    END IF;
+
+    RETURN QUERY
     SELECT job.request_id, job.job_key::text, job.status::text,
            job.dispatch_state::text, job.dispatch_generation,
            job.dispatch_reservation_token, job.dispatch_reserved_at,
            job.dispatched_at, job.dispatch_task_name::text, job.lease_expires_at
     FROM public.analysis_pipeline_jobs AS job
-    JOIN authorized ON authorized.id = job.request_id AND authorized.active_count = 1
-    WHERE job.status IN ('pending', 'processing')
+    WHERE job.request_id = dev_live_budget.active_standard_recovery_request_v1()
+      AND job.status IN ('pending', 'processing')
       AND job.recovery_not_before <= pg_catalog.statement_timestamp()
       AND (job.scheduler_not_before_at IS NULL OR job.scheduler_not_before_at <= pg_catalog.statement_timestamp())
       AND (job.status = 'pending' OR job.lease_expires_at <= pg_catalog.statement_timestamp())

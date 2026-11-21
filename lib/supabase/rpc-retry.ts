@@ -1,11 +1,12 @@
-/** Repeat the same database statement after a confirmed PostgreSQL timeout rollback. */
-export async function retryPostgresStatementTimeout<
+/** Repeat the same database statement after a confirmed PostgreSQL rollback. */
+export async function retryPostgresAbortedRpc<
     T extends { error: { code?: string; message?: string } | null }
 >(execute: () => PromiseLike<T>): Promise<T> {
     const result = await execute();
     if (
-        result.error?.code === '57014'
-        && result.error.message === 'canceling statement due to statement timeout'
+        (result.error?.code === '57014'
+            && result.error.message === 'canceling statement due to statement timeout')
+        || (result.error?.code === '40P01' && result.error.message === 'deadlock detected')
     ) {
         return execute();
     }

@@ -35,6 +35,22 @@ if (freshCheckpointStart < 0) {
 // unrelated profile-checkpoint dependency graph in a lock-focused test.
 const freshProvenanceMigration = freshHardeningMigration.slice(0, freshCheckpointStart);
 
+const dispatchLockMigration = new URL(
+    '../../../supabase/migrations/20261122090000_order_analysis_v2_dispatch_lineage_locks.sql',
+    import.meta.url,
+);
+
+function migrationSource(filename: string): string {
+    return readFileSync(new URL(`../../../supabase/migrations/${filename}`, import.meta.url), 'utf8');
+}
+
+function functionDefinition(source: string, name: string): string {
+    const start = source.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
+    const end = source.indexOf('\n$$;', start);
+    if (start < 0 || end < 0) throw new Error(`FRESH_PROVENANCE_POSTGRES_FUNCTION_MISSING:${name}`);
+    return source.slice(start, end + '\n$$;'.length);
+}
+
 const requestId = '11111111-1111-4111-8111-111111111111';
 const preflightId = '22222222-2222-4222-8222-222222222222';
 const userId = '33333333-3333-4333-8333-333333333333';
@@ -497,4 +513,196 @@ describePostgres('fresh provenance PostgreSQL concurrency', () => {
             second.release();
         }
     }, 30_000);
+});
+
+describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () => {
+    const paidJob = 'track:profile-ai:batch:1';
+    const dispatchToken = '77777777-7777-4777-8777-777777777777';
+    const auditToken = '88888888-8888-4888-8888-888888888888';
+    const metadata = {
+        model_name: 'gemini-fixture', location: 'global', stage: 'genderTriage',
+        thinking_level: null, media_count: 0, media_resolution: null,
+        prompt_version: 'fixture-v1', schema_version: 1, max_output_tokens: 32, retry_count: 0,
+    };
+    const identity = {
+        model_name: metadata.model_name, stage: metadata.stage,
+        thinking_level: metadata.thinking_level, media_resolution: metadata.media_resolution,
+        prompt_version: metadata.prompt_version, schema_version: metadata.schema_version,
+        max_output_tokens: metadata.max_output_tokens,
+        input_hash: jobInputHash, media_snapshot_hash: 'f'.repeat(64), cache_scope: 'request',
+    };
+    const telemetry = {
+        ...metadata, usage_metadata_status: 'complete', usage_complete: true,
+        prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, thinking_tokens: 0,
+        latency_ms: 100, estimated_cost_usd: 0.001, finish_reason: 'STOP',
+    };
+    const output = '{"decision":"fixture"}';
+    const outputHash = hash(`analysis-v2-ai-result-content:v1\0${output}`);
+    const auditSql = `SELECT public.terminalize_analysis_v2_ai_attempt_with_result(
+        $1::uuid,$2::text,$3::uuid,$4::text,1::smallint,$5::uuid,
+        $6::jsonb,$7::jsonb,$8::jsonb,$9::text,$10::text
+    ) AS result`;
+    const reserveSql = `SELECT public.reserve_analysis_v2_ai_attempt(
+        $1::uuid,$2::text,$3::uuid,$4::text,1::smallint,$5::uuid,$6::jsonb
+    ) AS result`;
+    const claimSql = `SELECT pg_catalog.to_jsonb(claim_row) AS result
+       FROM public.claim_analysis_v2_job_v2($1::uuid,$2::text,1,$3::uuid,$4::uuid,120,7,'paid',2::smallint) AS claim_row`;
+    let pool: Pool;
+    let auditOperation: string;
+
+    beforeAll(async () => {
+        pool = new Pool({ connectionString: databaseUrl, max: 5 });
+        await pool.query(`
+            DROP SCHEMA IF EXISTS public CASCADE;
+            DROP SCHEMA IF EXISTS extensions CASCADE;
+            CREATE SCHEMA public;
+        `);
+        await pool.query(faithfulCostBootstrap());
+        await pool.query(`
+            GRANT USAGE ON SCHEMA public TO service_role;
+            DROP TABLE public.analysis_v2_ai_result_checkpoints, public.analysis_v2_ai_attempts;
+            ALTER TABLE public.analysis_requests ADD COLUMN background_processing boolean;
+            ALTER TABLE public.analysis_pipeline_jobs
+                ADD COLUMN track text, ADD COLUMN kind text, ADD COLUMN batch integer,
+                ADD COLUMN attempt_count integer NOT NULL DEFAULT 0, ADD COLUMN first_started_at timestamptz,
+                ADD COLUMN last_error_code text, ADD COLUMN last_error_at timestamptz,
+                ADD COLUMN dispatch_workload_role text, ADD COLUMN dispatch_contract_version smallint,
+                ADD COLUMN claim_workload_role text, ADD COLUMN claim_contract_version smallint;
+            CREATE TABLE public.analysis_v2_provider_cleanup_intents (
+                request_id uuid PRIMARY KEY, failed_job_key text, failed_job_input_hash text,
+                failed_claim_token uuid, error_code text, completed_at timestamptz
+            );
+            CREATE TABLE public.analysis_revenue_dispatch_guards (
+                request_id uuid PRIMARY KEY, state text, reason_code text
+            );
+        `);
+        await pool.query(costOperationMigration);
+        const jobClaim = functionDefinition(migrationSource(
+            '20260714031500_harden_analysis_v2_terminal_invariants.sql',
+        ), 'claim_analysis_v2_job');
+        await pool.query(jobClaim.replace('public.claim_analysis_v2_job(', 'public.claim_analysis_v2_job_unfenced_20260811('));
+        for (const name of ['assert_analysis_revenue_dispatch_guard_v1', 'claim_analysis_v2_job']) {
+            await pool.query(functionDefinition(freshHardeningMigration, name));
+        }
+        const paidWrappers = migrationSource('20260831100000_add_analysis_provider_admission_leases.sql');
+        for (const name of [
+            'reserve_analysis_v2_job_dispatch_v2', 'rearm_analysis_v2_job_dispatch_v2',
+            'mark_analysis_v2_job_dispatched_v2', 'claim_analysis_v2_job_v2',
+        ]) await pool.query(functionDefinition(paidWrappers, name));
+        await pool.query(`
+            REVOKE ALL ON FUNCTION public.claim_analysis_v2_job_v2(
+                uuid,text,integer,uuid,uuid,integer,integer,text,smallint
+            ) FROM PUBLIC, anon, authenticated, service_role;
+            GRANT EXECUTE ON FUNCTION public.claim_analysis_v2_job_v2(
+                uuid,text,integer,uuid,uuid,integer,integer,text,smallint
+            ) TO service_role;
+        `);
+        await pool.query(migrationSource('20260713170859_add_analysis_v2_ai_attempt_ledger.sql'));
+        await pool.query(migrationSource('20260713173056_add_analysis_v2_ai_result_checkpoint_cache.sql'));
+        auditOperation = (await pool.query<{ value: string }>(
+            'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [identity],
+        )).rows[0]!.value;
+        await pool.query(`
+            INSERT INTO public.analysis_requests(id,preflight_id,pipeline_version,status)
+            VALUES ($1,$2,'v2','processing')`, [requestId, preflightId]);
+        await pool.query(`
+            INSERT INTO public.analysis_preflights(id,consumed_request_id,status)
+            VALUES ($1,$2,'consumed')`, [preflightId, requestId]);
+        await pool.query(`
+            INSERT INTO public.analysis_pipeline_jobs (
+                request_id,job_key,track,kind,batch,input_hash,status,attempt_count,
+                dispatch_state,dispatch_generation,dispatch_reservation_token,dispatch_task_name,
+                dispatch_reserved_at,dispatched_at,delivered_at,lease_token,lease_expires_at,
+                dispatch_workload_role,dispatch_contract_version,claim_workload_role,claim_contract_version,
+                created_at,updated_at
+            ) VALUES ($1,$2,'profiles','profile_ai',1,$3,'processing',1,
+                'delivered',1,$4,'fixture-task',statement_timestamp(),statement_timestamp(),statement_timestamp(),
+                $5,statement_timestamp()+interval '5 minutes','paid',2,'paid',2,
+                statement_timestamp(),statement_timestamp())
+        `, [requestId, paidJob, jobInputHash, dispatchToken, claimToken]);
+    }, 30_000);
+
+    afterAll(async () => {
+        await pool?.end();
+    });
+
+    async function runAuditAlongsideClaim(): Promise<{
+        audit: { outcome?: string; code?: string };
+        claim: { claimed?: boolean; attempt_count?: number; code?: string };
+    }> {
+        const auditClient = await pool.connect();
+        const claimClient = await pool.connect();
+        try {
+            await pool.query('DELETE FROM public.analysis_v2_ai_result_checkpoints');
+            await pool.query('DELETE FROM public.analysis_v2_ai_attempts');
+            const auditArgs = [requestId, paidJob, claimToken, auditOperation, auditToken];
+            await expect(asService(auditClient, reserveSql, [...auditArgs, metadata]))
+                .resolves.toMatchObject({ created: true });
+            const auditPid = (await auditClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+            const claimPid = (await claimClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+            await auditClient.query('BEGIN');
+            await auditClient.query("SET LOCAL statement_timeout = '5s'");
+            // Pause the audit after its first lineage lock to force the exact
+            // overlap before executing the actual successful-result RPC.
+            await auditClient.query('SELECT 1 FROM public.analysis_preflights WHERE id=$1::uuid FOR UPDATE', [preflightId]);
+            const claim = asService<{ claimed: boolean; attempt_count: number }>(
+                claimClient, claimSql, [requestId, paidJob, dispatchToken, claimToken],
+            ).catch((error: { code?: string }) => ({ code: error.code }));
+            await waitForLockWait(pool, claimPid, auditPid);
+            await auditClient.query('SET LOCAL ROLE service_role');
+            let audit: { outcome?: string; code?: string };
+            try {
+                const result = await auditClient.query<{ result: { outcome: string } }>(
+                    auditSql, [...auditArgs, telemetry, identity, output, output, outputHash],
+                );
+                audit = result.rows[0]!.result;
+                await auditClient.query('COMMIT');
+            } catch (error) {
+                audit = { code: (error as { code?: string }).code };
+                await auditClient.query('ROLLBACK');
+            }
+            return { audit, claim: await claim };
+        } finally {
+            await auditClient.query('ROLLBACK');
+            await claimClient.query('ROLLBACK');
+            auditClient.release();
+            claimClient.release();
+        }
+    }
+
+    it('reproduces the original paid claim / Vertex result deadlock and removes the cycle', async () => {
+        const before = await runAuditAlongsideClaim();
+        expect([before.audit.code, before.claim.code]).toContain('40P01');
+
+        const migration = readFileSync(dispatchLockMigration, 'utf8');
+        await pool.query(migration);
+        await pool.query(migration);
+        const privileges = await pool.query(`
+            SELECT has_function_privilege('service_role', 'public.lock_analysis_v2_dispatch_parents(uuid)', 'EXECUTE') AS helper,
+                   has_function_privilege('anon', 'public.claim_analysis_v2_job_v2(uuid,text,integer,uuid,uuid,integer,integer,text,smallint)', 'EXECUTE') AS anon_claim
+        `);
+        expect(privileges.rows[0]).toEqual({ helper: false, anon_claim: false });
+        const after = await runAuditAlongsideClaim();
+        expect(after.audit).toMatchObject({ outcome: 'checkpointed' });
+        expect(after.claim).toMatchObject({ claimed: true, attempt_count: 1 });
+
+        const client = await pool.connect();
+        try {
+            const auditArgs = [requestId, paidJob, claimToken, auditOperation, auditToken];
+            await expect(asService(client, reserveSql, [...auditArgs, metadata]))
+                .resolves.toMatchObject({ created: false, status: 'success' });
+            await expect(asService(client, auditSql, [...auditArgs, telemetry, identity, output, output, outputHash]))
+                .resolves.toMatchObject({ outcome: 'checkpointed' });
+            await expect(asService(client, claimSql, [requestId, paidJob, auditToken, claimToken]))
+                .rejects.toThrow('ANALYSIS_V2_JOB_DISPATCH_FENCE_MISMATCH');
+        } finally {
+            client.release();
+        }
+        const auditRows = await pool.query(`
+            SELECT count(*)::int AS attempt_count, sum(estimated_cost_usd)::text AS cost_usd,
+                   (SELECT count(*)::int FROM public.analysis_v2_ai_result_checkpoints) AS checkpoint_count
+            FROM public.analysis_v2_ai_attempts
+        `);
+        expect(auditRows.rows[0]).toEqual({ attempt_count: 1, cost_usd: '0.001000000000', checkpoint_count: 1 });
+    }, 15_000);
 });

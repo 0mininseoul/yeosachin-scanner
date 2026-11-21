@@ -801,6 +801,7 @@ function durableAuditFailure(
     const prefix = message.split(':', 1)[0];
     const reason = DURABLE_AUDIT_REASON_CODES.has(prefix) ? prefix : 'unknown';
     const databaseCode = reason === 'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR'
+        || reason === 'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR'
         ? message.match(/\(((?:PGRST[0-9]{3}|[0-9][0-9A-Z]{4}))\)\.$/)?.[1] ?? null
         : null;
     console.warn(JSON.stringify({ event: 'gemini_durable_audit_failed', boundary, stage, reason, databaseCode }));
