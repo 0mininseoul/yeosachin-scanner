@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import { z } from 'zod';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -553,7 +553,7 @@ export function createAnalysisV2AiAttemptStore(
             const parsed = safeParse(reservationInputSchema, input, 'reservation');
             assertMetadataConsistency(parsed, 'reservation');
             const reservationToken = randomUUID().toLowerCase();
-            const { data, error } = await retryPostgresStatementTimeout(() => client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.reserveRpc,
                 {
                     p_request_id: parsed.requestId.toLowerCase(),
@@ -598,7 +598,7 @@ export function createAnalysisV2AiAttemptStore(
 
         async terminalize(input) {
             const parsed = canonicalTerminalInput(input);
-            const { data, error } = await retryPostgresStatementTimeout(() => client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.terminalizeRpc,
                 {
                     p_request_id: parsed.requestId.toLowerCase(),

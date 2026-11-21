@@ -1215,6 +1215,14 @@ export async function processAnalysisV2TaskDelivery(
             : ANALYSIS_V2_JOB_MAX_ATTEMPTS;
         const exhausted = failure.retryable
             && claim.attemptCount >= maxAttempts;
+        if (exhausted) {
+            console.warn(JSON.stringify({
+                event: 'analysis_v2_job_attempts_exhausted',
+                kind: claim.kind,
+                attemptCount: claim.attemptCount,
+                causeCode: failure.code,
+            }));
+        }
         if (!failure.retryable || exhausted) {
             const cleanupRetry = await finalizeTerminalFailureOrDeferProviderCleanup(
                 claim,

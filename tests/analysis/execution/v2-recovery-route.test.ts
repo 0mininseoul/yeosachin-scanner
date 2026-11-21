@@ -23,7 +23,7 @@ vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
 }));
 vi.mock('@/lib/services/analysis/v2-recovery', () => ({
     recoverAnalysisV2Jobs: mocks.recover,
-    recoverDevLiveStandardDispatches: mocks.devRecover,
+    recoverDevLiveStandard: mocks.devRecover,
 }));
 vi.mock('@/lib/services/dev-ui/live-runtime', () => ({
     devLiveWorkerRequestBoundary: mocks.devBoundary,
@@ -79,7 +79,12 @@ describe('analysis V2 recovery route', () => {
             failed: 0,
         });
         mocks.devBoundary.mockReturnValue('invalid');
-        mocks.devRecover.mockResolvedValue({ scanned: 1, dispatched: 1, taskPresent: 0, lostRace: 0, failed: 0 });
+        mocks.devRecover.mockResolvedValue({
+            scanned: 1, dispatched: 1, taskPresent: 0, lostRace: 0, failed: 0,
+            providerAdmissions: {
+                scanned: 2, recovered: 1, resolved: 1, skipped: 1, failed: 0, hasMore: false, geminiSlotsReaped: 1,
+            },
+        });
         mocks.purgeResultImages.mockResolvedValue({
             claimed: 2,
             deleted: 2,
@@ -148,7 +153,7 @@ describe('analysis V2 recovery route', () => {
         expect(purgeRetry.status).toBe(500);
     });
 
-    it('runs only Standard delivery recovery on the verified Dev worker', async () => {
+    it('keeps Dev Standard lease and delivery recovery within the verified Dev worker', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         mocks.available.mockReturnValue(false);
         expect((await POST(request())).status).toBe(503);
@@ -161,7 +166,10 @@ describe('analysis V2 recovery route', () => {
 
         const response = await POST(request());
         expect(response.status).toBe(200);
-        await expect(response.json()).resolves.toMatchObject({ scanned: 1, dispatched: 1 });
+        await expect(response.json()).resolves.toMatchObject({
+            scanned: 1, dispatched: 1,
+            providerAdmissions: { resolved: 1, geminiSlotsReaped: 1 },
+        });
         expect(mocks.devRecover).toHaveBeenCalledOnce();
         expect(mocks.recover).not.toHaveBeenCalled();
         expect(mocks.recoverCanary).not.toHaveBeenCalled();

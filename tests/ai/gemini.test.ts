@@ -182,11 +182,13 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.generateContent).not.toHaveBeenCalled();
     });
 
-    it('uses one Vertex call and one Dev budget reservation and settlement after the audit intent times out once', async () => {
+    it.each([false, true])('charges once after a rolled-back audit intent (redelivery=%s)', async redelivered => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };
         const spend = { grantId: grant.id, reservationId: 'synthetic-reservation' };
         mocks.requireDevApproval.mockReturnValue(grant);
+        const unused = { grantId: grant.id, reservationId: 'synthetic-unused-reservation' };
+        if (redelivered) mocks.reserveDevAttempt.mockResolvedValueOnce(unused);
         mocks.reserveDevAttempt.mockResolvedValueOnce(spend);
         mocks.generateContent.mockResolvedValueOnce(successfulResponse());
         const attempt = {
@@ -205,12 +207,13 @@ describe('analyzeWithGemini generation retry policy', () => {
             schemaVersion: 2,
             maxOutputTokens: 128,
         } as const;
-        const rpc = vi.fn()
-            .mockResolvedValueOnce({
-                data: null,
-                error: { code: '57014', message: 'canceling statement due to statement timeout' },
-            })
-            .mockImplementation(async (_, args: Record<string, unknown>) => ({
+        const rollback = {
+            data: null,
+            error: { code: '57014', message: 'canceling statement due to statement timeout' },
+        };
+        const rpc = vi.fn().mockResolvedValueOnce(rollback);
+        if (redelivered) rpc.mockResolvedValueOnce(rollback);
+        rpc.mockImplementation(async (_, args: Record<string, unknown>) => ({
                 data: {
                     ...attempt,
                     reservationToken: args.p_reservation_token,
@@ -229,25 +232,38 @@ describe('analyzeWithGemini generation retry policy', () => {
             }));
         const attemptStore = createAnalysisV2AiAttemptStore({ rpc });
         const audit = stageAuditOptions();
+        let jobClaimToken = '123e4567-e89b-42d3-a456-426614174001';
         audit.onBeforeAttempt.mockImplementation(async () => {
             const reserved = await attemptStore.reserve({
                 ...attempt,
-                claimToken: '123e4567-e89b-42d3-a456-426614174001',
+                claimToken: jobClaimToken,
             });
             expect(reserved.created).toBe(true);
         });
 
-        await expect(analyzeWithGemini('prompt', undefined, {
+        const invoke = () => analyzeWithGemini('prompt', undefined, {
             ...audit, stage: 'genderTriage', schema: responseSchema,
             model: attempt.modelName, maxOutputTokens: attempt.maxOutputTokens,
-        })).resolves.toEqual({ value: 'ok' });
-        expect(rpc).toHaveBeenCalledTimes(2);
+        });
+        if (redelivered) {
+            await expect(invoke()).rejects.toThrow('AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR');
+            expect(mocks.generateContent).not.toHaveBeenCalled();
+            expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(unused, 0);
+            jobClaimToken = '123e4567-e89b-42d3-a456-426614174002';
+        }
+
+        await expect(invoke()).resolves.toEqual({ value: 'ok' });
+        expect(rpc).toHaveBeenCalledTimes(redelivered ? 3 : 2);
         expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
-        expect(rpc.mock.invocationCallOrder[1]).toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
+        expect(rpc.mock.calls.at(-1)?.[1]).toMatchObject({
+            p_operation_key: attempt.operationKey, p_attempt: 1, p_claim_token: jobClaimToken,
+        });
+        expect(rpc.mock.invocationCallOrder.at(-1)).toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
         expect(mocks.generateContent).toHaveBeenCalledOnce();
-        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
-        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(spend, expect.any(Number));
-        expect(mocks.settleDevAttempt.mock.calls[0]![1]).toBeGreaterThan(0);
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledTimes(redelivered ? 2 : 1);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(redelivered ? 2 : 1);
+        expect(mocks.settleDevAttempt).toHaveBeenLastCalledWith(spend, expect.any(Number));
+        expect(mocks.settleDevAttempt.mock.calls.at(-1)?.[1]).toBeGreaterThan(0);
         expect(audit.onAttemptTelemetry).toHaveBeenCalledOnce();
     });
 

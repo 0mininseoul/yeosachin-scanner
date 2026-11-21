@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { isAnalysisV2RecoveryAvailable } from '@/lib/services/analysis/v2-execution-gate';
-import { recoverAnalysisV2Jobs, recoverDevLiveStandardDispatches } from '@/lib/services/analysis/v2-recovery';
+import { recoverAnalysisV2Jobs, recoverDevLiveStandard } from '@/lib/services/analysis/v2-recovery';
 import {
     recoverExpiredProfileProviderCanaries,
 } from '@/lib/services/analysis/profile-provider-canary-recovery';
@@ -38,7 +38,7 @@ async function handlePOST(request: Request) {
     }
     if (devRecovery) {
         try {
-            const summary = await recoverDevLiveStandardDispatches();
+            const summary = await recoverDevLiveStandard();
             return NextResponse.json(summary, { status: summary.failed === 0 ? 200 : 500 });
         } catch {
             return NextResponse.json({ code: 'RECOVERY_FAILED' }, { status: 500 });

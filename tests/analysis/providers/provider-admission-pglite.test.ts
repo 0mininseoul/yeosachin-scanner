@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PGlite, type Results } from '@electric-sql/pglite';
@@ -12,6 +13,10 @@ const migration = readFileSync(new URL(
     '../../../supabase/migrations/20260831100000_add_analysis_provider_admission_leases.sql',
     import.meta.url,
 ), 'utf8');
+const rearmMigrations = [
+    '20261122020200_rearm_unstarted_apify_admissions',
+    '20261122020300_rearm_unstarted_gemini_admissions',
+].map(name => readFileSync(new URL(`../../../supabase/migrations/${name}.sql`, import.meta.url), 'utf8'));
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -158,6 +163,56 @@ async function acquire(input: AnalysisProviderAdmissionInput): Promise<Record<st
     return acquireWithLeaseToken(input, '33333333-3333-4333-8333-333333333333');
 }
 
+async function seedPaidJob(requestId: string, jobKey: string, jobClaimToken: string): Promise<void> {
+    await db.query(
+        `INSERT INTO public.analysis_requests(id, pipeline_version, status)
+         VALUES ($1, 'v2', 'processing') ON CONFLICT (id) DO NOTHING`,
+        [requestId],
+    );
+    await db.query(
+        `INSERT INTO public.analysis_pipeline_jobs(request_id, job_key, status, lease_token, lease_expires_at)
+         VALUES ($1, $2, 'processing', $3, clock_timestamp() + interval '10 minutes')`,
+        [requestId, jobKey, jobClaimToken],
+    );
+}
+
+async function seedGeminiSlot(input: AnalysisProviderAdmissionInput, operation: string): Promise<void> {
+    await db.query(
+        `UPDATE public.analysis_v2_gemini_leases
+         SET state = 'leased', fence = $1, request_id = $2, job_key = $3, attempt = 1,
+             operation_key = $4, stage = 'featureAnalysis', lease_claim_token = $5,
+             acquired_at = clock_timestamp(), expires_at = clock_timestamp() + interval '10 minutes'
+         WHERE slot = $6`,
+        [input.providerFence, input.requestId, input.jobKey, operation, input.claimToken,
+            Number(input.credentialSlot.slice('gemini-'.length))],
+    );
+}
+
+async function seedReleasedUnstartedGemini() {
+    await db.exec(`
+        UPDATE public.analysis_provider_admission_leases
+        SET state = 'released', released_at = clock_timestamp(), release_reason = 'terminal'
+        WHERE logical_provider = 'gemini' AND state <> 'released';
+        UPDATE public.analysis_provider_admission_budgets
+        SET window_count = 0, window_started_at = clock_timestamp();
+    `);
+    const operation = `feature-analysis:${'d'.repeat(64)}`;
+    const input = {
+        ...geminiInput(),
+        requestId: randomUUID(),
+        jobClaimToken: randomUUID(),
+        claimToken: randomUUID(),
+        operationKey: `gemini:${operation}:attempt:1`,
+    };
+    await seedPaidJob(input.requestId, input.jobKey, input.jobClaimToken);
+    await seedGeminiSlot(input, operation);
+    const initial = await acquireWithLeaseToken(input, randomUUID());
+    await asService('SELECT public.release_analysis_provider_admission($1,$2,$3)', [
+        initial.admissionId, initial.leaseToken, initial.fence,
+    ]);
+    return { input, operation, initial };
+}
+
 describe('provider admission migration PGlite contract', () => {
     beforeAll(async () => {
         db = await PGlite.create({ extensions: { pgcrypto } });
@@ -293,8 +348,26 @@ describe('provider admission migration PGlite contract', () => {
                 attempt INTEGER,
                 lease_claim_token UUID,
                 acquired_at TIMESTAMPTZ,
-                expires_at TIMESTAMPTZ
+                expires_at TIMESTAMPTZ,
+                operation_key TEXT,
+                stage TEXT,
+                quarantined_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ
             );
+            CREATE TABLE public.analysis_v2_ai_attempts (
+                request_id UUID NOT NULL,
+                job_key TEXT NOT NULL,
+                operation_key TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                terminalized_at TIMESTAMPTZ,
+                estimated_cost_usd NUMERIC,
+                PRIMARY KEY (request_id, operation_key, attempt)
+            );
+            CREATE FUNCTION public.analysis_v2_valid_ai_operation_key(TEXT)
+            RETURNS BOOLEAN LANGUAGE sql IMMUTABLE STRICT AS $$
+                SELECT $1 ~ '^(gender-triage|gender-resolution|feature-analysis|high-risk-narrative|private-account-name|partner-safety):[0-9a-f]{64}$';
+            $$;
             CREATE TABLE public.precheckout_blite_cache (
                 preflight_id UUID PRIMARY KEY,
                 state TEXT NOT NULL,
@@ -433,6 +506,9 @@ describe('provider admission migration PGlite contract', () => {
             $$;
         `);
         await db.exec(migration);
+        for (const rearmMigration of rearmMigrations) {
+            await db.exec(rearmMigration);
+        }
         await db.exec(`
             INSERT INTO public.analysis_v2_gemini_leases(slot, state)
             SELECT slot, 'available' FROM generate_series(1, 8) AS slots(slot);
@@ -642,13 +718,16 @@ describe('provider admission migration PGlite contract', () => {
             [recoverableId, '77777777-7777-4777-8777-777777777777'],
         );
         expect(absentResolution.rows[0]?.payload.resolved).toBe(true);
-        const absentResolutionSource = await db.query<{ resolution_source: string }>(
-            `SELECT resolution_source
+        const absentResolutionSource = await db.query<{ resolution_source: string; release_reason: string }>(
+            `SELECT resolution_source, release_reason
              FROM public.analysis_provider_admission_leases
              WHERE admission_id = $1`,
             [recoverableId],
         );
-        expect(absentResolutionSource.rows[0]?.resolution_source).toBe('provider_ledger_absent');
+        expect(absentResolutionSource.rows[0]).toEqual({
+            resolution_source: 'provider_ledger_absent',
+            release_reason: 'prestart_rejected',
+        });
 
         const runningRecovery = paidInput(6);
         const runningRecoveryId = analysisProviderAdmissionId(runningRecovery);
@@ -1855,5 +1934,320 @@ describe('provider admission migration PGlite contract', () => {
             ready: false,
         });
         expect(Number(unsafeFresh.rows[0]?.payload.legacyActiveFreshAdmissions)).toBeGreaterThan(0);
+    });
+
+    it.each(['same slot', 'different slot'] as const)('rearms unstarted Gemini on the %s', async mode => {
+        const { input, operation, initial } = await seedReleasedUnstartedGemini();
+        await db.exec(
+            "UPDATE public.analysis_v2_gemini_leases SET state = 'available', lease_claim_token = NULL WHERE slot = 1",
+        );
+        const slot = mode === 'same slot' ? 'gemini-1' : 'gemini-2';
+        const next = {
+            ...input, credentialSlot: slot, budgetKey: 'paid:gemini:' + slot,
+            providerFence: 5, claimToken: randomUUID(), jobClaimToken: randomUUID(),
+        };
+        await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2', [
+            next.jobClaimToken, next.requestId,
+        ]);
+        await seedGeminiSlot(next, operation);
+        expect(await acquireWithLeaseToken(next, randomUUID())).toMatchObject({
+            outcome: 'acquired', admissionId: analysisProviderAdmissionId(next), credentialSlot: slot, fence: 2,
+        });
+        expect((await acquire(next)).outcome).toBe('already_acquired');
+        await expect(asService(
+            'SELECT public.release_analysis_provider_admission($1,$2,$3)',
+            [initial.admissionId, initial.leaseToken, initial.fence],
+        )).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_FENCE_MISMATCH');
+        expect((await db.query(
+            'SELECT state, fence FROM public.analysis_provider_admission_leases WHERE request_id = $1',
+            [input.requestId],
+        )).rows).toEqual([{ state: 'leased', fence: 2 }]);
+        expect((await db.query(
+            'SELECT 1 FROM public.analysis_v2_ai_attempts WHERE request_id = $1', [input.requestId],
+        )).rows).toEqual([]);
+    });
+
+    it.each(['reserved', 'ambiguous', 'success'] as const)(
+        'preserves the released Gemini admission when the attempt is %s',
+        async status => {
+            const { input, operation, initial } = await seedReleasedUnstartedGemini();
+            const next = {
+                ...input, credentialSlot: 'gemini-2', budgetKey: 'paid:gemini:gemini-2',
+                claimToken: randomUUID(), jobClaimToken: randomUUID(), providerFence: 5,
+            };
+            await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2', [
+                next.jobClaimToken, next.requestId,
+            ]);
+            await db.exec('UPDATE public.analysis_v2_gemini_leases SET fence = 5 WHERE slot = 1');
+            await seedGeminiSlot(next, operation);
+            await db.query(
+                "INSERT INTO public.analysis_v2_ai_attempts VALUES ($1, $2, $3, 1, $4, $5, $6)",
+                [input.requestId, input.jobKey, operation, status,
+                    status === 'reserved' ? null : new Date(), status === 'success' ? 0.05 : null],
+            );
+            await expect(acquire(next)).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT');
+            expect((await db.query(
+                'SELECT admission_id, state FROM public.analysis_provider_admission_leases WHERE request_id = $1',
+                [input.requestId],
+            )).rows).toEqual([{ admission_id: initial.admissionId, state: 'released' }]);
+            expect((await db.query(
+                'SELECT status, estimated_cost_usd FROM public.analysis_v2_ai_attempts WHERE request_id = $1',
+                [input.requestId],
+            )).rows).toEqual([{ status, estimated_cost_usd: status === 'success' ? '0.05' : null }]);
+        },
+    );
+
+    it('blocks rearming Gemini while either original fence can still own the operation', async () => {
+        const { input, operation } = await seedReleasedUnstartedGemini();
+        const next = {
+            ...input, credentialSlot: 'gemini-2', budgetKey: 'paid:gemini:gemini-2',
+            claimToken: randomUUID(), providerFence: 5,
+        };
+        await seedGeminiSlot(next, operation);
+        await db.exec('UPDATE public.analysis_v2_gemini_leases SET fence = 5 WHERE slot = 1');
+        await expect(acquire(next)).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT');
+        next.jobClaimToken = randomUUID();
+        await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2', [
+            next.jobClaimToken, next.requestId,
+        ]);
+        await db.exec('UPDATE public.analysis_v2_gemini_leases SET fence = 4 WHERE slot = 1');
+        await expect(acquire(next)).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_IDENTITY_CONFLICT');
+    });
+
+    it.each(['prestart_rejected', 'ledger_resolved'] as const)(
+        'reacquires a single proven absent Apify identity from %s',
+        async releaseReason => {
+            await db.exec(`
+                UPDATE public.analysis_provider_admission_leases
+                SET state = 'released', released_at = clock_timestamp(), release_reason = 'terminal'
+                WHERE logical_provider = 'apify' AND state <> 'released';
+                UPDATE public.analysis_provider_admission_budgets
+                SET window_count = 0, window_started_at = clock_timestamp();
+            `);
+            const claim = randomUUID();
+            const input = { ...paidInput(), requestId: randomUUID(), jobClaimToken: claim, claimToken: claim };
+            await seedPaidJob(input.requestId, input.jobKey, claim);
+            const first = await acquireWithLeaseToken(input, randomUUID());
+            await db.query(
+                "UPDATE public.analysis_provider_admission_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE admission_id = $1",
+                [first.admissionId],
+            );
+            await asService('SELECT public.recover_expired_analysis_provider_admission($1,$2)', [
+                first.admissionId, randomUUID(),
+            ]);
+            const nextClaim = randomUUID();
+            await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE request_id = $2', [
+                nextClaim, input.requestId,
+            ]);
+            const next = { ...input, jobClaimToken: nextClaim, claimToken: nextClaim };
+            await asService('SELECT public.resolve_analysis_provider_admission($1,$2)', [
+                first.admissionId, randomUUID(),
+            ]);
+            if (releaseReason === 'ledger_resolved') {
+                await db.query(
+                    "UPDATE public.analysis_provider_admission_leases SET release_reason = 'ledger_resolved' WHERE admission_id = $1",
+                    [first.admissionId],
+                );
+            }
+            expect(await acquire(next)).toMatchObject({
+                outcome: 'acquired', admissionId: first.admissionId, fence: 3,
+            });
+            expect((await acquire(next)).outcome).toBe('already_acquired');
+            expect((await db.query('SELECT 1 FROM public.analysis_v2_provider_runs WHERE request_id = $1', [
+                input.requestId,
+            ])).rows).toEqual([]);
+        },
+    );
+
+    it('recovers only evidenced leases for the approved Dev Standard request and cleans proven terminal capacity when idle', async () => {
+        await db.exec(`
+            CREATE SCHEMA dev_ui;
+            CREATE TABLE dev_ui.runs (id uuid);
+            CREATE SCHEMA dev_live_budget;
+            CREATE TABLE dev_live_budget.owner_starts (grant_id uuid, user_id uuid, target_instagram_id text);
+            CREATE TABLE dev_live_budget.grants (
+                grant_id uuid, plan_id text, expires_at timestamptz, approved_at timestamptz,
+                blocked boolean, standard_policy_id uuid
+            );
+            CREATE TABLE dev_live_budget.standard_policy (id uuid, user_id uuid, target text);
+            CREATE FUNCTION dev_live_budget.standard_policy_for_owner(uuid,text) RETURNS uuid
+            LANGUAGE sql STABLE AS $$
+                SELECT id FROM dev_live_budget.standard_policy WHERE user_id = $1 AND target = $2
+            $$;
+            CREATE FUNCTION public.dev_live_owner_start_v4(uuid,text,uuid) RETURNS jsonb
+            LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;
+            CREATE FUNCTION public.list_analysis_v2_dispatchable_jobs(integer) RETURNS void
+            LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
+            ALTER TABLE public.analysis_requests ADD user_id uuid, ADD completed_at timestamptz,
+                ADD selected_plan_id_snapshot text;
+            ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
+                ADD access_mode text;
+            ALTER TABLE public.analysis_pipeline_jobs ADD recovery_not_before timestamptz,
+                ADD scheduler_not_before_at timestamptz;
+            UPDATE public.analysis_provider_admission_leases SET state = 'released', released_at = clock_timestamp(),
+                release_reason = 'terminal' WHERE state <> 'released';
+            UPDATE public.analysis_provider_admission_budgets
+            SET window_count = 0, window_started_at = clock_timestamp();
+        `);
+        const dispatchSql = readFileSync(new URL(
+            '../../../supabase/dev-ui/live-standard-dispatch-recovery.sql', import.meta.url,
+        ), 'utf8');
+        const recoverySql = readFileSync(new URL(
+            '../../../supabase/dev-ui/live-standard-provider-recovery.sql', import.meta.url,
+        ), 'utf8');
+        await db.exec(dispatchSql);
+        await db.exec(recoverySql);
+        await db.exec(recoverySql);
+        const lockOrder = [
+            'v_preflight FOR SHARE', 'v_request FOR SHARE', 'FOR SHARE OF job SKIP LOCKED',
+            'FOR UPDATE OF lease SKIP LOCKED', 'FOR UPDATE SKIP LOCKED',
+        ].map(fragment => recoverySql.indexOf(fragment));
+        expect(lockOrder.every(index => index >= 0)).toBe(true);
+        expect(lockOrder).toEqual([...lockOrder].sort((left, right) => left - right));
+
+        const owner = randomUUID();
+        const request = randomUUID();
+        const preflight = randomUUID();
+        const grant = randomUUID();
+        const policy = randomUUID();
+        const target = 'dev_fixture';
+        await db.query('INSERT INTO dev_live_budget.standard_policy VALUES ($1,$2,$3)', [policy, owner, target]);
+        await db.query('INSERT INTO dev_live_budget.owner_starts VALUES ($1,$2,$3)', [grant, owner, target]);
+        await db.query(
+            "INSERT INTO dev_live_budget.grants VALUES ($1,'standard','infinity',clock_timestamp(),false,$2)",
+            [grant, policy],
+        );
+        await db.query(
+            "INSERT INTO public.analysis_requests(id,pipeline_version,status,preflight_id,user_id,selected_plan_id_snapshot) VALUES ($1,'v2','processing',$2,$3,'standard')",
+            [request, preflight, owner],
+        );
+        await db.query(`
+            INSERT INTO public.analysis_preflights
+                (id,status,user_id,consumed_request_id,expires_at,idempotency_key,target_instagram_id,access_mode)
+            VALUES ($1,'consumed',$2,$3,clock_timestamp() + interval '30 minutes',$4,$5,'test_entitlement')
+        `, [preflight, owner, request, 'dev-live:owner:standard:' + grant, target]);
+
+        const apify = async (jobKey: string, requestId: string) => {
+            const claim = randomUUID();
+            const input = { ...paidInput(), jobKey, requestId, jobClaimToken: claim, claimToken: claim };
+            await seedPaidJob(requestId, jobKey, claim);
+            await acquireWithLeaseToken(input, randomUUID());
+            await db.query(
+                "UPDATE public.analysis_provider_admission_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE admission_id = $1",
+                [analysisProviderAdmissionId(input)],
+            );
+            await db.query(
+                "UPDATE public.analysis_pipeline_jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE request_id = $1 AND job_key = $2",
+                [requestId, jobKey],
+            );
+            return input;
+        };
+        const missing = await apify('track:profiles:batch:1', request);
+        const running = await apify('track:profiles:batch:2', request);
+        const otherRequest = randomUUID();
+        const unrelated = await apify('track:profiles:batch:1', otherRequest);
+        const actorRun = 'FixtureActorRun123';
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_runs
+                (request_id,job_key,operation_key,logical_provider,credential_slot,status,run_id)
+            VALUES ($1,$2,$3,'apify','secondary','running',$4)
+        `, [running.requestId, running.jobKey, running.operationKey, actorRun]);
+
+        const gemini = async (slot: number, audit: 'success' | 'reserved' | 'ambiguous' | null, admission: 'live' | 'released' | 'absent') => {
+            const operation = 'feature-analysis:' + String(slot).repeat(64);
+            const slotName = 'gemini-' + slot;
+            const jobKey = 'track:profile-ai:batch:' + slot;
+            const input = {
+                ...geminiInput(), requestId: request, jobKey, credentialSlot: slotName, budgetKey: 'paid:gemini:' + slotName,
+                operationKey: 'gemini:' + operation + ':attempt:1',
+                providerFence: 40, jobClaimToken: randomUUID(), claimToken: randomUUID(),
+            };
+            await seedPaidJob(request, jobKey, input.jobClaimToken);
+            await seedGeminiSlot(input, operation);
+            if (admission !== 'absent') {
+                const acquired = await acquireWithLeaseToken(input, randomUUID());
+                if (admission === 'released') {
+                    await asService('SELECT public.release_analysis_provider_admission($1,$2,$3)', [
+                        acquired.admissionId, acquired.leaseToken, acquired.fence,
+                    ]);
+                }
+                await db.query(
+                    "UPDATE public.analysis_provider_admission_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE admission_id = $1",
+                    [acquired.admissionId],
+                );
+            }
+            if (audit) {
+                await db.query('INSERT INTO public.analysis_v2_ai_attempts VALUES ($1,$2,$3,1,$4,$5,$6)', [
+                    request, jobKey, operation, audit, audit === 'reserved' ? null : new Date(), audit === 'success' ? 0.04 : null,
+                ]);
+            }
+            await db.query(
+                "UPDATE public.analysis_v2_gemini_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE slot = $1",
+                [slot],
+            );
+            await db.query(
+                "UPDATE public.analysis_pipeline_jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE request_id = $1 AND job_key = $2",
+                [request, jobKey],
+            );
+            return input;
+        };
+        await gemini(1, 'success', 'live');
+        await gemini(2, 'reserved', 'live');
+        await gemini(3, 'ambiguous', 'live');
+        await gemini(4, null, 'live');
+        await gemini(5, null, 'absent');
+        await gemini(6, null, 'released');
+
+        expect((await db.query(`
+            SELECT has_function_privilege('anon','public.recover_dev_live_standard_provider_admissions_v1(integer)','EXECUTE') AS anon,
+                has_function_privilege('authenticated','public.recover_dev_live_standard_provider_admissions_v1(integer)','EXECUTE') AS authenticated
+        `)).rows).toEqual([{ anon: false, authenticated: false }]);
+        const recoverDev = () => asService('SELECT public.recover_dev_live_standard_provider_admissions_v1(16) AS summary');
+        expect((await recoverDev()).rows).toEqual([{ summary: {
+            scanned: 4, recovered: 4, resolved: 3, skipped: 1, failed: 0, hasMore: false, geminiSlotsReaped: 4,
+        } }]);
+        expect((await db.query(`
+            SELECT slot,state FROM public.analysis_v2_gemini_leases WHERE slot BETWEEN 1 AND 6 ORDER BY slot
+        `)).rows).toEqual([
+            { slot: 1, state: 'available' }, { slot: 2, state: 'leased' }, { slot: 3, state: 'leased' },
+            { slot: 4, state: 'available' }, { slot: 5, state: 'available' }, { slot: 6, state: 'available' },
+        ]);
+        const providerState = async (input: AnalysisProviderAdmissionInput) => (
+            await db.query('SELECT state,release_reason FROM public.analysis_provider_admission_leases WHERE admission_id=$1',
+                [analysisProviderAdmissionId(input)])
+        ).rows[0];
+        expect(await providerState(unrelated)).toEqual({ state: 'leased', release_reason: null });
+        expect(await providerState(missing)).toEqual({ state: 'released', release_reason: 'prestart_rejected' });
+        expect(await providerState(running)).toEqual({ state: 'recovery_required', release_reason: null });
+        const nextClaim = randomUUID();
+        await db.query(`
+            UPDATE public.analysis_pipeline_jobs SET lease_token = $1, lease_expires_at = clock_timestamp() + interval '10 minutes'
+            WHERE request_id = $2 AND job_key = $3
+        `, [nextClaim, request, running.jobKey]);
+        expect(await acquireWithLeaseToken({ ...running, claimToken: nextClaim, jobClaimToken: nextClaim }, randomUUID()))
+            .toMatchObject({ outcome: 'adopted' });
+        expect((await db.query('SELECT run_id FROM public.analysis_v2_provider_runs WHERE request_id=$1', [request])).rows)
+            .toEqual([{ run_id: actorRun }]);
+        expect((await db.query(`
+            SELECT status,estimated_cost_usd FROM public.analysis_v2_ai_attempts WHERE request_id=$1 ORDER BY status
+        `, [request])).rows).toEqual([
+            { status: 'ambiguous', estimated_cost_usd: null }, { status: 'reserved', estimated_cost_usd: null },
+            { status: 'success', estimated_cost_usd: '0.04' },
+        ]);
+        expect((await recoverDev()).rows).toEqual([{ summary: {
+            scanned: 0, recovered: 0, resolved: 0, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 0,
+        } }]);
+
+        await gemini(7, 'success', 'absent');
+        await gemini(8, null, 'absent');
+        await db.query("UPDATE public.analysis_preflights SET target_instagram_id='scrubbed' WHERE id=$1", [preflight]);
+        await db.exec("UPDATE public.analysis_requests SET status='failed',completed_at=clock_timestamp()");
+        expect((await recoverDev()).rows).toEqual([{ summary: {
+            scanned: 0, recovered: 0, resolved: 0, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 1,
+        } }]);
+        expect((await db.query('SELECT slot,state FROM public.analysis_v2_gemini_leases WHERE slot IN (7,8) ORDER BY slot')).rows)
+            .toEqual([{ slot: 7, state: 'available' }, { slot: 8, state: 'leased' }]);
+        expect((await asService('SELECT request_id FROM public.list_dev_live_standard_dispatchable_jobs_v1(16)')).rows)
+            .toEqual([]);
     });
 });

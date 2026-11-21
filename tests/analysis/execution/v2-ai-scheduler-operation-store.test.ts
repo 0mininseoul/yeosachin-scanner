@@ -58,6 +58,45 @@ describe('analysis V2 scheduler operation store', () => {
         ]);
     });
 
+    it('retries rolled-back scheduler RPCs without changing the claim token or result', async () => {
+        const timeout = { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+        const deadlock = { data: null, error: { code: '40P01', message: 'deadlock detected' } };
+        const rpc = vi.fn()
+            .mockResolvedValueOnce(timeout)
+            .mockResolvedValueOnce({
+                data: {
+                    decision: 'execute',
+                    operation_claim_token: operationClaimToken,
+                    recovery_only: false,
+                    result_json: null,
+                    not_before_at: null,
+                },
+                error: null,
+            })
+            .mockResolvedValueOnce(deadlock)
+            .mockResolvedValueOnce({ data: true, error: null });
+        const store = storeWith(rpc);
+        const operation = { key: operationKey, stage: 'genderTriage' as const };
+
+        await expect(store.claim(operation)).resolves.toMatchObject({ claimToken: operationClaimToken });
+        await expect(store.commitReady({
+            ...operation, claimToken: operationClaimToken, value: { value: 'female' },
+        })).resolves.toBeUndefined();
+        expect(rpc).toHaveBeenCalledTimes(4);
+        expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
+        expect(rpc.mock.calls[3]).toEqual(rpc.mock.calls[2]);
+    });
+
+    it('preserves ambiguous scheduler failures without replaying the RPC', async () => {
+        const rpc = vi.fn().mockResolvedValue({
+            data: null, error: { code: '57014', message: 'canceling statement due to user request' },
+        });
+
+        await expect(storeWith(rpc).claim({ key: operationKey, stage: 'genderTriage' }))
+            .rejects.toThrow('claim failed (57014)');
+        expect(rpc).toHaveBeenCalledOnce();
+    });
+
     it('returns validated ready values and checkpoint-only recovery decisions', async () => {
         const readyRpc = vi.fn().mockResolvedValue({
             data: {

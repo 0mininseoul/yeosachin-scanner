@@ -227,8 +227,8 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: 'Gemini',
         numbers: [{ label: '외모·노출 배점', value: points(W.appearanceExposure) }],
-        failure: '호출 제한은 허용된 횟수 안에서 재시도합니다. 응답 검증이 실패하면 기존 보정 또는 후보별 판독 불가 처리를 적용합니다.',
-        code: ['lib/services/ai/v2-staged-analysis.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts'],
+        failure: '시간 초과·교착으로 DB가 취소한 기록 저장은 같은 작업에서 한 번 재시도합니다. 호출 제한과 응답 검증 실패는 기존 재시도·보정 규칙을 따릅니다.',
+        code: ['lib/services/ai/v2-staged-analysis.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts', 'lib/services/analysis/v2-ai-result-store.ts'],
     },
     private_names: {
         col: 1, row: 1, kind: 'ai', title: '비공개 이름 성별', subtitle: 'private_names', batched: true,

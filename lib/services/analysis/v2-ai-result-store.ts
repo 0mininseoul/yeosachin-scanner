@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import { operationalLogger } from '@/lib/observability/server';
 import type {
     GeminiAttemptStartTelemetry,
@@ -848,7 +848,7 @@ export function createAnalysisV2AiResultStore(
             if (!parsed.success) {
                 throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid terminal result.');
             }
-            const { data, error } = await retryPostgresStatementTimeout(() => client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_AI_RESULT_DATABASE_NAMES.terminalizeSuccessRpc,
                 {
                     p_request_id: parsed.data.requestId.toLowerCase(),
