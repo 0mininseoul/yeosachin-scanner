@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import {
     ACCOUNT_CONTEXT_SOFT_MULTIPLIERS,
@@ -42,8 +44,10 @@ import {
     type AnalysisV2AiStageRuntime,
 } from '../../../lib/services/analysis/v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from '../../../lib/services/analysis/v2-media-artifact-store';
+import type { ProfileMediaInput, ProfileMediaInputStore } from '../../../lib/services/analysis/v2-profile-media-inputs';
+import type { ProfileGenderGroup } from '../../../lib/services/analysis/v2-profile-gender-plan';
 import {
-    analysisV2SourceMediaArchiveId,
+    analysisV2SourceMediaArchiveId, createAnalysisV2SourceMediaArchiveStore,
     type AnalysisV2SourceMediaArchiveStore,
 } from '../../../lib/services/analysis/v2-source-media-archive';
 import {
@@ -5551,102 +5555,309 @@ describe('V2 final score invariants', () => {
     });
 });
 
+function mediaInputFixture(hasHistory = () => false, hasUnownedFeatureHistory = () => false) {
+    const rows = new Map<string, ProfileMediaInput>();
+    const store: ProfileMediaInputStore = {
+        async load() { return {
+            inputs: [...rows.values()], hasGenderHistory: hasHistory(),
+            hasUnownedFeatureHistory: hasUnownedFeatureHistory(),
+        }; },
+        async pin(_fence, inputs) {
+            for (const input of inputs) {
+                const key = `${input.ordinal}:${input.stage}`;
+                const stored = rows.get(key);
+                if (stored) expect(input).toEqual(stored);
+                else rows.set(key, structuredClone(input));
+            }
+        },
+    };
+    return { rows, store };
+}
+
+function retainedProfileArchive() {
+    const objects = new Map<string, Buffer>();
+    const readRetained = vi.fn(async ({objectName}: {objectName: string}) => objects.get(objectName) ?? null);
+    const archive = createAnalysisV2SourceMediaArchiveStore({objects: {
+        async createRetained({objectName, bytes}) {
+            const created = !objects.has(objectName);
+            if (created) objects.set(objectName, Buffer.from(bytes));
+            return {created, generation: '1'};
+        },
+        readRetained,
+    }});
+    return {archive, objects, readRetained};
+}
+
+function runScheduledStandardProfileBatch(deps: AnalysisV2AiScoringExecutorDependencies) {
+    const job = context('profile_ai', {
+        jobKey: 'track:profile-ai:batch:0', batch: 0, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+        state: state({planId: 'standard'}),
+    });
+    return createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+        ...job, schedulerCapability: 'scheduler-v1', handlerDeadlineAtMs: performance.now() + 300_000,
+    });
+}
+
 describe('v2.11 profile AI redelivery', () => {
-    it.each(['ready', 'claimed'] as const)(
-        'preserves the original %s gender operation when peer media preparation is delayed',
-        async priorStatus => {
-            const accounts = [profile('fixture.one'), profile('fixture.two')];
+    const scenarios = ['gender 5 to 4', 'gender 4 to 5', 'gender 404',
+        'features 6 to 5', 'features 5 to 6'] as const;
+    const cases = (['ready', 'claimed'] as const).flatMap(status => scenarios.map(scenario => ({status, scenario})));
+    it.each(cases)('restores $status proof for $scenario without downloading or admitting another paid operation',
+        async ({status, scenario}) => {
+            const accounts = [profile('fixture.one', {postCount: 5}), profile('fixture.two', {postCount: 5})];
+            const target = accounts[1]!;
+            const policy = selectAnalysisMedia({
+                profile: {id:target.username, imageUrl:target.profilePicUrl!}, posts:target.latestPosts!,
+            }, {carouselDiversity:true});
+            const featureCase = scenario.startsWith('features');
+            const missing = featureCase
+                ? policy.feature.media.find(row => !policy.triage.selectionIds.includes(row.selectionId))!.selectionId
+                : policy.triage.media[0]!.selectionId;
+            const initialPartial = scenario === 'gender 4 to 5' || scenario === 'features 5 to 6';
             const durable = new Map<string, { status: 'claimed' } | { status: 'ready'; value: unknown }>();
-            const providerBatchSizes: number[] = [];
-            let pinned: import('../../../lib/services/analysis/v2-profile-gender-plan').ProfileGenderGroup[] | undefined;
-            let redelivered = false;
+            const batchSizes: number[] = [];
+            const featureSizes: number[] = [];
+            let pinned: ProfileGenderGroup[] | undefined;
+            const receipts = mediaInputFixture(() => Boolean(pinned));
+            const receiptLoads = vi.spyOn(receipts.store, 'load');
+            const { archive, readRetained } = retainedProfileArchive();
+            let replay = false;
+            let replayDownloads = 0;
             const deps = dependencies(memory(), {
-                profileBatches: {
-                    loadExactBatch: async () => ({
-                        requestedUsernames: [...accounts.map(account => account.username), 'missing'],
-                        results: [
-                            ...accounts.map(account => ({
-                                username: account.username, status: 'success' as const, profile: account,
-                            })),
-                            { username: 'missing', status: 'unavailable' as const },
-                        ],
-                    }),
+                profileMediaInputs: receipts.store,
+                sourceMediaArchive: archive,
+                normalizeMedia: async selection => {
+                    if (replay) replayDownloads++;
+                    if (replay && scenario === 'gender 404' && selection.imageUrl.includes(target.username)) {
+                        throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    }
+                    if (selection.selectionId === missing && (replay ? !initialPartial : initialPartial)) {
+                        throw new AnalysisImagePreparationError('timeout', 'transient');
+                    }
+                    return Buffer.from([0xff,0xd8,0xff,0xd9]);
                 },
+                profileBatches: { loadExactBatch: async () => ({
+                    requestedUsernames: [...accounts.map(account => account.username), 'missing'],
+                    results: [...accounts.map(account => ({
+                        username:account.username,status:'success' as const,profile:account,
+                    })), {username:'missing', status:'unavailable' as const}],
+                }) },
             });
             const createRuntime = () => createDurableAnalysisV2AiStageRuntime({
                 pinProfileGenderPlan: async (_fence, groups) => {
+                    expect(receipts.rows.has('0:triage')).toBe(true);
                     pinned ??= [...groups];
-                    return { kind: 'pinned', groups: pinned };
+                    return {kind:'pinned',groups:pinned};
                 },
                 createSchedulerOperationStore: options => ({
-                    async claim({ key }) {
+                    async claim({key}) {
                         const prior = durable.get(key);
                         if (prior?.status === 'ready') {
-                            return { decision: 'ready', value: options.schemas.get(key)!.parse(prior.value) };
+                            return {decision:'ready', value:options.schemas.get(key)!.parse(prior.value)};
                         }
-                        if (prior?.status === 'claimed') {
-                            return { decision: 'deferred', notBeforeAtMs: performance.now() + 1_000 };
-                        }
-                        durable.set(key, { status: 'claimed' });
-                        return { decision: 'execute', claimToken: CLAIM_TOKEN };
+                        if (prior?.status === 'claimed') return {decision:'deferred',notBeforeAtMs:performance.now()+1_000};
+                        durable.set(key,{status:'claimed'});
+                        return {decision:'execute',claimToken:CLAIM_TOKEN};
                     },
-                    async commitReady({ key, value }) {
-                        durable.set(key, { status: 'ready', value });
-                    },
+                    async commitReady({key,value}) { durable.set(key,{status:'ready',value}); },
                 }),
                 runGenderMicrobatch: async members => {
-                    providerBatchSizes.push(members.length);
-                    if (priorStatus === 'claimed' && !redelivered) throw new Error('fixture interrupted');
-                    return members.map(({ accountId, input }) => ({
-                        accountId, source: 'checkpoint' as const,
-                        result: triage(input.media.map(row => row.selectionId), 'male'),
-                    }));
+                    batchSizes.push(members.length);
+                    if (status === 'claimed' && !featureCase && !replay) throw new Error('fixture interrupted');
+                    return members.map(({accountId,input}) => {
+                        const ids = input.media.map(row => row.selectionId);
+                        const isFeature = featureCase && ids.some(id => id.includes(target.username));
+                        const result = triage(ids, isFeature ? 'female' : 'male');
+                        if (isFeature) {
+                            result.assessment.confidence = 'high';
+                            result.assessment.ownerConsistency = 'same_person';
+                            result.assessment.evidenceSelectionIds = ids.slice(0,2);
+                            result.v29AccountContext = 'personal';
+                        }
+                        return {accountId,source:'checkpoint' as const,result};
+                    });
+                },
+                runFeatures: async (input, audit) => {
+                    featureSizes.push(input.media.length);
+                    expect(receipts.rows.get('1:feature_remainder')?.operationKey).toBe(audit.operationKey);
+                    if (status === 'claimed' && !replay) throw new Error('fixture interrupted');
+                    return feature(input.media.map(row => row.selectionId));
                 },
             });
             const run = () => {
-                const runtime = createRuntime();
-                const registry = createAnalysisV2AiScoringExecutorRegistry({ ...deps, ai: runtime });
                 const job = context('profile_ai', {
-                    jobKey: 'track:profile-ai:batch:0', batch: 0,
-                    aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
-                    state: state({ planId: 'standard' }),
+                    jobKey:'track:profile-ai:batch:0',batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+                    state:state({planId:'standard'}),
                     reportActiveProfile: async username => {
-                        if (redelivered && username === accounts[1]!.username) {
-                            await new Promise(resolve => setTimeout(resolve, 20));
-                        }
+                        if (replay && username === target.username) await new Promise(resolve => setTimeout(resolve, 12));
                     },
                 });
-                return registry.profile_ai!({
-                    ...job, schedulerCapability: 'scheduler-v1',
-                    handlerDeadlineAtMs: performance.now() + 300_000,
-                    claim: { ...job.claim, generation: redelivered ? 2 : 1 },
+                return createAnalysisV2AiScoringExecutorRegistry({...deps,ai:createRuntime()}).profile_ai!({
+                    ...job, schedulerCapability:'scheduler-v1', handlerDeadlineAtMs:performance.now()+300_000,
+                    claim:{...job.claim,generation:replay ? 2 : 1},
                 });
             };
-            if (priorStatus === 'ready') {
-                vi.mocked(deps.resultStore.checkpointFeatureBatch)
-                    .mockRejectedValueOnce(new Error('fixture interrupted'));
-            }
+            if (status === 'ready') vi.mocked(deps.resultStore.checkpointFeatureBatch)
+                .mockRejectedValueOnce(new Error('fixture interrupted'));
             await expect(run()).rejects.toThrow('fixture interrupted');
-            expect(providerBatchSizes).toEqual([2]);
             const originalKeys = [...durable.keys()];
-
-            redelivered = true;
-            const result = await Promise.allSettled([run()]);
-            expect(providerBatchSizes).toEqual([2]);
+            expect(batchSizes).toEqual([2]);
+            const row = receipts.rows.get(`1:${featureCase ? 'feature_remainder' : 'triage'}`)!;
+            expect(row.failures).toHaveLength(initialPartial ? 1 : 0);
+            if (initialPartial) expect(row.failures[0]).toMatchObject({reason:'timeout',disposition:'transient'});
+            const before = readRetained.mock.calls.length;
+            replay = true;
+            if (status === 'ready') await expect(run()).resolves.toMatchObject({ checkpoint:{ kind:'profile_ai_batch' } });
+            else await expect(run()).rejects.toMatchObject({reason:'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'});
+            expect(batchSizes).toEqual([2]);
+            expect(featureSizes).toEqual(featureCase ? [initialPartial ? 5 : 6] : []);
             expect([...durable.keys()]).toEqual(originalKeys);
-            if (priorStatus === 'ready') {
-                expect(result[0]).toMatchObject({ status: 'fulfilled' });
-            } else {
-                expect(result[0]).toMatchObject({
-                    status: 'rejected', reason: { reason: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' },
-                });
-            }
+            expect(replayDownloads).toBe(0);
+            expect(receiptLoads).toHaveBeenCalledTimes(2);
+            expect(readRetained.mock.calls.length).toBeGreaterThan(before);
+            expect(JSON.stringify([...receipts.rows.values()])).not.toMatch(/fixture|cdninstagram|normalizedJpeg/);
         },
     );
-
+    it.each(['later match', 'unmatched', 'all excluded'] as const)(
+        'reconciles every legacy feature key before checkpointing a batch with %s', async scenario => {
+            let unowned = true;
+            const receipts = mediaInputFixture(() => true, () => unowned);
+            const load = vi.fn(receipts.store.load);
+            const attempts: (string | null)[] = [];
+            const downloads: string[] = [];
+            const accounts = ['new.candidate', 'insufficient', 'history.late'].map(name => profile(name, {postCount: 8}));
+            const insufficient = accounts[1]!;
+            const media = selectAnalysisMedia({
+                profile: {id: insufficient.username, imageUrl: insufficient.profilePicUrl!}, posts: insufficient.latestPosts!,
+            }, {carouselDiversity: true});
+            const missing = new Set(media.feature.selectionIds.filter(id => !media.triage.selectionIds.includes(id)));
+            const deps = dependencies(memory(), {
+                profileAiConcurrency: 1, sourceMediaArchive: retainedProfileArchive().archive,
+                profileMediaInputs: {load, async pin(fence, rows) {
+                    for (const row of rows.filter(row => row.stage === 'feature_remainder')) {
+                        attempts.push(row.operationKey);
+                        if (!unowned) continue;
+                        if (scenario === 'later match' && row.ordinal === 2 && row.operationKey) unowned = false;
+                        else throw new Error('ANALYSIS_V2_PROFILE_FEATURE_HISTORY_PENDING');
+                    }
+                    await receipts.store.pin(fence, rows);
+                }},
+                profileBatches: {loadExactBatch: async () => ({
+                    requestedUsernames: accounts.map(row => row.username),
+                    results: accounts.map(account => ({username: account.username, status: 'success' as const, profile: account})),
+                })},
+                normalizeMedia: async selection => {
+                    downloads.push(selection.selectionId);
+                    if (missing.has(selection.selectionId)) throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+                },
+            });
+            deps.ai.profileGender = {
+                plan: async accounts => accounts.map(row => ({accountIds: [row.accountId], operationKey: digest(row.accountId)})),
+                run: async (inputs, group) => inputs.map(input => {
+                    const ids = input.media.map(row => row.selectionId);
+                    const result = triage(ids, scenario === 'all excluded' ? 'male' : 'female');
+                    result.assessment.confidence = 'high';
+                    result.assessment.ownerConsistency = 'same_person';
+                    result.assessment.evidenceSelectionIds = ids.slice(0, 2);
+                    result.v29AccountContext = 'personal';
+                    return {operationKey: group.operationKey, resultHash: digest('gender'), result, source: 'checkpoint'};
+                }),
+            };
+            if (scenario === 'later match') {
+                await expect(runScheduledStandardProfileBatch(deps)).resolves.toMatchObject({checkpoint: {kind: 'profile_ai_batch'}});
+                expect(attempts).toEqual([expect.any(String), null, expect.any(String), attempts[0], null]);
+                expect(deps.ai.features).toHaveBeenCalledTimes(2);
+                expect(receipts.rows.get('1:feature_remainder')?.operationKey).toBeNull();
+            } else {
+                await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                expect(unowned).toBe(true);
+                expect(deps.ai.features).not.toHaveBeenCalled();
+                expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+                expect(receipts.rows.has('1:feature_remainder')).toBe(false);
+            }
+            expect(load).toHaveBeenCalledTimes(2);
+            expect(new Set(downloads).size).toBe(downloads.length);
+        },
+    );
+    it.each(['permanent 404', 'missing archive', 'unmatched legacy'] as const)(
+        'pins every fresh triage input before planning and preserves %s on redelivery', async scenario => {
+            const legacy = scenario === 'unmatched legacy';
+            const receipts = mediaInputFixture(() => legacy);
+            const { archive, readRetained, objects } = retainedProfileArchive();
+            const accounts = [profile('available', {postCount: 4}), profile('missing.media', {postCount: 4})];
+            const mem = memory();
+            let replay = false;
+            let downloads = 0;
+            const deps = dependencies(mem, {
+                profileMediaInputs: receipts.store, sourceMediaArchive: archive,
+                profileBatches: {loadExactBatch: async () => ({
+                    requestedUsernames: [...accounts.map(row => row.username), 'missing.profile'],
+                    results: [...accounts.map(account => ({
+                        username: account.username, status: 'success' as const, profile: account,
+                    })), {username: 'missing.profile', status: 'unavailable' as const}],
+                })},
+                normalizeMedia: async selection => {
+                    downloads++;
+                    if (!replay && selection.imageUrl.includes('missing.media')) {
+                        throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    }
+                    return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+                },
+            });
+            deps.ai.profileGender = {
+                plan: async accounts => {
+                    if (legacy) {
+                        expect(receipts.rows.size).toBe(0);
+                        throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                    }
+                    expect(receipts.rows.size).toBe(3);
+                    if (!replay) throw new Error('fixture stopped before gender plan');
+                    return accounts.map(row => ({accountIds: [row.accountId], operationKey: digest(row.accountId)}));
+                },
+                run: vi.fn<NonNullable<AnalysisV2AiStageRuntime['profileGender']>['run']>(async (inputs, group) => inputs.map(input => ({
+                    operationKey: group.operationKey, resultHash: digest('gender'), source: 'checkpoint' as const,
+                    result: triage(input.media.map(row => row.selectionId), 'male'),
+                }))),
+            };
+            await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow(legacy
+                ? 'ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT' : 'fixture stopped before gender plan');
+            expect(deps.ai.profileGender.run).not.toHaveBeenCalled();
+            if (legacy) {
+                expect(receipts.rows.size).toBe(0);
+                return;
+            }
+            expect(receipts.rows.get('1:triage')).toMatchObject({
+                selectedCount: 5, archiveSha256: null, failures: [0, 1, 2, 3, 4].map(index => ({
+                    index, reason: 'source_missing', disposition: 'permanent',
+                })),
+            });
+            expect(receipts.rows.get('2:triage')).toMatchObject({selectedCount: 0, failures: [], archiveSha256: null});
+            const firstDownloads = downloads;
+            replay = true;
+            if (scenario === 'missing archive') {
+                objects.clear();
+                await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                expect(deps.ai.profileGender.run).not.toHaveBeenCalled();
+            } else {
+                await expect(runScheduledStandardProfileBatch(deps)).resolves.toMatchObject({checkpoint: {kind: 'profile_ai_batch'}});
+                expect(deps.ai.profileGender.run).toHaveBeenCalledTimes(1);
+                expect(mem.outcomes.map(row => row.status)).toEqual(['verified_non_female', 'media_unavailable', 'fetch_unavailable']);
+            }
+            expect(downloads).toBe(firstDownloads);
+            expect(readRetained).toHaveBeenCalledTimes(1);
+        },
+    );
     it('keeps six candidate slots for thirty profiles and reloads only triage bytes above the memory bound', async () => {
         const accounts = Array.from({ length: 30 }, (_, i) => profile(`fixture.${i}`, {postCount: 4}));
-        const archived = new Map<string, readonly { selectionId: string; normalizedJpeg: Buffer }[]>();
+        const archived = new Map<string, string[]>();
+        const allocated: WeakRef<Buffer>[] = [];
+        const collect = (() => {
+            if (global.gc) return global.gc;
+            setFlagsFromString('--expose-gc');
+            try { return runInNewContext('gc') as () => void; }
+            finally { setFlagsFromString('--no-expose-gc'); }
+        })();
         const loaded: string[] = [];
         const mem = memory();
         const count = accounts.length;
@@ -5655,22 +5866,27 @@ describe('v2.11 profile AI redelivery', () => {
         let peak = 0;
         let calls = 0;
         const deps = dependencies(mem, {
+            profileMediaInputs: mediaInputFixture().store,
             profileBatches: { loadExactBatch: async () => ({
                 requestedUsernames: accounts.map(item => item.username),
                 results: accounts.map(item => ({username:item.username,status:'success' as const,profile:item})),
             }) },
-            normalizeMedia: vi.fn(async () => Buffer.alloc(256 * 1024, 37)),
+            async normalizeMedia() {
+                const bytes = Buffer.alloc(256 * 1024, 37);
+                allocated.push(new WeakRef(bytes));
+                return bytes;
+            },
             sourceMediaArchive: {
                 async persistBundle(value) {
-                    archived.set(value.archiveId, value.media);
+                    archived.set(value.archiveId, value.media.map(row => row.selectionId));
                     return digest(value.archiveId);
                 },
                 async loadBundle(value) {
                     expect(value.contentSha256).toBe(digest(value.archiveId));
-                    const rows = archived.get(value.archiveId)!;
-                    expect(rows.map(row => row.selectionId)).toEqual(value.expectedSelectionIds);
+                    const ids = archived.get(value.archiveId)!;
+                    expect(ids).toEqual(value.expectedSelectionIds);
                     loaded.push(value.archiveId);
-                    return [...rows];
+                    return ids.map(selectionId => ({selectionId, normalizedJpeg:Buffer.alloc(256 * 1024, 37)}));
                 },
             },
         });
@@ -5678,6 +5894,13 @@ describe('v2.11 profile AI redelivery', () => {
             pinProfileGenderPlan: async (_fence, groups) => {
                 pinCount++;
                 expect(archived.size).toBe(count);
+                for (let i = 0; i < 3; i++) {
+                    await new Promise(resolve => setImmediate(resolve));
+                    collect();
+                }
+                const retained = allocated.filter(reference => reference.deref() !== undefined).length;
+                expect(retained).toBe(125);
+                expect(retained * 256 * 1024).toBeLessThanOrEqual(32 * 1024 * 1024);
                 expect(groups.map(row => row.accountIds.length)).toEqual(Array(15).fill(2));
                 return {kind:'pinned',groups:[...groups]};
             },
@@ -5710,7 +5933,7 @@ describe('v2.11 profile AI redelivery', () => {
         });
         expect(result.checkpoint.manifest.itemCount).toBe(30);
         expect(mem.outcomes.map(row => row.instagramId)).toEqual(accounts.map(item => item.username));
-        expect(deps.normalizeMedia).toHaveBeenCalledTimes(150);
+        expect(allocated).toHaveLength(150);
         expect(calls).toBe(15);
         expect(peak).toBeLessThanOrEqual(6);
         // 25 * 5 * 256 KiB fit within 32 MiB; each remaining bundle is restored exactly once.

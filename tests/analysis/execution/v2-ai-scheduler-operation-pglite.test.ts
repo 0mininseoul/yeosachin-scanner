@@ -760,4 +760,75 @@ describe('analysis V2 live scheduler migration', () => {
             has_table_privilege('service_role','public.analysis_v2_profile_gender_plans','SELECT') AS direct`);
         expect(privileges.rows[0]).toEqual({ authenticated: false, service: true, direct: false });
     });
+
+    it('preserves archived profile media and admits only a matching feature key across redelivery', async () => {
+        const id = '123e4567-e89b-42d3-a456-426614174098';
+        const jobKey = 'track:profile-ai:batch:0';
+        const hash = '5'.repeat(64);
+        const previousKey = `feature-analysis:${'c'.repeat(64)}`;
+        const newKey = `feature-analysis:${'d'.repeat(64)}`;
+        const pin = async (inputs: unknown[], token = jobClaim) => (
+            await db.query('SELECT public.pin_analysis_v2_profile_media_inputs($1,$2,$3,$4,$5::jsonb) AS ok',
+                [id, jobKey, token, hash, JSON.stringify(inputs)])
+        ).rows;
+        const load = async () => (
+            await db.query<{ state: unknown }>('SELECT public.load_analysis_v2_profile_media_inputs($1,$2,$3,$4) AS state',
+                [id, jobKey, jobClaim, hash])
+        ).rows[0]!.state;
+        const attempt = (key: string) => db.query(
+            `INSERT INTO public.analysis_v2_ai_attempts (request_id,job_key,stage,operation_key,status)
+             VALUES ($1,$2,'featureAnalysis',$3,'reserved')`, [id,jobKey,key]);
+        const triage = { ordinal: 0, stage: 'triage', selectedCount: 5,
+            failures: [{ index: 2, reason: 'timeout', disposition: 'transient' }],
+            archiveSha256: 'a'.repeat(64), operationKey: null };
+        const feature = { ordinal: 0, stage: 'feature_remainder', selectedCount: 1,
+            failures: [{ index: 0, reason: 'source_missing', disposition: 'permanent' }],
+            archiveSha256: null, operationKey: previousKey };
+
+        await db.query(`INSERT INTO public.analysis_requests
+            (id,pipeline_version,status,selected_plan_id_snapshot,policy_versions_snapshot)
+            VALUES ($1,'v2','processing','standard','{"pipeline":"v2","risk":"risk-policy-v2.5","aiStage":"ai-stage-policy-v2.11","scheduler":"ai-scheduler-v1"}')`, [id]);
+        await db.query(`INSERT INTO public.analysis_pipeline_jobs
+            (request_id,job_key,track,kind,batch,input_hash,status,dispatch_state,dispatch_generation,lease_token,lease_expires_at)
+            VALUES ($1,$2,'profile_ai','ai',0,$3,'processing','delivered',2,$4,now()+interval '5 min')`, [id,jobKey,hash,jobClaim]);
+
+        expect(await load()).toEqual({ inputs: [], hasGenderHistory: false, hasUnownedFeatureHistory: false });
+        await attempt(previousKey);
+        expect(await load()).toMatchObject({ hasUnownedFeatureHistory: true });
+        for (const rejected of [
+            { ...triage, ordinal: 30 }, { ...triage, unexpected: 1 }, { ...triage, archiveSha256: null },
+            { ...triage, failures: [triage.failures[0], triage.failures[0]] },
+            { ...triage, failures: [{ ...triage.failures[0], index: 5 }] },
+            { ...triage, failures: [{ ...triage.failures[0], reason: 'arbitrary' }] },
+        ]) {
+            await expect(pin([rejected])).rejects.toThrow('PLAN_INVALID');
+        }
+        await expect(pin([triage], operationClaim)).rejects.toThrow('PLAN_FENCE_MISMATCH');
+        expect(await pin([triage])).toEqual([{ ok: true }]);
+        expect(await pin([triage])).toEqual([{ ok: true }]);
+        // A pre-upgrade worker may reclaim this job before the new worker has pinned the gender groups.
+        await expect(db.query(
+            "SELECT decision FROM public.claim_analysis_v2_scheduler_operation($1,$2,$3,$4,'genderTriage',$5,330)",
+            [id,jobKey,jobClaim,operationKey,operationClaim],
+        )).rejects.toThrow('PLAN_DRIFT');
+        await expect(pin([{ ...triage, failures: [] }])).rejects.toThrow('PLAN_DRIFT');
+        // This legacy attempt has no candidate association yet. A different key cannot replace it.
+        await expect(pin([{ ...feature, operationKey: null }])).rejects.toThrow('FEATURE_HISTORY_PENDING');
+        await expect(pin([{ ...feature, operationKey: newKey }])).rejects.toThrow('FEATURE_HISTORY_PENDING');
+        await expect(attempt(newKey)).rejects.toThrow('PLAN_DRIFT');
+        expect(await pin([feature])).toEqual([{ ok: true }]);
+        expect(await load()).toEqual({ inputs: [feature, triage], hasGenderHistory: false, hasUnownedFeatureHistory: false });
+        await expect(pin([{ ...feature, operationKey: newKey }])).rejects.toThrow('PLAN_DRIFT');
+        expect(await pin([{ ...feature, ordinal: 1, operationKey: newKey }])).toEqual([{ ok: true }]);
+        await attempt(newKey);
+        await db.query(`INSERT INTO public.analysis_v2_ai_result_checkpoints (request_id,job_key,operation_key,stage)
+            VALUES ($1,$2,$3,'genderTriage')`, [id,jobKey,operationKey]);
+        expect(await load()).toMatchObject({ hasGenderHistory: true });
+        const acl = await db.query(`SELECT
+            has_function_privilege('anon','public.load_analysis_v2_profile_media_inputs(uuid,text,uuid,text)','EXECUTE') AS anon,
+            has_function_privilege('authenticated','public.pin_analysis_v2_profile_media_inputs(uuid,text,uuid,text,jsonb)','EXECUTE') AS logged_in,
+            has_function_privilege('service_role','public.load_analysis_v2_profile_media_inputs(uuid,text,uuid,text)','EXECUTE') AS worker,
+            has_table_privilege('service_role','public.analysis_v2_profile_media_inputs','SELECT') AS direct`);
+        expect(acl.rows[0]).toEqual({ anon: false, logged_in: false, worker: true, direct: false });
+    });
 });

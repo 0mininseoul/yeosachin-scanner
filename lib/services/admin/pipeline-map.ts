@@ -223,7 +223,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         col: 0, row: 2, kind: 'ai', title: '프로필 AI', subtitle: 'profile_ai', batched: true,
         does: [
             '맞팔 계정의 성별을 판정합니다 (1차 → 트리아지 → 해결).',
-            'Standard 1차 판독은 호출 전에 후보 묶음을 저장합니다. 작업이 재전달되면 같은 묶음의 호출 기록을 확인합니다.',
+            'Standard 1차 판독은 호출 전에 후보 묶음을 저장합니다. 작업이 재전달되면 처음 사용한 이미지와 같은 묶음의 호출 기록을 복구합니다.',
             '여성 후보는 외모·노출·계정 성격·파트너 근거를 분석합니다.',
         ],
         services: 'Gemini',
