@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     config: vi.fn(),
     verify: vi.fn(),
     available: vi.fn(),
     recover: vi.fn(),
+    devRecover: vi.fn(),
+    devBoundary: vi.fn(),
     recoverCanary: vi.fn(),
     purgeResultImages: vi.fn(),
     afterTask: vi.fn(),
@@ -21,6 +23,10 @@ vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
 }));
 vi.mock('@/lib/services/analysis/v2-recovery', () => ({
     recoverAnalysisV2Jobs: mocks.recover,
+    recoverDevLiveStandardDispatches: mocks.devRecover,
+}));
+vi.mock('@/lib/services/dev-ui/live-runtime', () => ({
+    devLiveWorkerRequestBoundary: mocks.devBoundary,
 }));
 vi.mock('@/lib/services/analysis/profile-provider-canary-recovery', () => ({
     recoverExpiredProfileProviderCanaries: mocks.recoverCanary,
@@ -53,6 +59,8 @@ function request() {
 }
 
 describe('analysis V2 recovery route', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.config.mockReturnValue(config);
@@ -70,6 +78,8 @@ describe('analysis V2 recovery route', () => {
             finalized: 1,
             failed: 0,
         });
+        mocks.devBoundary.mockReturnValue('invalid');
+        mocks.devRecover.mockResolvedValue({ scanned: 1, dispatched: 1, taskPresent: 0, lostRace: 0, failed: 0 });
         mocks.purgeResultImages.mockResolvedValue({
             claimed: 2,
             deleted: 2,
@@ -136,6 +146,26 @@ describe('analysis V2 recovery route', () => {
         });
         const purgeRetry = await POST(request());
         expect(purgeRetry.status).toBe(500);
+    });
+
+    it('runs only Standard delivery recovery on the verified Dev worker', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        mocks.available.mockReturnValue(false);
+        expect((await POST(request())).status).toBe(503);
+        expect(mocks.devRecover).not.toHaveBeenCalled();
+
+        mocks.devBoundary.mockReturnValue('dev-worker');
+        mocks.verify.mockResolvedValueOnce(false);
+        expect((await POST(request())).status).toBe(401);
+        expect(mocks.devRecover).not.toHaveBeenCalled();
+
+        const response = await POST(request());
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({ scanned: 1, dispatched: 1 });
+        expect(mocks.devRecover).toHaveBeenCalledOnce();
+        expect(mocks.recover).not.toHaveBeenCalled();
+        expect(mocks.recoverCanary).not.toHaveBeenCalled();
+        expect(mocks.purgeResultImages).not.toHaveBeenCalled();
     });
 
     it('still runs canary cleanup when general recovery throws', async () => {

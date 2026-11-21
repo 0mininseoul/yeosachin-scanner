@@ -169,6 +169,26 @@ describe('Dev live analysis runtime placement', () => {
         expect(devLiveWorkerRequestBoundary(request(`${paidOrigin}/api/analysis/v2/recover`), paidWorker)).toBe('invalid');
     });
 
+    it('opens paid recovery only for the dedicated Dev Standard maintenance identity', () => {
+        const endpoint = `${paidOrigin}/api/analysis/v2/recover`;
+        const maintenance = {
+            ...paidWorker,
+            DEV_LIVE_ANALYSIS_MODE: 'owner_start',
+            DEV_LIVE_STANDARD_RECOVERY_ENABLED: 'true',
+            ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE: paidOrigin,
+            ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: `dev-live-paid-maintenance@${project}.iam.gserviceaccount.com`,
+        };
+        expect(devLiveWorkerRequestBoundary(request(endpoint), maintenance)).toBe('dev-worker');
+        expect(devLiveWorkerRequestBoundary(request(endpoint), {
+            ...maintenance, ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL: paid.ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,
+        })).toBe('invalid');
+        expect(devLiveWorkerRequestBoundary(request(endpoint), {
+            ...maintenance, ANALYSIS_V2_RECOVERY_ENABLED: 'true',
+        })).toBe('invalid');
+        expect(devLiveWorkerRequestBoundary(request(`${endpoint}?scope=other`), maintenance)).toBe('invalid');
+        expect(devLiveWorkerRequestBoundary(request(endpoint, 'GET'), maintenance)).toBe('invalid');
+    });
+
     it('matches the Cloud Run host when self-hosted Next uses its listener address in the proxy URL', () => {
         for (const [endpoint, worker] of [
             [preflightEndpoint, preflightWorker],

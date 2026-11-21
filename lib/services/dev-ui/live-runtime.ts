@@ -15,6 +15,7 @@ const WORKER_ROUTES = {
     preflight: '/api/analysis/preflight/worker',
     paid: '/api/analysis/v2/worker',
 } as const;
+const STANDARD_RECOVERY_ROUTE = '/api/analysis/v2/recover';
 
 type Role = keyof typeof WORKER_ROUTES;
 type TaskConfig = PreflightTasksConfig | AnalysisV2TasksConfig;
@@ -211,7 +212,15 @@ export function devLiveWorkerRequestBoundary(
     try {
         const identity = cloudIdentity(env);
         const approval = devLiveOwnerStartEnabled(env) ? DEV_LIVE_OWNER_CAPS : readDevLiveApproval(env);
-        if (!approval || !matchesWorkerEndpoint(request, identity.origins[role], WORKER_ROUTES[role])) return 'invalid';
+        const standardRecovery = role === 'paid'
+            && devLiveOwnerStartEnabled(env)
+            && env.DEV_LIVE_STANDARD_RECOVERY_ENABLED === 'true'
+            && env.ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE === identity.origins.paid
+            && env.ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL
+                === serviceAccount('dev-live-paid-maintenance', identity.projectId)
+            && matchesWorkerEndpoint(request, identity.origins.paid, STANDARD_RECOVERY_ROUTE);
+        if (!approval || (!standardRecovery
+            && !matchesWorkerEndpoint(request, identity.origins[role], WORKER_ROUTES[role]))) return 'invalid';
         assertLiveFlags(env);
         assertLiveWorkerPolicy(env, role, approval);
         assertStorage(env, identity.projectId, role);

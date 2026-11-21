@@ -233,6 +233,46 @@ async function cleanupTerminalMedia(): Promise<void> {
     await cleanupConfiguredAnalysisV2TerminalMedia();
 }
 
+type DispatchRecoverySummary = Record<RecoveryOutcome, number> & { scanned: number };
+
+async function recoverDispatchableJobs(
+    jobs: readonly AnalysisV2DispatchableJob[],
+    store: AnalysisV2JobStore,
+    lookup: RecoveryLookup,
+    dispatch: RecoveryDispatch,
+    concurrency: number,
+): Promise<DispatchRecoverySummary> {
+    const summary: DispatchRecoverySummary = {
+        scanned: jobs.length, dispatched: 0, taskPresent: 0, lostRace: 0, failed: 0,
+    };
+    let cursor = 0;
+    const worker = async () => {
+        while (cursor < jobs.length) {
+            const job = jobs[cursor++];
+            try {
+                const outcome = await recoverOne(job, store, lookup, dispatch);
+                summary[outcome] += 1;
+            } catch {
+                summary.failed += 1;
+            }
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()));
+    return summary;
+}
+
+/** Runs queue delivery recovery for authorized Dev Standard jobs only. */
+export async function recoverDevLiveStandardDispatches(
+    dependencies: { store?: AnalysisV2JobStore; lookup?: RecoveryLookup; dispatch?: RecoveryDispatch } = {},
+): Promise<DispatchRecoverySummary> {
+    const store = dependencies.store ?? analysisV2JobStore;
+    const jobs = await store.listDispatchable({ limit: ANALYSIS_V2_RECOVERY_MAX_JOBS, scope: 'dev-live-standard' });
+    return recoverDispatchableJobs(
+        jobs, store, dependencies.lookup ?? lookupAnalysisV2Task,
+        dependencies.dispatch ?? dispatchAnalysisV2Job, ANALYSIS_V2_RECOVERY_CONCURRENCY,
+    );
+}
+
 export async function recoverAnalysisV2Jobs(
     dependencies: {
         store?: AnalysisV2JobStore;
@@ -402,21 +442,11 @@ export async function recoverAnalysisV2Jobs(
     } catch {
         summary.failed += 1;
     }
-    let cursor = 0;
-    const worker = async () => {
-        while (cursor < jobs.length) {
-            const job = jobs[cursor++];
-            try {
-                const outcome = await recoverOne(job, store, lookup, dispatch);
-                summary[outcome] += 1;
-            } catch {
-                summary.failed += 1;
-            }
-        }
-    };
-    await Promise.all(
-        Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker())
-    );
+    const dispatchRecovery = await recoverDispatchableJobs(jobs, store, lookup, dispatch, concurrency);
+    summary.dispatched = dispatchRecovery.dispatched;
+    summary.taskPresent = dispatchRecovery.taskPresent;
+    summary.lostRace = dispatchRecovery.lostRace;
+    summary.failed += dispatchRecovery.failed;
     try {
         const fulfillment = await (
             dependencies.recoverFulfillments

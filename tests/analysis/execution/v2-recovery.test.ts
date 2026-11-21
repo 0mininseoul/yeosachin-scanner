@@ -4,7 +4,7 @@ import {
     type AnalysisV2DispatchableJob,
     type AnalysisV2JobStore,
 } from '../../../lib/services/analysis/v2-job-store';
-import { recoverAnalysisV2Jobs } from '../../../lib/services/analysis/v2-recovery';
+import { recoverAnalysisV2Jobs, recoverDevLiveStandardDispatches } from '../../../lib/services/analysis/v2-recovery';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -112,6 +112,25 @@ function providerRecovery() {
 }
 
 describe('analysis V2 dispatch recovery', () => {
+    it('uses the Dev Standard scan and only rearms a delivery confirmed missing', async () => {
+        const missing = job('track:profile-ai:batch:0', 'delivered');
+        const present = job('track:profile-ai:batch:1', 'delivered');
+        const unknown = job('track:profile-ai:batch:2', 'delivered');
+        const jobStore = store([missing, present, unknown]);
+        const lookup = vi.fn()
+            .mockResolvedValueOnce('not_found')
+            .mockResolvedValueOnce('exists')
+            .mockRejectedValueOnce(new Error('lookup unavailable'));
+        const dispatch = vi.fn(async () => undefined);
+
+        await expect(recoverDevLiveStandardDispatches({ store: jobStore, lookup, dispatch })).resolves.toEqual({
+            scanned: 3, dispatched: 1, taskPresent: 1, lostRace: 0, failed: 1,
+        });
+        expect(jobStore.listDispatchable).toHaveBeenCalledExactlyOnceWith({ limit: 100, scope: 'dev-live-standard' });
+        expect(jobStore.rearmDispatch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ jobKey: missing.jobKey }));
+        expect(dispatch).toHaveBeenCalledExactlyOnceWith(missing.requestId, missing.jobKey);
+    });
+
     it('dispatches pending/reserved jobs and preserves task identities that still exist', async () => {
         const jobStore = store([
             job('coordinator:pending', 'pending'),
