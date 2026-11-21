@@ -8,6 +8,9 @@ import {
 const cloudTasksBuildTrace = ["./node_modules/@google-cloud/tasks/build/**/*"];
 
 const nextConfig: NextConfig = {
+  async rewrites() {
+    return [{ source: '/namchin', destination: '/namchin/index.html' }];
+  },
   serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax"],
   outputFileTracingIncludes: {
     "/api/analysis/start": cloudTasksBuildTrace,

@@ -294,6 +294,13 @@ export default function PrivacyPage() {
                         본 방침은 법령·서비스 변경에 따라 개정될 수 있으며, 변경 시 서비스 내 공지를 통해 고지합니다.
                     </p>
 
+                    <section id="namchin" className="mt-6">
+                        <H>남친 맞팔 알리미 사전 예약</H>
+                        <p className="mt-2">
+                            사전 예약 관리와 출시 알림 1회 발송을 위해 이메일, 휴대폰 번호, 수신 동의 시각을 처리합니다.
+                            처리 목적이 달성되면 지체 없이 파기합니다. 개인정보 수집 및 이용에 동의하지 않을 수 있으며, 동의하지 않으면 출시 알림을 신청할 수 없습니다.
+                        </p>
+                    </section>
                     <p className="mt-8 border-t border-line pt-5 text-[12px] text-fg-mute">
                         공고일자: {UPDATED}
                         <br />시행일자: {UPDATED}

@@ -55,9 +55,25 @@
 .ac-nav-btn:focus-visible { outline: 2px solid #8fa7f5; outline-offset: 2px; }
 .ac-nav-btn svg { flex: none; }
 .ac-nav-count { margin-left: auto; min-width: 22px; height: 20px; padding: 0 7px; border-radius: 999px; background: #4a3410; color: #ffcb70; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
-.ac-side-foot { margin-top: auto; padding: 12px; border-radius: 10px; background: #161d26; font-size: 12px; line-height: 1.6; color: #9aa4b2; }
+.ac-side-bottom { display: grid; gap: 12px; margin-top: auto; }
+.ac-workspaces { padding: 10px 8px 8px; border: 1px solid #2b3542; border-radius: 10px; }
+.ac-workspaces p { margin: 0 0 6px 3px; color: #a7b0bd; font-size: 11.5px; font-weight: 600; }
+.ac-workspace-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.ac-workspace-option { display: grid; place-items: center; min-height: 36px; padding: 4px; border-radius: 6px; color: #c5cdd8; font-size: 12px; font-weight: 650; text-align: center; text-decoration: none; }
+.ac-workspace-option:hover { background: #19212b; color: #fff; }
+.ac-workspace-option[aria-current='page'] { background: #273544; color: #fff; }
+.ac-workspace-option.is-namchin[aria-current='page'] { background: #ffe3ca; color: #812a14; }
+.ac-workspace-option:focus-visible { outline: 2px solid #8fa7f5; outline-offset: 2px; }
+.ac-side-foot { padding: 12px; border-radius: 10px; background: #161d26; font-size: 12px; line-height: 1.6; color: #9aa4b2; }
 .ac-side-foot b { color: #e8ecf1; font-weight: 500; }
 .ac-live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #3cc97a; }
+
+/* ---------- mutual-follow reservations ---------- */
+.ac-namchin-mark { display: block; width: 34px; height: 34px; flex: none; border-radius: 9px; background: #ffe3ca; object-fit: contain; }
+.ac-namchin .ac-nav-btn { text-decoration: none; }
+.ac-namchin .ac-nav-btn.is-active { box-shadow: inset 2px 0 #ffb782; }
+.ac-namchin-timezone { margin-left: 3px; font-size: 10px; font-weight: 650; }
+.ac-namchin-roster time { color: var(--ac-text-2); font-variant-numeric: tabular-nums; }
 
 /* ---------- main ---------- */
 .ac-main { flex: 999 1 560px; min-width: 0; padding: 24px 32px 56px; }

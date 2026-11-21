@@ -1,6 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
-import { adminConsolePath } from '@/lib/contracts/admin-console';
+import { adminConsolePath, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
 import { AuthButtons } from '@/components/auth-buttons';
 import { createClient } from '@/lib/supabase/server';
 import {
@@ -8,6 +8,7 @@ import {
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import { AdminConsole } from '../admin/console/admin-console';
+import { NamchinWaitlistConsole } from '../admin/console/namchin-waitlist-console';
 import { buildPipelineMap } from '@/lib/services/admin/pipeline-map';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import { assertDevUiDeployment } from '@/lib/services/dev-ui/deployment';
@@ -87,10 +88,10 @@ function ConsoleAccessState({
 
 export default async function AnalysisAuditPage({
     searchParams,
-}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[]; view?: string | string[]; tab?: string | string[] }> }) {
+}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[]; view?: string | string[]; tab?: string | string[]; workspace?: string | string[] }> }) {
     const params = await searchParams;
-    const destination = adminConsolePath(params.requestId);
-    const requestId = new URL(destination, 'https://admin-console.invalid').searchParams.get('requestId') ?? '';
+    const namchinWorkspace = params.workspace === 'namchin';
+    const destination = namchinWorkspace ? NAMCHIN_ADMIN_CONSOLE_PATH : adminConsolePath(params.requestId);
     const loginFailed = typeof params.error === 'string'
         && ['bad_oauth_state', 'no_code', 'exchange_failed'].includes(params.error);
 
@@ -134,8 +135,10 @@ export default async function AnalysisAuditPage({
     }
     if (decision !== 'authorized') return <ConsoleAccessState state={decision} destination={destination} />;
 
+    if (namchinWorkspace) return <NamchinWaitlistConsole />;
+
     return <AdminConsole
-        initialRequestId={requestId}
+        initialRequestId={new URL(destination, 'https://admin-console.invalid').searchParams.get('requestId') ?? ''}
         initialView={typeof params.view === 'string' ? params.view : undefined}
         initialTab={typeof params.tab === 'string' ? params.tab : undefined}
         pipelineMap={buildPipelineMap()}

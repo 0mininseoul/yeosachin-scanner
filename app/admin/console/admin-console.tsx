@@ -26,6 +26,7 @@ import { OrdersView } from './orders-view';
 import { OverviewView } from './overview-view';
 import { UsersView, type UsersTab } from './users-view';
 import { PipelineView } from './pipeline-view';
+import { ConsoleWorkspaceSwitch } from './console-workspace-switch';
 import type { PipelineMap } from '@/lib/services/admin/pipeline-map';
 
 type View = 'overview' | 'orders' | 'users' | 'accounts' | 'preflight' | 'pipeline';
@@ -318,7 +319,10 @@ export function AdminConsole({ initialRequestId, initialView, initialTab, pipeli
                     {counts[item] ? <span className="ac-nav-count">{counts[item]}</span> : null}
                 </button>)}
             </nav>
-            <div className="ac-side-foot"><span className="ac-live-dot" />operator session<br />응답 캐시 private / no-store<br />확인할 수 없는 값은 <b>미상</b>으로 표시</div>
+            <div className="ac-side-bottom">
+                <ConsoleWorkspaceSwitch active="yeosachin" />
+                <div className="ac-side-foot"><span className="ac-live-dot" />operator session<br />응답 캐시 private / no-store<br />확인할 수 없는 값은 <b>미상</b>으로 표시</div>
+            </div>
         </aside>
         <main ref={mainRef} className={`ac-main${fixedLayout ? ' is-fixed' : ''}`}><div className="ac-wrap">
             <header className="ac-top">

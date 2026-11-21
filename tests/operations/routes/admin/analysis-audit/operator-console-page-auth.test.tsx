@@ -25,6 +25,7 @@ vi.mock('@/lib/services/analytics', async () => ({
 
 import AnalysisAuditPage, { metadata } from '../../../../../app/admin0min/page';
 import LegacyAnalysisAuditPage from '../../../../../app/admin/analysis-audit/page';
+import { NAMCHIN_ADMIN_CONSOLE_PATH, readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 import { readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
 
 // Synthetic identifiers; no live account or analysis record is loaded by this suite.
@@ -285,8 +286,30 @@ describe('operator console page authentication boundary', () => {
         expect(html).toContain('위장여사친');
         expect(html).toContain('운영 콘솔 · production');
         expect(html).toContain('Apify 계정');
+        expect(html).toContain(`href="${NAMCHIN_ADMIN_CONSOLE_PATH}"`);
         expect(html).not.toContain('접근 권한이 없습니다');
         expect(boundary.redirect).not.toHaveBeenCalled();
+    });
+
+    it('shows the reservation console only to allowlisted operators', async () => {
+        const reservationsPage = () => AnalysisAuditPage({ searchParams: Promise.resolve({ workspace: 'namchin' }) });
+        const authorized = renderToStaticMarkup(await reservationsPage());
+        expect(authorized).toContain('사전 예약 명단');
+        expect(authorized).toContain('휴대폰 번호');
+        expect(authorized).toContain('1회 수신 동의 일시');
+        expect(authorized).toContain(`href="${destination}"`);
+        expect(authorized).not.toContain('Apify 계정');
+
+        boundary.getUser.mockResolvedValue({ data: { user: { id: otherUserId } }, error: null });
+        const forbidden = renderToStaticMarkup(await reservationsPage());
+        expect(forbidden).toContain('관리자 콘솔 접근 권한이 없습니다');
+        expect(forbidden).not.toContain('사전 예약 명단');
+    });
+
+    it('retains only the supported reservation workspace through OAuth', () => {
+        expect(readAdminConsoleDestination(`${NAMCHIN_ADMIN_CONSOLE_PATH}&next=//untrusted.example`)).toBe(NAMCHIN_ADMIN_CONSOLE_PATH);
+        expect(readAdminConsoleDestination(`${NAMCHIN_ADMIN_CONSOLE_PATH}&workspace=namchin`)).toBe(destination);
+        expect(readAdminConsoleDestination('/admin/analysis-audit?workspace=namchin')).toBe(destination);
     });
 
     it('renders a forbidden state for an authenticated ordinary user without redirecting home', async () => {
