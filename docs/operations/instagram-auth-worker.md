@@ -2,6 +2,16 @@
 
 `services/instagram-auth-worker` is a private Cloud Run service used only when the application enables `selfhosted_auth`. It is an additive path: the existing Apify relationship route remains the rollback target.
 
+## Current status: decommissioned (2026-11-22)
+
+The production worker and its egress path were removed on 2026-11-22. The burner account had been permanently quarantined since 2026-08-05, and the worker had served no requests after that.
+
+- **Deleted:** the `instagram-auth-worker` Cloud Run service, the `instagram-egress-nat` Cloud NAT configuration, the `instagram-egress-router` router, the `instagram-egress-ip` reserved address, the `instagram-egress` network with its `instagram-egress-seoul` subnet, and the `instagram-auth-session-settings` secret. The address is released and cannot be recovered. The session secret is destroyed.
+- **Kept:** the durable-state GCS bucket, which still holds 18 `pending` operation-ledger entries from 2026-08-04/05 and the permanent quarantine record. They remain audit evidence; do not delete or replay them.
+- **Unchanged:** callers keep `SELFHOSTED_AUTH_ENABLED=false`. The Apify relationship route stays the production path.
+
+To resume `selfhosted_auth`, first recreate the network, subnet, router, NAT, and a new reserved address as described below. Then onboard a new burner session and resolve the pending ledger entries before enabling the kill switch. Expect a new egress IP. The deploy script fails closed until the NAT resources exist.
+
 ## Baseline
 
 The application kill switch is closed by default:
