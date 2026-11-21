@@ -2,6 +2,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
+import {
+    createAnalysisV2AiAttemptStore,
+    createAnalysisV2AiOperationKey,
+} from '@/lib/services/analysis/v2-ai-attempt-store';
 
 const mocks = vi.hoisted(() => ({
     generateContent: vi.fn(),
@@ -176,6 +180,75 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
         expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
+    });
+
+    it('uses one Vertex call and one Dev budget reservation and settlement after the audit intent times out once', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const grant = { id: 'synthetic-approval' };
+        const spend = { grantId: grant.id, reservationId: 'synthetic-reservation' };
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValueOnce(spend);
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        const attempt = {
+            requestId: stageRequestId,
+            jobKey: 'track:profile-ai:batch:0',
+            operationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-checkpoint'),
+            attempt: 1,
+            retryCount: 0,
+            modelName: 'gemini-3.1-flash-lite',
+            location: 'global',
+            stage: 'genderTriage',
+            thinkingLevel: 'MINIMAL',
+            mediaCount: 0,
+            mediaResolution: 'LOW',
+            promptVersion: 'gender-triage-v2',
+            schemaVersion: 2,
+            maxOutputTokens: 128,
+        } as const;
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: '57014', message: 'canceling statement due to statement timeout' },
+            })
+            .mockImplementation(async (_, args: Record<string, unknown>) => ({
+                data: {
+                    ...attempt,
+                    reservationToken: args.p_reservation_token,
+                    created: true,
+                    status: 'reserved',
+                    usageMetadataStatus: null,
+                    usageComplete: null,
+                    tokenUsage: null,
+                    latencyMs: null,
+                    estimatedCostUsd: null,
+                    finishReason: null,
+                    createdAt: '2026-07-14T01:00:00.000Z',
+                    terminalizedAt: null,
+                },
+                error: null,
+            }));
+        const attemptStore = createAnalysisV2AiAttemptStore({ rpc });
+        const audit = stageAuditOptions();
+        audit.onBeforeAttempt.mockImplementation(async () => {
+            const reserved = await attemptStore.reserve({
+                ...attempt,
+                claimToken: '123e4567-e89b-42d3-a456-426614174001',
+            });
+            expect(reserved.created).toBe(true);
+        });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: attempt.modelName, maxOutputTokens: attempt.maxOutputTokens,
+        })).resolves.toEqual({ value: 'ok' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
+        expect(rpc.mock.invocationCallOrder[1]).toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(spend, expect.any(Number));
+        expect(mocks.settleDevAttempt.mock.calls[0]![1]).toBeGreaterThan(0);
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledOnce();
     });
 
     it.each([

@@ -2714,6 +2714,9 @@ describe('analysis V2 concrete collection executors', () => {
         const usernames = ['alice'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const profileStore = inMemoryProfileStore(null);
+        vi.mocked(profileStore.store.load).mockResolvedValueOnce(null).mockRejectedValue(
+            new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: checkpoint load failed (57014).')
+        );
         const providers = providerStore();
         const fetcher = vi.fn(async (
             requested: readonly string[],
@@ -2769,6 +2772,7 @@ describe('analysis V2 concrete collection executors', () => {
         ));
 
         expect(fetcher).toHaveBeenCalledOnce();
+        expect(profileStore.store.load).toHaveBeenCalledOnce();
         expect(profileStore.store.checkpointFreshApify).toHaveBeenCalledOnce();
         expect(profileStore.store.checkpointPrimary).not.toHaveBeenCalled();
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
@@ -2776,11 +2780,13 @@ describe('analysis V2 concrete collection executors', () => {
         );
     });
 
-    it('admits production paid profile retries through the retained direct-fresh checkpoint reader', async () => {
+    it('reuses the retained direct-fresh checkpoint on a new claim without calling Apify again', async () => {
         const usernames = ['alice'];
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
         const profileStore = inMemoryProfileStore(null);
-        const loadFreshApifyRetry = vi.fn(async () => null);
+        const loadFreshApifyRetry = vi.fn<NonNullable<AnalysisV2ProfileFetchCheckpointStore['loadFreshApifyRetry']>>(
+            async () => profileStore.current()
+        );
         profileStore.store.loadFreshApifyRetry = loadFreshApifyRetry;
         const providers = providerStore();
         const fetcher = vi.fn(async (
@@ -2802,7 +2808,7 @@ describe('analysis V2 concrete collection executors', () => {
             };
         });
 
-        await createAnalysisV2ProfileFetchExecutor({
+        const executor = createAnalysisV2ProfileFetchExecutor({
             requestContextStore: contextStore(requestContext()),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
@@ -2818,11 +2824,32 @@ describe('analysis V2 concrete collection executors', () => {
                 SCRAPER_COMMENTS: 'apify',
                 SELFHOSTED_AUTH_ENABLED: 'true',
             },
-        })(stageContext(
+        });
+        const stage = stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
             0
-        ));
+        );
+        const original = await executor(stage);
+        const resumeProviderRun: AnalysisV2ProviderRunStore['bindAdapterCheckpoint'] = async input => {
+            const stored = storedRun(input);
+            return {
+                stored,
+                checkpoint: {
+                    logicalProvider: stored.logicalProvider,
+                    actorId: stored.actorId,
+                    credentialSlot: stored.credentialSlot,
+                    maxChargeUsd: stored.maxChargeUsd,
+                    resumeRunId: stored.runId!,
+                },
+            };
+        };
+        vi.mocked(providers.value.bindAdapterCheckpoint).mockImplementationOnce(resumeProviderRun);
+        const nextClaimToken = '123e4567-e89b-42d3-a456-426614174009';
+        await expect(executor({
+            ...stage,
+            claim: { ...stage.claim, claimToken: nextClaimToken, attemptCount: 2 },
+        })).resolves.toEqual(original);
 
         expect(loadFreshApifyRetry).toHaveBeenCalledWith(expect.objectContaining({
             requestId,
@@ -2832,7 +2859,12 @@ describe('analysis V2 concrete collection executors', () => {
             operationKey: expect.stringMatching(/^profile-fallback:/),
             providerInputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
         }));
-        expect(profileStore.store.load).toHaveBeenCalledOnce();
+        expect(loadFreshApifyRetry).toHaveBeenLastCalledWith(expect.objectContaining({
+            claimToken: nextClaimToken,
+            operationKey: loadFreshApifyRetry.mock.calls[0]![0].operationKey,
+        }));
+        expect(profileStore.store.load).not.toHaveBeenCalled();
+        expect(profileStore.store.checkpointFreshApify).toHaveBeenCalledOnce();
         expect(fetcher).toHaveBeenCalledOnce();
     });
 

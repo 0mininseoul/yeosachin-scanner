@@ -1091,6 +1091,7 @@ async function durableFreshApifyProfiles(input: {
         return resume;
     }
 
+    let stored: AnalysisV2ProfileFetchResume | undefined;
     try {
         await dependencies.getProfilesBatchV2(usernames, {
             requestId: claim.requestId,
@@ -1103,7 +1104,7 @@ async function durableFreshApifyProfiles(input: {
                 if (snapshot.attempt !== 'fresh_apify' || snapshot.source !== 'apify') {
                     throw new Error('FRESH_PROVENANCE_PROFILE_ATTEMPT_DRIFT');
                 }
-                await dependencies.profileCheckpointStore.checkpointFreshApify({
+                stored = await dependencies.profileCheckpointStore.checkpointFreshApify({
                     ...identity,
                     requestedUsernames: snapshot.requestedUsernames,
                     results: checkpointAttemptResults(snapshot.results),
@@ -1120,7 +1121,7 @@ async function durableFreshApifyProfiles(input: {
         throw error;
     }
 
-    const stored = await dependencies.profileCheckpointStore.load(identity);
+    // The write RPC returns the committed, validated checkpoint under the current claim.
     if (!stored || !isDirectApifyProfileResume(stored)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
     }

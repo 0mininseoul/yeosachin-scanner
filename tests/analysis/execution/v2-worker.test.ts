@@ -1475,6 +1475,7 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid result.',
             'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid cache response.',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid load response.',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fresh Apify checkpoint failed (23514).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: metadata mismatch.',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: bundle selection mismatch.',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: existing content mismatch.',
@@ -1496,6 +1497,9 @@ describe('analysis V2 durable DAG worker', () => {
             'fetch failed: ECONNRESET',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: primary checkpoint failed (08006).',
             'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fallback checkpoint failed (PGRST000).',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: checkpoint load failed (57014).',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fresh Apify checkpoint failed (57014).',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fresh Apify retry admission failed (57014).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object write failed (429).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (408).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (500).',
@@ -1638,10 +1642,12 @@ describe('analysis V2 durable DAG worker', () => {
         expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
     });
 
-    it('keeps a transient short-lived object failure retryable within the fenced job budget', async () => {
-        const failureCode = 'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR';
+    it.each([
+        ['ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR', 'object read failed (503).'],
+        ['ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR', 'fresh Apify retry admission failed (57014).'],
+    ])('keeps %s retryable within the fenced job budget', async (failureCode, detail) => {
         const handler = vi.fn(async () => {
-            throw new Error(`${failureCode}: object read failed (503).`);
+            throw new Error(`${failureCode}: ${detail}`);
         });
         const terminalFailureFinalizer = vi.fn(async () => undefined);
         const terminalMediaCleanup = vi.fn(async () => undefined);

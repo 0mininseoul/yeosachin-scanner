@@ -859,14 +859,14 @@ function isDeterministicPersistenceFailure(error: Error): boolean {
 
 function isTransientProfileCheckpointFailure(error: Error): boolean {
     const match = error.message.match(
-        /^ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: [a-z ]+ failed \(([A-Za-z0-9_]{1,32})\)\.$/
+        /^ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: [A-Za-z ]+ failed \(([A-Za-z0-9_]{1,32})\)\.$/
     );
     if (!match) return false;
     const rpcCode = match[1].toUpperCase();
     return rpcCode === 'UNKNOWN'
         || rpcCode === 'PGRST000'
         || /^(?:08|40|53)[A-Z0-9]{3}$/.test(rpcCode)
-        || /^(?:57P0[123]|58030)$/.test(rpcCode);
+        || /^(?:57P0[123]|57014|58030)$/.test(rpcCode);
 }
 
 function isTransientMediaObjectFailure(error: Error): boolean {
