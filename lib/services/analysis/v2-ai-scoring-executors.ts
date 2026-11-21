@@ -8,6 +8,8 @@ import {
     applyGenderResolution,
     createFeatureAnalysisResultIdentity,
     createGenderResolutionResultIdentity,
+    prepareGenderTriagePlanAccount,
+    type GenderTriagePlanAccount,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { buildCarouselCaptionPolicy } from '@/lib/domain/analysis/carousel-caption-policy';
 import {
@@ -26,6 +28,7 @@ import type {
     FeatureAnalysisInput,
     FeatureAnalysisResult,
     GenderTriageResult,
+    GenderTriageInput,
     HighRiskNarrativeInput,
     NormalizedAiMediaSelection,
     PartnerSafetyResult,
@@ -80,6 +83,7 @@ import type {
     AnalysisV2MediaArtifactStore,
     AnalysisV2NormalizedMediaBundleItem,
 } from './v2-media-artifact-store';
+import { ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES } from './v2-media-artifact-store';
 import {
     analysisV2SourceMediaArchiveId,
     type AnalysisV2SourceMediaArchiveStore,
@@ -292,6 +296,81 @@ interface AnalysisV2DeferredProfileAiOutcome {
 type AnalysisV2PreparedProfileAiOutcome =
     | AnalysisV2ProfileAiOutcome
     | AnalysisV2DeferredProfileAiOutcome;
+
+type TriageMedia = Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>;
+interface ProfileGenderEvidence {
+    username: string;
+    candidateId: string;
+    profile: AnalysisV2CheckpointProfile;
+    policy: ReturnType<typeof mediaPolicy>;
+    selectionProvenance?: ReturnType<typeof mediaSelectionProvenance>;
+    profileEvidence?: GenderTriageInput['accountProfile'];
+    triageSha256: string;
+}
+type GenderEvaluation = () => ReturnType<AnalysisV2AiStageRuntime['gender']>;
+interface PlannedProfile {
+    kind: 'planned_gender';
+    account: GenderTriagePlanAccount;
+    input(media: TriageMedia): GenderTriageInput;
+    load(): Promise<TriageMedia>;
+    analyze(media: TriageMedia, evaluate: GenderEvaluation): Promise<AnalysisV2PreparedProfileAiOutcome>;
+}
+
+/** Retain only JPEG buffers within the job budget. Larger batches can reload the exact immutable archive. */
+function profileTriageLoader(
+    normalized: TriageMedia, retain: boolean, archive: AnalysisV2SourceMediaArchiveStore,
+    reference: { requestId: string; archiveId: string; contentSha256: string },
+): PlannedProfile['load'] {
+    const manifest = normalized.media.map(({ selectionId, kind, postId }) => ({ selectionId, kind, postId }));
+    const coverage = normalized.coverage;
+    const cached = retain ? normalized.bytes : null;
+    return async () => {
+        let bytes = cached;
+        if (!bytes) {
+            const rows = await archive.loadBundle({
+                ...reference,
+                expectedSelectionIds: manifest.map(row => row.selectionId),
+            });
+            if (!rows) throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+            bytes = new Map(rows.map(row => [row.selectionId, row.normalizedJpeg]));
+        }
+        const media = manifest.map(row => {
+            const buffer = bytes.get(row.selectionId);
+            if (!buffer) throw new Error('ANALYSIS_V2_MEDIA_SELECTION_DRIFT');
+            return { ...row, normalizedJpegBase64: buffer.toString('base64') };
+        });
+        return { media, bytes, coverage };
+    };
+}
+
+/** A paired call and its dependent profile pipelines occupy the same candidate slots as before. */
+async function runProfileGroups<T>(
+    groups: readonly T[], concurrency: number, memberCount: (group: T) => number,
+    run: (group: T, slots: number) => Promise<void>,
+) {
+    const active = new Set<Promise<void>>();
+    let occupied = 0;
+    let failed = false;
+    let failure: unknown;
+    for (const group of groups) {
+        const slots = Math.min(concurrency, memberCount(group));
+        while (!failed && occupied + slots > concurrency) await Promise.race(active);
+        if (failed) break;
+        occupied += slots;
+        const task = run(group, slots).catch(error => {
+            if (!failed) {
+                failed = true;
+                failure = error;
+            }
+        }).finally(() => {
+            occupied -= slots;
+            active.delete(task);
+        });
+        active.add(task);
+    }
+    await Promise.all(active);
+    if (failed) throw failure;
+}
 
 function isDeferredProfileAiOutcome(
     value: AnalysisV2PreparedProfileAiOutcome
@@ -520,6 +599,8 @@ export interface AnalysisV2ReverseLikeCollector {
     }>>;
 }
 
+type DevStandardEvalBuilder = (expiresAt: number) => Promise<DevStandardEvalBundle | null>;
+
 export interface AnalysisV2AiScoringExecutorDependencies {
     profileBatches: AnalysisV2ProfileBatchReadModel;
     evidence: AnalysisV2RelationshipEvidenceReadModel;
@@ -550,9 +631,7 @@ export interface AnalysisV2AiScoringExecutorDependencies {
     mediaStore: AnalysisV2MediaArtifactStore;
     /** Required archive for every normalized image set actually passed to V2 AI. */
     sourceMediaArchive: AnalysisV2SourceMediaArchiveStore;
-    devStandardEvalCapture?: (
-        build: (expiresAt: number) => Promise<DevStandardEvalBundle | null>,
-    ) => Promise<void>;
+    devStandardEvalCapture?: (build: DevStandardEvalBuilder) => Promise<void>;
     ai: AnalysisV2AiStageRuntime;
     reverseLikes: AnalysisV2ReverseLikeCollector;
     normalizeMedia(media: SelectedAnalysisMedia): Promise<Buffer>;
@@ -847,6 +926,21 @@ async function retainedDevEvalCandidate(input: {
         featureOperationKey: identity.operationKey,
         featureResult: outcome.feature,
     };
+}
+
+async function captureDevStandardEval(
+    context: AnalysisV2StageExecutorContext<'final_score'>,
+    capture: AnalysisV2AiScoringExecutorDependencies['devStandardEvalCapture'],
+    build: DevStandardEvalBuilder,
+) {
+    if (!capture || context.riskPolicyVersion !== 'risk-policy-v2.5') return;
+    try {
+        const policy = await context.loadAiPolicy?.() ?? context;
+        if (policy.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION) await capture(build);
+    } catch {
+        // The optional evaluation must never block either score checkpoint.
+        console.warn('DEV_STANDARD_EVAL_CAPTURE_FAILED');
+    }
 }
 
 function policySupports(
@@ -1677,12 +1771,12 @@ async function runPrimaryRevenueResolverPass(input: {
     patches: readonly AnalysisV2RevenueResolverOutcomePatch[];
 }> {
     const candidates = finalRevenueResolverCandidates(input.plannedOutcomes);
+    const aiFence = aiJobFence(input.context, await input.context.loadAiPolicy?.());
     await input.admission.begin({
         planHash: finalRevenueResolverPlanHash(candidates),
         screenedCount: input.coverage.screenedCount,
         unknownBurdenCount: input.coverage.unknownBurdenCount,
     });
-    const aiFence = aiJobFence(input.context);
     if (!policySupports(aiFence.aiStagePolicyVersion, 'genderResolution')) {
         return { outcomes: input.outcomes, patches: [] };
     }
@@ -1728,6 +1822,9 @@ async function runPrimaryRevenueResolverPass(input: {
         });
         await resolver.completion;
         const state = resolver.peek();
+        if (state.status === 'terminal_unavailable' && state.budgetError) {
+            throw new Error(state.budgetError);
+        }
         if (state.status === 'recovery_pending') {
             throw new AnalysisV2AiResultRecoveryPendingError();
         }
@@ -1889,14 +1986,17 @@ async function resolveStrictPrimaryRevenueOutcomes(
     return outcomes;
 }
 
-function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>) {
-    if (!context.aiStagePolicyVersion) {
+function aiJobFence(
+    context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSubset>,
+    policy: Pick<typeof context, 'aiStagePolicyVersion' | 'schedulerCapability'> = context,
+) {
+    if (!policy.aiStagePolicyVersion) {
         throw new Error('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH');
     }
     return {
         ...checkpointClaim(context),
-        aiStagePolicyVersion: context.aiStagePolicyVersion,
-        schedulerCapability: context.schedulerCapability,
+        aiStagePolicyVersion: policy.aiStagePolicyVersion,
+        schedulerCapability: policy.schedulerCapability,
         handlerDeadlineAtMs: context.handlerDeadlineAtMs,
     };
 }
@@ -2031,33 +2131,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const strictRevenueResolverDeferred = hasStrictRevenueRelationshipSelection(context);
             const resolverFence = aiFence;
             const startedResolverHandles: AnalysisV2GenderResolutionHandle[] = [];
+            const requiresGenderPlan = context.state.planId === 'standard'
+                && aiFence.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
+                && aiFence.schedulerCapability === 'scheduler-v1';
+            const plannedGender = requiresGenderPlan ? dependencies.ai.profileGender : undefined;
+            if (requiresGenderPlan && !plannedGender) {
+                throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_PERSISTENCE_ERROR');
+            }
+            let retainedBytes = 0;
             let preparedOutcomes: AnalysisV2PreparedProfileAiOutcome[];
             try {
-                preparedOutcomes = await runBounded(
-                    results,
-                    profileConcurrency,
-                    async (item, index): Promise<AnalysisV2PreparedProfileAiOutcome> => {
-                        const signal = {
-                            currentOrdinal: index + 1,
-                            totalCount: results.length,
-                            callPhase: 'analyzing' as const,
-                        };
-                        let preview;
-                        if (
-                            item.status === 'success'
-                            && item.profile
-                            && !item.profile.isPrivate
-                        ) {
-                            try {
-                                preview = selectAnalysisV2ProgressCandidateMedia(item.profile);
-                            } catch {
-                                // Progress presentation must never affect candidate analysis.
-                                preview = undefined;
-                            }
-                            await context.reportActiveProfile?.(item.username, preview, signal);
-                        } else {
-                            await context.reportActiveProfile?.(item.username, undefined, signal);
+                async function prepareProfile(
+                    item: (typeof results)[number], index: number,
+                ): Promise<AnalysisV2PreparedProfileAiOutcome | PlannedProfile> {
+                    const signal = {
+                        currentOrdinal: index + 1,
+                        totalCount: results.length,
+                        callPhase: 'analyzing' as const,
+                    };
+                    let preview;
+                    if (
+                        item.status === 'success'
+                        && item.profile
+                        && !item.profile.isPrivate
+                    ) {
+                        try {
+                            preview = selectAnalysisV2ProgressCandidateMedia(item.profile);
+                        } catch {
+                            // Progress presentation must never affect candidate analysis.
+                            preview = undefined;
                         }
+                        await context.reportActiveProfile?.(item.username, preview, signal);
+                    } else {
+                        await context.reportActiveProfile?.(item.username, undefined, signal);
+                    }
                     const candidateId = analysisV2CandidateId(item.username);
                     if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {
                         return {
@@ -2155,21 +2262,54 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             return { selectionId: media.selectionId, normalizedJpeg };
                         }),
                     });
+                    const evidence = {
+                        username: item.username, candidateId, profile, policy, selectionProvenance,
+                        profileEvidence, triageSha256,
+                    };
+                    const inputFor = (media: TriageMedia): GenderTriageInput => ({
+                        media: media.media,
+                        ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
+                    });
+                    const analyze: PlannedProfile['analyze'] = (media, evaluate) => (
+                        analyzePreparedProfile(evidence, media, evaluate)
+                    );
+                    if (!plannedGender) {
+                        return analyze(triageNormalized, () => dependencies.ai.gender(inputFor(triageNormalized), aiFence));
+                    }
+                    const byteSize = [...triageNormalized.bytes.values()].reduce((sum, bytes) => sum + bytes.length, 0);
+                    const retain = retainedBytes + byteSize <= ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES;
+                    if (retain) retainedBytes += byteSize;
+                    return {
+                        kind: 'planned_gender',
+                        account: prepareGenderTriagePlanAccount(inputFor(triageNormalized), inputQualityPolicyVersion),
+                        input: inputFor,
+                        analyze,
+                        load: profileTriageLoader(triageNormalized, retain, dependencies.sourceMediaArchive, {
+                            requestId: context.claim.requestId,
+                            archiveId: analysisV2SourceMediaArchiveId({ candidateId, stage: 'triage' }),
+                            contentSha256: triageSha256,
+                        }),
+                    };
+                }
+
+                async function analyzePreparedProfile(
+                    evidence: ProfileGenderEvidence,
+                    triageNormalized: TriageMedia,
+                    evaluate: GenderEvaluation,
+                ): Promise<AnalysisV2PreparedProfileAiOutcome> {
+                    const { username, candidateId, profile, policy, selectionProvenance, profileEvidence, triageSha256 } = evidence;
                     const triageArchiveCheckpoint = captureSourceArchiveRevisions
                         ? { sourceMediaArchive: { triageSha256, featureRemainderSha256: null } }
                         : {};
                     let gender: Awaited<ReturnType<AnalysisV2AiStageRuntime['gender']>>;
                     try {
-                        gender = await dependencies.ai.gender({
-                            media: triageNormalized.media,
-                            ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
-                        }, aiFence);
+                        gender = await evaluate();
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return analysisUnavailableOutcome(
                                 candidateId,
-                                item.username,
-                                item.profile,
+                                username,
+                                profile,
                                 defaultGenderResolutionStatus,
                             );
                         }
@@ -2178,10 +2318,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     if (gender.result.routingDecision === 'exclude_high_confidence_male') {
                         return {
                             candidateId,
-                            instagramId: normalizeUsername(item.username),
+                            instagramId: normalizeUsername(username),
                             status: 'verified_non_female' as const,
                             unavailableReason: null,
-                            profile: item.profile,
+                            profile: profile,
                             triage: gender.result,
                             feature: null,
                             normalizedSelectionIds: triageNormalized.media.map(
@@ -2232,10 +2372,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     )) {
                         return {
                             candidateId,
-                            instagramId: normalizeUsername(item.username),
+                            instagramId: normalizeUsername(username),
                             status: 'media_unavailable' as const,
                             unavailableReason: null,
-                            profile: item.profile,
+                            profile: profile,
                             triage: null,
                             feature: null,
                             normalizedSelectionIds: normalized.media.map(
@@ -2259,8 +2399,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         normalized.media.map(row => row.selectionId)
                     );
                     const captionPolicy = buildCarouselCaptionPolicy({
-                        targetUsername: item.profile.username,
-                        profile: item.profile,
+                        targetUsername: profile.username,
+                        profile: profile,
                         featureSelections: policy.feature.media,
                         partnerSelections: policy.partnerSafetyContactSheetCandidates.media,
                     });
@@ -2298,10 +2438,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     ) {
                         return {
                             candidateId,
-                            instagramId: normalizeUsername(item.username),
+                            instagramId: normalizeUsername(username),
                             status: 'unresolved' as const,
                             unavailableReason: null,
-                            profile: item.profile,
+                            profile: profile,
                             triage: gender.result,
                             feature: null,
                             normalizedSelectionIds: normalized.media.map(
@@ -2351,7 +2491,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     try {
                         features = await dependencies.ai.features({
                             triage: gender.result,
-                            bio: item.profile.bio ?? null,
+                            bio: profile.bio ?? null,
                             media: normalized.media,
                             captions,
                             ...(profileEvidence ? { accountProfile: profileEvidence } : {}),
@@ -2379,7 +2519,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                                         : 'cutoff' as const;
                                     return analysisUnavailableOutcome(
                                         candidateId,
-                                        item.username,
+                                        username,
                                         profile,
                                         resolverFailureStatus,
                                         readyResolver?.operationKey ?? null,
@@ -2517,7 +2657,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             }
                             return {
                                 candidateId,
-                                instagramId: normalizeUsername(item.username),
+                                instagramId: normalizeUsername(username),
                                 status,
                                 unavailableReason: null,
                                 profile,
@@ -2560,8 +2700,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             };
                         },
                     };
-                    },
-                );
+                }
+                const prepared = await runBounded(results, profileConcurrency, prepareProfile);
+                preparedOutcomes = new Array(prepared.length);
+                const byAccount = new Map<string, { index: number; work: PlannedProfile }[]>();
+                const accounts: GenderTriagePlanAccount[] = [];
+                prepared.forEach((work, index) => {
+                    if ('kind' in work && work.kind === 'planned_gender') {
+                        const entries = byAccount.get(work.account.accountId) ?? [];
+                        entries.push({ index, work });
+                        byAccount.set(work.account.accountId, entries);
+                        accounts.push(work.account);
+                    } else {
+                        preparedOutcomes[index] = work;
+                    }
+                });
+                if (plannedGender) {
+                    const plan = await plannedGender.plan(accounts, { ...aiFence, inputHash: context.claim.inputHash });
+                    await runProfileGroups(plan, profileConcurrency, group => (
+                        group.accountIds.reduce((count, id) => count + byAccount.get(id)!.length, 0)
+                    ), async (group, slots) => {
+                        const entries = group.accountIds.map(id => byAccount.get(id)!);
+                        const media = await Promise.all(entries.map(rows => rows[0]!.work.load()));
+                        const gender = plannedGender.run(
+                            entries.map((rows, index) => rows[0]!.work.input(media[index]!)), group, aiFence,
+                        );
+                        const rows = entries.flatMap((members, memberIndex) => members.map((item, ordinal) => (
+                            { ...item, memberIndex, ordinal }
+                        )));
+                        await runBounded(rows, slots, async ({ index, work, memberIndex, ordinal }) => {
+                            const ownMedia = ordinal === 0 ? media[memberIndex]! : await work.load();
+                            preparedOutcomes[index] = await work.analyze(ownMedia, async () => (await gender)[memberIndex]!);
+                        });
+                    });
+                }
             } catch (error) {
                 const cleanupStates = await Promise.all(
                     startedResolverHandles.map(settleOptionalGenderResolution)
@@ -3221,44 +3393,41 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 .sort((left, right) => left.featuredRank! - right.featuredRank!)
                 .slice(0, 3)
                 .map(row => row.candidateId);
-            if (dependencies.devStandardEvalCapture && liveRiskPolicyVersion === 'risk-policy-v2.5'
-                && aiJobFence(context).aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION) {
-                await dependencies.devStandardEvalCapture(async expiresAt => {
-                    const finalCandidates = candidates as readonly V2FinalCandidateScore[];
-                    const selected = finalCandidates.filter(row => {
-                        const outcome = outcomeById.get(row.candidateId);
-                        return outcome?.baselineClassification === 'verified_female'
-                            && outcome.feature?.finalGenderDecision === 'verified_female';
-                    }).sort((left, right) =>
-                        Number(right.riskBand === 'high_risk') - Number(left.riskBand === 'high_risk')
-                        || right.displayScore - left.displayScore
-                        || left.candidateId.localeCompare(right.candidateId)
-                    ).slice(0, 3);
-                    if (selected.length !== 3) return null;
-                    const samples = await Promise.all(selected.map(row => retainedDevEvalCandidate({
-                        requestId: context.claim.requestId,
-                        outcome: outcomeById.get(row.candidateId)!,
-                        archive: dependencies.sourceMediaArchive,
-                    })));
-                    return devStandardEvalBundleSchema.parse({
-                        version: 1,
-                        expiresAt,
-                        candidates: samples,
-                        preliminary: preliminary.map((row, index) => ({ ...row, username: `eval_${index + 1}` })),
-                        observed: [...observed],
-                        notCollected: [...notCollected],
-                        partnerOverrides: partner.rows.flatMap(row => {
-                            const evidence = row.result.assessment?.partnerEvidence;
-                            return row.result.assessment?.exclusionContext === 'none'
-                                && (evidence === 'weak' || evidence === 'strong')
-                                ? [{ candidateId: row.candidateId, evidence }] : [];
-                        }),
-                        originalHighRiskIds: finalCandidates
-                            .filter(row => row.riskBand === 'high_risk')
-                            .map(row => row.candidateId),
-                    });
+            await captureDevStandardEval(context, dependencies.devStandardEvalCapture, async expiresAt => {
+                const finalCandidates = candidates as readonly V2FinalCandidateScore[];
+                const selected = finalCandidates.filter(row => {
+                    const outcome = outcomeById.get(row.candidateId);
+                    return outcome?.baselineClassification === 'verified_female'
+                        && outcome.feature?.finalGenderDecision === 'verified_female';
+                }).sort((left, right) =>
+                    Number(right.riskBand === 'high_risk') - Number(left.riskBand === 'high_risk')
+                    || right.displayScore - left.displayScore
+                    || left.candidateId.localeCompare(right.candidateId)
+                ).slice(0, 3);
+                if (selected.length !== 3) return null;
+                const samples = await Promise.all(selected.map(row => retainedDevEvalCandidate({
+                    requestId: context.claim.requestId,
+                    outcome: outcomeById.get(row.candidateId)!,
+                    archive: dependencies.sourceMediaArchive,
+                })));
+                return devStandardEvalBundleSchema.parse({
+                    version: 1,
+                    expiresAt,
+                    candidates: samples,
+                    preliminary: preliminary.map((row, index) => ({ ...row, username: `eval_${index + 1}` })),
+                    observed: [...observed],
+                    notCollected: [...notCollected],
+                    partnerOverrides: partner.rows.flatMap(row => {
+                        const evidence = row.result.assessment?.partnerEvidence;
+                        return row.result.assessment?.exclusionContext === 'none'
+                            && (evidence === 'weak' || evidence === 'strong')
+                            ? [{ candidateId: row.candidateId, evidence }] : [];
+                    }),
+                    originalHighRiskIds: finalCandidates
+                        .filter(row => row.riskBand === 'high_risk')
+                        .map(row => row.candidateId),
                 });
-            }
+            });
             const narrativeBatchHash = sha256(
                 'analysis-v2-narrative-batch-v1',
                 narrativeCandidateIds

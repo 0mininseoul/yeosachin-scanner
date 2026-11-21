@@ -286,6 +286,83 @@ describe('captureResultImages', () => {
         expect(imageRegistry.registerOutcome).not.toHaveBeenCalled();
     });
 
+    it.each(['capture_failed', 'ready'] as const)(
+        'preserves the existing %s receipt when its source cannot be recaptured',
+        async status => {
+            const row = source(0);
+            const existing = {
+                kind: row.kind,
+                candidateLocator: row.candidateLocator,
+                sortOrdinal: row.sortOrdinal,
+                sourceFingerprint: digest(row.sourceUrl!),
+                status,
+                objectKey: status === 'ready' ? `v1/${'1'.repeat(32)}/target/${'2'.repeat(32)}.webp` : null,
+                sha256: status === 'ready' ? 'c'.repeat(64) : null,
+                byteSize: status === 'ready' ? 100 : null,
+                capturedAt: status === 'ready' ? new Date(NOW).toISOString() : null,
+                expiresAt: new Date(NOW + 30 * 86_400_000).toISOString(),
+                failureCode: status === 'ready' ? null : 'UPSTREAM_UNAVAILABLE',
+                isMandatory: true,
+            };
+            const notReady = new Error('ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY');
+            const imageRegistry = registry({
+                loadManifestPage: vi.fn(async () => [existing]),
+                sealManifest: vi.fn().mockRejectedValue(notReady),
+            });
+            const put = vi.fn();
+            await expect(captureResultImages({
+                ...CLAIM,
+                orderedManifestHash: MANIFEST_HASH,
+                expectedRows: 1,
+                loadSourcePage: async () => ({ items: [row], nextAfterOrdinal: null }),
+                registry: imageRegistry,
+                store: { put, head: vi.fn().mockRejectedValue(new Error('missing object')) },
+                hmacSecret: HMAC_SECRET,
+                download: vi.fn().mockRejectedValue(new SecureImageFetchError('source_rejected', 'permanent', 'denied')),
+                now: () => NOW + 5_000,
+            })).rejects.toThrow('ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY');
+
+            expect(imageRegistry.registerOutcome).not.toHaveBeenCalled();
+            expect(imageRegistry.sealManifest).toHaveBeenCalledTimes(status === 'ready' ? 0 : 1);
+            expect(put).not.toHaveBeenCalled();
+        },
+    );
+
+    it('finishes in-flight registrations before releasing a failed page and skips later images', async () => {
+        let finishRegistration!: () => void;
+        const pending = new Promise<void>(resolve => { finishRegistration = resolve; });
+        const attempted: number[] = [];
+        const imageRegistry = registry({
+            registerOutcome: vi.fn(async ({ outcome }: { outcome: ResultImageRegistryOutcome }) => {
+                attempted.push(outcome.sortOrdinal);
+                if (outcome.sortOrdinal === 0) throw new Error('registry unavailable');
+                await pending;
+                return { registered: true, status: outcome.status };
+            }),
+        });
+        let returned = false;
+        const capture = captureResultImages({
+            ...CLAIM,
+            orderedManifestHash: MANIFEST_HASH,
+            expectedRows: 3,
+            loadSourcePage: async () => ({
+                items: [0, 1, 2].map(i => source(i, { sourceUrl: null })),
+                nextAfterOrdinal: null,
+            }),
+            concurrency: 2,
+            registry: imageRegistry,
+            store: { put: vi.fn(), head: vi.fn() },
+            hmacSecret: HMAC_SECRET,
+        }).catch(error => { returned = true; return error; });
+        await new Promise(resolve => setImmediate(resolve));
+        const returnedWhileRegistrationPending = returned;
+        finishRegistration();
+        expect(await capture).toMatchObject({ message: 'registry unavailable' });
+        expect(returnedWhileRegistrationPending).toBe(false);
+        expect(attempted).toEqual([0, 1]);
+        expect(imageRegistry.sealManifest).not.toHaveBeenCalled();
+    });
+
     it('processes a 50,000-row source through one bounded page at a time', async () => {
         const expectedRows = 50_000;
         const pageSize = 500;

@@ -223,11 +223,12 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         col: 0, row: 2, kind: 'ai', title: '프로필 AI', subtitle: 'profile_ai', batched: true,
         does: [
             '맞팔 계정의 성별을 판정합니다 (1차 → 트리아지 → 해결).',
+            'Standard 1차 판독은 호출 전에 후보 묶음을 저장합니다. 작업이 재전달되면 같은 묶음의 호출 기록을 확인합니다.',
             '여성 후보는 외모·노출·계정 성격·파트너 근거를 분석합니다.',
         ],
         services: 'Gemini',
         numbers: [{ label: '외모·노출 배점', value: points(W.appearanceExposure) }],
-        failure: '시간 초과·교착으로 DB가 취소한 기록 저장은 같은 작업에서 한 번 재시도합니다. 호출 제한과 응답 검증 실패는 기존 재시도·보정 규칙을 따릅니다.',
+        failure: '일시적인 DB 저장 오류는 재시도합니다. 이전 묶음의 호출 기록과 입력을 일치시킬 수 없으면 새 호출 전에 중단합니다.',
         code: ['lib/services/ai/v2-staged-analysis.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts', 'lib/services/analysis/v2-ai-result-store.ts'],
     },
     private_names: {
@@ -245,9 +246,10 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         col: 2, row: 3, kind: 'join', title: '예비 점수 조인', subtitle: 'primary_join',
         does: [
             '관계·대상 상호작용·프로필 AI 결과를 합칩니다.',
+            '품질 검사가 적용된 요청에서 미확정 비율이 기준을 넘으면 저장된 AI 정책에 따라 성별을 재판독합니다.',
             '검증된 여성 후보마다 예비 점수를 계산합니다 (대상→후보 좋아요 제외).',
         ],
-        services: '없음',
+        services: 'Gemini (재판독 시)',
         numbers: [
             { label: '예비 점수 상한', value: points(PRE_SCORE_MAX) },
             { label: '후보→대상 좋아요', value: points(W.candidateToTargetLikes) },
@@ -257,8 +259,8 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
             { label: '최근 맞팔', value: points(W.recentMutual) },
             { label: '외모·노출', value: points(W.appearanceExposure) },
         ],
-        failure: '입력이 하나라도 빠지면 시작하지 않습니다.',
-        code: ['lib/domain/analysis/risk-policy.ts', 'lib/services/analysis/v2-dag-planner.ts'],
+        failure: '모든 배치가 완료돼야 시작하며 재판독 후에도 품질 기준을 충족하지 못하면 수동 검토로 보냅니다.',
+        code: ['lib/domain/analysis/risk-policy.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts', 'lib/services/analysis/v2-dag-planner.ts'],
     },
     screening: {
         col: 2, row: 4, kind: 'join', title: '검증 후보 선별', subtitle: 'screening',
@@ -321,7 +323,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: 'Cloudflare R2',
         numbers: [{ label: '최대 시도', value: `${n(ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS)}회` }],
-        failure: '재시도하고, 계속 실패하면 운영자 복구 대상으로 남깁니다.',
+        failure: '일시적인 이미지 저장 오류는 기존 저장 내역부터 확인해 재시도합니다. 필수 이미지가 준비돼야 결과를 발행합니다.',
         code: ['lib/services/analysis/v2-worker.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts', 'lib/services/media/result-image-capture.ts'],
     },
 };

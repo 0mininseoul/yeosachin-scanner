@@ -49,6 +49,7 @@ import {
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import { planProfileGender, type PinProfileGenderPlan, type ProfileGenderGroup } from './v2-profile-gender-plan';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
 import {
     AnalysisV2AiResultRecoveredCutoffError,
@@ -112,6 +113,11 @@ export interface AnalysisV2PrivateNameAuditedResult {
 }
 
 export interface AnalysisV2AiStageRuntime {
+    profileGender?: {
+        plan: typeof planProfileGender;
+        run(inputs: readonly GenderTriageInput[], group: ProfileGenderGroup, fence: AnalysisV2AiJobFence):
+            Promise<readonly AnalysisV2AuditedResult<GenderTriageResult>[]>;
+    };
     gender(
         input: GenderTriageInput,
         fence: AnalysisV2AiJobFence
@@ -147,7 +153,10 @@ export type AnalysisV2GenderResolutionState =
     | { status: 'cutoff' }
     | { status: 'recovery_pending' }
     | { status: 'capacity_skipped' }
-    | { status: 'terminal_unavailable' };
+    | {
+        status: 'terminal_unavailable';
+        budgetError?: 'DEV_LIVE_BUDGET_EXCEEDED' | 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    };
 
 export interface AnalysisV2GenderResolutionHandle {
     operationKey: string;
@@ -160,6 +169,7 @@ type AuditFactory = <T>(options: Parameters<typeof createAnalysisV2AiAuditAdapte
 AnalysisV2AiAuditAdapter<T>;
 
 export interface AnalysisV2AiStageRuntimeDependencies {
+    pinProfileGenderPlan?: PinProfileGenderPlan;
     createAudit?: AuditFactory;
     runGender?: typeof genderTriage;
     runGenderMicrobatch?: typeof genderTriageMicrobatch;
@@ -468,6 +478,7 @@ export function createDurableAnalysisV2AiStageRuntime(
         fence: AnalysisV2AiJobFence;
         plans: PendingGenderMicrobatchPlan[];
         scheduled: boolean;
+        pinnedKey?: string;
     }>();
 
     const flushGenderMicrobatch = async (groupKey: string): Promise<void> => {
@@ -488,6 +499,9 @@ export function createDurableAnalysisV2AiStageRuntime(
                     accounts,
                     assertAiStagePolicyVersion(group.fence),
                 );
+                if (group.pinnedKey && group.pinnedKey !== identity.operationKey) {
+                    throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                }
                 const responseSchema = createGenderTriageMicrobatchResponseSchema(accounts);
                 const envelopeSchema = z.object({
                     results: z.array(z.object({
@@ -554,18 +568,20 @@ export function createDurableAnalysisV2AiStageRuntime(
     const queueGenderMicrobatch = (
         input: GenderTriageInput,
         fence: AnalysisV2AiJobFence,
+        pinnedKey?: string,
+        verifiedAccountId?: string,
     ): Promise<AnalysisV2AuditedResult<GenderTriageResult>> => {
         if (!exactSchedulerEnabled(fence)) {
             return Promise.reject(new Error('ANALYSIS_V2_GENDER_TRIAGE_MICROBATCH_SCHEDULER_REQUIRED'));
         }
-        const accountId = createGenderTriageMicrobatchAccountId(
+        const accountId = verifiedAccountId ?? createGenderTriageMicrobatchAccountId(
             input,
             assertAiStagePolicyVersion(fence),
         );
-        const groupKey = schedulerBatchKey(fence);
+        const groupKey = pinnedKey ? `${schedulerBatchKey(fence)}:${pinnedKey}` : schedulerBatchKey(fence);
         let group = pendingGenderMicrobatches.get(groupKey);
         if (!group) {
-            group = { fence, plans: [], scheduled: false };
+            group = { fence, plans: [], scheduled: false, pinnedKey };
             pendingGenderMicrobatches.set(groupKey, group);
         }
         return new Promise((resolve, reject) => {
@@ -583,7 +599,7 @@ export function createDurableAnalysisV2AiStageRuntime(
                 fence,
                 waiters: [{ resolve, reject }],
             });
-            if (!group!.scheduled) {
+            if (!pinnedKey && !group!.scheduled) {
                 group!.scheduled = true;
                 setTimeout(() => void flushGenderMicrobatch(groupKey), 0);
             }
@@ -591,6 +607,20 @@ export function createDurableAnalysisV2AiStageRuntime(
     };
 
     return {
+        profileGender: {
+            plan: (accounts, fence) => planProfileGender(accounts, fence, dependencies.pinProfileGenderPlan),
+            async run(inputs, group, fence) {
+                const ids = inputs.map(input => createGenderTriageMicrobatchAccountId(input, assertAiStagePolicyVersion(fence)));
+                if (ids.length !== group.accountIds.length || ids.some((id, index) => id !== group.accountIds[index])) {
+                    throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                }
+                const results = inputs.map((input, index) => (
+                    queueGenderMicrobatch(input, fence, group.operationKey, ids[index])
+                ));
+                void flushGenderMicrobatch(`${schedulerBatchKey(fence)}:${group.operationKey}`);
+                return Promise.all(results);
+            },
+        },
         async gender(input, fence) {
             const policyVersion = assertAiStagePolicyVersion(fence);
             if (aiStagePolicySupports(policyVersion, 'genderTriageMicrobatchV29')) {
@@ -686,6 +716,13 @@ export function createDurableAnalysisV2AiStageRuntime(
                     };
                 } catch (error) {
                     if (state.status !== 'pending') return;
+                    if (error instanceof Error && (
+                        error.message === 'DEV_LIVE_BUDGET_EXCEEDED'
+                        || error.message === 'DEV_LIVE_BUDGET_UNAVAILABLE'
+                    )) {
+                        state = { status: 'terminal_unavailable', budgetError: error.message };
+                        return;
+                    }
                     state = {
                         status: error instanceof AnalysisV2AiResultRecoveryPendingError
                             ? 'recovery_pending'

@@ -23,6 +23,7 @@ export interface ResultImageRegistryClient {
     ): PromiseLike<{
         data: unknown;
         error: { code?: string; message?: string } | null;
+        status?: number;
     }>;
 }
 
@@ -154,9 +155,24 @@ const purgeClaimSchema = z.object({
     reason: z.enum(['owner_delete', 'expired']),
 }).strict();
 
+const sqlFailureSchema = z.enum([
+    'ANALYSIS_V2_RESULT_IMAGE_CONFLICT',
+    'ANALYSIS_V2_RESULT_IMAGE_FENCE_MISMATCH',
+    'ANALYSIS_V2_RESULT_IMAGE_INVALID',
+    'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY',
+]);
+const transientRpcCodes = new Set([
+    '40001', '40P01', '55P03', '57014', '57P01', '57P02', '57P03', '58030',
+    'PGRST000', 'PGRST001', 'PGRST002', 'PGRST003',
+    'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', 'ETIMEDOUT', 'EPIPE',
+]);
+const connectionFailureMessage = /\b(?:fetch failed|failed to fetch|network error|socket hang up|timed?\s*out|timeout|econnreset)\b/i;
+
 export class ResultImageRegistryError extends Error {
     constructor(
         readonly code:
+            | z.infer<typeof sqlFailureSchema>
+            | 'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR'
             | 'RESULT_IMAGE_REGISTRY_INVALID_INPUT'
             | 'RESULT_IMAGE_REGISTRY_INVALID_RESPONSE'
             | 'RESULT_IMAGE_REGISTRY_OPERATION_FAILED'
@@ -164,6 +180,35 @@ export class ResultImageRegistryError extends Error {
         super(code);
         this.name = 'ResultImageRegistryError';
     }
+}
+
+function registryRpcError(error: unknown, status?: number): ResultImageRegistryError {
+    const { code, message, name } = (error ?? {}) as {
+        code?: unknown;
+        message?: unknown;
+        name?: unknown;
+    };
+    if (code === 'P0001' || !code) {
+        const parsed = sqlFailureSchema.safeParse(message);
+        if (parsed.success) return new ResultImageRegistryError(parsed.data);
+    }
+    if (typeof code === 'string' && code) {
+        const transient = transientRpcCodes.has(code) || /^(?:08|53)[A-Z0-9]{3}$/.test(code);
+        return new ResultImageRegistryError(transient
+            ? 'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR'
+            : 'RESULT_IMAGE_REGISTRY_OPERATION_FAILED');
+    }
+    // The SQL transaction can commit before its HTTP response is truncated.
+    // postgrest-js reports that decoding failure with status zero. On retry
+    // the finalizer reads the committed manifest before capturing any bytes.
+    const transient = status === undefined
+        ? name === 'AbortError' || name === 'TimeoutError' || name === 'SyntaxError'
+            || (typeof message === 'string' && connectionFailureMessage.test(message))
+        : status === 0 || status === 408 || status === 429 || (status >= 500 && status < 600);
+    if (transient) {
+        return new ResultImageRegistryError('ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR');
+    }
+    return new ResultImageRegistryError('RESULT_IMAGE_REGISTRY_OPERATION_FAILED');
 }
 
 function parseClaim(input: ResultImageRegistryClaim): ResultImageRegistryClaim {
@@ -232,20 +277,14 @@ export function createResultImageRegistry(
         name: string,
         params: Record<string, unknown>
     ): Promise<unknown> {
+        let response;
         try {
-            const { data, error } = await client.rpc(name, params);
-            if (error) {
-                throw new ResultImageRegistryError(
-                    'RESULT_IMAGE_REGISTRY_OPERATION_FAILED'
-                );
-            }
-            return data;
+            response = await client.rpc(name, params);
         } catch (error) {
-            if (error instanceof ResultImageRegistryError) throw error;
-            throw new ResultImageRegistryError(
-                'RESULT_IMAGE_REGISTRY_OPERATION_FAILED'
-            );
+            throw registryRpcError(error);
         }
+        if (response?.error) throw registryRpcError(response.error, response.status);
+        return response?.data;
     }
 
     function claimParams(input: ResultImageRegistryClaim) {

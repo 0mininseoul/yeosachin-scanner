@@ -8,9 +8,16 @@ import {
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
 import {
+    createGenderTriageMicrobatchAccountId,
     createGenderTriageMicrobatchResultIdentity,
+    plannedGenderTriageOperationKey,
+    prepareGenderTriagePlanAccount,
     type GenderTriageInput,
 } from '@/lib/services/ai/v2-staged-analysis';
+import {
+    pinProfileGenderPlan, planProfileGender, type PinProfileGenderPlan,
+} from '@/lib/services/analysis/v2-profile-gender-plan';
+import { AnalysisV2JobFenceError } from '@/lib/services/analysis/v2-job-store';
 
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: vi.fn() },
@@ -25,7 +32,8 @@ import {
 } from '../../../lib/services/analysis/v2-ai-result-store';
 import type { AnalysisV2SchedulerRuntimeOptions } from '../../../lib/services/analysis/v2-ai-scheduler-runtime';
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+const supabase = vi.hoisted(() => ({ rpc: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: supabase }));
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const claimToken = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow
@@ -409,6 +417,24 @@ describe('durable V2 AI stage runtime', () => {
         await expect(handle.cutoff()).resolves.toBeUndefined();
         expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
     });
+
+    it.each(['DEV_LIVE_BUDGET_EXCEEDED', 'DEV_LIVE_BUDGET_UNAVAILABLE'])(
+        'preserves %s when the resolver cannot start', async budgetError => {
+            const runGenderResolution = vi.fn();
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: cachedAuditFactory({}).createAudit,
+                runGenderResolution,
+            });
+            const handle = runtime.startGenderResolution({ media: [] }, {
+                ...fence,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                reserveGenderResolutionCapacity: vi.fn().mockRejectedValue(new Error(budgetError)),
+            });
+            await handle.completion;
+            expect(handle.peek()).toEqual({ status: 'terminal_unavailable', budgetError });
+            expect(runGenderResolution).not.toHaveBeenCalled();
+        },
+    );
 
     it('replays the same cached gender operation without opening another provider attempt', async () => {
         const cached = cachedAuditFactory({
@@ -831,5 +857,80 @@ describe('durable V2 AI stage runtime', () => {
         expect(schedulerCalls[0]!.tasks).toHaveLength(1);
         expect(first.operationKey).toBe(second.operationKey);
         expect(first.resultHash).toBe(second.resultHash);
+    });
+});
+
+describe('persisted v2.11 profile gender membership', () => {
+    const policy = AI_STAGE_POLICY_V211_VERSION;
+    const planFence = { ...fence, inputHash: '4'.repeat(64) };
+    const input = (suffix: string, hasProfileImage = true): GenderTriageInput => ({
+        media: [
+            { selectionId: `profile:${suffix}`, kind: 'profile', normalizedJpegBase64: '/9j/2Q==' },
+            { selectionId: `feed:${suffix}`, kind: 'feed', postId: `post:${suffix}`, normalizedJpegBase64: '/9j/2g==' },
+        ],
+        accountProfile: { fullName: suffix, bio: 'fixture', hasProfileImage },
+    });
+    const rawKey = (inputs: readonly GenderTriageInput[]) => createGenderTriageMicrobatchResultIdentity(
+        inputs.map(input => ({ input, accountId: createGenderTriageMicrobatchAccountId(input, policy) })), policy,
+    ).operationKey;
+
+    it('returns stale claims to the existing worker fence handling', async () => {
+        supabase.rpc.mockResolvedValueOnce({
+            data: null, error: { message: 'ANALYSIS_V2_PROFILE_GENDER_PLAN_FENCE_MISMATCH' },
+        });
+        await expect(pinProfileGenderPlan(planFence, [])).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+    });
+
+    it('pins empty and singleton input and refuses a new candidate after a singleton is sealed', async () => {
+        const a = prepareGenderTriagePlanAccount(input('a'), policy);
+        const b = prepareGenderTriagePlanAccount(input('b'), policy);
+        const fresh: PinProfileGenderPlan = async (_fence, groups) => ({ kind: 'pinned', groups: [...groups] });
+        expect(await planProfileGender([], planFence, fresh)).toEqual([]);
+        const singleton = await planProfileGender([a,a], planFence, fresh);
+        expect(singleton).toEqual([{ accountIds: [a.accountId], operationKey: rawKey([input('a')]) }]);
+        await expect(planProfileGender([a,b], planFence, async () => ({ kind: 'pinned', groups: [...singleton] })))
+            .rejects.toThrow('PLAN_DRIFT');
+    });
+
+    it('reproduces the pre-change singleton and pair operation keys from compact evidence', () => {
+        vi.stubEnv('CONCIERGE_BATCH_NAME_GENDER_ASSERTIVE', 'false');
+        try {
+            const inputs = [input('first'), input('second', false)];
+            const members = inputs.map(value => prepareGenderTriagePlanAccount(value, policy));
+            // Captured from the pre-change prompt + media identity, including projected attachment ordinals.
+            expect(rawKey(inputs)).toBe('gender-triage:5df887986a185e919e325fe8b0a979bcb15ff6a309d15589f94f253855bd9e7b');
+            expect(rawKey(inputs.slice(1))).toBe('gender-triage:ea11f3a567337d2c528082dfb9a1f0f2fecad8a98c806b05380ac3b2223828d1');
+            expect(plannedGenderTriageOperationKey(members.toReversed(), policy)).toBe(rawKey(inputs));
+            expect(plannedGenderTriageOperationKey(members.slice(1), policy)).toBe(rawKey(inputs.slice(1)));
+            expect(JSON.stringify(members)).not.toContain('/9j/');
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('adopts exact legacy ready members and opaque cross-pair claims before assigning untouched candidates', async () => {
+        const accounts = Array.from({length: 6}, (_, i) => prepareGenderTriagePlanAccount(input(String(i)), policy))
+            .sort((a,b) => a.accountId.localeCompare(b.accountId));
+        const historical = [[accounts[0]!], [accounts[1]!,accounts[4]!]].map(rows => ({
+            accountIds: rows.map(row => row.accountId), operationKey: plannedGenderTriageOperationKey(rows, policy),
+        }));
+        const pin = vi.fn<PinProfileGenderPlan>()
+            .mockResolvedValueOnce({kind:'history',groups:[historical[0]!,{...historical[1]!, accountIds:null}]})
+            .mockImplementation(async (_fence, groups) => ({kind:'pinned', groups:[...groups]}));
+        const plan = await planProfileGender(accounts, planFence, pin);
+        expect(plan).toEqual(expect.arrayContaining(historical));
+        expect(plan.flatMap(row => row.accountIds).sort()).toEqual(accounts.map(row => row.accountId).sort());
+        expect(pin).toHaveBeenCalledTimes(2);
+    });
+
+    it('blocks missing input and historical overlaps without pinning another operation', async () => {
+        const a = prepareGenderTriagePlanAccount(input('a'), policy);
+        const b = prepareGenderTriagePlanAccount(input('b'), policy);
+        const old = (rows: typeof a[]) => ({ operationKey: plannedGenderTriageOperationKey(rows, policy), accountIds: null });
+        for (const history of [[old([a,b])], [old([a]),old([a,b])]]) {
+            const pin = vi.fn<PinProfileGenderPlan>().mockResolvedValue({kind:'history',groups:history});
+            await expect(planProfileGender(history.length === 1 ? [a] : [a,b], planFence, pin)).rejects.toThrow('PLAN_DRIFT');
+            expect(pin).toHaveBeenCalledOnce();
+        }
     });
 });

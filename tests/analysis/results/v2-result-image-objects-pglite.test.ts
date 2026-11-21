@@ -1,6 +1,15 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    captureResultImageSources,
+    type ResultImageCaptureStore,
+} from '@/lib/services/media/result-image-capture';
+import {
+    createResultImageRegistry,
+    RESULT_IMAGE_REGISTRY_RPC,
+} from '@/lib/services/media/result-image-registry';
 
 const migration = readFileSync(
     new URL(
@@ -165,6 +174,87 @@ describe('analysis_v2_result_image_coverage_ok', () => {
 });
 
 describe('retained result image registry', () => {
+    it('resumes the committed ready row when the registration response is lost', async () => {
+        const signatures = new Map<string, string[]>([
+            [RESULT_IMAGE_REGISTRY_RPC.begin, ['p_ordered_manifest_hash', 'p_expected_rows']],
+            [RESULT_IMAGE_REGISTRY_RPC.loadPage, ['p_after_ordinal', 'p_page_size']],
+            [RESULT_IMAGE_REGISTRY_RPC.register, ['p_outcome']],
+            [RESULT_IMAGE_REGISTRY_RPC.seal, ['p_ordered_manifest_hash']],
+        ]);
+        const registrations: unknown[] = [];
+        const registry = createResultImageRegistry({
+            async rpc(name, params) {
+                const extraArgs = signatures.get(name);
+                if (!extraArgs) throw new Error('unexpected image RPC');
+                const fields = ['p_request_id', 'p_job_key', 'p_claim_token', 'p_job_input_hash', ...extraArgs];
+                const values = fields.map(field => field === 'p_outcome'
+                    ? JSON.stringify(params[field])
+                    : params[field]);
+                const placeholders = fields.map((_, index) => '$' + (index + 1));
+                const statement = 'SELECT public.' + name + '(' + placeholders.join(', ') + ') AS result';
+                if (name === RESULT_IMAGE_REGISTRY_RPC.register) {
+                    registrations.push(params.p_outcome);
+                }
+                const { rows } = await db.query<{ result: unknown }>(statement, values);
+                if (name === RESULT_IMAGE_REGISTRY_RPC.register && registrations.length === 1) {
+                    throw new TypeError('fetch failed');
+                }
+                return { data: rows[0].result, error: null };
+            },
+        });
+        const objects = new Map<string, { byteSize: number; sha256: string }>();
+        const store = {
+            put: vi.fn<ResultImageCaptureStore['put']>(async ({ objectKey, bytes }) => {
+                objects.set(objectKey, {
+                    byteSize: bytes.byteLength,
+                    sha256: createHash('sha256').update(bytes).digest('hex'),
+                });
+            }),
+            head: vi.fn<ResultImageCaptureStore['head']>(async ({ objectKey, expectedByteSize, expectedSha256 }) => {
+                const stored = objects.get(objectKey);
+                if (!stored || stored.byteSize !== expectedByteSize || stored.sha256 !== expectedSha256) {
+                    throw new Error('fixture object missing or changed');
+                }
+                return stored;
+            }),
+        };
+        const url = 'https://cdninstagram.com/target.jpg';
+        const bytes = Buffer.from('normalized fixture');
+        const download = vi.fn(async () => ({ bytes, contentType: 'image/jpeg', finalUrl: url }));
+        const normalize = vi.fn(async () => ({
+            bytes, contentType: 'image/webp' as const, width: 256, height: 256,
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+        }));
+        const capture = (claimToken: string) => captureResultImageSources({
+            requestId: REQUEST_ID,
+            jobKey: 'coordinator:finalize',
+            claimToken,
+            jobInputHash: INPUT_HASH,
+            orderedManifestHash: MANIFEST_HASH,
+            expectedRows: 1,
+            sources: [{ kind: 'target', candidateLocator: 'target', sortOrdinal: 0, sourceUrl: url }],
+            hmacSecret: 'local-result-image-fixture'.repeat(2),
+            registry,
+            store,
+            download,
+            normalize,
+        });
+
+        await expect(capture(CLAIM_TOKEN)).rejects.toThrow('ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR');
+        await db.query(
+            'UPDATE public.analysis_pipeline_jobs SET lease_token = $2 WHERE request_id = $1',
+            [REQUEST_ID, RETRY_CLAIM_TOKEN],
+        );
+        await expect(capture(RETRY_CLAIM_TOKEN)).resolves.toMatchObject({ readyImages: 1, durableRows: 1 });
+
+        expect(registrations).toEqual([expect.objectContaining({ status: 'ready' })]);
+        expect(download).toHaveBeenCalledOnce();
+        expect(normalize).toHaveBeenCalledOnce();
+        expect(store.put).toHaveBeenCalledOnce();
+        expect(store.head).toHaveBeenCalledTimes(2);
+        expect(store.head.mock.calls[1]).toEqual(store.head.mock.calls[0]);
+    });
+
     it('hands an exact manifest to a fresh live retry lease', async () => {
         const outcome = readyOutcome({
             kind: 'target',

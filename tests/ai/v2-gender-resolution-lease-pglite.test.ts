@@ -16,6 +16,10 @@ const resolverMigration = readFileSync(
     ),
     'utf8'
 );
+const slotPreferenceMigration = readFileSync(
+    new URL('../../supabase/migrations/20261122110000_prefer_unoccupied_gemini_slots.sql', import.meta.url),
+    'utf8',
+);
 
 const REQUEST = '123e4567-e89b-42d3-a456-426614174000';
 const FEATURE_OPERATION = `feature-analysis:${'a'.repeat(64)}`;
@@ -81,6 +85,9 @@ describe('gender resolver operation-aware lease migration', () => {
                 status TEXT NOT NULL
             );
             CREATE TABLE public.analysis_preflights (consumed_request_id UUID);
+            CREATE TABLE public.analysis_provider_admission_leases (
+                workload_role text, logical_provider text, credential_slot text, state text
+            );
             CREATE TABLE public.analysis_pipeline_jobs (
                 request_id UUID NOT NULL,
                 job_key TEXT NOT NULL,
@@ -199,11 +206,13 @@ describe('gender resolver operation-aware lease migration', () => {
             $$;
         `);
         await db.exec(resolverMigration);
+        await db.exec(slotPreferenceMigration);
     });
 
     beforeEach(async () => {
         await db.exec(`
             DELETE FROM public.analysis_v2_ai_attempts;
+            DELETE FROM public.analysis_provider_admission_leases;
             UPDATE public.analysis_v2_gemini_leases
             SET state = 'available',
                 fence = 0,
@@ -221,6 +230,39 @@ describe('gender resolver operation-aware lease migration', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    it('tries another available slot after a provider admission declines the first one', async () => {
+        const input = {
+            requestId: REQUEST,
+            jobKey: 'track:profile-ai:batch:0',
+            operationKey: FEATURE_OPERATION,
+            stage: 'featureAnalysis',
+            claimToken: crypto.randomUUID(),
+        };
+        const first = await acquireV2(input);
+        expect(first.outcome).toBe('acquired');
+        await db.query(
+            `INSERT INTO public.analysis_provider_admission_leases
+             VALUES ('paid','gemini',$1,'recovery_required')`,
+            [`gemini-${first.slot}`],
+        );
+        // The admission wrapper returns the physical slot before any provider call.
+        const released = await asService<{ released: boolean }>(
+            'SELECT released FROM public.release_analysis_v2_gemini_lease_v2($1,$2,$3,$4)',
+            [first.slot, input.claimToken, first.fence, FEATURE_OPERATION],
+        );
+        expect(released.rows[0].released).toBe(true);
+
+        const retry = { ...input, claimToken: crypto.randomUUID() };
+        const next = await acquireV2(retry);
+        expect(next.outcome).toBe('acquired');
+        expect(next.slot).not.toBe(first.slot);
+        const duplicate = await acquireV2(retry);
+        expect(duplicate.slot).toBe(next.slot);
+        expect(duplicate.fence).toBe(next.fence);
+        expect((await db.query('SELECT state FROM public.analysis_provider_admission_leases')).rows)
+            .toEqual([{ state: 'recovery_required' }]);
     });
 
     it('allocates feature and resolver independently inside one job identity', async () => {

@@ -54,7 +54,7 @@ import {
 import type { AnalysisV2ProgressCandidateMediaPreview } from './progress-candidate-media';
 import type { ProgressCallPhase } from '@/lib/contracts/analysis-v2';
 import { analysisV2ResultStore } from './v2-result-store';
-import { assertSupportedAiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
+import { assertSupportedAiStagePolicyVersion, type AiStagePolicyVersion } from '@/lib/services/ai/stage-policy';
 import {
     parseAiSchedulerPolicySnapshot,
     type AiSchedulerCapability,
@@ -162,6 +162,11 @@ export interface AnalysisV2StageExecutorContext<S extends AnalysisV2StageId> {
     aiStagePolicyVersion: string | null;
     /** Parsed once from this request's immutable policy snapshot. */
     schedulerCapability?: AiSchedulerCapability;
+    /** Conditional work can request the same validated policy after its eligibility checks. */
+    loadAiPolicy?: () => Promise<{
+        aiStagePolicyVersion: AiStagePolicyVersion;
+        schedulerCapability: AiSchedulerCapability;
+    }>;
     riskPolicyVersion: 'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null;
     handlerDeadlineAtMs?: number;
     /** Reports the exact profile whose work is starting; persistence masks the handle. */
@@ -632,18 +637,18 @@ export async function executeAnalysisV2DagJob(
         return successorsForAnalysisV2Job(current.plan, claim);
     }
 
-    let aiStagePolicyVersion: string | null = null;
-    let schedulerCapability: AiSchedulerCapability = 'legacy';
-    if (AI_PROVIDER_STAGES.has(current.stage)) {
-        aiStagePolicyVersion = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
+    const loadAiPolicy = async () => {
+        const loaded = await aiPolicyStore.loadAiStagePolicyVersion(claim.requestId);
+        let aiStagePolicyVersion: AiStagePolicyVersion;
         try {
-            assertSupportedAiStagePolicyVersion(aiStagePolicyVersion);
+            aiStagePolicyVersion = assertSupportedAiStagePolicyVersion(loaded);
         } catch {
-            executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
+            return executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
         }
         // Older request fixtures and all historical policy snapshots stay on the exact legacy
         // runtime. A production store supplies the full immutable snapshot; parsing it here
         // makes scheduler admission independent of an environment value that can change mid-job.
+        let schedulerCapability: AiSchedulerCapability = 'legacy';
         if (aiPolicyStore.loadPolicyVersionsSnapshot) {
             const snapshot = await aiPolicyStore.loadPolicyVersionsSnapshot(claim.requestId);
             if (!snapshot || snapshot.aiStage !== aiStagePolicyVersion) {
@@ -655,7 +660,9 @@ export async function executeAnalysisV2DagJob(
                 executionError('ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', 'permanent');
             }
         }
-    }
+        return { aiStagePolicyVersion, schedulerCapability };
+    };
+    const aiPolicy = AI_PROVIDER_STAGES.has(current.stage) ? await loadAiPolicy() : null;
     let riskPolicyVersion:
         'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null = null;
     if (RISK_POLICY_STAGES.has(current.stage)) {
@@ -700,8 +707,9 @@ export async function executeAnalysisV2DagJob(
         claim,
         job: current.job,
         state,
-        aiStagePolicyVersion,
-        schedulerCapability,
+        aiStagePolicyVersion: aiPolicy?.aiStagePolicyVersion ?? null,
+        schedulerCapability: aiPolicy?.schedulerCapability ?? 'legacy',
+        ...(aiPolicy ? {} : { loadAiPolicy }),
         riskPolicyVersion,
         handlerDeadlineAtMs,
         ...(progressReporter?.heartbeat && activeProfileStage ? {

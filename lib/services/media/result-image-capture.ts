@@ -102,6 +102,7 @@ export class ResultImageCaptureError extends Error {
             | 'RESULT_IMAGE_CAPTURE_INVALID_INPUT'
             | 'RESULT_IMAGE_CAPTURE_SOURCE_DRIFT'
             | 'RESULT_IMAGE_CAPTURE_PAGE_DRIFT'
+            | 'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY'
     ) {
         super(code);
         this.name = 'ResultImageCaptureError';
@@ -239,18 +240,23 @@ async function runBounded(
     worker: (item: ResultImageCaptureSource) => Promise<void>
 ): Promise<void> {
     let nextIndex = 0;
+    const failures: unknown[] = [];
     const workers = Array.from(
         { length: Math.min(concurrency, items.length) },
         async () => {
-            while (true) {
-                const index = nextIndex;
-                nextIndex += 1;
-                if (index >= items.length) return;
-                await worker(items[index]);
+            while (failures.length === 0 && nextIndex < items.length) {
+                const item = items[nextIndex++];
+                try {
+                    await worker(item);
+                } catch (error) {
+                    // Stop scheduling and drain in-flight writes before the worker releases the claim.
+                    failures.push(error);
+                }
             }
         }
     );
     await Promise.all(workers);
+    if (failures.length) throw failures[0];
 }
 
 export async function captureResultImages(
@@ -428,6 +434,7 @@ export async function captureResultImages(
                 );
             }
 
+            let readyOutcome: ResultImageRegistryOutcome | undefined;
             let lastError: unknown;
             for (let attempt = 1; attempt <= captureAttempts; attempt++) {
                 try {
@@ -472,7 +479,7 @@ export async function captureResultImages(
                         return;
                     }
                     const capturedAtMs = now();
-                    const outcome: ResultImageRegistryOutcome = {
+                    readyOutcome = {
                         kind: source.kind,
                         candidateLocator: source.candidateLocator,
                         sortOrdinal: source.sortOrdinal,
@@ -486,11 +493,7 @@ export async function captureResultImages(
                         failureCode: null,
                         isMandatory: mandatory(source, sourceFingerprint),
                     };
-                    await input.registry.registerOutcome({
-                        ...claim,
-                        outcome,
-                    });
-                    return;
+                    break;
                 } catch (error) {
                     lastError = error;
                     if (attempt === captureAttempts || !shouldRetry(error)) {
@@ -499,8 +502,20 @@ export async function captureResultImages(
                 }
             }
 
+            // An RPC may have committed before losing its response. A new claim reads the durable row.
+            if (readyOutcome) {
+                await input.registry.registerOutcome({ ...claim, outcome: readyOutcome });
+                return;
+            }
             if (lastError instanceof ResultImageCaptureError) {
                 throw lastError;
+            }
+            if (prior?.status === 'ready') {
+                throw new ResultImageCaptureError('ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY');
+            }
+            if (prior?.status === 'capture_failed') {
+                // SQL accepts an existing failure only verbatim, or promotes it to ready.
+                return;
             }
             const outcome: ResultImageRegistryOutcome = {
                 kind: source.kind,

@@ -62,6 +62,7 @@ describePostgres('fresh-admission v3 PostgreSQL return contract', () => {
             DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
             DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
             GRANT service_role TO CURRENT_USER;
+            GRANT USAGE ON SCHEMA public TO service_role;
             CREATE TABLE public.analysis_preflights (
                 id UUID PRIMARY KEY, status TEXT NOT NULL, consumed_request_id UUID,
                 expires_at TIMESTAMP WITH TIME ZONE NOT NULL, admission_generation INTEGER,
@@ -105,7 +106,7 @@ describePostgres('fresh-admission v3 PostgreSQL return contract', () => {
             await client.query('BEGIN');
             await client.query('SET LOCAL ROLE service_role');
             await expect(client.query(
-                `SELECT * FROM ${signature}($1, 1, 1, $2, $3, 30)`,
+                'SELECT * FROM public.claim_analysis_v2_preflight_admission_v3($1, 1, 1, $2, $3, 30)',
                 [preflightId, dispatchToken, claimToken],
             )).resolves.toMatchObject({ rows: [{
                 claimed: true,
