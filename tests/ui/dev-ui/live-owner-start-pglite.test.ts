@@ -16,6 +16,8 @@ type OwnerApproval = {
 };
 
 type StandardOwnerApproval = OwnerApproval & { planId: 'standard' };
+type DurableStandardOwnerApproval = Omit<StandardOwnerApproval, 'expiresAt'> & { expiresAt: null };
+type BudgetApproval = OwnerApproval | DurableStandardOwnerApproval;
 
 const ownerId = randomUUID();
 const fixtureEmail = 'owner@invalid.test';
@@ -70,7 +72,7 @@ async function configureStandard(username = target) {
 }
 
 async function standardReady(username = target, userId = ownerId) {
-    const result = await db.query<{ ready: boolean }>('SELECT public.dev_live_owner_start_ready_v3($1, $2) AS ready', [userId, username]);
+    const result = await db.query<{ ready: boolean }>('SELECT public.dev_live_owner_start_ready_v4($1, $2) AS ready', [userId, username]);
     return result.rows[0].ready;
 }
 
@@ -81,21 +83,28 @@ async function startStandard(attemptId = randomUUID(), username = target, userId
     return result.rows[0].approval;
 }
 
-async function lookupStandard(grant: OwnerApproval, username = target, userId = ownerId): Promise<StandardOwnerApproval | null> {
-    const result = await db.query<{ approval: StandardOwnerApproval | null }>(
+async function startDurableStandard(attemptId = randomUUID(), username = target, userId = ownerId): Promise<DurableStandardOwnerApproval> {
+    const result = await db.query<{ approval: DurableStandardOwnerApproval }>(
+        'SELECT public.dev_live_owner_start_v4($1, $2, $3) AS approval', [userId, username, attemptId],
+    );
+    return result.rows[0].approval;
+}
+
+async function lookupStandard(grant: BudgetApproval, username = target, userId = ownerId): Promise<StandardOwnerApproval | DurableStandardOwnerApproval | null> {
+    const result = await db.query<{ approval: StandardOwnerApproval | DurableStandardOwnerApproval | null }>(
         'SELECT public.dev_live_owner_start_lookup_v2($1, $2, $3) AS approval', [grant.id, userId, username],
     );
     return result.rows[0].approval;
 }
 
-function budgetValues(approval: OwnerApproval) {
+function budgetValues(approval: BudgetApproval) {
     return [
-        approval.id, approval.approvedAt, approval.expiresAt,
+        approval.id, approval.approvedAt, approval.expiresAt ?? 'infinity',
         approval.apifyMaxCents * 10_000, approval.aiMaxCents * 10_000,
     ];
 }
 
-async function reserve(approval: OwnerApproval, provider: 'apify' | 'vertex', amount: number, reservationId = randomUUID()) {
+async function reserve(approval: BudgetApproval, provider: 'apify' | 'vertex', amount: number, reservationId = randomUUID()) {
     const result = await db.query<{ reserved: boolean }>(
         `SELECT public.dev_live_budget_reserve_v1(${grantParameters}, $6, $7, $8) AS reserved`,
         [...budgetValues(approval), reservationId, provider, amount],
@@ -231,13 +240,13 @@ describe('Dev owner-start grant SQL', () => {
               )
             ORDER BY rolname, proname
         `);
-        expect(rows).toHaveLength(27);
+        expect(rows).toHaveLength(33);
         const executable = rows.filter(row => row.executable);
         expect(executable.every(row => row.rolname === 'service_role')).toBe(true);
         expect(executable.map(row => row.proname)).toEqual([
             'dev_live_owner_start_lookup_v1', 'dev_live_owner_start_lookup_v2',
-            'dev_live_owner_start_ready_v1', 'dev_live_owner_start_ready_v2', 'dev_live_owner_start_ready_v3',
-            'dev_live_owner_start_v1', 'dev_live_owner_start_v2', 'dev_live_owner_start_v3',
+            'dev_live_owner_start_ready_v1', 'dev_live_owner_start_ready_v2', 'dev_live_owner_start_ready_v3', 'dev_live_owner_start_ready_v4',
+            'dev_live_owner_start_v1', 'dev_live_owner_start_v2', 'dev_live_owner_start_v3', 'dev_live_owner_start_v4',
         ]);
         expect(rows.every(row => !row.writable)).toBe(true);
         await configureStandard();
@@ -398,6 +407,45 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserve({ ...grant, aiMaxCents: 1_801 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
     });
 
+    it('keeps new Standard approvals active beyond the old window without reopening expired grants', async () => {
+        await configureStandard();
+        const legacyAttempt = randomUUID();
+        const legacy = await startStandard(legacyAttempt);
+        const durableAttempt = randomUUID();
+        const durable = await startDurableStandard(durableAttempt);
+        expect(durable).toMatchObject({ expiresAt: null, apifyMaxCents: 600, aiMaxCents: 1_800 });
+        await expect(startStandard(durableAttempt)).rejects.toThrow('DEV_LIVE_OWNER_START_UNAVAILABLE');
+        await expect(startDurableStandard(legacyAttempt)).rejects.toThrow('DEV_LIVE_OWNER_START_UNAVAILABLE');
+        const twoDaysAgo = Date.now() - 48 * 60 * 60_000;
+        const expired = {
+            ...legacy,
+            approvedAt: new Date(twoDaysAgo).toISOString(),
+            expiresAt: new Date(twoDaysAgo + 150 * 60_000).toISOString(),
+        };
+        await db.query(`
+            UPDATE dev_live_budget.grants
+            SET approved_at = $3::timestamptz,
+                expires_at = CASE WHEN grant_id = $1 THEN $4::timestamptz ELSE expires_at END
+            WHERE grant_id IN ($1, $2)
+        `, [legacy.id, durable.id, expired.approvedAt, expired.expiresAt]);
+
+        await db.exec(await readSql('live-owner-start-standard'));
+        await expect(lookupStandard(expired)).resolves.toBeNull();
+        await expect(reserve(expired, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        const aged = await startDurableStandard(durableAttempt);
+        expect(aged).toMatchObject({ id: durable.id, approvedAt: expired.approvedAt, expiresAt: null });
+        await expect(lookupStandard(aged)).resolves.toEqual(aged);
+        await expect(reserve(aged, 'apify', 5_000_000)).resolves.toBe(true);
+        await expect(reserve(aged, 'apify', 1_000_000)).resolves.toBe(true);
+        await expect(reserve(aged, 'apify', 1)).resolves.toBe(false);
+        await expect(reserve({ ...aged, expiresAt: expired.expiresAt }, 'vertex', 1))
+            .rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        await expect(reserve(aged, 'vertex', 1)).resolves.toBe(true);
+        await db.exec('UPDATE dev_live_budget.standard_owner_policy SET enabled = false');
+        await expect(lookupStandard(aged)).resolves.toBeNull();
+        await expect(reserve(aged, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+    });
+
     it('preserves a prior $4 grant and admits the same representative feature request on a fresh $18 grant', async () => {
         await configureStandard();
         const oldAttemptId = randomUUID();
@@ -467,7 +515,7 @@ describe('Dev owner-start grant SQL', () => {
 
     it('replays fresh Standard admission with the exact grant nonce and rejects a different plan, hash or revoked grant', async () => {
         await configureStandard();
-        const grant = await startStandard();
+        const grant = await startDurableStandard();
         const preflightId = randomUUID();
         const jti = hashAnalysisTestEntitlementJti(`dev-live-${grant.id}`);
         const key = `dev-live:owner:standard:${grant.id}`;

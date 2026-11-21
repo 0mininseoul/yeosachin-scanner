@@ -66,7 +66,8 @@ ALTER TABLE dev_live_budget.grants
     DROP CONSTRAINT IF EXISTS grants_check,
     DROP CONSTRAINT IF EXISTS grants_plan_scope_check,
     ADD CONSTRAINT grants_plan_scope_check CHECK (
-        expires_at > approved_at
+        pg_catalog.isfinite(approved_at)
+        AND expires_at > approved_at
         AND (
             (plan_id = 'basic'
                 AND standard_policy_id IS NULL
@@ -76,8 +77,11 @@ ALTER TABLE dev_live_budget.grants
             OR (plan_id = 'standard'
                 AND standard_policy_id IS NOT NULL
                 AND apify_limit_micros = 6000000
-                AND ai_limit_micros IN (4000000, 18000000)
-                AND expires_at <= approved_at + interval '150 minutes')
+                AND (
+                    (ai_limit_micros IN (4000000, 18000000)
+                        AND expires_at <= approved_at + interval '150 minutes')
+                    OR (ai_limit_micros = 18000000 AND expires_at = 'infinity'::timestamptz)
+                ))
         )
     );
 
@@ -103,7 +107,10 @@ AS $$
         'id', grant_row.grant_id,
         'targetInstagramId', start_row.target_instagram_id,
         'approvedAt', to_char(grant_row.approved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-        'expiresAt', to_char(grant_row.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'expiresAt', CASE WHEN grant_row.expires_at <> 'infinity'::timestamptz
+            THEN to_char(grant_row.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            ELSE NULL
+        END,
         'apifyMaxCents', grant_row.apify_limit_micros / 10000,
         'aiMaxCents', grant_row.ai_limit_micros / 10000
     )
@@ -150,7 +157,8 @@ AS $$
 $$;
 
 CREATE OR REPLACE FUNCTION dev_live_budget.start_standard_owner_run(
-    p_user_id uuid, p_target_instagram_id text, p_attempt_id uuid, p_ai_limit_micros integer
+    p_user_id uuid, p_target_instagram_id text, p_attempt_id uuid, p_ai_limit_micros integer,
+    p_no_expiry boolean
 ) RETURNS jsonb
 LANGUAGE plpgsql SET search_path = ''
 AS $$
@@ -161,11 +169,13 @@ DECLARE
     existing_plan text;
     existing_target text;
     existing_ai_limit_micros integer;
+    existing_no_expiry boolean;
     descriptor jsonb;
 BEGIN
     IF p_user_id IS NULL OR p_target_instagram_id IS NULL OR p_target_instagram_id !~ '^[a-z0-9._]{1,30}$'
         OR p_attempt_id IS NULL OR p_attempt_id::text !~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-        OR p_ai_limit_micros IS NULL OR p_ai_limit_micros NOT IN (4000000, 18000000) THEN
+        OR p_ai_limit_micros IS NULL OR p_ai_limit_micros NOT IN (4000000, 18000000)
+        OR p_no_expiry IS NULL OR (p_no_expiry AND p_ai_limit_micros <> 18000000) THEN
         RAISE EXCEPTION 'DEV_LIVE_OWNER_START_DENIED';
     END IF;
 
@@ -178,8 +188,9 @@ BEGIN
         RAISE EXCEPTION 'DEV_LIVE_OWNER_START_DENIED';
     END IF;
 
-    SELECT existing.grant_id, grant_row.plan_id, existing.target_instagram_id, grant_row.ai_limit_micros
-    INTO issued_grant_id, existing_plan, existing_target, existing_ai_limit_micros
+    SELECT existing.grant_id, grant_row.plan_id, existing.target_instagram_id,
+           grant_row.ai_limit_micros, grant_row.expires_at = 'infinity'::timestamptz
+    INTO issued_grant_id, existing_plan, existing_target, existing_ai_limit_micros, existing_no_expiry
     FROM dev_live_budget.owner_starts AS existing
     JOIN dev_live_budget.grants AS grant_row ON grant_row.grant_id = existing.grant_id
     WHERE existing.user_id = p_user_id AND existing.attempt_id = p_attempt_id;
@@ -191,7 +202,7 @@ BEGIN
         IF existing_target <> p_target_instagram_id THEN
             RAISE EXCEPTION 'DEV_LIVE_OWNER_START_TARGET_CONFLICT';
         END IF;
-        IF existing_ai_limit_micros <> p_ai_limit_micros THEN
+        IF existing_ai_limit_micros <> p_ai_limit_micros OR existing_no_expiry <> p_no_expiry THEN
             RAISE EXCEPTION 'DEV_LIVE_OWNER_START_UNAVAILABLE';
         END IF;
     ELSE
@@ -200,7 +211,9 @@ BEGIN
         INSERT INTO dev_live_budget.grants (
             grant_id, approved_at, expires_at, apify_limit_micros, ai_limit_micros, plan_id, standard_policy_id
         ) VALUES (
-            issued_grant_id, issued_at, issued_at + interval '150 minutes', 6000000, p_ai_limit_micros, 'standard', approved_policy_id
+            issued_grant_id, issued_at,
+            CASE WHEN p_no_expiry THEN 'infinity'::timestamptz ELSE issued_at + interval '150 minutes' END,
+            6000000, p_ai_limit_micros, 'standard', approved_policy_id
         );
         INSERT INTO dev_live_budget.owner_starts (grant_id, user_id, attempt_id, target_instagram_id)
         VALUES (issued_grant_id, p_user_id, p_attempt_id, p_target_instagram_id);
@@ -213,17 +226,17 @@ BEGIN
     RETURN descriptor;
 END;
 $$;
-REVOKE ALL ON FUNCTION dev_live_budget.start_standard_owner_run(uuid,text,uuid,integer)
+REVOKE ALL ON FUNCTION dev_live_budget.start_standard_owner_run(uuid,text,uuid,integer,boolean)
     FROM PUBLIC, anon, authenticated, service_role;
 
--- A caller on either version can only issue or replay a grant with the cap it
--- presented. Bound preflights retain their original grant via lookup_v2.
+-- Each issuer only replays attempts that match its original cap and expiry
+-- policy. Bound preflights retain their original grant via lookup_v2.
 CREATE OR REPLACE FUNCTION public.dev_live_owner_start_v2(
     p_user_id uuid, p_target_instagram_id text, p_attempt_id uuid
 ) RETURNS jsonb
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
 AS $$
-    SELECT dev_live_budget.start_standard_owner_run(p_user_id, p_target_instagram_id, p_attempt_id, 4000000);
+    SELECT dev_live_budget.start_standard_owner_run(p_user_id, p_target_instagram_id, p_attempt_id, 4000000, false);
 $$;
 
 CREATE OR REPLACE FUNCTION public.dev_live_owner_start_ready_v3(p_user_id uuid, p_target_instagram_id text)
@@ -238,8 +251,25 @@ CREATE OR REPLACE FUNCTION public.dev_live_owner_start_v3(
 ) RETURNS jsonb
 LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
 AS $$
-    SELECT dev_live_budget.start_standard_owner_run(p_user_id, p_target_instagram_id, p_attempt_id, 18000000);
+    SELECT dev_live_budget.start_standard_owner_run(p_user_id, p_target_instagram_id, p_attempt_id, 18000000, false);
 $$;
+
+CREATE OR REPLACE FUNCTION public.dev_live_owner_start_ready_v4(p_user_id uuid, p_target_instagram_id text)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ''
+AS $$
+    SELECT public.dev_live_owner_start_ready_v2(p_user_id, p_target_instagram_id);
+$$;
+
+CREATE OR REPLACE FUNCTION public.dev_live_owner_start_v4(
+    p_user_id uuid, p_target_instagram_id text, p_attempt_id uuid
+) RETURNS jsonb
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
+AS $$
+    SELECT dev_live_budget.start_standard_owner_run(p_user_id, p_target_instagram_id, p_attempt_id, 18000000, true);
+$$;
+
+DROP FUNCTION IF EXISTS dev_live_budget.start_standard_owner_run(uuid,text,uuid,integer);
 
 -- Keep Basic and legacy checks. Standard must also match a currently approved
 -- policy ID, target and owner at admission and before every provider reservation.
@@ -336,13 +366,17 @@ REVOKE ALL ON FUNCTION public.dev_live_owner_start_ready_v2(uuid,text),
     public.dev_live_owner_start_v2(uuid,text,uuid),
     public.dev_live_owner_start_lookup_v2(uuid,uuid,text),
     public.dev_live_owner_start_ready_v3(uuid,text),
-    public.dev_live_owner_start_v3(uuid,text,uuid)
+    public.dev_live_owner_start_v3(uuid,text,uuid),
+    public.dev_live_owner_start_ready_v4(uuid,text),
+    public.dev_live_owner_start_v4(uuid,text,uuid)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.dev_live_owner_start_ready_v2(uuid,text),
     public.dev_live_owner_start_v2(uuid,text,uuid),
     public.dev_live_owner_start_lookup_v2(uuid,uuid,text),
     public.dev_live_owner_start_ready_v3(uuid,text),
-    public.dev_live_owner_start_v3(uuid,text,uuid)
+    public.dev_live_owner_start_v3(uuid,text,uuid),
+    public.dev_live_owner_start_ready_v4(uuid,text),
+    public.dev_live_owner_start_v4(uuid,text,uuid)
     TO service_role;
 
 COMMIT;

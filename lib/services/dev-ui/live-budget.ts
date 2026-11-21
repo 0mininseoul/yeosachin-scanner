@@ -60,7 +60,7 @@ function grantArguments(approval: DevLiveApproval) {
     return {
         p_grant_id: approval.id,
         p_approved_at: approval.approvedAt,
-        p_expires_at: approval.expiresAt,
+        p_expires_at: approval.expiresAt === null ? 'infinity' : approval.expiresAt,
         p_apify_limit_micros: approval.apifyMaxCents * MICRODOLLARS_PER_CENT,
         p_ai_limit_micros: approval.aiMaxCents * MICRODOLLARS_PER_CENT,
     };
@@ -89,7 +89,8 @@ export function requireDevLiveProviderApproval(): DevLiveApproval {
         ? `${process.env.DEV_LIVE_PREFLIGHT_ORIGIN}/api/analysis/preflight/worker`
         : `${process.env.DEV_LIVE_PAID_ORIGIN}/api/analysis/v2/worker`;
     const approval = devLiveOwnerStartEnabled() ? workerApproval.getStore() : readDevLiveApproval();
-    if (!approval || Date.now() >= Date.parse(approval.expiresAt) || devLiveWorkerRequestBoundary({ url, method: 'POST' }) !== 'dev-worker') {
+    if (!approval || (approval.expiresAt !== null && Date.now() >= Date.parse(approval.expiresAt))
+        || devLiveWorkerRequestBoundary({ url, method: 'POST' }) !== 'dev-worker') {
         throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
     }
     return approval;
