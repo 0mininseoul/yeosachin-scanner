@@ -341,8 +341,8 @@ describePostgres('preflight exclusion PostgreSQL lock-wait expiry', () => {
             [ownerPreflightId, anonymousPreflightId],
         );
         expect(rows.rows).toEqual([
-            { id: anonymousPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
             { id: ownerPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
+            { id: anonymousPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
         ]);
     }, 15_000);
 
