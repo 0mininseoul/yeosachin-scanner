@@ -140,7 +140,7 @@ async function seedPreflight(
         `INSERT INTO public.analysis_preflights(
             id, user_id, claim_token_hash, claim_expires_at,
             status, expires_at, target_instagram_id
-        ) VALUES ($1, $2, $3, $4,
+        ) VALUES ($1, $2, $3, pg_catalog.clock_timestamp() + $4::INTERVAL,
             'ready', pg_catalog.clock_timestamp() + $5::INTERVAL, 'target.user')`,
         [input.id, input.userId, input.claimHash, input.claimExpiration, input.expiration],
     );
@@ -341,8 +341,8 @@ describePostgres('preflight exclusion PostgreSQL lock-wait expiry', () => {
             [ownerPreflightId, anonymousPreflightId],
         );
         expect(rows.rows).toEqual([
-            { id: anonymousPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
             { id: ownerPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
+            { id: anonymousPreflightId, exclusion_decision: 'pending', excluded_count: 0 },
         ]);
     }, 15_000);
 

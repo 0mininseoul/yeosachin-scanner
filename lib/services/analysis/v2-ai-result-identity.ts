@@ -63,24 +63,26 @@ export const createAnalysisV2AiResultInputHash = (value: string) =>
     sha256('analysis-v2-ai-result-input:v1', value);
 export const createAnalysisV2AiMediaSnapshotHash = (value: string) =>
     sha256('analysis-v2-ai-media-snapshot:v1', value);
+export function digestAnalysisV2AiMediaPart(item: AnalysisV2AiIdentityMediaPart) {
+    if (!item.selectionId || item.selectionId.length > 240 || item.normalizedJpegBase64.length < 4) {
+        throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid identity media.');
+    }
+    return {
+        selectionId: item.selectionId,
+        kind: item.kind,
+        postId: item.postId ?? null,
+        contentHash: createHash('sha256')
+            .update('analysis-v2-ai-normalized-media-content:v1\0')
+            .update(item.normalizedJpegBase64).digest('hex'),
+    };
+}
+export function hashAnalysisV2AiMediaDigests(media: readonly ReturnType<typeof digestAnalysisV2AiMediaPart>[]) {
+    return createAnalysisV2AiMediaSnapshotHash(JSON.stringify(media.map((item, index) => ({ index, ...item }))));
+}
 export function createAnalysisV2AiMediaSnapshotHashFromParts(
     media: readonly AnalysisV2AiIdentityMediaPart[],
 ): string {
-    const manifest = media.map((item, index) => {
-        if (!item.selectionId || item.selectionId.length > 240 || item.normalizedJpegBase64.length < 4) {
-            throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid identity media.');
-        }
-        return {
-            index,
-            selectionId: item.selectionId,
-            kind: item.kind,
-            postId: item.postId ?? null,
-            contentHash: createHash('sha256')
-                .update('analysis-v2-ai-normalized-media-content:v1\0')
-                .update(item.normalizedJpegBase64).digest('hex'),
-        };
-    });
-    return createAnalysisV2AiMediaSnapshotHash(JSON.stringify(manifest));
+    return hashAnalysisV2AiMediaDigests(media.map(digestAnalysisV2AiMediaPart));
 }
 export function createAnalysisV2AiResultIdentity(
     raw: AnalysisV2AiResultIdentityMaterial,

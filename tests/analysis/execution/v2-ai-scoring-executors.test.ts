@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import {
     ACCOUNT_CONTEXT_SOFT_MULTIPLIERS,
@@ -33,19 +35,32 @@ import {
     type AnalysisV2ResultStageSnapshot,
     type AnalysisV2ResultSupabaseClient,
 } from '../../../lib/services/analysis/v2-result-store';
-import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from '../../../lib/services/analysis/v2-worker';
+import { executeAnalysisV2DagJob, type AnalysisV2StageExecutorContext, type AnalysisV2StageId } from '../../../lib/services/analysis/v2-worker';
 import type { AnalysisV2ProgressCandidateMediaPreview } from '../../../lib/services/analysis/progress-candidate-media';
 import * as progressCandidateMedia from '../../../lib/services/analysis/progress-candidate-media';
 import {
     AnalysisV2GenderResolutionCutoffPersistenceError,
+    createDurableAnalysisV2AiStageRuntime,
     type AnalysisV2AiStageRuntime,
 } from '../../../lib/services/analysis/v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from '../../../lib/services/analysis/v2-media-artifact-store';
+import type { ProfileMediaInput, ProfileMediaInputStore } from '../../../lib/services/analysis/v2-profile-media-inputs';
+import type { ProfileGenderGroup } from '../../../lib/services/analysis/v2-profile-gender-plan';
 import {
-    analysisV2SourceMediaArchiveId,
+    analysisV2SourceMediaArchiveId, createAnalysisV2SourceMediaArchiveStore,
     type AnalysisV2SourceMediaArchiveStore,
 } from '../../../lib/services/analysis/v2-source-media-archive';
-import type { AnalysisV2DagState } from '../../../lib/services/analysis/v2-dag-planner';
+import {
+    ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY,
+    ANALYSIS_V2_FINAL_SCORE_JOB_KEY,
+    ANALYSIS_V2_NARRATIVE_JOB_KEY,
+    ANALYSIS_V2_PRIMARY_JOIN_JOB_KEY,
+    ANALYSIS_V2_SHORTLIST_LIMIT,
+    buildAnalysisV2DagPlan,
+    type AnalysisV2DagState,
+} from '../../../lib/services/analysis/v2-dag-planner';
+import type { AnalysisV2DagStateStore } from '../../../lib/services/analysis/v2-dag-state-store';
+import type { DevStandardEvalBundle } from '@/lib/services/dev-ui/standard-eval-types';
 import { AnalysisV2AiResultRateLimitExhaustedError } from '../../../lib/services/analysis/v2-ai-result-store';
 import {
     createSupabaseAnalysisV2AiScoringStageStore,
@@ -151,6 +166,97 @@ function state(overrides: Partial<AnalysisV2DagState> = {}): AnalysisV2DagState 
             resultHash: digest('profile-result'),
         }],
         ...overrides,
+    };
+}
+
+function strictFinalizerState(screenedCount: number, planId: 'basic' | 'standard' = 'basic') {
+    const relationshipResultHash = digest(`strict-relationships:${screenedCount}`);
+    return state({
+        planId,
+        relationships: {
+            revision: 1,
+            resultHash: relationshipResultHash,
+            detectedMutualCount: screenedCount,
+            publicCount: screenedCount,
+            privateCount: 0,
+            detailedSelectedPublicCount: screenedCount,
+            notScreenedPublicCount: 0,
+            profileBatches: screenedCount ? [{
+                batch: 0,
+                itemCount: screenedCount,
+                inputHash: digest(`strict-profile:${screenedCount}`),
+            }] : [],
+            privateNameBatches: [],
+            relationshipSelectionPolicy: {
+                policyVersion: 'gender-routing-v1',
+                relationshipCheckpointId: relationshipResultHash,
+                relationshipJobInputHash: digest(`strict-relationship-input:${screenedCount}`),
+                planId,
+                publicPopulationCount: screenedCount,
+                selectedCount: screenedCount,
+            },
+        },
+    });
+}
+
+function standardJoinWorker(
+    dependencies: AnalysisV2AiScoringExecutorDependencies,
+    jobKey: typeof ANALYSIS_V2_PRIMARY_JOIN_JOB_KEY | typeof ANALYSIS_V2_FINAL_SCORE_JOB_KEY,
+    screenedCount: number,
+) {
+    const dag = strictFinalizerState(screenedCount, 'standard');
+    const manifest = (name: string) => ({ revision: 1, resultHash: digest(name) });
+    const plannedJob = (key: string) => {
+        const job = buildAnalysisV2DagPlan(REQUEST_ID, dag).jobs.find(row => row.jobKey === key);
+        if (!job) throw new Error(`Missing planned fixture job ${key}`);
+        return job;
+    };
+    dag.targetEvidence = { ...manifest('target'), interactorCount: 0 };
+    dag.profileFetchBatches = [];
+    if (screenedCount > 0) {
+        const batch = { batch: 0, itemCount: screenedCount };
+        dag.profileFetchBatches = [{
+            ...batch, ...manifest('fetch'), producerInputHash: plannedJob('track:profiles:batch:0').inputHash,
+        }];
+        dag.profileAiBatches = [{
+            ...batch, ...manifest('ai'), producerInputHash: plannedJob('track:profile-ai:batch:0').inputHash,
+        }];
+    }
+    if (jobKey === ANALYSIS_V2_FINAL_SCORE_JOB_KEY) {
+        const verifiedFemaleCount = screenedCount;
+        const shortlistCount = Math.min(verifiedFemaleCount, ANALYSIS_V2_SHORTLIST_LIMIT);
+        dag.primaryJoin = { ...manifest('primary'), verifiedFemaleCount };
+        dag.screening = { ...manifest('screening'), verifiedFemaleCount, shortlistCount, shortlistHash: digest('shortlist') };
+        dag.reverseLikes = { ...manifest('reverse'), shortlistCount };
+        dag.partnerSafety = { ...manifest('partner'), shortlistCount };
+    }
+    const claim = {
+        ...plannedJob(jobKey),
+        requestId: REQUEST_ID, claimToken: CLAIM_TOKEN, reservationToken: RESERVATION_TOKEN,
+        generation: 1, attemptCount: 1,
+    };
+    const stateStore: AnalysisV2DagStateStore = {
+        initializeScope: vi.fn(),
+        load: async () => dag,
+        checkpointManifest: vi.fn(async (_claim, checkpoint) => {
+            if (checkpoint.kind === 'primary_join') dag.primaryJoin = checkpoint.manifest;
+            else if (checkpoint.kind === 'final_score') dag.finalScore = checkpoint.manifest;
+            else throw new Error('Unexpected fixture checkpoint');
+            return dag;
+        }),
+    };
+    const aiPolicyStore = {
+        loadAiStagePolicyVersion: vi.fn(async (): Promise<string> => AI_STAGE_POLICY_V211_VERSION),
+        loadRiskPolicyVersion: vi.fn(async () => 'risk-policy-v2.5'),
+        loadPolicyVersionsSnapshot: vi.fn(async (): Promise<Record<string, string>> => ({
+            pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: AI_STAGE_POLICY_V211_VERSION,
+            scheduler: 'ai-scheduler-v1',
+        })),
+    };
+    const executors = createAnalysisV2AiScoringExecutorRegistry(dependencies);
+    return {
+        dag, aiPolicyStore, stateStore, executors,
+        run: () => executeAnalysisV2DagJob(claim, { stateStore, aiPolicyStore, executors }),
     };
 }
 
@@ -3977,7 +4083,7 @@ describe('V2 AI and scoring executors', () => {
         });
     });
 
-    it('seals the exact three archived inputs and fixed scoring cohort before the final score checkpoint', async () => {
+    function finalScoreCaptureFixture() {
         const memoryState = memory();
         const women = ['sample.one', 'sample.two', 'sample.three', 'sample.four'];
         const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
@@ -4041,6 +4147,7 @@ describe('V2 AI and scoring executors', () => {
         memoryState.reverse = { revision: 1, resultHash: digest('reverse'), rows: [] };
         memoryState.partner = { revision: 1, resultHash: digest('partner'), rows: [] };
         const expiresAt = 2_000_000_000_000;
+        const seal = vi.fn<(bundle: DevStandardEvalBundle | null) => void>();
         const deps = dependencies(memoryState, {
             sourceMediaArchive: {
                 persistBundle: vi.fn(async ({ archiveId }) => digest(archiveId)),
@@ -4048,16 +4155,30 @@ describe('V2 AI and scoring executors', () => {
                     expectedSelectionIds.map(selectionId => ({ selectionId, normalizedJpeg: bytes }))),
             },
             devStandardEvalCapture: async build => {
-                expect(memoryState.final).toBeNull();
-                const bundle = await build(expiresAt);
-                expect(bundle?.candidates).toHaveLength(3);
-                expect(bundle?.candidates[0]?.candidateId).toBe(memoryState.outcomes[0]!.candidateId);
-                expect(bundle?.originalHighRiskIds).toContain(memoryState.outcomes[0]!.candidateId);
-                expect(bundle?.preliminary.map(row => row.username)).toEqual(['eval_1', 'eval_2', 'eval_3', 'eval_4']);
+                seal(await build(expiresAt));
             },
         });
-        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
-        await registry.final_score!(context('final_score', { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, riskPolicyVersion }));
+        return { memoryState, deps, seal, triageSha256, featureRemainderSha256 };
+    }
+
+    it('seals three archived inputs through the Standard worker and reuses the scored narrative fanout on redelivery', async () => {
+        const { memoryState, deps, seal, triageSha256, featureRemainderSha256 } = finalScoreCaptureFixture();
+        const worker = standardJoinWorker(deps, ANALYSIS_V2_FINAL_SCORE_JOB_KEY, memoryState.outcomes.length);
+        const successors = await worker.run();
+        expect(successors).toMatchObject([{ jobKey: ANALYSIS_V2_NARRATIVE_JOB_KEY }]);
+        await expect(worker.run()).resolves.toEqual(successors);
+        expect(seal).toHaveBeenCalledOnce();
+        expect(seal.mock.invocationCallOrder[0]).toBeLessThan(
+            vi.mocked(deps.resultStore.checkpointScores).mock.invocationCallOrder[0]!,
+        );
+        const bundle = seal.mock.calls[0]![0];
+        expect(bundle?.candidates).toHaveLength(3);
+        expect(bundle?.candidates[0]?.candidateId).toBe(memoryState.outcomes[0]!.candidateId);
+        expect(bundle?.originalHighRiskIds).toContain(memoryState.outcomes[0]!.candidateId);
+        expect(bundle?.preliminary.map(row => row.username)).toEqual(['eval_1', 'eval_2', 'eval_3', 'eval_4']);
+        expect(worker.aiPolicyStore.loadPolicyVersionsSnapshot).toHaveBeenCalledExactlyOnceWith(REQUEST_ID);
+        expect(deps.resultStore.checkpointScores).toHaveBeenCalledOnce();
+        expect(worker.stateStore.checkpointManifest).toHaveBeenCalledOnce();
         expect(deps.sourceMediaArchive.loadBundle).toHaveBeenCalledTimes(4);
         const archivedReads = vi.mocked(deps.sourceMediaArchive.loadBundle).mock.calls.map(([input]) => input);
         expect(archivedReads.map(input => input.contentSha256)).toEqual([
@@ -4067,6 +4188,41 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.ai.features).not.toHaveBeenCalled();
         expect(memoryState.final?.candidates).toHaveLength(4);
     });
+
+    it.each(['disabled', 'older policy', 'policy read failure', 'capture write failure'])(
+        'keeps the Standard worker score and narrative fanout when eval capture encounters %s',
+        async scenario => {
+            const { memoryState, deps, seal } = finalScoreCaptureFixture();
+            const capture = vi.fn(deps.devStandardEvalCapture!);
+            deps.devStandardEvalCapture = scenario === 'disabled' ? undefined : capture;
+            const worker = standardJoinWorker(deps, ANALYSIS_V2_FINAL_SCORE_JOB_KEY, memoryState.outcomes.length);
+            if (scenario === 'older policy') {
+                worker.aiPolicyStore.loadAiStagePolicyVersion.mockResolvedValue(AI_STAGE_POLICY_V210_VERSION);
+                worker.aiPolicyStore.loadPolicyVersionsSnapshot.mockResolvedValue({
+                    pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: AI_STAGE_POLICY_V210_VERSION,
+                });
+            }
+            if (scenario === 'policy read failure') {
+                worker.aiPolicyStore.loadPolicyVersionsSnapshot.mockRejectedValue(new Error('fixture policy read failure'));
+            }
+            if (scenario === 'capture write failure') {
+                capture.mockRejectedValue(new Error('fixture capture write failure'));
+            }
+
+            await expect(worker.run()).resolves.toMatchObject([{ jobKey: ANALYSIS_V2_NARRATIVE_JOB_KEY }]);
+            expect(memoryState.final?.candidates).toEqual(calculateV2FinalScores({
+                preliminary: memoryState.screening!.candidates,
+                observedReverseLikeCandidateIds: new Set(),
+                riskPolicyVersion: 'risk-policy-v2.5',
+            }));
+            expect(deps.resultStore.checkpointScores).toHaveBeenCalledOnce();
+            expect(worker.aiPolicyStore.loadAiStagePolicyVersion).toHaveBeenCalledTimes(scenario === 'disabled' ? 0 : 1);
+            expect(capture).toHaveBeenCalledTimes(scenario === 'capture write failure' ? 1 : 0);
+            expect(seal).not.toHaveBeenCalled();
+            expect(deps.sourceMediaArchive.loadBundle).not.toHaveBeenCalled();
+            expect(deps.ai.features).not.toHaveBeenCalled();
+        },
+    );
 
     it('checkpoints every candidate publicly while keeping paid verification frozen to Top 10', async () => {
         const memoryState = memory();
@@ -4510,35 +4666,6 @@ describe('V2 AI and scoring executors', () => {
 });
 
 describe('V2 retained result image finalization', () => {
-    function strictFinalizerState(screenedCount: number) {
-        const relationshipResultHash = digest(`strict-relationships:${screenedCount}`);
-        return state({
-            relationships: {
-                revision: 1,
-                resultHash: relationshipResultHash,
-                detectedMutualCount: screenedCount,
-                publicCount: screenedCount,
-                privateCount: 0,
-                detailedSelectedPublicCount: screenedCount,
-                notScreenedPublicCount: 0,
-                profileBatches: [{
-                    batch: 0,
-                    itemCount: screenedCount,
-                    inputHash: digest(`strict-profile:${screenedCount}`),
-                }],
-                privateNameBatches: [],
-                relationshipSelectionPolicy: {
-                    policyVersion: 'gender-routing-v1',
-                    relationshipCheckpointId: relationshipResultHash,
-                    relationshipJobInputHash: digest(`strict-relationship-input:${screenedCount}`),
-                    planId: 'basic',
-                    publicPopulationCount: screenedCount,
-                    selectedCount: screenedCount,
-                },
-            },
-        });
-    }
-
     function unresolvedOutcome(username: string): AnalysisV2ProfileAiOutcome {
         const baseline = verifiedOutcome(username);
         const mediaIds = baseline.normalizedSelectionIds;
@@ -4664,22 +4791,22 @@ describe('V2 retained result image finalization', () => {
         expect(completed).not.toHaveBeenCalled();
     });
 
-    it('keeps a strict primary join at the exact thirty-percent boundary resolver-free', async () => {
+    it('keeps the strict Standard worker resolver-free at the exact thirty-percent boundary', async () => {
         const memoryState = memory();
         memoryState.outcomes = [
             ...Array.from({ length: 7 }, (_, index) => verifiedOutcome(`verified.${index}`)),
             ...Array.from({ length: 3 }, (_, index) => unresolvedOutcome(`unknown.${index}`)),
         ];
-        const admission = strictResolverAdmission();
+        const admission = strictResolverAdmission(40);
         const deps = dependencies(memoryState, {
             revenueResolverCapacity: { bind: vi.fn(async () => admission) },
-        } as never);
+        });
 
-        await createAnalysisV2AiScoringExecutorRegistry(deps).primary_join!(context('primary_join', {
-            jobKey: 'coordinator:join:primary-evidence',
-            state: strictFinalizerState(10),
-        }));
+        const worker = standardJoinWorker(deps, ANALYSIS_V2_PRIMARY_JOIN_JOB_KEY, 10);
+        await expect(worker.run()).resolves.toMatchObject([{ jobKey: ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY }]);
 
+        expect(worker.aiPolicyStore.loadAiStagePolicyVersion).not.toHaveBeenCalled();
+        expect(worker.aiPolicyStore.loadPolicyVersionsSnapshot).not.toHaveBeenCalled();
         expect(admission.begin).not.toHaveBeenCalled();
         expect(admission.reserve).not.toHaveBeenCalled();
         expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
@@ -4691,6 +4818,28 @@ describe('V2 retained result image finalization', () => {
         }));
         expect(deps.resultStore.checkpointRevenueResolverOutcomes).not.toHaveBeenCalled();
         expect(memoryState.primary?.candidates).toHaveLength(7);
+    });
+
+    it('rejects a mismatched strict Standard worker snapshot before starting resolver work', async () => {
+        const memoryState = memory();
+        memoryState.outcomes = [
+            ...Array.from({ length: 6 }, (_, i) => verifiedOutcome(`verified.${i}`)),
+            ...Array.from({ length: 4 }, (_, i) => unresolvedOutcome(`unknown.${i}`)),
+        ];
+        const admission = strictResolverAdmission(40);
+        const deps = dependencies(memoryState, {
+            revenueResolverCapacity: { bind: vi.fn(async () => admission) },
+        });
+        const worker = standardJoinWorker(deps, ANALYSIS_V2_PRIMARY_JOIN_JOB_KEY, 10);
+        worker.aiPolicyStore.loadAiStagePolicyVersion.mockResolvedValue(AI_STAGE_POLICY_V210_VERSION);
+
+        await expect(worker.run()).rejects.toMatchObject({
+            code: 'ANALYSIS_V2_AI_STAGE_POLICY_MISMATCH', disposition: 'permanent',
+        });
+        expect(admission.begin).not.toHaveBeenCalled();
+        expect(admission.reserve).not.toHaveBeenCalled();
+        expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+        expect(worker.stateStore.checkpointManifest).not.toHaveBeenCalled();
     });
 
     it('handles a strict screened-zero cohort without beginning a resolver pass', async () => {
@@ -4792,7 +4941,10 @@ describe('V2 retained result image finalization', () => {
         expect(memoryState.primary?.candidates).toHaveLength(20);
     });
 
-    it('resolves featureless analysis/media outages, skips fetch, and keeps only featureful women in screening', async () => {
+    it.each([
+        [AI_STAGE_POLICY_V211_VERSION, 'scheduler-v1'],
+        [AI_STAGE_POLICY_LATEST_VERSION, 'legacy'],
+    ] as const)('uses the strict Standard worker policy %s above thirty percent and keeps only featureful women in screening', async (version, scheduler) => {
         const memoryState = memory();
         const analysisUnavailable = unavailableOutcome(
             'analysis.unavailable',
@@ -4814,10 +4966,10 @@ describe('V2 retained result image finalization', () => {
             fetchUnavailable,
             otherUnknown,
         ];
-        const admission = strictResolverAdmission();
+        const admission = strictResolverAdmission(40);
         const deps = dependencies(memoryState, {
             revenueResolverCapacity: { bind: vi.fn(async () => admission) },
-        } as never);
+        });
         deps.ai.startGenderResolution = vi.fn((
             input: Parameters<AnalysisV2AiStageRuntime['startGenderResolution']>[0],
         ) => {
@@ -4845,14 +4997,20 @@ describe('V2 retained result image finalization', () => {
                 cutoff: vi.fn(async () => undefined),
             };
         });
-        const strictState = strictFinalizerState(10);
-        const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
-
-        await registry.primary_join!(context('primary_join', {
-            jobKey: 'coordinator:join:primary-evidence',
-            state: strictState,
-            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
-        }));
+        const worker = standardJoinWorker(deps, ANALYSIS_V2_PRIMARY_JOIN_JOB_KEY, 10);
+        if (scheduler === 'legacy') {
+            worker.aiPolicyStore.loadAiStagePolicyVersion.mockResolvedValue(version);
+            worker.aiPolicyStore.loadPolicyVersionsSnapshot.mockResolvedValue({
+                pipeline: 'v2', risk: 'risk-policy-v2.4', aiStage: version,
+            });
+        }
+        await expect(worker.run()).resolves.toMatchObject([{ jobKey: ANALYSIS_V2_CANDIDATE_SCREENING_JOB_KEY }]);
+        expect(worker.aiPolicyStore.loadPolicyVersionsSnapshot).toHaveBeenCalledExactlyOnceWith(REQUEST_ID);
+        for (const [, fence] of vi.mocked(deps.ai.startGenderResolution).mock.calls) {
+            expect(fence).toMatchObject({
+                aiStagePolicyVersion: version, schedulerCapability: scheduler,
+            });
+        }
 
         const resolverProfiles = vi.mocked(deps.ai.startGenderResolution).mock.calls.map(
             ([input]) => input.media[0]!.selectionId,
@@ -4894,9 +5052,9 @@ describe('V2 retained result image finalization', () => {
         ]);
         expect(deps.mediaStore.persistBundle).toHaveBeenCalledTimes(1);
 
-        await registry.screening!(context('screening', {
+        await worker.executors.screening!(context('screening', {
             jobKey: 'coordinator:candidate-screening',
-            state: strictState,
+            state: worker.dag,
         }));
         expect(memoryState.screening?.candidates.map(row => row.candidateId)).toEqual([
             ...Array.from({ length: 6 }, (_, index) => analysisV2CandidateId(`verified.${index}`)),
@@ -4910,7 +5068,11 @@ describe('V2 retained result image finalization', () => {
         );
     });
 
-    it('bubbles a strict primary resolver recovery-pending state without checkpointing manual review', async () => {
+    it.each([
+        { state: { status: 'recovery_pending' }, code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' },
+        { state: { status: 'terminal_unavailable', budgetError: 'DEV_LIVE_BUDGET_EXCEEDED' }, code: 'DEV_LIVE_BUDGET_EXCEEDED' },
+        { state: { status: 'terminal_unavailable', budgetError: 'DEV_LIVE_BUDGET_UNAVAILABLE' }, code: 'DEV_LIVE_BUDGET_UNAVAILABLE' },
+    ] as const)('stops strict primary on $code before another reservation or manual review', async ({ state, code }) => {
         const memoryState = memory();
         memoryState.outcomes = [
             ...Array.from({ length: 6 }, (_, index) => verifiedOutcome(`verified.${index}`)),
@@ -4923,7 +5085,7 @@ describe('V2 retained result image finalization', () => {
         deps.ai.startGenderResolution = vi.fn(() => ({
             operationKey: `gender-resolution:${digest('primary-recovery-pending')}`,
             completion: Promise.resolve(),
-            peek: () => ({ status: 'recovery_pending' as const }),
+            peek: () => state,
             cutoff: vi.fn().mockResolvedValue(undefined),
         }));
 
@@ -4931,7 +5093,7 @@ describe('V2 retained result image finalization', () => {
             jobKey: 'coordinator:join:primary-evidence',
             state: strictFinalizerState(10),
             aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
-        }))).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        }))).rejects.toThrow(code);
 
         expect(admission.begin).toHaveBeenCalledOnce();
         expect(admission.reserve).toHaveBeenCalledOnce();
@@ -5391,4 +5553,391 @@ describe('V2 final score invariants', () => {
         }));
         expect(memoryState.final?.riskPolicyVersion).toBe('risk-policy-v2.3');
     });
+});
+
+function mediaInputFixture(hasHistory = () => false, hasUnownedFeatureHistory = () => false) {
+    const rows = new Map<string, ProfileMediaInput>();
+    const store: ProfileMediaInputStore = {
+        async load() { return {
+            inputs: [...rows.values()], hasGenderHistory: hasHistory(),
+            hasUnownedFeatureHistory: hasUnownedFeatureHistory(),
+        }; },
+        async pin(_fence, inputs) {
+            for (const input of inputs) {
+                const key = `${input.ordinal}:${input.stage}`;
+                const stored = rows.get(key);
+                if (stored) expect(input).toEqual(stored);
+                else rows.set(key, structuredClone(input));
+            }
+        },
+    };
+    return { rows, store };
+}
+
+function retainedProfileArchive() {
+    const objects = new Map<string, Buffer>();
+    const readRetained = vi.fn(async ({objectName}: {objectName: string}) => objects.get(objectName) ?? null);
+    const archive = createAnalysisV2SourceMediaArchiveStore({objects: {
+        async createRetained({objectName, bytes}) {
+            const created = !objects.has(objectName);
+            if (created) objects.set(objectName, Buffer.from(bytes));
+            return {created, generation: '1'};
+        },
+        readRetained,
+    }});
+    return {archive, objects, readRetained};
+}
+
+function runScheduledStandardProfileBatch(deps: AnalysisV2AiScoringExecutorDependencies) {
+    const job = context('profile_ai', {
+        jobKey: 'track:profile-ai:batch:0', batch: 0, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+        state: state({planId: 'standard'}),
+    });
+    return createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+        ...job, schedulerCapability: 'scheduler-v1', handlerDeadlineAtMs: performance.now() + 300_000,
+    });
+}
+
+describe('v2.11 profile AI redelivery', () => {
+    const scenarios = ['gender 5 to 4', 'gender 4 to 5', 'gender 404',
+        'features 6 to 5', 'features 5 to 6'] as const;
+    const cases = (['ready', 'claimed'] as const).flatMap(status => scenarios.map(scenario => ({status, scenario})));
+    it.each(cases)('restores $status proof for $scenario without downloading or admitting another paid operation',
+        async ({status, scenario}) => {
+            const accounts = [profile('fixture.one', {postCount: 5}), profile('fixture.two', {postCount: 5})];
+            const target = accounts[1]!;
+            const policy = selectAnalysisMedia({
+                profile: {id:target.username, imageUrl:target.profilePicUrl!}, posts:target.latestPosts!,
+            }, {carouselDiversity:true});
+            const featureCase = scenario.startsWith('features');
+            const missing = featureCase
+                ? policy.feature.media.find(row => !policy.triage.selectionIds.includes(row.selectionId))!.selectionId
+                : policy.triage.media[0]!.selectionId;
+            const initialPartial = scenario === 'gender 4 to 5' || scenario === 'features 5 to 6';
+            const durable = new Map<string, { status: 'claimed' } | { status: 'ready'; value: unknown }>();
+            const batchSizes: number[] = [];
+            const featureSizes: number[] = [];
+            let pinned: ProfileGenderGroup[] | undefined;
+            const receipts = mediaInputFixture(() => Boolean(pinned));
+            const receiptLoads = vi.spyOn(receipts.store, 'load');
+            const { archive, readRetained } = retainedProfileArchive();
+            let replay = false;
+            let replayDownloads = 0;
+            const deps = dependencies(memory(), {
+                profileMediaInputs: receipts.store,
+                sourceMediaArchive: archive,
+                normalizeMedia: async selection => {
+                    if (replay) replayDownloads++;
+                    if (replay && scenario === 'gender 404' && selection.imageUrl.includes(target.username)) {
+                        throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    }
+                    if (selection.selectionId === missing && (replay ? !initialPartial : initialPartial)) {
+                        throw new AnalysisImagePreparationError('timeout', 'transient');
+                    }
+                    return Buffer.from([0xff,0xd8,0xff,0xd9]);
+                },
+                profileBatches: { loadExactBatch: async () => ({
+                    requestedUsernames: [...accounts.map(account => account.username), 'missing'],
+                    results: [...accounts.map(account => ({
+                        username:account.username,status:'success' as const,profile:account,
+                    })), {username:'missing', status:'unavailable' as const}],
+                }) },
+            });
+            const createRuntime = () => createDurableAnalysisV2AiStageRuntime({
+                pinProfileGenderPlan: async (_fence, groups) => {
+                    expect(receipts.rows.has('0:triage')).toBe(true);
+                    pinned ??= [...groups];
+                    return {kind:'pinned',groups:pinned};
+                },
+                createSchedulerOperationStore: options => ({
+                    async claim({key}) {
+                        const prior = durable.get(key);
+                        if (prior?.status === 'ready') {
+                            return {decision:'ready', value:options.schemas.get(key)!.parse(prior.value)};
+                        }
+                        if (prior?.status === 'claimed') return {decision:'deferred',notBeforeAtMs:performance.now()+1_000};
+                        durable.set(key,{status:'claimed'});
+                        return {decision:'execute',claimToken:CLAIM_TOKEN};
+                    },
+                    async commitReady({key,value}) { durable.set(key,{status:'ready',value}); },
+                }),
+                runGenderMicrobatch: async members => {
+                    batchSizes.push(members.length);
+                    if (status === 'claimed' && !featureCase && !replay) throw new Error('fixture interrupted');
+                    return members.map(({accountId,input}) => {
+                        const ids = input.media.map(row => row.selectionId);
+                        const isFeature = featureCase && ids.some(id => id.includes(target.username));
+                        const result = triage(ids, isFeature ? 'female' : 'male');
+                        if (isFeature) {
+                            result.assessment.confidence = 'high';
+                            result.assessment.ownerConsistency = 'same_person';
+                            result.assessment.evidenceSelectionIds = ids.slice(0,2);
+                            result.v29AccountContext = 'personal';
+                        }
+                        return {accountId,source:'checkpoint' as const,result};
+                    });
+                },
+                runFeatures: async (input, audit) => {
+                    featureSizes.push(input.media.length);
+                    expect(receipts.rows.get('1:feature_remainder')?.operationKey).toBe(audit.operationKey);
+                    if (status === 'claimed' && !replay) throw new Error('fixture interrupted');
+                    return feature(input.media.map(row => row.selectionId));
+                },
+            });
+            const run = () => {
+                const job = context('profile_ai', {
+                    jobKey:'track:profile-ai:batch:0',batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+                    state:state({planId:'standard'}),
+                    reportActiveProfile: async username => {
+                        if (replay && username === target.username) await new Promise(resolve => setTimeout(resolve, 12));
+                    },
+                });
+                return createAnalysisV2AiScoringExecutorRegistry({...deps,ai:createRuntime()}).profile_ai!({
+                    ...job, schedulerCapability:'scheduler-v1', handlerDeadlineAtMs:performance.now()+300_000,
+                    claim:{...job.claim,generation:replay ? 2 : 1},
+                });
+            };
+            if (status === 'ready') vi.mocked(deps.resultStore.checkpointFeatureBatch)
+                .mockRejectedValueOnce(new Error('fixture interrupted'));
+            await expect(run()).rejects.toThrow('fixture interrupted');
+            const originalKeys = [...durable.keys()];
+            expect(batchSizes).toEqual([2]);
+            const row = receipts.rows.get(`1:${featureCase ? 'feature_remainder' : 'triage'}`)!;
+            expect(row.failures).toHaveLength(initialPartial ? 1 : 0);
+            if (initialPartial) expect(row.failures[0]).toMatchObject({reason:'timeout',disposition:'transient'});
+            const before = readRetained.mock.calls.length;
+            replay = true;
+            if (status === 'ready') await expect(run()).resolves.toMatchObject({ checkpoint:{ kind:'profile_ai_batch' } });
+            else await expect(run()).rejects.toMatchObject({reason:'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'});
+            expect(batchSizes).toEqual([2]);
+            expect(featureSizes).toEqual(featureCase ? [initialPartial ? 5 : 6] : []);
+            expect([...durable.keys()]).toEqual(originalKeys);
+            expect(replayDownloads).toBe(0);
+            expect(receiptLoads).toHaveBeenCalledTimes(2);
+            expect(readRetained.mock.calls.length).toBeGreaterThan(before);
+            expect(JSON.stringify([...receipts.rows.values()])).not.toMatch(/fixture|cdninstagram|normalizedJpeg/);
+        },
+    );
+    it.each(['later match', 'unmatched', 'all excluded'] as const)(
+        'reconciles every legacy feature key before checkpointing a batch with %s', async scenario => {
+            let unowned = true;
+            const receipts = mediaInputFixture(() => true, () => unowned);
+            const load = vi.fn(receipts.store.load);
+            const attempts: (string | null)[] = [];
+            const downloads: string[] = [];
+            const accounts = ['new.candidate', 'insufficient', 'history.late'].map(name => profile(name, {postCount: 8}));
+            const insufficient = accounts[1]!;
+            const media = selectAnalysisMedia({
+                profile: {id: insufficient.username, imageUrl: insufficient.profilePicUrl!}, posts: insufficient.latestPosts!,
+            }, {carouselDiversity: true});
+            const missing = new Set(media.feature.selectionIds.filter(id => !media.triage.selectionIds.includes(id)));
+            const deps = dependencies(memory(), {
+                profileAiConcurrency: 1, sourceMediaArchive: retainedProfileArchive().archive,
+                profileMediaInputs: {load, async pin(fence, rows) {
+                    for (const row of rows.filter(row => row.stage === 'feature_remainder')) {
+                        attempts.push(row.operationKey);
+                        if (!unowned) continue;
+                        if (scenario === 'later match' && row.ordinal === 2 && row.operationKey) unowned = false;
+                        else throw new Error('ANALYSIS_V2_PROFILE_FEATURE_HISTORY_PENDING');
+                    }
+                    await receipts.store.pin(fence, rows);
+                }},
+                profileBatches: {loadExactBatch: async () => ({
+                    requestedUsernames: accounts.map(row => row.username),
+                    results: accounts.map(account => ({username: account.username, status: 'success' as const, profile: account})),
+                })},
+                normalizeMedia: async selection => {
+                    downloads.push(selection.selectionId);
+                    if (missing.has(selection.selectionId)) throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+                },
+            });
+            deps.ai.profileGender = {
+                plan: async accounts => accounts.map(row => ({accountIds: [row.accountId], operationKey: digest(row.accountId)})),
+                run: async (inputs, group) => inputs.map(input => {
+                    const ids = input.media.map(row => row.selectionId);
+                    const result = triage(ids, scenario === 'all excluded' ? 'male' : 'female');
+                    result.assessment.confidence = 'high';
+                    result.assessment.ownerConsistency = 'same_person';
+                    result.assessment.evidenceSelectionIds = ids.slice(0, 2);
+                    result.v29AccountContext = 'personal';
+                    return {operationKey: group.operationKey, resultHash: digest('gender'), result, source: 'checkpoint'};
+                }),
+            };
+            if (scenario === 'later match') {
+                await expect(runScheduledStandardProfileBatch(deps)).resolves.toMatchObject({checkpoint: {kind: 'profile_ai_batch'}});
+                expect(attempts).toEqual([expect.any(String), null, expect.any(String), attempts[0], null]);
+                expect(deps.ai.features).toHaveBeenCalledTimes(2);
+                expect(receipts.rows.get('1:feature_remainder')?.operationKey).toBeNull();
+            } else {
+                await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                expect(unowned).toBe(true);
+                expect(deps.ai.features).not.toHaveBeenCalled();
+                expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+                expect(receipts.rows.has('1:feature_remainder')).toBe(false);
+            }
+            expect(load).toHaveBeenCalledTimes(2);
+            expect(new Set(downloads).size).toBe(downloads.length);
+        },
+    );
+    it.each(['permanent 404', 'missing archive', 'unmatched legacy'] as const)(
+        'pins every fresh triage input before planning and preserves %s on redelivery', async scenario => {
+            const legacy = scenario === 'unmatched legacy';
+            const receipts = mediaInputFixture(() => legacy);
+            const { archive, readRetained, objects } = retainedProfileArchive();
+            const accounts = [profile('available', {postCount: 4}), profile('missing.media', {postCount: 4})];
+            const mem = memory();
+            let replay = false;
+            let downloads = 0;
+            const deps = dependencies(mem, {
+                profileMediaInputs: receipts.store, sourceMediaArchive: archive,
+                profileBatches: {loadExactBatch: async () => ({
+                    requestedUsernames: [...accounts.map(row => row.username), 'missing.profile'],
+                    results: [...accounts.map(account => ({
+                        username: account.username, status: 'success' as const, profile: account,
+                    })), {username: 'missing.profile', status: 'unavailable' as const}],
+                })},
+                normalizeMedia: async selection => {
+                    downloads++;
+                    if (!replay && selection.imageUrl.includes('missing.media')) {
+                        throw new AnalysisImagePreparationError('source_missing', 'permanent');
+                    }
+                    return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+                },
+            });
+            deps.ai.profileGender = {
+                plan: async accounts => {
+                    if (legacy) {
+                        expect(receipts.rows.size).toBe(0);
+                        throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                    }
+                    expect(receipts.rows.size).toBe(3);
+                    if (!replay) throw new Error('fixture stopped before gender plan');
+                    return accounts.map(row => ({accountIds: [row.accountId], operationKey: digest(row.accountId)}));
+                },
+                run: vi.fn<NonNullable<AnalysisV2AiStageRuntime['profileGender']>['run']>(async (inputs, group) => inputs.map(input => ({
+                    operationKey: group.operationKey, resultHash: digest('gender'), source: 'checkpoint' as const,
+                    result: triage(input.media.map(row => row.selectionId), 'male'),
+                }))),
+            };
+            await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow(legacy
+                ? 'ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT' : 'fixture stopped before gender plan');
+            expect(deps.ai.profileGender.run).not.toHaveBeenCalled();
+            if (legacy) {
+                expect(receipts.rows.size).toBe(0);
+                return;
+            }
+            expect(receipts.rows.get('1:triage')).toMatchObject({
+                selectedCount: 5, archiveSha256: null, failures: [0, 1, 2, 3, 4].map(index => ({
+                    index, reason: 'source_missing', disposition: 'permanent',
+                })),
+            });
+            expect(receipts.rows.get('2:triage')).toMatchObject({selectedCount: 0, failures: [], archiveSha256: null});
+            const firstDownloads = downloads;
+            replay = true;
+            if (scenario === 'missing archive') {
+                objects.clear();
+                await expect(runScheduledStandardProfileBatch(deps)).rejects.toThrow('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+                expect(deps.ai.profileGender.run).not.toHaveBeenCalled();
+            } else {
+                await expect(runScheduledStandardProfileBatch(deps)).resolves.toMatchObject({checkpoint: {kind: 'profile_ai_batch'}});
+                expect(deps.ai.profileGender.run).toHaveBeenCalledTimes(1);
+                expect(mem.outcomes.map(row => row.status)).toEqual(['verified_non_female', 'media_unavailable', 'fetch_unavailable']);
+            }
+            expect(downloads).toBe(firstDownloads);
+            expect(readRetained).toHaveBeenCalledTimes(1);
+        },
+    );
+    it('keeps six candidate slots for thirty profiles and reloads only triage bytes above the memory bound', async () => {
+        const accounts = Array.from({ length: 30 }, (_, i) => profile(`fixture.${i}`, {postCount: 4}));
+        const archived = new Map<string, string[]>();
+        const allocated: WeakRef<Buffer>[] = [];
+        const collect = (() => {
+            if (global.gc) return global.gc;
+            setFlagsFromString('--expose-gc');
+            try { return runInNewContext('gc') as () => void; }
+            finally { setFlagsFromString('--no-expose-gc'); }
+        })();
+        const loaded: string[] = [];
+        const mem = memory();
+        const count = accounts.length;
+        let pinCount = 0;
+        let participating = 0;
+        let peak = 0;
+        let calls = 0;
+        const deps = dependencies(mem, {
+            profileMediaInputs: mediaInputFixture().store,
+            profileBatches: { loadExactBatch: async () => ({
+                requestedUsernames: accounts.map(item => item.username),
+                results: accounts.map(item => ({username:item.username,status:'success' as const,profile:item})),
+            }) },
+            async normalizeMedia() {
+                const bytes = Buffer.alloc(256 * 1024, 37);
+                allocated.push(new WeakRef(bytes));
+                return bytes;
+            },
+            sourceMediaArchive: {
+                async persistBundle(value) {
+                    archived.set(value.archiveId, value.media.map(row => row.selectionId));
+                    return digest(value.archiveId);
+                },
+                async loadBundle(value) {
+                    expect(value.contentSha256).toBe(digest(value.archiveId));
+                    const ids = archived.get(value.archiveId)!;
+                    expect(ids).toEqual(value.expectedSelectionIds);
+                    loaded.push(value.archiveId);
+                    return ids.map(selectionId => ({selectionId, normalizedJpeg:Buffer.alloc(256 * 1024, 37)}));
+                },
+            },
+        });
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            pinProfileGenderPlan: async (_fence, groups) => {
+                pinCount++;
+                expect(archived.size).toBe(count);
+                for (let i = 0; i < 3; i++) {
+                    await new Promise(resolve => setImmediate(resolve));
+                    collect();
+                }
+                const retained = allocated.filter(reference => reference.deref() !== undefined).length;
+                expect(retained).toBe(125);
+                expect(retained * 256 * 1024).toBeLessThanOrEqual(32 * 1024 * 1024);
+                expect(groups.map(row => row.accountIds.length)).toEqual(Array(15).fill(2));
+                return {kind:'pinned',groups:[...groups]};
+            },
+            createSchedulerOperationStore: () => ({
+                claim: async () => ({decision:'execute',claimToken:CLAIM_TOKEN}), commitReady: async () => {},
+            }),
+            runGenderMicrobatch: async members => {
+                expect(pinCount).toBe(1);
+                participating += members.length;
+                peak = Math.max(peak, participating);
+                calls++;
+                await new Promise(resolve => setTimeout(resolve, 1));
+                participating -= members.length;
+                return members.map(({accountId,input}) => ({
+                    accountId, source:'checkpoint' as const, result:triage(input.media.map(row => row.selectionId),'male'),
+                }));
+            },
+        });
+        const baseline = state();
+        const job = context('profile_ai', {
+            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+            state:state({
+                planId:'standard', relationships:{...baseline.relationships!,profileBatches:[{
+                    ...baseline.relationships!.profileBatches[0]!,itemCount:count,
+                }]}, profileFetchBatches:[{...baseline.profileFetchBatches![0]!,itemCount:count}],
+            }),
+        });
+        const result = await createAnalysisV2AiScoringExecutorRegistry({...deps,ai:runtime}).profile_ai!({
+            ...job,schedulerCapability:'scheduler-v1',handlerDeadlineAtMs:performance.now()+300_000,
+        });
+        expect(result.checkpoint.manifest.itemCount).toBe(30);
+        expect(mem.outcomes.map(row => row.instagramId)).toEqual(accounts.map(item => item.username));
+        expect(allocated).toHaveLength(150);
+        expect(calls).toBe(15);
+        expect(peak).toBeLessThanOrEqual(6);
+        // 25 * 5 * 256 KiB fit within 32 MiB; each remaining bundle is restored exactly once.
+        expect(new Set(loaded).size).toBe(5);
+        expect(loaded).toHaveLength(5);
+    }, 20_000);
 });

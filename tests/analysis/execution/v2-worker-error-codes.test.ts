@@ -6,6 +6,8 @@ import {
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { AnalysisV2AiResultRecoveryPendingError } from '../../../lib/services/analysis/v2-ai-result-store';
 import { OPERATIONAL_ERROR_CODES } from '@/lib/observability/schema';
+import { createResultImageRegistry } from '@/lib/services/media/result-image-registry';
+import { createClient } from '@supabase/supabase-js';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -43,6 +45,84 @@ const PROFILE_AI_RUNTIME_CODES = [
 ] as const;
 
 describe('analysis V2 worker error codes', () => {
+    it.each([
+        [{ error: { code: 'P0001', message: 'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY' } },
+            'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY', 'transient'],
+        [{ error: { code: 'P0001', message: 'ANALYSIS_V2_RESULT_IMAGE_FENCE_MISMATCH' } },
+            'ANALYSIS_V2_RESULT_IMAGE_FENCE_MISMATCH', 'fence'],
+        [{ error: { code: 'P0001', message: 'ANALYSIS_V2_RESULT_IMAGE_CONFLICT' } },
+            'ANALYSIS_V2_RESULT_IMAGE_CONFLICT', 'permanent'],
+        [{ error: { code: 'P0001', message: 'ANALYSIS_V2_RESULT_IMAGE_INVALID' } },
+            'ANALYSIS_V2_RESULT_IMAGE_INVALID', 'permanent'],
+        [{ error: { code: '57014', message: 'canceling statement due to statement timeout' } },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { code: '40P01', message: 'deadlock detected' } },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { code: '55P03', message: 'canceling statement due to lock timeout' } },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { code: '', message: 'TypeError: fetch failed' }, status: 0 },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [new TypeError('fetch failed'), 'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { message: 'upstream detail' }, status: 503 },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { code: '', message: 'SyntaxError: malformed response' }, status: 0 },
+            'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        [{ error: { code: '23514', message: 'constraint with private values' } },
+            'RESULT_IMAGE_REGISTRY_OPERATION_FAILED', 'permanent'],
+        [{ error: { code: 'P0001', message: 'ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY: private details' } },
+            'RESULT_IMAGE_REGISTRY_OPERATION_FAILED', 'permanent'],
+        [{ error: null }, 'RESULT_IMAGE_REGISTRY_INVALID_RESPONSE', 'permanent'],
+    ] as const)('classifies and redacts registry RPC failure %#', async (response, code, disposition) => {
+        const registry = createResultImageRegistry({
+            async rpc() {
+                if (response instanceof Error) throw response;
+                return { ...response, data: null };
+            },
+        });
+        const failure = await registry.sealManifest({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            jobKey: 'coordinator:finalize',
+            claimToken: '223e4567-e89b-42d3-a456-426614174000',
+            jobInputHash: 'a'.repeat(64),
+            orderedManifestHash: 'b'.repeat(64),
+        }).catch(error => error);
+
+        expect(failure).toMatchObject({ message: code });
+        expect(classifyAnalysisV2JobFailure(failure)).toMatchObject({
+            code,
+            disposition,
+            retryable: disposition === 'transient',
+        });
+    });
+
+    it.each([
+        ['{"sealed":', 'ANALYSIS_V2_RESULT_IMAGE_PERSISTENCE_ERROR', 'transient'],
+        ['{"unexpected":true}', 'RESULT_IMAGE_REGISTRY_INVALID_RESPONSE', 'permanent'],
+    ])('distinguishes an incomplete HTTP receipt from an invalid decoded receipt %#', async (body, code, disposition) => {
+        const client = createClient('https://synthetic.invalid', 'synthetic', {
+            global: { fetch: async () => new Response(body, { status: 200 }) },
+            auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const failure = await createResultImageRegistry(client).sealManifest({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            jobKey: 'coordinator:finalize',
+            claimToken: '223e4567-e89b-42d3-a456-426614174000',
+            jobInputHash: 'a'.repeat(64),
+            orderedManifestHash: 'b'.repeat(64),
+        }).catch(error => error);
+        expect(classifyAnalysisV2JobFailure(failure)).toMatchObject({ code, disposition });
+    });
+
+    it.each([
+        ['ANALYSIS_V2_RESULT_IMAGE_SOURCE_NOT_READY', 'transient'],
+        ['RESULT_IMAGE_REGISTRY_INVALID_INPUT', 'permanent'],
+        ['RESULT_IMAGE_CAPTURE_SOURCE_DRIFT', 'permanent'],
+        ['ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT', 'permanent'],
+        ['ANALYSIS_V2_PROFILE_GENDER_PLAN_PERSISTENCE_ERROR', 'transient'],
+    ])('preserves the worker receipt and retry behavior for %s', (code, disposition) => {
+        expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({ code, disposition });
+    });
+
     it('keeps progress fail-open codes telemetry-only', () => {
         for (const code of [
             'ANALYSIS_V2_PROGRESS_HEARTBEAT_FAIL_OPEN',
@@ -66,6 +146,15 @@ describe('analysis V2 worker error codes', () => {
             expect(isAnalysisV2WorkerErrorCode(code), code).toBe(true);
         }
     });
+
+    it.each(['DEV_LIVE_BUDGET_EXCEEDED', 'DEV_LIVE_BUDGET_UNAVAILABLE'])(
+        'keeps the Dev budget refusal %s permanent with its exact receipt code',
+        code => {
+            expect(classifyAnalysisV2JobFailure(new Error(code))).toMatchObject({
+                code, disposition: 'permanent', retryable: false,
+            });
+        },
+    );
 
     it.each(PROVIDER_LIFECYCLE_PERSISTENCE_CODES)(
         'allows the provider lifecycle phase code %s',

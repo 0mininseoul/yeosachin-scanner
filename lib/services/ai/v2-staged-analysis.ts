@@ -79,6 +79,8 @@ import {
     createAnalysisV2AiMediaSnapshotHashFromParts,
     createAnalysisV2AiResultIdentity,
     createAnalysisV2AiResultInputHash,
+    digestAnalysisV2AiMediaPart,
+    hashAnalysisV2AiMediaDigests,
     type AnalysisV2AiIdentityMediaPart,
     type AnalysisV2AiPreparedResult,
     type AnalysisV2AiResultIdentity,
@@ -1308,7 +1310,7 @@ function stagedTelemetryOptions(
 function stagedResultIdentity(
     stage: AiStageName,
     prompt: string,
-    media: readonly AnalysisV2AiIdentityMediaPart[],
+    media: readonly AnalysisV2AiIdentityMediaPart[] | string,
     cacheScope: 'request' | 'global_ttl',
     policyVersion: AiStagePolicyVersion = AI_STAGE_POLICY_VERSION,
     overrides: Readonly<{
@@ -1339,7 +1341,7 @@ function stagedResultIdentity(
             ?? route?.maxOutputTokens
             ?? policy.maxOutputTokens,
         inputHash: createAnalysisV2AiResultInputHash(prompt),
-        mediaSnapshotHash: createAnalysisV2AiMediaSnapshotHashFromParts(media),
+        mediaSnapshotHash: typeof media === 'string' ? media : createAnalysisV2AiMediaSnapshotHashFromParts(media),
         cacheScope,
     });
 }
@@ -1722,7 +1724,7 @@ function featureResponseSchemaFor(
         .pipe(groundedSchema);
 }
 
-function mediaManifest(media: readonly NormalizedAiMediaSelection[]) {
+function mediaManifest(media: readonly Pick<NormalizedAiMediaSelection, 'selectionId' | 'kind' | 'postId'>[]) {
     return media.map((item, index) => ({
         attachmentNumber: index + 1,
         selectionId: item.selectionId,
@@ -2095,10 +2097,19 @@ export function createGenderTriageResultIdentity(
 ): AnalysisV2AiResultIdentity {
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
+    return genderTriageInputIdentity(input, media, media, policyVersion);
+}
+
+function genderTriageInputIdentity(
+    input: GenderTriageInput,
+    media: NormalizedAiMediaSelection[],
+    mediaIdentity: readonly AnalysisV2AiIdentityMediaPart[] | string,
+    policyVersion: AiStagePolicyVersion,
+) {
     return stagedResultIdentity(
         'genderTriage',
         genderTriagePrompt(media, policyVersion, input.accountProfile),
-        media,
+        mediaIdentity,
         'request',
         policyVersion,
     );
@@ -2153,7 +2164,11 @@ function projectGenderTriageMicrobatch(
 }
 
 function genderTriageMicrobatchPrompt(
-    accounts: readonly ProjectedGenderTriageMicrobatchAccount[],
+    accounts: readonly {
+        accountId: string;
+        input: Pick<GenderTriageInput, 'accountProfile'>;
+        projectedMedia: readonly Pick<NormalizedAiMediaSelection, 'selectionId' | 'kind' | 'postId'>[];
+    }[],
     policyVersion: AiStagePolicyVersion,
     assertiveNameGender = conciergeBatchNameGenderAssertiveEnabled(),
 ): string {
@@ -2283,6 +2298,32 @@ export function createGenderTriageMicrobatchAccountId(
 ): string {
     const identity = createGenderTriageResultIdentity(rawInput, policyVersion);
     return `account:${identity.operationKey.slice('gender-triage:'.length)}`;
+}
+
+/** Keeps only the evidence and byte digests needed to reproduce the original batch identity. */
+export function prepareGenderTriagePlanAccount(input: GenderTriageInput, policy: AiStagePolicyVersion) {
+    const parsed = genderTriageInputSchema.parse(input);
+    const selected = selectedMedia(parsed.media, MAX_TRIAGE_FEED_MEDIA);
+    const original = selected.map(digestAnalysisV2AiMediaPart);
+    const identity = genderTriageInputIdentity(parsed, selected, hashAnalysisV2AiMediaDigests(original), policy);
+    const accountId = `account:${identity.operationKey.slice('gender-triage:'.length)}`;
+    const [account] = projectGenderTriageMicrobatch([{ accountId, input: parsed }]);
+    const media = account!.projectedMedia;
+    return {
+        accountId,
+        input: { accountProfile: account!.input.accountProfile },
+        projectedMedia: media.map(({ selectionId, kind, postId }) => ({ selectionId, kind, postId })),
+        digests: original.map((item, index) => ({ ...item, selectionId: media[index]!.selectionId, postId: null })),
+    };
+}
+export type GenderTriagePlanAccount = ReturnType<typeof prepareGenderTriagePlanAccount>;
+
+export function plannedGenderTriageOperationKey(accounts: readonly GenderTriagePlanAccount[], policy: AiStagePolicyVersion) {
+    const sorted = [...accounts].sort((left, right) => left.accountId.localeCompare(right.accountId));
+    return stagedResultIdentity(
+        'genderTriage', genderTriageMicrobatchPrompt(sorted, policy),
+        hashAnalysisV2AiMediaDigests(sorted.flatMap(account => account.digests)), 'request', policy,
+    ).operationKey;
 }
 
 /**
