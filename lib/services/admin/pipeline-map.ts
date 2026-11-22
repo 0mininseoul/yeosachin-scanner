@@ -232,7 +232,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: 'Gemini',
         numbers: [{ label: '외모·노출 배점', value: points(W.appearanceExposure) }],
-        failure: '일시적인 DB 저장 오류는 재시도합니다. 이전 묶음의 호출 기록과 입력을 일치시킬 수 없으면 새 호출 전에 중단합니다.',
+        failure: '일시적인 DB 저장 오류는 재시도합니다. 이전 묶음의 호출 기록과 입력을 일치시킬 수 없으면 새 호출 전에 중단합니다. 종료된 분석의 만료 작업권을 회수할 때도 미결 호출과 비용 기록을 보존합니다.',
         code: ['lib/services/ai/v2-staged-analysis.ts', 'lib/services/analysis/v2-ai-scoring-executors.ts', 'lib/services/analysis/v2-ai-result-store.ts'],
     },
     private_names: {

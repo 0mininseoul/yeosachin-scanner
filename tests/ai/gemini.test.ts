@@ -204,6 +204,26 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
     });
 
+    it('refuses a suspended worker before SDK dispatch and returns its unused reservation once', async () => {
+        vi.useFakeTimers();
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const reservation = { grantId: 'synthetic', reservationId: 'synthetic-reservation' };
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        const audit = stageAuditOptions();
+        // Move wall time without running timers or aborting the signal.
+        audit.onBeforeAttempt.mockImplementationOnce(async () => vi.setSystemTime(Date.now() + 300_000));
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema, abortSignal: new AbortController().signal,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        })).rejects.toThrow('ANALYSIS_V2_AI_PREDISPATCH_REJECTED');
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            disposition: 'rejected', attempt: 1,
+        }));
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+    });
+
     it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };

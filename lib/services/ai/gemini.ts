@@ -34,6 +34,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
+    AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
@@ -752,9 +753,10 @@ function extractSuccessfulCandidateText(response: GeminiResponseShape): string {
 async function emitAttemptTelemetry<T>(
     telemetry: GeminiAttemptTelemetry,
     hook: AnalyzeWithGeminiOptions<T>['onAttemptTelemetry'],
-    parsedResult?: T
+    parsedResult?: T,
+    source: 'sdk' | 'pre-dispatch' = 'sdk',
 ): Promise<void> {
-    console.log('Gemini SDK attempt telemetry:', telemetry);
+    console.log(source === 'sdk' ? 'Gemini SDK attempt telemetry:' : 'Gemini pre-dispatch rejection:', telemetry);
     if (!hook) return;
 
     try {
@@ -1202,6 +1204,7 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     attemptStartedAt = performance.now();
+                    const dispatchDeadline = Date.now() + AI_GEMINI_LEASE_SECONDS * 1_000;
                     // Stage audit acquires provider leases as well as writing the attempt.
                     // Check the Dev cap before it can acquire either.
                     const devReservation = devLiveBudget && devLiveApproval
@@ -1214,23 +1217,24 @@ export async function analyzeWithGemini<T>(
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
+                            const intent: GeminiAttemptStartTelemetry = {
+                                requestId,
+                                modelName,
+                                location: GOOGLE_CLOUD_LOCATION,
+                                stage,
+                                thinkingLevel: resolvedThinkingLevel,
+                                mediaCount: selectedImages.length,
+                                mediaResolution: resolvedMediaResolution,
+                                promptVersion: resolvedPromptVersion!,
+                                schemaVersion: resolvedSchemaVersion!,
+                                maxOutputTokens: resolvedMaxOutputTokens
+                                    ?? stagePolicy.maxOutputTokens,
+                                attempt: attemptNumber,
+                                retryCount: attemptNumber - 1,
+                                costRoute: resolvedCostRoute,
+                            };
                             try {
-                                await onBeforeAttempt({
-                                    requestId,
-                                    modelName,
-                                    location: GOOGLE_CLOUD_LOCATION,
-                                    stage,
-                                    thinkingLevel: resolvedThinkingLevel,
-                                    mediaCount: selectedImages.length,
-                                    mediaResolution: resolvedMediaResolution,
-                                    promptVersion: resolvedPromptVersion!,
-                                    schemaVersion: resolvedSchemaVersion!,
-                                    maxOutputTokens: resolvedMaxOutputTokens
-                                        ?? stagePolicy.maxOutputTokens,
-                                    attempt: attemptNumber,
-                                    retryCount: attemptNumber - 1,
-                                    costRoute: resolvedCostRoute,
-                                });
+                                await onBeforeAttempt(intent);
                             } catch (error) {
                                 if (
                                     error instanceof GeminiPreDispatchAdmissionError
@@ -1240,6 +1244,22 @@ export async function analyzeWithGemini<T>(
                                     throw error;
                                 }
                                 throw durableAuditFailure('intent', stage, error);
+                            }
+                            // A suspended worker may resume before its abort timer fires.
+                            // A permit obtained during this window cannot authorize a late SDK start.
+                            if (Date.now() >= dispatchDeadline
+                                || performance.now() - attemptStartedAt >= AI_GEMINI_LEASE_SECONDS * 1_000) {
+                                await emitAttemptTelemetry({
+                                    ...intent,
+                                    tokenUsage: null,
+                                    usageComplete: false,
+                                    usageMetadataStatus: 'missing',
+                                    latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
+                                    estimatedCostUsd: null,
+                                    disposition: 'rejected',
+                                    finishReason: null,
+                                }, onAttemptTelemetry, undefined, 'pre-dispatch');
+                                throw new GeminiPreDispatchAdmissionError();
                             }
                         }
                         if (abortSignal?.aborted) {
