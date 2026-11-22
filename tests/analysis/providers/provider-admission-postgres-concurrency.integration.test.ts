@@ -128,6 +128,7 @@ async function bootstrap(pool: Pool): Promise<void> {
             pipeline_version TEXT NOT NULL,
             status TEXT NOT NULL,
             preflight_id UUID,
+            completed_at TIMESTAMPTZ,
             policy_versions_snapshot JSONB,
             analysis_entry_channel TEXT NOT NULL DEFAULT 'standard'
         );
@@ -144,6 +145,7 @@ async function bootstrap(pool: Pool): Promise<void> {
             lease_token UUID,
             lease_expires_at TIMESTAMPTZ,
             attempt_count INTEGER NOT NULL DEFAULT 0,
+            completed_at TIMESTAMPTZ,
             first_started_at TIMESTAMPTZ,
             ai_capacity_deferral_count INTEGER NOT NULL DEFAULT 0,
             last_error_code TEXT,
@@ -348,8 +350,14 @@ async function bootstrap(pool: Pool): Promise<void> {
             operation_key TEXT,
             stage TEXT
         );
+        CREATE TABLE public.analysis_v2_scheduler_operations (
+            request_id uuid, job_key text, operation_key text, stage text, status text, claim_token uuid,
+            lease_expires_at timestamptz, recovery_deadline_at timestamptz, not_before_at timestamptz,
+            updated_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
+        );
         CREATE TABLE public.analysis_v2_ai_attempts (
-            request_id UUID, job_key TEXT, operation_key TEXT, attempt SMALLINT, stage TEXT, status TEXT
+            request_id UUID, job_key TEXT, operation_key TEXT, attempt SMALLINT, stage TEXT, status TEXT,
+            job_claim_token UUID, reservation_token UUID, terminalized_at TIMESTAMPTZ, estimated_cost_usd NUMERIC
         );
         -- Historical dispatch RPCs are supplied as inert fixtures so the additive migration can
         -- revoke and wrap their exact signatures without applying the complete production schema.
@@ -917,4 +925,190 @@ describePostgres('provider admission true-session concurrency', () => {
             maintenance.release();
         }
     });
+
+    it('retires only drained closed requests and fences old deliveries without settling or reopening their attempts', async () => {
+        const closed = [input(70), input(71)];
+        const ids = closed.map(value => value.requestId);
+        const newRequest = input(72);
+        const policy = { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.12', scheduler: 'ai-scheduler-v1' };
+        const worker = await pool.connect();
+        const recovery = await pool.connect();
+        const retire = async (id: string, client = worker) => (await client.query(
+            'SELECT public.retire_inactive_analysis_v2_gemini_slots_v1($1, 8) AS n', [id],
+        )).rows[0].n;
+        const reap = () => asService<number>(worker, 'SELECT public.reap_analysis_v2_scheduler_gemini_leases(1) AS result');
+        const op = `gender-triage:${'1'.padStart(64, '0')}`;
+        const acquire = (value: AnalysisProviderAdmissionInput) => worker.query(`
+            SELECT outcome,slot,fence FROM public.acquire_analysis_v2_scheduler_gemini_lease_v1(
+                $1,$2,$3,'genderTriage',1,$4,240
+            )
+        `, [value.requestId, jobKey, op, value.claimToken]);
+        const moneyAndAttempts = async () => (await worker.query(`
+            SELECT (SELECT jsonb_agg(to_jsonb(a) ORDER BY operation_key) FROM public.analysis_v2_ai_attempts a
+                    WHERE request_id=ANY($1::uuid[])) AS attempts,
+                   (SELECT jsonb_agg(to_jsonb(g) ORDER BY grant_id) FROM dev_live_budget.grants g) AS grants,
+                   (SELECT jsonb_agg(to_jsonb(r) ORDER BY reservation_id) FROM dev_live_budget.reservations r) AS reservations
+        `, [ids])).rows[0];
+
+        try {
+            for (const name of [
+                'renew_analysis_v2_gemini_lease_v2', 'release_analysis_v2_gemini_lease_v2',
+                'reap_analysis_v2_scheduler_gemini_leases', 'claim_analysis_v2_scheduler_operation',
+            ]) await worker.query(schedulerBaselineFunction(name));
+            // Install the same post-baseline admission resolver and replay checks as the deployment.
+            for (const name of [
+                '20261122020200_rearm_unstarted_apify_admissions',
+                '20261122020300_rearm_unstarted_gemini_admissions',
+                '20261122150000_retire_closed_analysis_v2_gemini_slots',
+            ]) await worker.query(readFileSync(new URL(`../../../supabase/migrations/${name}.sql`, import.meta.url), 'utf8'));
+            await worker.query(readFileSync(new URL('../../../supabase/dev-ui/live-budget.sql', import.meta.url), 'utf8'));
+            await worker.query(`
+                INSERT INTO public.analysis_requests (id,pipeline_version,status,completed_at,policy_versions_snapshot)
+                SELECT id,'v2','failed',now() - interval '1 day',$2 FROM unnest($1::uuid[]) AS id
+            `, [ids, policy]);
+            await worker.query(`
+                INSERT INTO public.analysis_pipeline_jobs(request_id,job_key,status,completed_at,updated_at)
+                SELECT id,$2,'failed',now() - interval '1 day',now() - interval '1 day' FROM unnest($1::uuid[]) AS id
+            `, [ids, jobKey]);
+            await worker.query(`
+                UPDATE public.analysis_v2_gemini_leases
+                SET state='quarantined',fence=10,request_id=CASE WHEN slot<=5 THEN $1::uuid ELSE $2::uuid END,
+                    job_key=$3,stage='genderTriage',operation_key='gender-triage:' || lpad(slot::text,64,'0'),
+                    lease_claim_token=gen_random_uuid(),attempt=1,acquired_at=now() - interval '2 days',
+                    expires_at=now() - interval '1 day',quarantined_at=now() - interval '1 day'
+            `, [...ids, jobKey]);
+            await worker.query(`
+                INSERT INTO public.analysis_provider_admission_leases(
+                    admission_id,workload_role,logical_provider,credential_slot,budget_key,request_id,job_key,
+                    operation_key,claim_token,job_claim_token,provider_fence,lease_token,state,acquired_at,expires_at
+                )
+                SELECT public.analysis_provider_admission_expected_id('paid','gemini','gemini-' || slot,request_id,
+                          job_key,'gemini:' || operation_key || ':attempt:1'),
+                       'paid','gemini','gemini-' || slot,'paid:gemini:gemini-' || slot,request_id,job_key,
+                       'gemini:' || operation_key || ':attempt:1',lease_claim_token,gen_random_uuid(),fence,
+                       gen_random_uuid(),'leased',acquired_at,expires_at
+                FROM public.analysis_v2_gemini_leases;
+                INSERT INTO public.analysis_v2_ai_attempts(request_id,job_key,operation_key,attempt,stage,status,
+                    job_claim_token,reservation_token)
+                SELECT s.request_id,s.job_key,s.operation_key,1,s.stage,'reserved',a.job_claim_token,gen_random_uuid()
+                FROM public.analysis_v2_gemini_leases s JOIN public.analysis_provider_admission_leases a
+                    ON a.request_id=s.request_id AND a.credential_slot='gemini-' || s.slot;
+                INSERT INTO dev_live_budget.grants(grant_id,approved_at,expires_at,apify_limit_micros,ai_limit_micros,ai_committed_micros)
+                SELECT request_id,now(),now()+interval '20 minutes',20000,30000,count(*)*100
+                FROM public.analysis_v2_ai_attempts GROUP BY request_id;
+                INSERT INTO dev_live_budget.reservations(reservation_id,grant_id,provider,reserved_micros)
+                SELECT gen_random_uuid(),request_id,'vertex',100 FROM public.analysis_v2_ai_attempts;
+            `);
+            const before = await moneyAndAttempts();
+            expect(before.attempts).toHaveLength(8);
+            expect(before.reservations).toHaveLength(8);
+            // An active request with an ambiguous outcome, a recently closed request, and a
+            // terminal request with unfinished work must all retain capacity.
+            await worker.query('BEGIN');
+            await worker.query("UPDATE public.analysis_requests SET status='processing' WHERE id=ANY($1::uuid[])", [ids]);
+            await worker.query("UPDATE public.analysis_v2_ai_attempts SET status='ambiguous' WHERE request_id=ANY($1::uuid[])", [ids]);
+            expect(await retire(ids[0])).toBe(0);
+            expect((await worker.query('SELECT public.reap_analysis_v2_scheduler_gemini_leases(8) AS n')).rows[0].n).toBe(0);
+            await worker.query("UPDATE public.analysis_requests SET status='failed',completed_at=now() WHERE id=$1", [ids[0]]);
+            expect(await retire(ids[0])).toBe(0);
+            await worker.query("UPDATE public.analysis_requests SET status='failed' WHERE id=$1", [ids[1]]);
+            await worker.query("UPDATE public.analysis_pipeline_jobs SET status='pending' WHERE request_id=$1", [ids[1]]);
+            expect(await retire(ids[1])).toBe(0);
+            await worker.query('ROLLBACK');
+
+            // The parent request can continue after the scheduler has irrevocably recorded
+            // a result or an unavailable outcome for this exact operation.
+            await worker.query('BEGIN');
+            await worker.query("UPDATE public.analysis_requests SET status='processing',completed_at=NULL WHERE id=$1", [ids[0]]);
+            await worker.query(`
+                UPDATE public.analysis_pipeline_jobs SET status='processing',completed_at=NULL,
+                    lease_token=$2,lease_expires_at=now()+interval '5 minutes' WHERE request_id=$1
+            `, [ids[0], closed[0].claimToken]);
+            await worker.query(`
+                INSERT INTO public.analysis_v2_scheduler_operations(request_id,job_key,operation_key,stage,
+                    status,claim_token,lease_expires_at,recovery_deadline_at,updated_at,result_json)
+                SELECT s.request_id,s.job_key,s.operation_key,s.stage,
+                    CASE s.slot WHEN 2 THEN 'ready' WHEN 3 THEN 'claimed' ELSE 'terminal_unavailable' END,
+                    gen_random_uuid(),now()-interval '1 day',now()-interval '1 day',
+                    CASE WHEN s.slot=4 THEN now() ELSE now()-interval '1 day' END,
+                    CASE WHEN s.slot=2 THEN '{"fixture": true}'::jsonb END
+                FROM public.analysis_v2_gemini_leases s WHERE s.request_id=$1 AND s.slot<>5
+            `, [ids[0]]);
+            // The old worker still owns slot 1's job. Only slot 2 can be retired.
+            const oldJobClaim = (await worker.query(`
+                SELECT job_claim_token FROM public.analysis_provider_admission_leases
+                WHERE request_id=$1 AND credential_slot='gemini-1'
+            `, [ids[0]])).rows[0].job_claim_token;
+            await worker.query('UPDATE public.analysis_pipeline_jobs SET lease_token=$2 WHERE request_id=$1', [ids[0], oldJobClaim]);
+            expect(await retire(ids[0])).toBe(1);
+            await worker.query('UPDATE public.analysis_pipeline_jobs SET lease_token=$2 WHERE request_id=$1', [ids[0], closed[0].claimToken]);
+            expect(await retire(ids[0])).toBe(1);
+            expect(await retire(ids[0])).toBe(0);
+            for (const [slot, decision] of [[1, 'terminal_unavailable'], [2, 'ready']] as const) {
+                const result = await worker.query(`
+                    SELECT decision,recovery_only FROM public.claim_analysis_v2_scheduler_operation(
+                        $1,$2,$3,$4,'genderTriage',gen_random_uuid(),330)
+                `, [ids[0], jobKey, closed[0].claimToken, 'gender-triage:' + String(slot).padStart(64, '0')]);
+                expect(result.rows).toEqual([{ decision, recovery_only: true }]);
+            }
+            expect(await moneyAndAttempts()).toEqual(before);
+            await worker.query('ROLLBACK');
+
+            // Holds without exact slot/claim/generation proof, or with a recently expired
+            // physical slot or admission, must survive even on an old closed request.
+            await worker.query('BEGIN');
+            await worker.query("UPDATE public.analysis_provider_admission_leases SET provider_fence=11 WHERE request_id=$1 AND credential_slot='gemini-1'", [ids[0]]);
+            await worker.query("UPDATE public.analysis_provider_admission_leases SET job_claim_token=gen_random_uuid() WHERE request_id=$1 AND credential_slot='gemini-2'", [ids[0]]);
+            await worker.query("UPDATE public.analysis_provider_admission_leases SET expires_at=now() WHERE request_id=$1 AND credential_slot='gemini-3'", [ids[0]]);
+            await worker.query("UPDATE public.analysis_v2_gemini_leases SET expires_at=now() WHERE slot=4");
+            expect(await retire(ids[0])).toBe(1);
+            await worker.query('ROLLBACK');
+
+            // While another session still holds the pool lock, recovery cannot retire or double-count.
+            await recovery.query('BEGIN');
+            await recovery.query("SELECT pg_advisory_xact_lock(hashtextextended('analysis-v2-gemini-leases',0))");
+            expect(await retire(ids[0])).toBe(0);
+            expect(await retire(ids[0], recovery)).toBe(5);
+            expect(await retire(ids[0])).toBe(0);
+            await recovery.query('COMMIT');
+            expect(await retire(ids[0])).toBe(0);
+            expect(await reap()).toBe(1);
+            expect(await retire(ids[1])).toBe(2);
+            expect(await reap()).toBe(0);
+
+            const original = (await worker.query(`
+                SELECT * FROM public.analysis_provider_admission_leases WHERE request_id=$1 AND credential_slot='gemini-1'
+            `, [ids[0]])).rows[0];
+            expect((await worker.query(`
+                SELECT count(*)::int AS n FROM public.analysis_provider_admission_leases WHERE request_id=ANY($1::uuid[])
+                  AND state='released' AND resolution_source='gemini_lease_fenced'
+            `, [ids])).rows[0].n).toBe(8);
+            expect((await worker.query("SELECT count(*)::int AS n FROM public.analysis_v2_gemini_leases WHERE state='available' AND fence>10")).rows[0].n).toBe(8);
+            await expect(acquire(closed[0])).rejects.toThrow('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
+            expect((await worker.query(`
+                SELECT public.analysis_provider_admission_can_rearm_gemini_without_attempt(a,gen_random_uuid()) AS allowed
+                FROM public.analysis_provider_admission_leases a WHERE admission_id=$1
+            `, [original.admission_id])).rows[0].allowed).toBe(false);
+
+            await worker.query(`
+                INSERT INTO public.analysis_requests(id,pipeline_version,status,policy_versions_snapshot)
+                VALUES ($1,'v2','processing',$2)
+            `, [newRequest.requestId, policy]);
+            const fresh = (await acquire(newRequest)).rows[0];
+            expect(fresh).toMatchObject({ outcome: 'acquired', slot: 1 });
+            expect(Number(fresh.fence)).toBeGreaterThan(10);
+            expect((await worker.query('SELECT renewed FROM public.renew_analysis_v2_gemini_lease_v2(1,$1,10,$2,240)',
+                [original.claim_token, op])).rows[0].renewed).toBe(false);
+            expect((await worker.query('SELECT released FROM public.release_analysis_v2_gemini_lease_v2(1,$1,10,$2)',
+                [original.claim_token, op])).rows[0].released).toBe(false);
+            expect((await acquire(newRequest)).rows[0]).toEqual(fresh);
+            expect(await moneyAndAttempts()).toEqual(before);
+        } finally {
+            await Promise.all([worker.query('ROLLBACK'), recovery.query('ROLLBACK')]);
+            await worker.query('DROP SCHEMA IF EXISTS dev_live_budget CASCADE');
+            worker.release();
+            recovery.release();
+        }
+    });
+
 });

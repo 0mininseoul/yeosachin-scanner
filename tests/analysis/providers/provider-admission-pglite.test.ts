@@ -2206,6 +2206,12 @@ describe('provider admission migration PGlite contract', () => {
             LANGUAGE sql AS $$ SELECT '{}'::jsonb $$;
             CREATE FUNCTION public.list_analysis_v2_dispatchable_jobs(integer) RETURNS void
             LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;
+            CREATE TABLE public.analysis_v2_scheduler_operations (
+            request_id uuid, job_key text, operation_key text, stage text, status text, claim_token uuid,
+            lease_expires_at timestamptz, recovery_deadline_at timestamptz, not_before_at timestamptz,
+            updated_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
+        );
+            ALTER TABLE public.analysis_v2_ai_attempts ADD stage text, ADD job_claim_token uuid;
             ALTER TABLE public.analysis_requests ADD user_id uuid, ADD completed_at timestamptz,
                 ADD selected_plan_id_snapshot text;
             ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
@@ -2224,6 +2230,9 @@ describe('provider admission migration PGlite contract', () => {
             '../../../supabase/dev-ui/live-standard-provider-recovery.sql', import.meta.url,
         ), 'utf8');
         await db.exec(dispatchSql);
+        await db.exec(readFileSync(new URL(
+            '../../../supabase/migrations/20261122150000_retire_closed_analysis_v2_gemini_slots.sql', import.meta.url,
+        ), 'utf8'));
         await db.exec(recoverySql);
         await db.exec(recoverySql);
         const lockOrder = [
@@ -2281,16 +2290,16 @@ describe('provider admission migration PGlite contract', () => {
             VALUES ($1,$2,$3,'apify','secondary','running',$4)
         `, [running.requestId, running.jobKey, running.operationKey, actorRun]);
 
-        const gemini = async (slot: number, audit: 'success' | 'reserved' | 'ambiguous' | null, admission: 'live' | 'released' | 'absent') => {
+        const gemini = async (slot: number, audit: 'success' | 'reserved' | 'ambiguous' | null, admission: 'live' | 'released' | 'absent', requestId = request) => {
             const operation = 'feature-analysis:' + String(slot).repeat(64);
             const slotName = 'gemini-' + slot;
             const jobKey = 'track:profile-ai:batch:' + slot;
             const input = {
-                ...geminiInput(), requestId: request, jobKey, credentialSlot: slotName, budgetKey: 'paid:gemini:' + slotName,
+                ...geminiInput(), requestId, jobKey, credentialSlot: slotName, budgetKey: 'paid:gemini:' + slotName,
                 operationKey: 'gemini:' + operation + ':attempt:1',
                 providerFence: 40, jobClaimToken: randomUUID(), claimToken: randomUUID(),
             };
-            await seedPaidJob(request, jobKey, input.jobClaimToken);
+            await seedPaidJob(requestId, jobKey, input.jobClaimToken);
             await seedGeminiSlot(input, operation);
             if (admission !== 'absent') {
                 const acquired = await acquireWithLeaseToken(input, randomUUID());
@@ -2305,8 +2314,8 @@ describe('provider admission migration PGlite contract', () => {
                 );
             }
             if (audit) {
-                await db.query('INSERT INTO public.analysis_v2_ai_attempts VALUES ($1,$2,$3,1,$4,$5,$6)', [
-                    request, jobKey, operation, audit, audit === 'reserved' ? null : new Date(), audit === 'success' ? 0.04 : null,
+                await db.query('INSERT INTO public.analysis_v2_ai_attempts VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8)', [
+                    requestId, jobKey, operation, audit, audit === 'reserved' ? null : new Date(), audit === 'success' ? 0.04 : null, 'featureAnalysis', input.jobClaimToken,
                 ]);
             }
             await db.query(
@@ -2315,7 +2324,7 @@ describe('provider admission migration PGlite contract', () => {
             );
             await db.query(
                 "UPDATE public.analysis_pipeline_jobs SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE request_id = $1 AND job_key = $2",
-                [request, jobKey],
+                [requestId, jobKey],
             );
             return input;
         };
@@ -2377,5 +2386,39 @@ describe('provider admission migration PGlite contract', () => {
             .toEqual([{ slot: 7, state: 'available' }, { slot: 8, state: 'leased' }]);
         expect((await asService('SELECT request_id FROM public.list_dev_live_standard_dispatchable_jobs_v1(16)')).rows)
             .toEqual([]);
+
+        // Two grants are closed at different times; the oldest must still be reachable.
+        // A closed standard request without a Dev owner grant stays isolated.
+        const second = randomUUID();
+        const nonOwner = randomUUID();
+        const secondGrant = randomUUID();
+        const secondPreflight = randomUUID();
+        await db.query('INSERT INTO dev_live_budget.owner_starts VALUES ($1,$2,$3)', [secondGrant, owner, target]);
+        await db.query("INSERT INTO dev_live_budget.grants VALUES ($1,'standard','infinity',now(),true,$2)", [secondGrant, policy]);
+        await db.query(`
+            INSERT INTO public.analysis_requests(id,pipeline_version,status,user_id,selected_plan_id_snapshot,preflight_id)
+            VALUES ($1,'v2','processing',$3,'standard',$4),($2,'v2','processing',$3,'standard',NULL)
+        `, [second, nonOwner, owner, secondPreflight]);
+        await db.query(`
+            INSERT INTO public.analysis_preflights(id,status,user_id,consumed_request_id,expires_at,idempotency_key,access_mode)
+            VALUES ($1,'consumed',$2,$3,now(),'dev-live:owner:standard:' || $4,'test_entitlement')
+        `, [secondPreflight, owner, second, secondGrant]);
+        await gemini(1, 'reserved', 'live', second);
+        await gemini(5, 'reserved', 'live', nonOwner);
+        await db.exec(`
+            UPDATE public.analysis_requests SET status='failed',completed_at=now() - interval '1 day';
+            UPDATE public.analysis_pipeline_jobs SET status='failed',lease_token=NULL,lease_expires_at=NULL,updated_at=now()-interval '1 day';
+            UPDATE public.analysis_v2_gemini_leases SET expires_at=now()-interval '1 day' WHERE state='leased';
+            UPDATE public.analysis_provider_admission_leases SET expires_at=now()-interval '1 day' WHERE logical_provider='gemini';
+        `);
+        const retireDev = () => asService('SELECT public.retire_dev_live_standard_gemini_slots_v1(8) AS retired');
+        expect((await retireDev()).rows).toEqual([{ retired: 3 }]);
+        expect((await retireDev()).rows).toEqual([{ retired: 0 }]);
+        expect((await db.query('SELECT state FROM public.analysis_v2_gemini_leases WHERE slot=5')).rows)
+            .toEqual([{ state: 'leased' }]);
+        expect((await db.query(`
+            SELECT count(*)::int AS unresolved FROM public.analysis_v2_ai_attempts WHERE request_id=ANY($1::uuid[])
+              AND status IN ('reserved','ambiguous') AND estimated_cost_usd IS NULL
+        `, [[request, second]])).rows).toEqual([{ unresolved: 3 }]);
     });
 });
