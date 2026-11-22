@@ -21,6 +21,7 @@ const nextConfig: NextConfig = {
     "/api/analysis/betatest/preflight/[preflightId]/admit": cloudTasksBuildTrace,
     "/api/analysis/v2/recover": cloudTasksBuildTrace,
     "/api/analysis/v2/worker": cloudTasksBuildTrace,
+    "/api/cherry/target-checks": cloudTasksBuildTrace,
   },
 };
 

@@ -42,7 +42,7 @@ beforeEach(async () => {
         insert into public.users (id, email, provider, phone_number_normalized, phone_number_verification_source) values
             ('${USER}', 'me@example.com', 'kakao', '+821011112222', 'kakao_rest_api'),
             ('${OTHER}', 'other@example.com', 'kakao', '+821033334444', 'kakao_rest_api');
-        update public.cherry_settings set sales_enabled = true, monitoring_enabled = true, notifications_enabled = true,
+        update public.cherry_settings set sales_enabled = true, tester_user_ids = '{}', monitoring_enabled = true, notifications_enabled = true,
             auto_refund_enabled = false, payment_provider = 'groble', max_active_runs = 3,
             apify_limit_usd = 100, apify_usage_usd = 10, apify_observed_at = now();
         update public.cherry_offers set active = true, groble_product_id = 'prod_' || code, groble_payment_address = 'pay_' || code;
@@ -88,6 +88,9 @@ describe('cherry checkout and payment', () => {
     it('stays closed until sales are switched on and needs a verified phone', async () => {
         await db.exec('update public.cherry_settings set sales_enabled = false');
         expect((await checkout()).outcome).toBe('sales_closed');
+        await db.exec(`update public.cherry_settings set tester_user_ids = '{${USER}}'`);
+        expect((await checkout()).outcome).toBe('ready');
+        expect((await checkout(OTHER)).outcome).toBe('sales_closed');
         await db.exec('update public.cherry_settings set sales_enabled = true');
         await db.exec(`update public.users set phone_number_normalized = null where id = '${USER}'`);
         expect((await checkout()).outcome).toBe('phone_required');
@@ -194,6 +197,29 @@ describe('cherry checks', () => {
         const refund = await one<{ status: string }>('select status from public.cherry_refunds where subscription_id = $1', [subscriptionId]);
         expect(refund.status).toBe('manual_required');
         await expect(rpc('cherry_end_with_refund($1,$2)', [subscriptionId, 'operator'])).resolves.toMatchObject({ ended: false });
+    });
+
+    it('lets a member stop the next charge, and cancel in full only when the first list is a day late', async () => {
+        const order = await checkout();
+        await pay(order);
+        expect(await rpc('cherry_member_action($1,$2)', [USER, 'cancel_preparing'])).toEqual({ outcome: 'not_allowed' });
+        await db.exec(`update public.cherry_subscriptions set first_paid_at = now() - interval '25 hours'`);
+        expect(await rpc('cherry_member_action($1,$2)', [USER, 'cancel_preparing'])).toMatchObject({ outcome: 'done', ended: true, refundKrw: 9900 });
+        expect((await one<{ amount_krw: number }>('select amount_krw from public.cherry_refunds')).amount_krw).toBe(9900);
+    });
+
+    it('ends a granted month without billing or refunding it', async () => {
+        const granted = await rpc<{ outcome: string; subscriptionId: string }>('cherry_grant($1,$2,$3)', [USER, await targetCheck(), 'v1']);
+        expect(granted.outcome).toBe('granted');
+        const check = await claimOne();
+        await rpc('cherry_apply_check($1,$2,$3)', [check.id, check.lease_token, JSON.stringify({
+            followers: { count: 1, gap: 0 }, following: { count: 1, gap: 0 }, items: 2, mutuals: 1, relations: [relation('1', true, true)], events: [],
+        })]);
+        await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '1 minute'`);
+        await rpc('cherry_enqueue_due(now())');
+        expect(await one('select status, status_reason from public.cherry_subscriptions where id = $1', [granted.subscriptionId]))
+            .toEqual({ status: 'ended', status_reason: 'canceled' });
+        expect((await one<{ n: number }>('select (select count(*) from public.cherry_payments) + (select count(*) from public.cherry_refunds) as n')).n).toBe(0);
     });
 
     it('lapses an unrenewed pass, then ends it after the grace period', async () => {

@@ -6,6 +6,8 @@ set local statement_timeout = '2min';
 create table public.cherry_settings (
     id boolean primary key default true check (id),
     sales_enabled boolean not null default false,
+    -- Members who may check out while public sales are closed.
+    tester_user_ids uuid[] not null default '{}',
     monitoring_enabled boolean not null default false,
     notifications_enabled boolean not null default false,
     ai_enabled boolean not null default true,
@@ -96,7 +98,7 @@ create table public.cherry_subscriptions (
     offer_code text not null references public.cherry_offers (code),
     price_krw integer not null check (price_krw > 0),
     price_lock_until timestamptz,
-    payment_provider text not null check (payment_provider in ('groble', 'toss')),
+    payment_provider text not null check (payment_provider in ('groble', 'toss', 'grant')),
     terms_version text not null,
     terms_accepted_at timestamptz not null default now(),
     first_paid_at timestamptz,
@@ -470,7 +472,7 @@ declare
 begin
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('cherry-checkout:' || p_user::text, 0));
     select * into strict v_settings from public.cherry_settings;
-    if not v_settings.sales_enabled then
+    if not v_settings.sales_enabled and not (p_user = any (v_settings.tester_user_ids)) then
         return pg_catalog.jsonb_build_object('outcome', 'sales_closed');
     end if;
     select * into v_account from public.users where id = p_user;
@@ -553,6 +555,40 @@ begin
 end;
 $$;
 
+-- An operator-granted month for verification or support. It ends by itself and is never billed.
+create function public.cherry_grant(p_user uuid, p_target_check uuid, p_terms_version text) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+    v_now timestamptz := pg_catalog.clock_timestamp();
+    v_account public.users%rowtype;
+    v_target public.cherry_target_checks%rowtype;
+    v_subscription uuid;
+begin
+    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('cherry-checkout:' || p_user::text, 0));
+    select * into v_account from public.users where id = p_user;
+    select * into v_target from public.cherry_target_checks where id = p_target_check;
+    if v_account.id is null or v_account.lifecycle <> 'active' or v_target.status is distinct from 'done'
+        or v_target.result_code is distinct from 'ok' then
+        return pg_catalog.jsonb_build_object('outcome', 'invalid');
+    end if;
+    if exists (select 1 from public.cherry_subscriptions as live where live.user_id = p_user
+        and live.status in ('preparing', 'active', 'paused', 'past_due')) then
+        return pg_catalog.jsonb_build_object('outcome', 'already_subscribed');
+    end if;
+    insert into public.cherry_subscriptions (user_id, status, target_instagram_id, target_username, target_full_name,
+        target_profile_pic_url, recipient_phone, recipient_email, offer_code, price_krw, payment_provider, terms_version,
+        first_paid_at, cancel_at_period_end, followers_count, following_count)
+    values (p_user, 'preparing', v_target.instagram_id, v_target.username, v_target.full_name, v_target.profile_pic_url,
+        case when v_account.phone_number_normalized ~ '^\+8210[0-9]{8}$' then v_account.phone_number_normalized end,
+        v_account.email, 'standard', (select offer.price_krw from public.cherry_offers as offer where offer.code = 'standard'),
+        'grant', p_terms_version, v_now, true, v_target.followers_count, v_target.following_count)
+    returning id into v_subscription;
+    insert into public.cherry_checks (subscription_id, kind, check_date)
+    values (v_subscription, 'baseline', public.cherry_kst_date(v_now));
+    return pg_catalog.jsonb_build_object('outcome', 'granted', 'subscriptionId', v_subscription);
+end;
+$$;
+
 -- A renewal is a new order for the same subscription (Groble passes have no auto-renewal).
 create function public.cherry_begin_renewal(p_user uuid) returns jsonb
 language plpgsql security definer set search_path = '' as $$
@@ -566,7 +602,9 @@ declare
 begin
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('cherry-checkout:' || p_user::text, 0));
     select * into strict v_settings from public.cherry_settings;
-    if not v_settings.sales_enabled then return pg_catalog.jsonb_build_object('outcome', 'sales_closed'); end if;
+    if not v_settings.sales_enabled and not (p_user = any (v_settings.tester_user_ids)) then
+        return pg_catalog.jsonb_build_object('outcome', 'sales_closed');
+    end if;
     select * into v_subscription from public.cherry_subscriptions
     where user_id = p_user and status in ('active', 'past_due') for update;
     if not found or v_subscription.payment_provider <> 'groble'
@@ -824,6 +862,32 @@ begin
         end if;
     end if;
     return pg_catalog.jsonb_build_object('ended', true, 'refundKrw', v_amount);
+end;
+$$;
+
+-- A member stops or resumes the next charge, or cancels a service that never started.
+create function public.cherry_member_action(p_user uuid, p_action text) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+    v_subscription public.cherry_subscriptions%rowtype;
+begin
+    select * into v_subscription from public.cherry_subscriptions
+    where user_id = p_user and status in ('preparing', 'active', 'past_due') for update;
+    if not found then return pg_catalog.jsonb_build_object('outcome', 'not_found'); end if;
+    if p_action = 'cancel' and v_subscription.status in ('active', 'past_due') then
+        update public.cherry_subscriptions set cancel_at_period_end = true, updated_at = pg_catalog.now()
+        where id = v_subscription.id;
+        return pg_catalog.jsonb_build_object('outcome', 'done');
+    elsif p_action = 'resume' and v_subscription.status = 'active' and v_subscription.payment_provider <> 'grant'
+        and v_subscription.current_period_end > pg_catalog.now() then
+        update public.cherry_subscriptions set cancel_at_period_end = false, updated_at = pg_catalog.now()
+        where id = v_subscription.id;
+        return pg_catalog.jsonb_build_object('outcome', 'done');
+    elsif p_action = 'cancel_preparing' and v_subscription.status = 'preparing'
+        and v_subscription.first_paid_at <= pg_catalog.now() - interval '24 hours' then
+        return public.cherry_end_with_refund(v_subscription.id, 'baseline_failed') || pg_catalog.jsonb_build_object('outcome', 'done');
+    end if;
+    return pg_catalog.jsonb_build_object('outcome', 'not_allowed');
 end;
 $$;
 

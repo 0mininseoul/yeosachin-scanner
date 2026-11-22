@@ -4,6 +4,7 @@ import { assertNoDatabaseError, cherryRpc } from './rpc';
 
 export interface CherrySettings {
     sales_enabled: boolean;
+    tester_user_ids: string[];
     monitoring_enabled: boolean;
     notifications_enabled: boolean;
     ai_enabled: boolean;
@@ -38,7 +39,7 @@ export interface CherrySubscription {
     offer_code: string;
     price_krw: number;
     price_lock_until: string | null;
-    payment_provider: 'groble' | 'toss';
+    payment_provider: 'groble' | 'toss' | 'grant';
     first_paid_at: string | null;
     current_period_start: string | null;
     current_period_end: string | null;
