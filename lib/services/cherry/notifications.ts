@@ -46,11 +46,12 @@ export function buildCherryMessage(
             const count = Number(payload.count ?? context.accounts.length);
             const listed = context.accounts.slice(0, 3).map(account => `@${account}`);
             const rest = Math.max(0, count - listed.length);
+            const unsure = payload.confirmed === 0 ? '\n앞선 목록에서 빠졌던 계정일 수 있어 리포트에 표시했어요.' : '';
             const list = rest > 0 ? [...listed, `외 ${rest}명`].join('\n') : listed.join('\n');
             const link = `${CANONICAL_APP_ORIGIN}/cherry/reports/${context.reportId}`;
             return {
                 subject: '체리 새 맞팔 알림',
-                text: `[체리] 등록하신 ${id} 계정에서 새 맞팔 ${count}명을 확인했어요.\n\n${list}\n\n리포트 보기\n${link}`,
+                text: `[체리] 등록하신 ${id} 계정에서 새 맞팔 ${count}명을 확인했어요.\n\n${list}${unsure ? `\n${unsure}` : ''}\n\n리포트 보기\n${link}`,
                 variables: { target: id, count: String(count), accounts: list, link },
             };
         }
@@ -170,8 +171,10 @@ async function settle(row: CherryNotificationRow, patch: Record<string, unknown>
 
 export async function processCherryNotifications(limit: number, deps = cherryDeliveryDeps()): Promise<number> {
     if (!deps.solapi && !deps.email) return 0;
-    const rows = await cherryRpc<CherryNotificationRow[]>('cherry_claim_notifications', { p_limit: limit, p_lease_seconds: 120 });
-    for (const row of rows) {
+    // One at a time: a claimed row that was never sent must not look like an unknown delivery.
+    for (let sent = 0; sent < limit; sent += 1) {
+        const [row] = await cherryRpc<CherryNotificationRow[]>('cherry_claim_notifications', { p_limit: 1, p_lease_seconds: 120 });
+        if (!row) return sent;
         const subscription: CherrySubscription | null = await loadCherrySubscription(row.subscription_id);
         if (!subscription || (!subscription.recipient_phone && !subscription.recipient_email)) {
             await settle(row, { status: 'canceled', error_code: 'recipient_removed' });
@@ -189,5 +192,5 @@ export async function processCherryNotifications(limit: number, deps = cherryDel
                 ? { status: 'unconfirmed', channel: result.channel, error_code: result.code }
                 : { status: 'failed', error_code: result.code });
     }
-    return rows.length;
+    return limit;
 }

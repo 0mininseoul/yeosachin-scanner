@@ -1,5 +1,5 @@
 import { after } from 'next/server';
-import { cherryIpHash, requestTargetCheck } from '@/lib/services/cherry/checkout';
+import { cherryIpHash, cherrySalesOpenFor, requestTargetCheck } from '@/lib/services/cherry/checkout';
 import { targetRequestSchema } from '@/lib/services/cherry/contracts';
 import { normalizeTargetUsername } from '@/lib/services/cherry/instagram';
 import { cherryJson, cherryUser, readCherryMutation } from '@/lib/services/cherry/session';
@@ -13,6 +13,8 @@ export async function POST(request: Request) {
     if (!username) return cherryJson({ code: 'INVALID_USERNAME' }, 400);
     try {
         const user = await cherryUser();
+        // Lookups spend free credit shared with the analyzer, so a closed shop makes none.
+        if (!await cherrySalesOpenFor(user?.id ?? null)) return cherryJson({ code: 'SALES_CLOSED' }, 403);
         const result = await requestTargetCheck(username, user?.id ?? null, cherryIpHash(request));
         if (result === 'limited') return cherryJson({ code: 'LIMITED' }, 429);
         if (result.created) after(() => kickCherryWorker({ kind: 'target_check', id: result.id }));

@@ -183,7 +183,8 @@ describe('cherry checks', () => {
     it('confirms a private target twice before ending with a prorated refund', async () => {
         const { subscriptionId } = await activate();
         await db.exec(`update public.cherry_subscriptions set next_check_at = now() - interval '1 minute',
-            current_period_start = now() - interval '15 days', current_period_end = now() + interval '15 days'`);
+            current_period_start = now() - interval '15 days', current_period_end = now() + interval '15 days';
+            update public.cherry_payments set period_start = now() - interval '15 days', period_end = now() + interval '15 days'`);
         await rpc('cherry_enqueue_due(now())');
         let check = await claimOne();
         expect(await rpc('cherry_mark_unavailable($1,$2,$3,$4)', [check.id, check.lease_token, 'private', 3600])).toEqual({ confirmed: false });
@@ -228,6 +229,36 @@ describe('cherry checks', () => {
         const check = await claimOne();
         expect(check).toMatchObject({ kind: 'daily', series: 1 });
         expect(await rpc('cherry_operator_requeue($1)', [subscriptionId])).toEqual({ outcome: 'running' });
+    });
+
+    it('refunds both periods after an early renewal, and drops yesterday\'s unfinished check', async () => {
+        const { subscriptionId } = await activate();
+        await db.exec(`update public.cherry_subscriptions set current_period_start = now() - interval '24 days', current_period_end = now() + interval '6 days';
+            update public.cherry_payments set period_start = now() - interval '24 days', period_end = now() + interval '6 days'`);
+        const renewal = await rpc<Record<string, unknown>>('cherry_begin_renewal($1)', [USER]);
+        expect((await pay(renewal, 'evt_early', 'pay_early')).disposition).toBe('renewed');
+        await db.exec(`insert into public.cherry_checks (subscription_id, kind, check_date, created_at)
+            values ('${subscriptionId}', 'daily', current_date - 1, now() - interval '21 hours')`);
+        expect(await claimOne()).toBeUndefined();
+        const { refundKrw } = await rpc<{ refundKrw: number }>('cherry_end_with_refund($1,$2)', [subscriptionId, 'target_private']);
+        expect([1979 + 9900, 1980 + 9900]).toContain(refundKrw);
+        expect((await one<{ n: number }>('select count(*)::int as n from public.cherry_refunds')).n).toBe(2);
+    });
+
+    it('moves a pass to automatic billing at its next renewal, and lets a declined card be replaced', async () => {
+        const { subscriptionId } = await activate();
+        await db.exec(`update public.cherry_settings set payment_provider = 'toss'; update public.cherry_subscriptions set current_period_end = now() + interval '1 day'`);
+        const renewal = await rpc<Record<string, unknown>>('cherry_begin_renewal($1)', [USER]);
+        expect(renewal).toMatchObject({ outcome: 'ready', provider: 'toss', amountKrw: 9900 });
+        await rpc('cherry_record_payment($1,$2,$3,$4,$5,$6,now(),null)', ['toss:1', 'toss', renewal.orderRef, 'tpay_1', null, 9900]);
+        expect((await one<{ payment_provider: string }>('select payment_provider from public.cherry_subscriptions where id = $1', [subscriptionId])).payment_provider).toBe('toss');
+        expect(await rpc('cherry_begin_renewal($1)', [USER])).toEqual({ outcome: 'ready', provider: 'toss', amountKrw: 0 });
+        await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '1 minute'`);
+        const charge = await one<{ id: string }>('select * from public.cherry_claim_billing(5)');
+        await rpc('cherry_fail_payment($1,$2)', [charge.id, 'EXPIRED_CARD']);
+        expect(await rpc('cherry_begin_renewal($1)', [USER])).toMatchObject({ outcome: 'ready', provider: 'toss', amountKrw: 9900 });
+        await db.exec('update public.cherry_subscriptions set billing_next_attempt_at = now()');
+        expect(await one('select * from public.cherry_claim_billing(5)')).toMatchObject({ status: 'processing' });
     });
 
     it('lapses an unrenewed pass, then ends it after the grace period', async () => {

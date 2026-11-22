@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import { openTossBilling } from './toss-billing';
 
 async function post(url: string, body: unknown): Promise<{ status: number; data: Record<string, unknown> }> {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' });
@@ -39,7 +40,7 @@ export function CherryActionButton({ action, label, quiet = true }: { action: Ac
     </div>;
 }
 
-export function CherryRenewButton({ label }: { label: string }) {
+export function CherryRenewButton({ label, quiet = false }: { label: string; quiet?: boolean }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     async function run() {
@@ -49,14 +50,17 @@ export function CherryRenewButton({ label }: { label: string }) {
         try {
             const { data } = await post('/api/cherry/renew', {});
             if (data.outcome === 'ready' && typeof data.redirectUrl === 'string') return window.location.assign(data.redirectUrl);
-            setError('지금은 연장 결제를 시작할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
+            if (data.outcome === 'ready' && data.provider === 'toss') {
+                return await openTossBilling({ clientKey: String(data.clientKey), customerKey: String(data.customerKey), email: null, checkId: null });
+            }
+            setError(data.outcome === 'payment_in_progress' ? '결제를 확인하고 있어요. 잠시 뒤 다시 확인해 주세요.' : '지금은 결제를 시작할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
         } catch {
             setError('인터넷 연결을 확인하고 다시 시도해 주세요.');
         }
         setBusy(false);
     }
     return <div style={{ width: '100%' }}>
-        <button type="button" className="ch-button" disabled={busy} onClick={run}>{busy ? '결제창을 여는 중' : label}</button>
+        <button type="button" className={quiet ? 'ch-text-button' : 'ch-button'} disabled={busy} onClick={run}>{busy ? '결제창을 여는 중' : label}</button>
         {error ? <p className="ch-error" role="alert" style={{ marginTop: 10 }}>{error}</p> : null}
     </div>;
 }

@@ -9,7 +9,6 @@ import { loadCherrySettings, type CherryEventImage, type CherryEventRow, type Ch
 
 /** Details are read for the first accounts of a day; the rest stay a plain list. */
 export const CHERRY_REPORT_DETAIL_LIMIT = 10;
-const MAX_ATTEMPTS = 4;
 /** A notice must not wait on details for longer than this. */
 const MAX_WAIT_MS = 90 * 60_000;
 const AI_CONCURRENCY = 2;
@@ -84,7 +83,7 @@ export function claimCherryReports(limit: number, leaseSeconds: number): Promise
 export async function processCherryReport(report: CherryReportRow, deadlineAtMs: number): Promise<{ outcome: 'done' | 'deferred'; code?: string }> {
     const events = await loadEvents(report.id);
     const pending = events.filter(event => event.detail_status === 'pending').slice(0, CHERRY_REPORT_DETAIL_LIMIT);
-    const overdue = Date.now() - Date.parse(report.created_at) > MAX_WAIT_MS || report.attempts >= MAX_ATTEMPTS;
+    const overdue = Date.now() - Date.parse(report.created_at) > MAX_WAIT_MS;
     try {
         if (pending.length > 0) {
             const settings = await loadCherrySettings();

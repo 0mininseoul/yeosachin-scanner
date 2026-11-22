@@ -20,6 +20,7 @@ import {
 const HARD_LIST_LIMIT = 2000;
 const RELATIONSHIP_BUILD = '0.0.71';
 const CONFIRM_UNAVAILABLE_SECONDS = 3600;
+const HIDDEN_ALLOWANCE = 3;
 /** A direction is read again after this long even when its public count never moved. */
 const RELIST_DAYS = 14;
 
@@ -89,7 +90,9 @@ async function collectList(input: {
         await deps.reject(result.ledgerId, 'schema');
         throw new CherryDeferError('list_schema', { delaySeconds: 1800 });
     }
-    if (coverageRatio(accounts.length, declared) < requiredCoverage(result.attempt)) {
+    // In a short list a single hidden account is a large share, so a few are accepted once a retry agrees.
+    const fewHidden = result.attempt >= 2 && accounts.length > 0 && listGap(accounts.length, declared) <= HIDDEN_ALLOWANCE;
+    if (!fewHidden && coverageRatio(accounts.length, declared) < requiredCoverage(result.attempt)) {
         await deps.reject(result.ledgerId, 'incomplete');
         throw new CherryDeferError('list_incomplete', { delaySeconds: 600, terminal: result.attempt >= 4 });
     }

@@ -45,6 +45,8 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
     const periodEnd = subscription.current_period_end;
     const renewable = subscription.payment_provider === 'groble' && periodEnd !== null && !subscription.cancel_at_period_end
         && ['active', 'past_due'].includes(subscription.status) && Date.parse(periodEnd) - nowMs < 7 * 86_400_000;
+    const automatic = subscription.payment_provider === 'toss' && !subscription.cancel_at_period_end;
+    const declined = automatic && subscription.status === 'past_due';
     const latePreparing = subscription.status === 'preparing' && subscription.first_paid_at !== null
         && nowMs - Date.parse(subscription.first_paid_at) > 86_400_000;
 
@@ -58,7 +60,9 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
             {subscription.status === 'preparing' ? '지금의 맞팔 목록을 저장하고 있어요. 보통 10분 안에 끝나요.' : null}
             {subscription.status === 'active' ? `맞팔 ${won.format(overview.mutuals)}명을 기준으로 매일 확인하고 있어요.` : null}
             {subscription.status === 'paused' ? '확인을 잠시 멈췄어요.' : null}
-            {subscription.status === 'past_due' ? '이용권이 끝나 확인을 멈췄어요. 4일 안에 연장하면 기존 목록에서 이어서 확인해요.' : null}
+            {subscription.status === 'past_due' ? declined
+                ? '결제가 승인되지 않아 확인을 멈췄어요. 4일 안에 카드를 바꾸면 이어서 확인해요.'
+                : '이용권이 끝나 확인을 멈췄어요. 4일 안에 연장하면 기존 목록에서 이어서 확인해요.' : null}
             {ended ? ENDED[subscription.status_reason ?? ''] ?? '이용이 끝났어요.' : null}
         </p>
         {refund ? <p className="ch-notice"><strong>{refund.status === 'done' ? '환불을 마쳤어요' : '환불을 진행하고 있어요'}</strong>{won.format(refund.amountKrw)}원을 결제한 수단으로 돌려드려요.</p> : null}
@@ -67,6 +71,7 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
             <CherryActionButton action="cancel_preparing" label="전액 환불받기" />
         </div> : null}
         {renewable ? <div className="ch-actions"><CherryRenewButton label={`월 ${won.format(subscription.price_krw)}원으로 연장하기`} /></div> : null}
+        {declined ? <div className="ch-actions"><CherryRenewButton label="카드 바꾸고 다시 결제하기" /></div> : null}
         {ended ? <div className="ch-form"><Link href="/cherry/start" className="ch-button">계정 다시 등록하기</Link></div> : null}
 
         <section className="ch-section">
@@ -102,6 +107,7 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
                 {subscription.recipient_phone ? <div><dt>알림 받는 번호</dt><dd>{subscription.recipient_phone.replace(/^\+82(\d{2})(\d{4})(\d{4})$/, '0$1-****-$3')}</dd></div> : null}
             </dl>
             <div className="ch-actions">
+                {automatic && subscription.status === 'active' ? <CherryRenewButton label="결제 카드 바꾸기" quiet /> : null}
                 {subscription.status === 'active' && !subscription.cancel_at_period_end ? <CherryActionButton action="cancel" label="해지하기" /> : null}
                 {subscription.status === 'active' && subscription.cancel_at_period_end && subscription.payment_provider !== 'grant'
                     ? <CherryActionButton action="resume" label="해지 취소하기" /> : null}

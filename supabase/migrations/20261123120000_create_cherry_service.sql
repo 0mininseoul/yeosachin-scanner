@@ -223,6 +223,8 @@ create table public.cherry_checks (
     status text not null default 'queued' check (status in ('queued', 'running', 'succeeded', 'failed')),
     run_after timestamptz not null default now(),
     attempts smallint not null default 0,
+    -- Raised by an operator retry so it never reuses the data of earlier paid runs.
+    series smallint not null default 0,
     lease_token uuid,
     lease_expires_at timestamptz,
     error_code text,
@@ -589,7 +591,7 @@ begin
 end;
 $$;
 
--- A renewal is a new order for the same subscription (Groble passes have no auto-renewal).
+-- A renewal order for a one-time pass, a switch to automatic billing, or a retry with another card.
 create function public.cherry_begin_renewal(p_user uuid) returns jsonb
 language plpgsql security definer set search_path = '' as $$
 declare
@@ -598,33 +600,45 @@ declare
     v_subscription public.cherry_subscriptions%rowtype;
     v_offer public.cherry_offers%rowtype;
     v_payment public.cherry_payments%rowtype;
+    v_provider text;
+    v_product text;
     v_cycle integer;
 begin
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('cherry-checkout:' || p_user::text, 0));
     select * into strict v_settings from public.cherry_settings;
-    if not v_settings.sales_enabled and not (p_user = any (v_settings.tester_user_ids)) then
-        return pg_catalog.jsonb_build_object('outcome', 'sales_closed');
-    end if;
     select * into v_subscription from public.cherry_subscriptions
     where user_id = p_user and status in ('active', 'past_due') for update;
-    if not found or v_subscription.payment_provider <> 'groble'
-        or v_subscription.current_period_end > v_now + interval '7 days' then
+    if not found or v_subscription.payment_provider = 'grant' then
         return pg_catalog.jsonb_build_object('outcome', 'not_renewable');
     end if;
+    if exists (select 1 from public.cherry_payments where subscription_id = v_subscription.id and status = 'processing') then
+        return pg_catalog.jsonb_build_object('outcome', 'payment_in_progress');
+    end if;
+    -- An active automatic plan only replaces its card; nothing is charged now.
+    if v_subscription.payment_provider = 'toss' and v_subscription.status = 'active' then
+        return pg_catalog.jsonb_build_object('outcome', 'ready', 'provider', 'toss', 'amountKrw', 0);
+    end if;
+    if v_subscription.current_period_end > v_now + interval '7 days' then
+        return pg_catalog.jsonb_build_object('outcome', 'not_renewable');
+    end if;
+    v_provider := case when v_subscription.payment_provider = 'toss' then 'toss' else v_settings.payment_provider end;
     if v_subscription.price_lock_until > v_now then
         select * into v_offer from public.cherry_offers where code = v_subscription.offer_code;
     else
         select * into v_offer from public.cherry_offers where code = 'standard';
     end if;
-    if v_offer.groble_product_id is null or v_offer.groble_payment_address is null then
-        return pg_catalog.jsonb_build_object('outcome', 'payment_unavailable');
+    if v_provider = 'groble' then
+        if v_offer.groble_product_id is null or v_offer.groble_payment_address is null then
+            return pg_catalog.jsonb_build_object('outcome', 'payment_unavailable');
+        end if;
+        v_product := v_offer.groble_product_id;
     end if;
     select coalesce(pg_catalog.max(payment.cycle), 0) + 1 into v_cycle
     from public.cherry_payments as payment where payment.subscription_id = v_subscription.id
         and payment.status in ('paid', 'partially_refunded', 'refunded', 'review');
     select * into v_payment from public.cherry_payments
     where subscription_id = v_subscription.id and cycle = v_cycle and status = 'ready' for update;
-    if found and (v_payment.groble_product_id is distinct from v_offer.groble_product_id
+    if found and (v_payment.provider <> v_provider or v_payment.groble_product_id is distinct from v_product
         or v_payment.amount_krw <> v_offer.price_krw) then
         update public.cherry_payments set status = 'canceled', failure_code = 'superseded', updated_at = v_now
         where id = v_payment.id;
@@ -633,14 +647,14 @@ begin
     if v_payment.id is null then
         insert into public.cherry_payments (subscription_id, user_id, cycle, provider, order_ref, offer_code,
             amount_krw, groble_product_id)
-        values (v_subscription.id, p_user, v_cycle, 'groble',
+        values (v_subscription.id, p_user, v_cycle, v_provider,
             'chr_' || pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', ''), v_offer.code,
-            v_offer.price_krw, v_offer.groble_product_id)
+            v_offer.price_krw, v_product)
         returning * into v_payment;
     end if;
     return pg_catalog.jsonb_build_object('outcome', 'ready', 'subscriptionId', v_subscription.id,
         'paymentId', v_payment.id, 'orderRef', v_payment.order_ref, 'amountKrw', v_payment.amount_krw,
-        'provider', 'groble', 'grobleAddress', v_offer.groble_payment_address);
+        'provider', v_provider, 'grobleAddress', v_offer.groble_payment_address);
 end;
 $$;
 
@@ -708,7 +722,7 @@ begin
     where id = v_payment.id;
     update public.cherry_subscriptions set status = case when status = 'past_due' then 'active' else status end,
         status_reason = null, current_period_start = v_start, current_period_end = v_start + interval '1 month',
-        offer_code = v_payment.offer_code, price_krw = v_payment.amount_krw,
+        offer_code = v_payment.offer_code, price_krw = v_payment.amount_krw, payment_provider = v_payment.provider,
         cancel_at_period_end = false, billing_next_attempt_at = null,
         -- A lapsed pass missed days, so the next check reads both lists again.
         followers_listed_at = case when status = 'past_due' then null else followers_listed_at end,
@@ -827,7 +841,8 @@ declare
     v_now timestamptz := pg_catalog.clock_timestamp();
     v_subscription public.cherry_subscriptions%rowtype;
     v_payment public.cherry_payments%rowtype;
-    v_amount integer := 0;
+    v_amount integer;
+    v_total integer := 0;
     v_total_seconds numeric;
 begin
     select * into strict v_subscription from public.cherry_subscriptions where id = p_subscription for update;
@@ -842,26 +857,28 @@ begin
     update public.cherry_payments set status = 'canceled', failure_code = 'subscription_ended', updated_at = v_now
     where subscription_id = p_subscription and status = 'ready';
 
-    select * into v_payment from public.cherry_payments
-    where subscription_id = p_subscription and status in ('paid', 'partially_refunded') and paid_at is not null
-    order by cycle desc limit 1 for update;
-    if found then
+    -- An early renewal leaves two paid periods open, so each one is refunded for its own unused part.
+    for v_payment in
+        select * from public.cherry_payments where subscription_id = p_subscription
+            and status in ('paid', 'partially_refunded') and paid_at is not null order by cycle for update
+    loop
+        v_amount := 0;
         if v_subscription.baseline_at is null then
             v_amount := v_payment.amount_krw - v_payment.refunded_krw;
-        elsif v_subscription.current_period_end > v_now then
-            v_total_seconds := extract(epoch from v_subscription.current_period_end - v_subscription.current_period_start);
+        elsif v_payment.period_end > v_now then
+            v_total_seconds := extract(epoch from v_payment.period_end - v_payment.period_start);
             v_amount := least(v_payment.amount_krw - v_payment.refunded_krw, pg_catalog.floor(v_payment.amount_krw
-                * extract(epoch from v_subscription.current_period_end
-                    - greatest(v_now, v_subscription.current_period_start)) / v_total_seconds)::integer);
+                * extract(epoch from v_payment.period_end - greatest(v_now, v_payment.period_start)) / v_total_seconds)::integer);
         end if;
         if v_amount > 0 then
             insert into public.cherry_refunds (payment_id, subscription_id, amount_krw, reason, status)
             values (v_payment.id, p_subscription, v_amount, p_reason,
                 case when v_payment.provider = 'groble' then 'manual_required' else 'pending' end)
             on conflict do nothing;
+            v_total := v_total + v_amount;
         end if;
-    end if;
-    return pg_catalog.jsonb_build_object('ended', true, 'refundKrw', v_amount);
+    end loop;
+    return pg_catalog.jsonb_build_object('ended', true, 'refundKrw', v_total);
 end;
 $$;
 
@@ -1021,6 +1038,11 @@ begin
     update public.cherry_checks set status = 'failed', error_code = coalesce(error_code, 'attempts_exhausted'),
         finished_at = pg_catalog.now(), lease_token = null, lease_expires_at = null
     where attempts >= 12 and (status = 'queued' or (status = 'running' and lease_expires_at < pg_catalog.now()));
+    -- Yesterday's check says nothing new; a change it missed is found by today's.
+    update public.cherry_checks set status = 'failed', error_code = coalesce(error_code, 'expired'),
+        finished_at = pg_catalog.now(), lease_token = null, lease_expires_at = null
+    where kind = 'daily' and created_at < pg_catalog.now() - interval '20 hours'
+        and (status = 'queued' or (status = 'running' and lease_expires_at < pg_catalog.now()));
     for v_candidate in
         select candidate.id from public.cherry_checks as candidate
         join public.cherry_subscriptions as subscription on subscription.id = candidate.subscription_id
@@ -1066,6 +1088,37 @@ begin
         where id = v_subscription;
     end if;
     return true;
+end;
+$$;
+
+-- An operator looks again now: the unfinished first list, or today's check.
+create function public.cherry_operator_requeue(p_subscription uuid) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+    v_subscription public.cherry_subscriptions%rowtype;
+    v_check uuid;
+begin
+    select * into v_subscription from public.cherry_subscriptions where id = p_subscription for update;
+    if not found or v_subscription.status not in ('preparing', 'active') then
+        return pg_catalog.jsonb_build_object('outcome', 'not_allowed');
+    end if;
+    if exists (select 1 from public.cherry_checks where subscription_id = p_subscription
+        and status = 'running' and lease_expires_at >= pg_catalog.now()) then
+        return pg_catalog.jsonb_build_object('outcome', 'running');
+    end if;
+    if v_subscription.status = 'preparing' then
+        select id into v_check from public.cherry_checks where subscription_id = p_subscription and kind = 'baseline'
+        order by created_at desc limit 1;
+    else
+        insert into public.cherry_checks (subscription_id, kind, check_date)
+        values (p_subscription, 'daily', public.cherry_kst_date(pg_catalog.now())) on conflict do nothing;
+        select id into v_check from public.cherry_checks where subscription_id = p_subscription and kind = 'daily'
+            and check_date = public.cherry_kst_date(pg_catalog.now());
+    end if;
+    update public.cherry_checks set status = 'queued', run_after = pg_catalog.now(), attempts = 0, series = series + 1,
+        error_code = null, finished_at = null, lease_token = null, lease_expires_at = null, created_at = pg_catalog.now()
+    where id = v_check;
+    return pg_catalog.jsonb_build_object('outcome', case when v_check is null then 'not_allowed' else 'queued' end);
 end;
 $$;
 
@@ -1289,7 +1342,9 @@ begin
     where id = p_report and status = 'building' and lease_token = p_lease returning * into v_report;
     if not found then return false; end if;
     perform public.cherry_queue_notification(v_report.subscription_id, 'new_mutual', 'report:' || v_report.id::text,
-        pg_catalog.jsonb_build_object('count', v_report.new_count), v_report.id);
+        pg_catalog.jsonb_build_object('count', v_report.new_count, 'confirmed', (select pg_catalog.count(*)
+            from public.cherry_mutual_events as event where event.report_id = v_report.id and event.certainty = 'confirmed')),
+        v_report.id);
     return true;
 end;
 $$;
@@ -1332,9 +1387,12 @@ begin
             and subscription.current_period_end > pg_catalog.now() - interval '4 days'
             and (subscription.billing_next_attempt_at is null or subscription.billing_next_attempt_at <= pg_catalog.now())
             and not exists (select 1 from public.cherry_payments as open_payment
-                where open_payment.subscription_id = subscription.id and open_payment.status in ('ready', 'processing'))
+                where open_payment.subscription_id = subscription.id and open_payment.status = 'processing')
         order by subscription.current_period_end for update skip locked limit p_limit
     loop
+        -- An abandoned card change must not block the scheduled charge.
+        update public.cherry_payments set status = 'canceled', failure_code = 'superseded', updated_at = pg_catalog.now()
+        where subscription_id = v_row.id and status = 'ready';
         select coalesce(pg_catalog.max(payment.cycle), 0) + 1 into v_cycle from public.cherry_payments as payment
         where payment.subscription_id = v_row.id and payment.status in ('paid', 'partially_refunded', 'refunded', 'review');
         if v_row.price_lock_until > v_row.current_period_end then
