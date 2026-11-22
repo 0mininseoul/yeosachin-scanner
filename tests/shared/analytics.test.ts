@@ -785,6 +785,7 @@ describe('Amplitude analytics adapter', () => {
         '/betatest',
         '/earlybird',
         '/mypage',
+        '/cherry',
         '/progress/demo-request-id',
         '/result/demo-request-id',
         '/share/demo-token',
@@ -832,6 +833,7 @@ describe('Amplitude analytics adapter', () => {
             'http://custom-alias.example/betatest?email=person@example.com#details',
             'http://custom-alias.example/earlybird?email=person@example.com#details',
             'https://production-alias.example/mypage?email=person@example.com#details',
+            'https://production-alias.example/cherry?email=person@example.com#details',
             `https://production-alias.example/progress/${requestId}?email=person@example.com#details`,
             `http://preview-alias.example/result/${requestId}?source=private#summary`,
             `https://custom-alias.example/share/${shareToken}?phone=01012345678#open`,
@@ -839,7 +841,7 @@ describe('Amplitude analytics adapter', () => {
         const sanitized = rawUrls.map((url) => getPageUrl(url, rules));
 
         expect(sanitized).toEqual([
-            '/', '/privacy', '/terms', '/login', '/analyze', '/betatest', '/betatest', '/earlybird', '/mypage',
+            '/', '/privacy', '/terms', '/login', '/analyze', '/betatest', '/betatest', '/earlybird', '/mypage', '/cherry',
             '/progress/:requestId', '/result/:requestId', '/share/:token',
         ]);
         expect(JSON.stringify(sanitized)).not.toContain(requestId);

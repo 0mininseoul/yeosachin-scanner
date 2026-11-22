@@ -390,6 +390,7 @@ if (!prefersReducedMotion && window.matchMedia('(hover: hover)').matches) {
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (submit.disabled) return;
+  window.dispatchEvent(new Event('cherry-reservation-submitted'));
 
   error.hidden = true;
   const fields = new FormData(form);
@@ -422,6 +423,7 @@ form.addEventListener('submit', async (event) => {
     }
 
     reservationDone = true;
+    window.dispatchEvent(new Event('cherry-reservation-completed'));
     updateDock();
     pass.classList.add('is-registered');
     for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;

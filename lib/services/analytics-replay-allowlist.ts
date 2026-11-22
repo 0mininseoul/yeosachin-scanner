@@ -5,7 +5,7 @@
  */
 export const REPLAY_ALLOWED_STATIC_PATHS = Object.freeze([
     '/', '/privacy', '/terms', '/login', '/analyze', '/betatest',
-    '/earlybird', '/mypage',
+    '/earlybird', '/mypage', '/cherry',
 ] as const);
 
 export const REPLAY_ALLOWED_DYNAMIC_PATHS = Object.freeze([

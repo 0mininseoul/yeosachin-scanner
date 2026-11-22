@@ -28,6 +28,7 @@
     <script src="/namchin/intro.js"></script>
     <link rel="stylesheet" href="/namchin/landing.css">
     <script type="module" src="/namchin/landing.js"></script>
+    <script defer src="/namchin/analytics.js"></script>
   </head>
   <body id="top">
     <div class="intro" data-intro aria-hidden="true">
@@ -254,7 +255,7 @@
             <div class="pass-face">
               <div class="pass-top"><img src="/namchin/logo.png" width="36" height="36" alt=""><b>체리</b><span>프라이빗 오픈 초대장</span></div>
               <p class="pass-number"><span>선착순</span><b>300</b><span>명</span></p>
-              <dl class="pass-owner">
+              <dl class="pass-owner" data-amp-mask>
                 <div><dt>받는 사람</dt><dd data-pass-email>등록 전</dd></div>
                 <div><dt>연락처</dt><dd data-pass-phone>등록 전</dd></div>
               </dl>
@@ -266,7 +267,7 @@
         </div>
 
         <div class="form-card">
-          <form id="interest-form" method="post" action="/api/namchin/reservations" aria-labelledby="form-title">
+          <form id="interest-form" method="post" action="/api/namchin/reservations" aria-labelledby="form-title" data-amp-mask>
             <div class="form-head">
               <h3 id="form-title">사전 예약</h3>
               <span class="form-required">모든 항목 필수</span>

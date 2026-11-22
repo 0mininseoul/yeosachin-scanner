@@ -7,7 +7,9 @@
   },
   "scripts": {
     "postinstall": "patch-package --error-on-fail",
+    "predev": "node scripts/build-cherry-analytics.mjs --dev",
     "dev": "next dev",
+    "prebuild": "node scripts/build-cherry-analytics.mjs",
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
@@ -78,6 +80,7 @@
     "@types/pg": "8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "jsdom": "^26.1.0",
