@@ -9,7 +9,14 @@ if (!isDevUiTelemetryDisabled()) inject();
 // This preserves a signed-in visitor's existing analytics identity.
 void (async () => {
     try {
-        const { data: { user } } = await createClient().auth.getUser();
+        const auth = createClient().auth;
+        let { data: { user }, error } = await auth.getUser();
+        if (error && error.name !== 'AuthSessionMissingError') {
+            ({ data: { user }, error } = await auth.getUser());
+        }
+        // A transient auth failure must not be mistaken for logout: that would reset
+        // an existing signed-in analytics identity and its device.
+        if (error && error.name !== 'AuthSessionMissingError') return;
         if (await initAmplitude(user?.id ?? null)) markAnalyticsIdentityReady();
     } catch {
         // Tracking is best-effort and must not affect reservations.
