@@ -6,7 +6,6 @@ import {
   DirectionalLight,
   ExtrudeGeometry,
   Group,
-  Line,
   LineBasicMaterial,
   LineSegments,
   Mesh,
@@ -20,8 +19,6 @@ import {
   RingGeometry,
   Scene,
   Shape,
-  Sprite,
-  SpriteMaterial,
   Vector3,
 } from 'three';
 import {
@@ -50,18 +47,38 @@ import {
   wrapText,
 } from './shared.js';
 
-// The clock has two parts: the count (0 to LEAD), then the story, whose times below start at 0.
+// One cycle per account: the count (0 to LEAD), then the story, whose times below start at 0.
 const LEAD = 1.4;
-const DURATION = LEAD + 8.35;
+const CYCLE = LEAD + 9.6;
 const COUNT = { in: [0, 0.4], roll: [0.6, 0.86], plus: [0.8, 1.06], out: [LEAD - 0.24, LEAD + 0.06], fly: [LEAD - 0.06, LEAD + 0.6] };
-const HANDLE = '@sample_seoa';
-const SUMMARY = '캠퍼스, 카페, 전시회 사진이 많아요. 벚꽃과 한강 나들이 셀카를 자주 올리는 계정이에요.';
-const KEYWORDS = ['캠퍼스', '카페', '전시회', '벚꽃과', '한강'];
-const STATS = [['팔로워', 1284], ['팔로잉', 612], ['게시물', 94]];
-const TAGS = ['캠퍼스', '카페', '한강', '전시회', '도서관', '벚꽃'];
-const FACTS = [['성별', '여성'], ['확인 시각', '오전 9:07']];
+// No Instagram profile was visible for these handles when checked signed out (2026-11-22). Check any new handle too.
+// The film plays one report after another; his following count goes up by one each time.
+// Tags and summary say who she is (what she likes, what she posts, what she is like), never a specific job.
+const PEOPLE = [
+  {
+    from: 230,
+    handle: '@seoa.ondo_',
+    name: '박서아',
+    photos: 'seoa',
+    stats: [['팔로워', 320], ['팔로잉', 306], ['게시물', 6]],
+    tags: ['대학생', '감성 일상', '잘 웃는 타입', '전시 덕후', '과제 기록', '셀카 장인'],
+    summary: '전시와 그림을 좋아하는 대학생이에요. 과제 기록과 전시 후기를 자주 올리고, 잘 웃는 차분한 느낌의 여성분이에요.',
+    keywords: ['대학생', '과제', '전시', '차분한', '느낌'],
+  },
+  {
+    from: 231,
+    handle: '@rina.wknd_',
+    name: '리나',
+    photos: 'rina',
+    stats: [['팔로워', 1312], ['팔로잉', 503], ['게시물', 20]],
+    tags: ['운동 인증', '인싸 타입', '여행 좋아함', '데일리룩', '럭셔리 취향', '밤 약속 많음'],
+    summary: '운동과 여행을 좋아하는 직장인이에요. 운동 인증과 데일리룩을 자주 올리고, 밤 약속이 많은 활발한 인싸예요.',
+    keywords: ['직장인', '운동', '데일리룩', '활발한', '인싸'],
+  },
+];
+const DURATION = CYCLE * PEOPLE.length;
 
-// Act 1 is shared; the report timeline differs per layout (see `timeline`).
+// Act 1 (the phone), then the cut to the report.
 const T = {
   phoneIn: [0, 0.6],
   push: [0.5, 0.95],
@@ -70,43 +87,35 @@ const T = {
   expand: [1.76, 2.16],
   dive: [1.72, 2.2],
   cut: 2.18,
-  fadeOut: [7.85, 8.3],
+  fadeOut: [9.1, 9.55],
 };
 
-/* `stack` (square stages) keeps every panel on screen; `beats` (wide, short
-   stages such as phones) gives each step the full right-hand side in turn. */
-const timeline = {
-  stack: {
-    header: [2.25, 2.7],
-    profile: [2.28, 2.95],
-    scan: [2.7, 3.95],
-    stats: [2.62, 3.2], count: [2.85, 3.95],
-    thumbs: 3.55, tags: 4.1,
-    links: [4.75, 5.35],
-    summary: [4.95, 5.5], typing: [5.25, 6.55],
-    out: {},
-  },
-  beats: {
-    header: [2.25, 2.7],
-    profile: [2.28, 2.95],
-    scan: [2.7, 3.9],
-    stats: [2.55, 3.05], count: [2.7, 3.55],
-    thumbs: 3.85, tags: 4.35,
-    links: null,
-    summary: [5.5, 5.95], typing: [5.7, 6.95],
-    out: { stats: [3.7, 4.05], posts: [5.3, 5.65] },
-  },
+// Act 2, always in two parts: the profile with its numbers, one scroll, then the photos with the summary.
+const R = {
+  header: [2.25, 2.7],
+  profile: [2.28, 2.95],
+  scan: [2.6, 3.7],
+  stats: [2.7, 3.3],
+  count: [2.95, 4.0],
+  open: [3.45, 3.95],
+  scroll: [4.8, 5.65],
+  thumbs: 5.0,
+  tags: 5.6,
+  summary: [6.45, 6.95],
+  typing: [6.7, 7.9],
 };
 
-const media = {
-  him: ['/namchin/assets/hero/maru-profile.jpg'],
-  her: ['/namchin/assets/hero/seoa-profile.jpg'],
-  posts: [1, 2, 3, 4, 5, 6].map((index) => [`/namchin/assets/hero/seoa-post-${index}.jpg`]),
-};
+const HIM = '/namchin/assets/hero/maru-profile.jpg';
+
+async function loadPhotos({ photos }) {
+  const names = ['profile', ...[1, 2, 3, 4, 5, 6].map((index) => `post-${index}`)];
+  const [her, ...posts] = await Promise.all(names.map((name) => loadPicture(`/namchin/assets/hero/${photos}-${name}.jpg`)));
+  return { her, posts };
+}
 
 /* ---------- 2D drawing: following count ---------- */
 
-function drawCount(ctx, w, h, { roll = 0, him = null } = {}) {
+function drawCount(ctx, w, h, { roll = 0, from = 230, him = null } = {}) {
   const size = h * 0.8;
   const top = (h - size) / 2;
   drawPicture(ctx, him, top, top, size, size, size / 2, '#3a1820');
@@ -125,8 +134,9 @@ function drawCount(ctx, w, h, { roll = 0, him = null } = {}) {
   const baseline = h * 0.9;
   ctx.font = `700 ${digit}px ${DIGITS}`;
   ctx.fillStyle = '#fff4f1';
-  ctx.fillText('23', x, baseline);
-  const last = x + ctx.measureText('23').width;
+  const before = String(from);
+  ctx.fillText(before.slice(0, -1), x, baseline);
+  const last = x + ctx.measureText(before.slice(0, -1)).width;
   const slot = ctx.measureText('0').width;
   ctx.save();
   ctx.beginPath();
@@ -134,9 +144,9 @@ function drawCount(ctx, w, h, { roll = 0, him = null } = {}) {
   ctx.clip();
   ctx.textAlign = 'center';
   const shift = easeOutBack(clamp(roll)) * digit;
-  ctx.fillText('0', last + slot / 2, baseline - shift);
+  ctx.fillText(before.slice(-1), last + slot / 2, baseline - shift);
   ctx.fillStyle = '#ff6b80';
-  ctx.fillText('1', last + slot / 2, baseline + digit - shift);
+  ctx.fillText(String(from + 1).slice(-1), last + slot / 2, baseline + digit - shift);
   ctx.restore();
 }
 
@@ -245,23 +255,7 @@ function drawFinger(ctx, w, h) {
 
 /* ---------- 2D drawing: report ---------- */
 
-function panelBase(ctx, w, h, unit, frame = 1) {
-  const r = unit * 0.16;
-  ctx.fillStyle = 'rgba(38, 18, 23, 0.94)';
-  roundRect(ctx, 1, 1, w - 2, h - 2, r);
-  ctx.fill();
-  const sheen = ctx.createLinearGradient(0, 0, w, h);
-  sheen.addColorStop(0, 'rgba(255, 255, 255, 0.09)');
-  sheen.addColorStop(0.5, 'rgba(255, 255, 255, 0)');
-  ctx.fillStyle = sheen;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 214, 219, 0.18)';
-  ctx.lineWidth = Math.max(1, unit * 0.012);
-  ctx.stroke();
-  corners(ctx, w, h, unit * 0.2, unit * 0.022, frame);
-}
-
-// Bracket marks that travel in to the panel corners.
+// Bracket marks that travel in to the corners.
 function corners(ctx, w, h, length, weight, progress) {
   if (progress <= 0) return;
   const inset = weight + (1 - progress) * length;
@@ -283,35 +277,12 @@ function label(ctx, text, x, y, size, color = '#ff9dab') {
   ctx.fillText(text, x, y);
 }
 
-function drawHeader(ctx, w, h, { steps = [0, 0, 0], p = 1 } = {}) {
-  ctx.globalAlpha = clamp(p);
-  fitFont(ctx, 800, h * 0.5, '맞팔 리포트', w * 0.4);
-  ctx.fillStyle = '#fff0ee';
-  ctx.fillText('맞팔 리포트', h * 0.04, h * 0.64);
-  const names = ['프로필', '게시물', '요약'];
-  const gap = h * 0.22;
-  const segment = Math.min(h * 1.5, (w * 0.54 - gap * 2) / 3);
-  const start = w - segment * 3 - gap * 2;
-  names.forEach((name, index) => {
-    const x = start + index * (segment + gap);
-    const value = clamp(steps[index]);
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
-    roundRect(ctx, x, h * 0.74, segment, h * 0.1, h * 0.05);
-    ctx.fill();
-    if (value > 0) {
-      ctx.fillStyle = COLORS.cherry;
-      roundRect(ctx, x, h * 0.74, segment * value, h * 0.1, h * 0.05);
-      ctx.fill();
-    }
-    ctx.fillStyle = value >= 1 ? '#fff0ee' : 'rgba(255, 230, 228, 0.55)';
-    fitFont(ctx, value >= 1 ? 800 : 400, h * 0.36, name, segment);
-    ctx.fillText(name, x, h * 0.56);
-  });
-  ctx.globalAlpha = 1;
+function drawHeader(ctx, w, h) {
+  label(ctx, '새 맞팔 리포트', 0, h * 0.72, h * 0.7, '#fff0ee');
 }
 
-function drawProfile(ctx, w, h, { zoom = 1, scan = 0, frame = 1, her = null, unit = 100, type = 1 } = {}) {
-  const r = unit * 0.16;
+function drawProfile(ctx, w, h, { zoom = 1, scan = 0, frame = 1, her = null, handle = '', name = '', unit = 100 } = {}) {
+  const r = unit * 0.22;
   ctx.save();
   roundRect(ctx, 1, 1, w - 2, h - 2, r);
   ctx.clip();
@@ -320,11 +291,6 @@ function drawProfile(ctx, w, h, { zoom = 1, scan = 0, frame = 1, her = null, uni
 
   const active = scan > 0 && scan < 1;
   if (active) {
-    ctx.strokeStyle = 'rgba(255, 190, 198, 0.22)';
-    ctx.lineWidth = 1;
-    const cell = w / 7;
-    for (let x = cell; x < w; x += cell) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
-    for (let y = cell; y < h; y += cell) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
     const ly = h * (0.5 - 0.5 * Math.cos(scan * Math.PI * 3));
     const band = ctx.createLinearGradient(0, ly - h * 0.16, 0, ly + h * 0.02);
     band.addColorStop(0, 'rgba(224, 52, 75, 0)');
@@ -352,14 +318,14 @@ function drawProfile(ctx, w, h, { zoom = 1, scan = 0, frame = 1, her = null, uni
     ctx.restore();
   }
 
-  ctx.strokeStyle = 'rgba(255, 214, 219, 0.22)';
+  ctx.strokeStyle = 'rgba(255, 214, 219, 0.16)';
   ctx.lineWidth = Math.max(1, unit * 0.012);
   roundRect(ctx, 1, 1, w - 2, h - 2, r);
   ctx.stroke();
 
   const done = scan >= 1;
   const chip = done ? '분석 완료' : `분석 ${String(Math.round(scan * 100)).padStart(2, '0')}%`;
-  const cs = unit * 0.15 * type;
+  const cs = unit * 0.15;
   ctx.font = `800 ${cs}px ${FONT}`;
   const cw = ctx.measureText(chip).width + cs * 1.5;
   ctx.fillStyle = done ? COLORS.cherry : 'rgba(18, 8, 10, 0.74)';
@@ -370,55 +336,69 @@ function drawProfile(ctx, w, h, { zoom = 1, scan = 0, frame = 1, her = null, uni
 
   ctx.globalAlpha = clamp(frame);
   ctx.fillStyle = '#fff4f1';
-  fitFont(ctx, 800, unit * 0.25 * type, HANDLE, w - unit * 0.28);
-  ctx.fillText(HANDLE, unit * 0.14, h - unit * (0.12 + 0.24 * type));
+  fitFont(ctx, 800, unit * 0.25, handle, w - unit * 0.28);
+  ctx.fillText(handle, unit * 0.14, h - unit * 0.36);
   ctx.fillStyle = 'rgba(255, 232, 230, 0.78)';
-  fitFont(ctx, 400, unit * 0.155 * type, '새로 맞팔한 공개 계정', w - unit * 0.28);
-  ctx.fillText('새로 맞팔한 공개 계정', unit * 0.14, h - unit * 0.14);
+  fitFont(ctx, 400, unit * 0.175, name, w - unit * 0.28);
+  ctx.fillText(name, unit * 0.14, h - unit * 0.14);
   ctx.globalAlpha = 1;
 }
 
-function drawStats(ctx, w, h, { count = 0, frame = 1, unit = 100 } = {}) {
-  panelBase(ctx, w, h, unit, frame);
-  const pad = unit * 0.2;
-  const title = h > unit * 3 ? unit * 0.24 : Math.min(unit * 0.17, h * 0.085);
-  label(ctx, '계정 규모', pad, pad + title, title);
-  const top = pad + title * 1.9;
-  const row = (h - top - pad * 0.5) / 3;
-  STATS.forEach(([name, value], index) => {
+// No box: the numbers stand in open space, label above value.
+function drawStats(ctx, w, h, { count = 0, unit = 100, stats = [] } = {}) {
+  const row = h / 3;
+  stats.forEach(([name, value], index) => {
     const local = easeOutCubic(clamp(count * 1.5 - index * 0.22));
-    const y = top + row * index;
+    const y = row * index;
     ctx.globalAlpha = clamp(count * 5 - index * 0.8);
-    ctx.fillStyle = 'rgba(255, 232, 230, 0.7)';
-    ctx.font = `400 ${Math.min(row * 0.28, unit * 0.27)}px ${FONT}`;
-    ctx.textAlign = 'left';
-    ctx.fillText(name, pad, y + row * 0.56);
-    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255, 232, 230, 0.66)';
+    ctx.font = `400 ${unit * 0.2}px ${FONT}`;
+    ctx.fillText(name, 0, y + row * 0.3);
     ctx.fillStyle = index === 0 ? '#ff7d90' : '#fff4f1';
-    ctx.font = `700 ${Math.min(row * 0.62, unit * 0.66)}px ${DIGITS}`;
-    ctx.fillText(Math.round(value * local).toLocaleString('ko-KR'), w - pad, y + row * 0.62);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
-    ctx.fillRect(pad, y + row * 0.8, w - pad * 2, Math.max(2, unit * 0.018));
-    ctx.fillStyle = index === 0 ? COLORS.cherry : 'rgba(255, 214, 219, 0.55)';
-    // Log scale, so the three magnitudes stay comparable.
-    ctx.fillRect(pad, y + row * 0.8, (w - pad * 2) * (Math.log10(value) / 4) * local, Math.max(2, unit * 0.018));
+    // Sized for the final number, so counting up never changes the scale.
+    let size = Math.min(row * 0.56, unit * (index === 0 ? 0.7 : 0.54));
+    ctx.font = `700 ${size}px ${DIGITS}`;
+    const width = ctx.measureText(value.toLocaleString('ko-KR')).width;
+    if (width > w) size *= w / width;
+    ctx.font = `700 ${size}px ${DIGITS}`;
+    ctx.fillText(Math.round(value * local).toLocaleString('ko-KR'), 0, y + row * 0.3 + size * 0.92);
     ctx.globalAlpha = 1;
   });
 }
 
-function drawThumb(ctx, w, h, { picture = null, lock = 0 } = {}) {
-  drawPicture(ctx, picture, 0, 0, w, h, w * 0.11, '#3a1820');
-  ctx.strokeStyle = 'rgba(255, 232, 230, 0.28)';
-  ctx.lineWidth = Math.max(1, w * 0.012);
-  roundRect(ctx, 1, 1, w - 2, h - 2, w * 0.11);
+// The way to her profile: a button with a plain camera mark.
+function drawOpen(ctx, w, h) {
+  ctx.fillStyle = '#fff4f1';
+  roundRect(ctx, 0, 0, w, h, h * 0.36);
+  ctx.fill();
+  const text = '인스타그램에서 보기';
+  const size = h * 0.38;
+  const mark = h * 0.42;
+  fitFont(ctx, 800, size, text, w - mark - h);
+  const total = mark + h * 0.2 + ctx.measureText(text).width;
+  const x = (w - total) / 2;
+  const y = (h - mark) / 2;
+  ctx.strokeStyle = COLORS.ink;
+  ctx.lineWidth = mark * 0.1;
+  roundRect(ctx, x, y, mark, mark, mark * 0.3);
   ctx.stroke();
-  if (lock > 0) corners(ctx, w, h, w * 0.2, w * 0.035, lock);
+  ctx.beginPath();
+  ctx.arc(x + mark / 2, y + mark / 2, mark * 0.24, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = COLORS.ink;
+  ctx.beginPath();
+  ctx.arc(x + mark * 0.76, y + mark * 0.24, mark * 0.07, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillText(text, x + mark + h * 0.2, h / 2 + size * 0.36);
+}
+
+function drawThumb(ctx, w, h, { picture = null } = {}) {
+  drawPicture(ctx, picture, 0, 0, w, h, w * 0.13, '#3a1820');
 }
 
 function drawTag(ctx, w, h, { text = '' } = {}) {
-  ctx.font = `800 ${h * 0.54}px ${FONT}`;
-  const width = Math.min(w, ctx.measureText(text).width + h * 0.9);
+  fitFont(ctx, 800, h * 0.54, text, w - h * 0.9);
+  const width = ctx.measureText(text).width + h * 0.9;
   ctx.fillStyle = COLORS.cherry;
   roundRect(ctx, (w - width) / 2, 0, width, h, h / 2);
   ctx.fill();
@@ -428,36 +408,34 @@ function drawTag(ctx, w, h, { text = '' } = {}) {
   ctx.textAlign = 'left';
 }
 
-function drawSummary(ctx, w, h, { typed = 0, frame = 1, unit = 100 } = {}) {
-  panelBase(ctx, w, h, unit, frame);
-  const pad = unit * 0.2;
-  const tall = h > w * 0.6;
-  const title = tall ? unit * 0.24 : unit * 0.16;
-  label(ctx, 'AI 요약', pad, pad + title, title);
-
-  let size = tall ? Math.min(unit * 0.31, w * 0.088) : unit * 0.185;
+function drawSummary(ctx, w, h, { typed = 0, unit = 100, text = 0.23, summary = '', keywords = [] } = {}) {
+  let size = unit * text;
   let lines = [];
-  // Narrow stages wrap to more lines, so shrink until the last one stays inside the panel.
+  // Shrink until the last line stays inside the plane.
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    ctx.font = `400 ${size}px ${FONT}`;
-    lines = wrapText(ctx, SUMMARY, w - pad * 2);
-    if (tall || pad + title * 1.25 + size * 1.5 * lines.length <= h - pad * 0.5) break;
+    ctx.font = `800 ${size}px ${FONT}`;
+    lines = wrapText(ctx, summary, w);
+    if (size * (1.5 + 1.52 * lines.length) <= h) break;
     size *= 0.94;
   }
-  const leading = size * 1.5;
-  let left = Math.round(SUMMARY.length * clamp(typed));
-  let y = pad + title * 1.25 + leading;
+  const leading = size * 1.52;
+  label(ctx, 'AI 요약', 0, size * 0.85, size * 0.82);
+  let left = Math.round(summary.length * clamp(typed));
+  let y = size * 0.95 + leading;
   let caret = null;
   for (const line of lines) {
-    let x = pad;
+    let x = 0;
     for (const word of line.split(' ')) {
       if (left <= 0) break;
+      // A keyword lights up without its particle: 대학생 in 대학생이에요.
+      const stem = keywords.find((keyword) => word.startsWith(keyword)) ?? '';
       const part = word.slice(0, left);
-      const hit = KEYWORDS.includes(word) || KEYWORDS.includes(word.replace(',', ''));
-      ctx.font = `${hit ? 800 : 400} ${size}px ${FONT}`;
-      ctx.fillStyle = hit ? '#ff9dab' : '#fff0ee';
-      ctx.fillText(part, x, y);
-      x += ctx.measureText(part).width;
+      for (const [text, hit] of [[part.slice(0, stem.length), true], [part.slice(stem.length), false]]) {
+        ctx.font = `${hit ? 800 : 400} ${size}px ${FONT}`;
+        ctx.fillStyle = hit ? '#ff9dab' : '#fff0ee';
+        ctx.fillText(text, x, y);
+        x += ctx.measureText(text).width;
+      }
       caret = [x, y];
       left -= word.length + 1;
       ctx.font = `400 ${size}px ${FONT}`;
@@ -469,22 +447,6 @@ function drawSummary(ctx, w, h, { typed = 0, frame = 1, unit = 100 } = {}) {
     ctx.fillStyle = COLORS.cherry;
     ctx.fillRect(caret[0] + size * 0.12, caret[1] - size * 0.82, Math.max(2, size * 0.1), size);
   }
-
-  if (!tall) return;
-  // Wide, short stages have room under the text for the two facts.
-  const shown = clamp(typed * 3 - 2);
-  ctx.globalAlpha = shown;
-  FACTS.forEach(([name, value], index) => {
-    const x = pad + index * ((w - pad * 2) / 2);
-    const fy = h - pad * 0.7;
-    ctx.fillStyle = 'rgba(255, 232, 230, 0.62)';
-    ctx.font = `400 ${unit * 0.21}px ${FONT}`;
-    ctx.fillText(name, x, fy - unit * 0.34);
-    ctx.fillStyle = '#fff4f1';
-    ctx.font = `800 ${unit * 0.29}px ${FONT}`;
-    ctx.fillText(value, x, fy);
-  });
-  ctx.globalAlpha = 1;
 }
 
 /* ---------- 3D helpers ---------- */
@@ -525,7 +487,7 @@ const REPORT_DISTANCE = VIEW / (2 * TAN);
 /** `startWhen` (optional) holds the first frame until the page is ready for the film. */
 export async function mountHero(container, { startWhen } = {}) {
   await waitForFonts();
-  const [him, her, ...posts] = await Promise.all([media.him, media.her, ...media.posts].map((entry) => loadPicture(...entry)));
+  const [him, first] = await Promise.all([loadPicture(HIM), loadPhotos(PEOPLE[0])]);
 
   const renderer = createRenderer(container);
   const scene = new Scene();
@@ -605,6 +567,7 @@ export async function mountHero(container, { startWhen } = {}) {
   camera.add(flash);
 
   let layout = null;
+  let layouts = [];
 
   function panel(group, { x, y, z = 0, width, height, draw, unitPixels, extra = {} }) {
     const item = plane({ width, height, pixels: Math.min(1500, Math.round(Math.max(width, height) * unitPixels)), draw: (ctx, w, h, state) => draw(ctx, w, h, { unit: w / width, ...extra, ...state }) });
@@ -615,75 +578,62 @@ export async function mountHero(container, { startWhen } = {}) {
     return item;
   }
 
-  function buildLayout(mode, viewWidth, unitPixels) {
+  function buildLayout(viewWidth, unitPixels, person, { her, posts }) {
     const group = new Group();
     act2.add(group);
-    const built = { mode, group, width: viewWidth };
+    const inner = Math.min(viewWidth - 0.76, 4.3);
+    const left = -inner / 2;
+
+    const gap = 0.36;
+    const side = inner * 0.57;
+    const rowHeight = Math.min(2.6, side * 1.3);
+    const openH = 0.46;
+    const headerY = (0.36 + 0.28 + rowHeight + 0.26 + openH) / 2 - 0.18;
+    const rowY = headerY - 0.18 - 0.28 - rowHeight / 2;
+    const statsW = inner - side - gap;
+    const header = panel(group, { x: left + 1, y: headerY, width: 2, height: 0.36, draw: drawHeader, unitPixels });
+    const profile = panel(group, { x: left + side / 2, y: rowY, width: side, height: rowHeight, draw: drawProfile, unitPixels, extra: { her, handle: person.handle, name: person.name } });
+    const stats = panel(group, { x: inner / 2 - statsW / 2, y: rowY - 0.04, width: statsW, height: rowHeight * 0.9, draw: drawStats, unitPixels, extra: { stats: person.stats } });
+
+    const open = panel(group, { x: 0, y: rowY - rowHeight / 2 - 0.26 - openH / 2, width: inner, height: openH, draw: drawOpen, unitPixels });
+
+    // The second part hangs `travel` below the first.
+    const gutter = 0.2;
+    const size = Math.min((inner - gutter * 2) / 3, 1.0);
+    const pitch = size + 0.32;
+    const span0 = size * 3 + gutter * 2;
+    const summaryH = 1.55;
+    const block = size + pitch + 0.54 + summaryH;
+    const travel = 4.7;
+    const top = block / 2 - travel;
+    const tagH = size * 0.25;
     const thumbs = [];
     const tags = [];
-    const addThumb = (index, x, y, size) => {
-      thumbs.push(panel(group, { x, y, width: size, height: size, draw: drawThumb, unitPixels, extra: { picture: posts[index] } }));
-      tags.push(panel(group, { x, y: y - size * 0.4, z: 0.16, width: size * 1.1, height: size * (mode === 'beats' ? 0.29 : 0.25), draw: drawTag, unitPixels: unitPixels * 1.4, extra: { text: TAGS[index] } }));
-    };
-
-    if (mode === 'stack') {
-      const m = 0.26;
-      const inner = viewWidth - m * 2;
-      const gap = 0.16;
-      built.header = panel(group, { x: 0, y: 2.1, width: inner, height: 0.4, draw: drawHeader, unitPixels });
-      const side = Math.min(1.98, inner * 0.47);
-      const rowY = 2.1 - 0.2 - 0.1 - 1.98 / 2;
-      built.profile = panel(group, { x: -inner / 2 + side / 2, y: rowY, width: side, height: 1.98, draw: drawProfile, unitPixels, extra: { her } });
-      const statsW = inner - side - gap;
-      built.stats = panel(group, { x: inner / 2 - statsW / 2, y: rowY, width: statsW, height: 1.98, draw: drawStats, unitPixels });
-      const size = (inner - 0.09 * 5) / 6;
-      const thumbY = rowY - 0.99 - gap - size / 2;
-      for (let i = 0; i < 6; i += 1) addThumb(i, -inner / 2 + size / 2 + i * (size + 0.09), thumbY, size);
-      const summaryH = 1.12;
-      const summaryY = thumbY - size / 2 - gap - 0.1 - summaryH / 2;
-      built.summary = panel(group, { x: 0, y: summaryY, width: inner, height: summaryH, draw: drawSummary, unitPixels });
-      built.links = thumbs.map((thumb) => {
-        const geometry = new BufferGeometry();
-        geometry.setAttribute('position', new BufferAttribute(new Float32Array(6), 3));
-        const line = new Line(geometry, new LineBasicMaterial({ color: '#ff7d90', transparent: true, opacity: 0.8, blending: AdditiveBlending, depthWrite: false }));
-        const dot = new Sprite(new SpriteMaterial({ map: glow, transparent: true, depthWrite: false, blending: AdditiveBlending }));
-        dot.scale.setScalar(0.2);
-        group.add(line, dot);
-        return { line, dot, from: [thumb.home.x, thumb.home.y - size * 0.54], to: [thumb.home.x * 0.8, summaryY + summaryH / 2] };
-      });
-    } else {
-      const m = 0.3;
-      const gap = 0.26;
-      const side = Math.min(2.55, (viewWidth - m * 2) * 0.37);
-      built.profile = panel(group, { x: -viewWidth / 2 + m + side / 2, y: 0, width: side, height: 4.4, draw: drawProfile, unitPixels, extra: { her, type: 1.35 } });
-      const right = viewWidth - m * 2 - side - gap;
-      const rx = viewWidth / 2 - m - right / 2;
-      built.header = panel(group, { x: rx, y: 1.88, width: right, height: 0.64, draw: drawHeader, unitPixels });
-      const areaH = 3.6;
-      const areaY = -0.4;
-      built.stats = panel(group, { x: rx, y: areaY, width: right, height: areaH, draw: drawStats, unitPixels });
-      built.summary = panel(group, { x: rx, y: areaY, width: right, height: areaH, draw: drawSummary, unitPixels });
-      const size = Math.min((right - 0.24) / 3, (areaH - 0.16) / 2);
-      const rowGap = Math.min(0.16, areaH - size * 2);
-      for (let i = 0; i < 6; i += 1) {
-        addThumb(i, rx + ((i % 3) - 1) * (size + 0.12), areaY + (i < 3 ? 1 : -1) * (size + rowGap) / 2, size);
-      }
-      built.links = [];
-    }
-    built.thumbs = thumbs;
-    built.tags = tags;
-    return built;
+    posts.forEach((picture, index) => {
+      const x = -span0 / 2 + size / 2 + (index % 3) * (size + gutter);
+      const y = top - size / 2 - Math.floor(index / 3) * pitch;
+      thumbs.push(panel(group, { x, y, width: size, height: size, draw: drawThumb, unitPixels, extra: { picture } }));
+      tags.push(panel(group, { x, y: y - size * 0.5 + tagH * 0.18, z: 0.16, width: size * 1.1, height: tagH, draw: drawTag, unitPixels: unitPixels * 1.4, extra: { text: person.tags[index] } }));
+    });
+    const summary = panel(group, { x: 0, y: top - block + summaryH / 2, width: span0, height: summaryH, draw: drawSummary, unitPixels, extra: { summary: person.summary, keywords: person.keywords, text: Math.min(0.25, span0 * 0.068) } });
+    return { group, travel, header, profile, stats, open, thumbs, tags, summary };
   }
+
+  // The second report's photos arrive while the first one plays; until then the first one repeats.
+  const people = [{ person: PEOPLE[0], pictures: first }];
+  let frame = null;
+  const buildFor = ({ person, pictures }) => buildLayout(frame.viewWidth, frame.unitPixels, person, pictures);
 
   let aspect = 1;
   const onResize = (width, height) => {
     aspect = width / height;
-    const mode = aspect > 1.12 ? 'beats' : 'stack';
     const viewWidth = VIEW * aspect;
-    if (layout && layout.mode === mode && Math.abs(layout.width - viewWidth) < 0.02) return;
-    if (layout) disposeTree(layout.group);
+    if (frame && Math.abs(frame.viewWidth - viewWidth) < 0.02) return;
     const unitPixels = Math.max(150, (height / VIEW) * Math.min(window.devicePixelRatio || 1, 2) * 1.15);
-    layout = buildLayout(mode, viewWidth, unitPixels);
+    frame = { viewWidth, unitPixels };
+    for (const item of layouts) disposeTree(item.group);
+    layouts = people.map(buildFor);
+    layout = layouts[0];
     screenKey = '';
   };
 
@@ -697,24 +647,22 @@ export async function mountHero(container, { startWhen } = {}) {
     item.redraw(state);
   }
 
-  // Panels hinge open towards the viewer; `exit` sweeps them away to the left.
-  function place(item, p, exit = 0, hinge = 'x') {
-    const on = p > 0 && exit < 1;
-    item.mesh.visible = on;
-    if (!on) return false;
+  // Panels hinge open towards the viewer; `lit` dims what is not the point right now.
+  function place(item, p, hinge = 'x', lit = 1) {
+    item.mesh.visible = p > 0;
+    if (!item.mesh.visible) return false;
     const e = easeOutExpo(p);
     const { x, y, z } = item.home;
-    const x1 = easeInCubic(exit);
-    item.mesh.position.set(x - x1 * 1.6, y + (hinge === 'x' ? (1 - e) * -0.35 : 0), z + (1 - e) * 1.3 - x1 * 0.8);
-    item.mesh.rotation.set(hinge === 'x' ? (1 - e) * -1.25 : 0, (hinge === 'y' ? (1 - e) * 1.35 : 0) - x1 * 0.9, 0);
-    item.material.opacity = Math.min(clamp(p * 3), 1 - exit);
+    item.mesh.position.set(x, y + (hinge === 'x' ? (1 - e) * -0.35 : 0), z + (1 - e) * 1.3);
+    item.mesh.rotation.set(hinge === 'x' ? (1 - e) * -1.25 : 0, hinge === 'y' ? (1 - e) * 1.35 : 0, 0);
+    item.material.opacity = clamp(p * 3) * lit;
     return true;
   }
 
   let countKey = '';
   const pushPoint = new Vector3();
 
-  function renderCount(t) {
+  function renderCount(t, from) {
     const out = easeInCubic(span(t, ...COUNT.out));
     const fly = span(t, ...COUNT.fly);
     hud.visible = fly < 1;
@@ -735,9 +683,10 @@ export async function mountHero(container, { startWhen } = {}) {
     count.mesh.position.set(shake, out * hudHeight * 0.42, 0);
     count.material.opacity = Math.min(enter, 1 - out);
     const roll = span(t, ...COUNT.roll);
-    if (countKey !== roll.toFixed(3)) {
-      countKey = roll.toFixed(3);
-      count.redraw({ roll });
+    const id = `${from}|${roll.toFixed(3)}`;
+    if (countKey !== id) {
+      countKey = id;
+      count.redraw({ roll, from });
     }
 
     const ring = span(t, COUNT.roll[1] - 0.06, COUNT.roll[1] + 0.8);
@@ -810,80 +759,70 @@ export async function mountHero(container, { startWhen } = {}) {
   }
 
   function renderReport(t) {
-    const time = timeline[layout.mode];
-    const beats = layout.mode === 'beats';
     const local = t - T.cut;
-
     const settle = easeOutExpo(span(t, T.cut, T.cut + 0.9));
-    const kick = [time.stats[0], time.thumbs, time.summary[0]].reduce((sum, at) => sum + (t > at ? Math.exp(-(t - at) * 5) * 0.14 : 0), 0);
+    const kick = [R.stats[0], R.summary[0]].reduce((sum, at) => sum + (t > at ? Math.exp(-(t - at) * 5) * 0.1 : 0), 0);
     camera.fov = mix(48, 30, settle);
-    camera.position.set(Math.sin(local * 0.75) * 0.32, Math.cos(local * 0.6) * 0.14, REPORT_DISTANCE - kick);
+    camera.position.set(Math.sin(local * 0.75) * 0.24, Math.cos(local * 0.6) * 0.1, REPORT_DISTANCE - kick);
     camera.lookAt(0, 0, 0);
-    grid.position.y = (local * 0.12) % 1;
     dust.rotation.z = local * 0.02;
 
-    const scan = span(t, ...time.scan);
-    const typed = span(t, ...time.typing);
-    const headerP = span(t, ...time.header);
-    if (place(layout.header, headerP)) {
-      const tagged = span(t, time.thumbs, time.tags + 0.8);
-      redraw(layout.header, { steps: [scan, tagged, typed], p: headerP });
+    const moved = easeInOutCubic(span(t, ...R.scroll));
+    layout.group.position.y = moved * layout.travel;
+    grid.position.y = (local * 0.12 + moved * 1.2) % 1;
+
+    const firstPart = 1 - span(moved, 0.35, 0.8);
+    place(layout.header, span(t, ...R.header), 'x', firstPart);
+    if (place(layout.profile, span(t, ...R.profile), 'y', firstPart)) {
+      redraw(layout.profile, { zoom: span(t, R.profile[0], R.scan[1]), scan: span(t, ...R.scan), frame: span(t, R.profile[0] + 0.3, R.profile[1] + 0.2) });
     }
+    if (place(layout.stats, span(t, ...R.stats), 'x', firstPart)) redraw(layout.stats, { count: span(t, ...R.count) });
+    place(layout.open, span(t, ...R.open), 'x', firstPart);
 
-    const profileP = span(t, ...time.profile);
-    if (place(layout.profile, profileP, 0, 'y')) redraw(layout.profile, { zoom: span(t, time.profile[0], time.scan[1]), scan, frame: span(t, time.profile[0] + 0.3, time.profile[1] + 0.2) });
-    if (!beats) layout.profile.mesh.rotation.y += 0.05;
-
-    const statsOut = time.out.stats ? span(t, ...time.out.stats) : 0;
-    if (place(layout.stats, span(t, ...time.stats), statsOut)) {
-      redraw(layout.stats, { count: span(t, ...time.count), frame: span(t, time.stats[0] + 0.2, time.stats[1] + 0.15) });
-      if (!beats) layout.stats.mesh.rotation.y -= 0.05;
-    }
-
-    const postsOut = time.out.posts ? span(t, ...time.out.posts) : 0;
+    // The photos step back a little while the summary is being written.
+    const writing = Math.min(span(t, R.summary[0], R.summary[0] + 0.5), 1 - span(t, R.typing[1] + 0.1, R.typing[1] + 0.6));
+    const photoLit = mix(1, 0.42, easeInOutCubic(writing));
     layout.thumbs.forEach((thumb, index) => {
-      const start = time.thumbs + index * 0.085;
+      const start = R.thumbs + index * 0.085;
       const p = span(t, start, start + 0.6);
-      const exit = easeInCubic(clamp(postsOut * 1.3 - index * 0.06));
-      thumb.mesh.visible = p > 0 && exit < 1;
+      const tagStart = R.tags + index * 0.13;
+      // Each photo leans forward as its tag lands.
+      const lean = Math.sin(span(t, tagStart, tagStart + 0.5) * Math.PI) * 0.22;
+      thumb.mesh.visible = p > 0;
       if (thumb.mesh.visible) {
         const e = easeOutExpo(p);
         const spin = (index % 2 ? 1 : -1) * (1 - e);
-        thumb.mesh.position.set(mix(thumb.home.x * 2.2 + spin, thumb.home.x, e) - exit * 1.4, mix(thumb.home.y + 1.4, thumb.home.y, e), (1 - e) * 3 - exit);
-        thumb.mesh.rotation.set((1 - e) * 0.9, spin * 1.2 - exit * 0.9, spin * 0.5);
-        thumb.material.opacity = Math.min(clamp(p * 4), 1 - exit);
-        redraw(thumb, { lock: easeOutCubic(span(t, time.tags + index * 0.12 - 0.12, time.tags + index * 0.12 + 0.15)) });
+        thumb.mesh.position.set(mix(thumb.home.x * 2.2 + spin, thumb.home.x, e), mix(thumb.home.y + 1.4, thumb.home.y, e), (1 - e) * 3 + lean);
+        thumb.mesh.rotation.set((1 - e) * 0.9, spin * 1.2, spin * 0.5);
+        thumb.material.opacity = clamp(p * 4) * photoLit;
       }
       const tag = layout.tags[index];
-      const tp = span(t, time.tags + index * 0.12, time.tags + index * 0.12 + 0.3);
-      tag.mesh.visible = tp > 0 && exit < 1;
+      const tp = span(t, tagStart, tagStart + 0.3);
+      tag.mesh.visible = tp > 0;
       if (tag.mesh.visible) {
-        tag.mesh.position.set(tag.home.x - exit * 1.4, tag.home.y, tag.home.z + (1 - easeOutCubic(tp)) * 0.5);
+        tag.mesh.position.set(tag.home.x, tag.home.y, tag.home.z + lean + (1 - easeOutCubic(tp)) * 0.5);
         tag.mesh.scale.setScalar(Math.max(0.01, easeOutBack(tp)));
-        tag.material.opacity = Math.min(tp * 2, 1) * (1 - exit);
-        if (!tag.key) redraw(tag, {});
+        tag.material.opacity = Math.min(tp * 2, 1) * photoLit;
       }
     });
 
-    layout.links.forEach(({ line, dot, from, to }, index) => {
-      const p = easeInOutCubic(span(t, time.links[0] + index * 0.05, time.links[1] + index * 0.05));
-      line.visible = p > 0;
-      const positions = line.geometry.attributes.position.array;
-      positions.set([from[0], from[1], 0.1, mix(from[0], to[0], p), mix(from[1], to[1], p), 0.1]);
-      line.geometry.attributes.position.needsUpdate = true;
-      const run = (local * 0.9 + index * 0.17) % 1;
-      dot.visible = p >= 1;
-      dot.position.set(mix(from[0], to[0], run), mix(from[1], to[1], run), 0.14);
-      dot.material.opacity = Math.sin(run * Math.PI);
-    });
-
-    if (place(layout.summary, span(t, ...time.summary))) {
-      redraw(layout.summary, { typed, frame: span(t, time.summary[0] + 0.2, time.summary[1] + 0.2) });
-    }
+    if (place(layout.summary, span(t, ...R.summary))) redraw(layout.summary, { typed: span(t, ...R.typing) });
   }
 
-  function render(t) {
+  let cycle = -1;
+  let shown = 0;
+
+  function render(seconds) {
     if (!layout) return;
+    // Chosen once per cycle, so the count and the report stay with one account even if photos arrive midway.
+    const set = Math.floor(seconds / CYCLE) % PEOPLE.length;
+    if (set !== cycle) {
+      cycle = set;
+      shown = layouts[set] ? set : 0;
+    }
+    const t = seconds % CYCLE;
+    layout = layouts[shown];
+    for (const item of layouts) item.group.visible = item === layout;
     canvas.style.opacity = String(Math.min(span(t, 0, 0.25), 1 - span(t - LEAD, ...T.fadeOut)));
     const story = t - LEAD;
     const phoneVisible = story < T.cut;
@@ -892,12 +831,26 @@ export async function mountHero(container, { startWhen } = {}) {
     if (act1.visible) renderPhone(story);
     else if (!phoneVisible) renderReport(story);
     camera.updateMatrixWorld();
-    renderCount(t);
+    renderCount(t, PEOPLE[shown].from);
     flash.material.opacity = Math.min(span(story, T.cut - 0.16, T.cut), 1 - span(story, T.cut, T.cut + 0.45)) * 0.5;
     camera.updateProjectionMatrix();
     renderer.render(scene, camera);
   }
 
-  runLoop({ container, renderer, camera, duration: DURATION, stillAt: LEAD + 7.4, render, onResize, startWhen });
+  const loop = runLoop({ container, renderer, camera, duration: DURATION, stillAt: LEAD + 4.2, render, onResize, startWhen });
   container.classList.add('is-live');
+
+  for (const [index, person] of PEOPLE.entries()) {
+    // A still picture needs only the account it shows.
+    if (index === 0 || (loop.still !== null && Math.floor(loop.still / CYCLE) !== index)) continue;
+    const entry = { person, pictures: await loadPhotos(person) };
+    people.push(entry);
+    if (!frame) continue;
+    const added = buildFor(entry);
+    added.group.visible = false;
+    layouts.push(added);
+    loop.refresh(() => {
+      cycle = -1;
+    });
+  }
 }

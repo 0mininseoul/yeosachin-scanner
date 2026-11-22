@@ -2,15 +2,17 @@
 
 히어로 3D 영상(`design/namchin-demand/three/hero.js`)과 ‘알림 예시’ 구간의 알림·리포트(`public/namchin/index.html`)가 함께 쓰는 이미지다. 타깃(10대 후반~20대 초반)에 맞춰 여성 계정을 **청순한 대학생** 분위기로 만들었고, 2026-11-22에 아래 요청으로 받은 7장을 적용했다. 남자친구 사진(`maru-profile.jpg`)은 그대로 쓴다.
 
-| 파일 | 쓰이는 곳 | 사진 태그 |
+| 파일 | 쓰이는 곳 | 인물 태그 |
 | --- | --- | --- |
 | `seoa-profile.jpg` | 리포트 대표 사진 | – |
-| `seoa-post-1.jpg` | 최근 게시물 1 | 캠퍼스 |
-| `seoa-post-2.jpg` | 최근 게시물 2 | 카페 |
-| `seoa-post-3.jpg` | 최근 게시물 3 | 한강 |
-| `seoa-post-4.jpg` | 최근 게시물 4 | 전시회 |
-| `seoa-post-5.jpg` | 최근 게시물 5 | 도서관 |
-| `seoa-post-6.jpg` | 최근 게시물 6 | 벚꽃 |
+| `seoa-post-1.jpg` | 최근 게시물 1 (캠퍼스) | 대학생 |
+| `seoa-post-2.jpg` | 최근 게시물 2 (카페) | 감성 일상 |
+| `seoa-post-3.jpg` | 최근 게시물 3 (한강) | 잘 웃는 타입 |
+| `seoa-post-4.jpg` | 최근 게시물 4 (전시회) | 전시 덕후 |
+| `seoa-post-5.jpg` | 최근 게시물 5 (도서관) | 과제 기록 |
+| `seoa-post-6.jpg` | 최근 게시물 6 (벚꽃) | 셀카 장인 |
+
+`rina-*.jpg` 7장은 처음 만들었던 다른 여성 계정의 사진이다. 히어로 영상의 두 번째 리포트(팔로잉 231→232)에서 쓴다(태그: 운동 인증, 인싸 타입, 여행 좋아함, 데일리룩, 럭셔리 취향, 밤 약속 많음).
 
 ## Codex에 붙여넣을 요청
 
@@ -62,9 +64,10 @@ The same woman taking a close-up selfie under blooming cherry blossom trees, wea
 
 ## 사진을 다시 바꿀 때
 
-1. 사진이 바뀌면 `design/namchin-demand/three/hero.js`의 리포트 문구(`TAGS`, `SUMMARY`, `KEYWORDS`, `STATS`)와 `public/namchin/index.html`의 ‘맞팔 리포트’ 예시(사진 설명, 태그, AI 요약, 계정 규모)를 함께 바꾼다. 지금 문구는 다음과 같다.
-   - 태그: 캠퍼스, 카페, 한강, 전시회, 도서관, 벚꽃
-   - AI 요약: “캠퍼스, 카페, 전시회 사진이 많아요. 벚꽃과 한강 나들이 셀카를 자주 올리는 계정이에요.”
-   - 계정 규모: 팔로워 1,284 / 팔로잉 612 / 게시물 94
+1. 사진이 바뀌면 `design/namchin-demand/three/hero.js`의 리포트 문구(`PEOPLE`)와 `public/namchin/index.html`의 ‘알림 예시’ 리포트(사진 설명, 태그, AI 요약, 계정 규모)를 함께 바꾼다. 지금 문구는 다음과 같다.
+   - 태그와 요약은 찍은 장소가 아니라 **어떤 사람인지**(관심사, 올리는 글, 성향)를 쓴다. 구체적인 직업은 쓰지 않고 첫 번째는 대학생, 두 번째는 직장인으로만 둔다. 사진 위에는 아이디와 이름(박서아, 리나)만 넣는다.
+   - AI 요약: “전시와 그림을 좋아하는 대학생이에요. 과제 기록과 전시 후기를 자주 올리고, 잘 웃는 차분한 느낌의 여성분이에요.”
+   - 계정 규모: 첫 번째 팔로워 320 / 팔로잉 306 / 게시물 6, 두 번째 팔로워 1,312 / 팔로잉 503 / 게시물 20
+   - 계정 아이디: `seoa.ondo_`, `rina.wknd_`, 남자친구 `maru.onair_` (2026-11-22에 로그아웃 상태의 인스타그램·웹 검색과 앱에서 확인. 아이디를 바꿀 때는 다시 확인한다)
 2. `node design/namchin-demand/build-3d.mjs`로 `public/namchin/3d/`를 다시 만든다.
-3. `node design/namchin-demand/preview.mjs` 실행 후 [랜딩](http://127.0.0.1:4327/namchin)을 연다. 리포트는 `?scene-t=8.7`로 멈춰 확인한다.
+3. `node design/namchin-demand/preview.mjs` 실행 후 [랜딩](http://127.0.0.1:4327/namchin)을 연다. 리포트는 `?scene-t=5.6`과 `?scene-t=9.6`으로 멈춰 확인한다.
