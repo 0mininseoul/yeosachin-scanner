@@ -2216,7 +2216,7 @@ describe('provider admission migration PGlite contract', () => {
                 ADD selected_plan_id_snapshot text;
             ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
                 ADD access_mode text;
-            ALTER TABLE public.analysis_pipeline_jobs ADD recovery_not_before timestamptz,
+            ALTER TABLE public.analysis_pipeline_jobs ADD completed_at timestamptz, ADD recovery_not_before timestamptz,
                 ADD scheduler_not_before_at timestamptz;
             UPDATE public.analysis_provider_admission_leases SET state = 'released', released_at = clock_timestamp(),
                 release_reason = 'terminal' WHERE state <> 'released';

@@ -1049,8 +1049,20 @@ describePostgres('provider admission true-session concurrency', () => {
                     SELECT decision,recovery_only FROM public.claim_analysis_v2_scheduler_operation(
                         $1,$2,$3,$4,'genderTriage',gen_random_uuid(),330)
                 `, [ids[0], jobKey, closed[0].claimToken, 'gender-triage:' + String(slot).padStart(64, '0')]);
-                expect(result.rows).toEqual([{ decision, recovery_only: true }]);
+                expect(result.rows).toEqual([{ decision, recovery_only: decision === 'terminal_unavailable' }]);
             }
+            expect(await moneyAndAttempts()).toEqual(before);
+            await worker.query('ROLLBACK');
+
+            // Completed non-scheduler jobs cannot be claimed again, even if another job
+            // on the same request is still running. Do not infer this for pending or failed jobs.
+            await worker.query('BEGIN');
+            await worker.query("UPDATE public.analysis_requests SET status='processing',completed_at=NULL WHERE id=$1", [ids[0]]);
+            expect(await retire(ids[0])).toBe(0);
+            await worker.query("UPDATE public.analysis_pipeline_jobs SET status='completed',completed_at=now() WHERE request_id=$1", [ids[0]]);
+            expect(await retire(ids[0])).toBe(0);
+            await worker.query("UPDATE public.analysis_pipeline_jobs SET completed_at=now()-interval '1 day' WHERE request_id=$1", [ids[0]]);
+            expect(await retire(ids[0])).toBe(5);
             expect(await moneyAndAttempts()).toEqual(before);
             await worker.query('ROLLBACK');
 
