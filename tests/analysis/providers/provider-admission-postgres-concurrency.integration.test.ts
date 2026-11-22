@@ -35,6 +35,18 @@ const migration = readFileSync(new URL(
     import.meta.url,
 ), 'utf8');
 
+const schedulerLockMigration = readFileSync(new URL(
+    '../../../supabase/migrations/20261122140000_order_scheduler_gemini_slot_lock.sql', import.meta.url,
+), 'utf8');
+
+function schedulerBaselineFunction(name: string): string {
+    const baseline = readFileSync(new URL('../../../supabase/dev-ui/production-baseline.sql', import.meta.url), 'utf8');
+    const start = baseline.indexOf(`CREATE FUNCTION public.${name}(`);
+    const definition = start < 0 ? undefined : baseline.slice(start).match(/^[\s\S]*?\n\$_?\$;/)?.[0];
+    if (!definition) throw new Error(`Missing baseline function ${name}`);
+    return definition.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION');
+}
+
 // gitleaks:allow -- deterministic local integration fixtures, not user identities
 const jobKey = 'track:relationships:collect';
 const operationKey = `target-profile:${'a'.repeat(64)}`;
@@ -116,6 +128,7 @@ async function bootstrap(pool: Pool): Promise<void> {
             pipeline_version TEXT NOT NULL,
             status TEXT NOT NULL,
             preflight_id UUID,
+            policy_versions_snapshot JSONB,
             analysis_entry_channel TEXT NOT NULL DEFAULT 'standard'
         );
         CREATE TABLE public.analysis_v2_provider_execution_policies (
@@ -329,7 +342,14 @@ async function bootstrap(pool: Pool): Promise<void> {
             attempt INTEGER,
             lease_claim_token UUID,
             acquired_at TIMESTAMPTZ,
-            expires_at TIMESTAMPTZ
+            expires_at TIMESTAMPTZ,
+            quarantined_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ,
+            operation_key TEXT,
+            stage TEXT
+        );
+        CREATE TABLE public.analysis_v2_ai_attempts (
+            request_id UUID, job_key TEXT, operation_key TEXT, attempt SMALLINT, stage TEXT, status TEXT
         );
         -- Historical dispatch RPCs are supplied as inert fixtures so the additive migration can
         -- revoke and wrap their exact signatures without applying the complete production schema.
@@ -418,6 +438,13 @@ describePostgres('provider admission true-session concurrency', () => {
         if (!databaseUrl) throw new Error('ANALYSIS_PROVIDER_ADMISSION_POSTGRES_URL_MISSING');
         pool = new Pool({ connectionString: databaseUrl, max: 8 });
         await bootstrap(pool);
+        for (const name of [
+            'analysis_v2_valid_ai_operation_key', 'analysis_v2_ai_operation_matches_stage',
+            'acquire_analysis_v2_gemini_lease_v2', 'acquire_analysis_v2_scheduler_gemini_lease_v1',
+        ]) {
+            await pool.query(schedulerBaselineFunction(name));
+        }
+        await pool.query(schedulerLockMigration);
     }, 30_000);
 
     afterAll(async () => {
@@ -425,20 +452,7 @@ describePostgres('provider admission true-session concurrency', () => {
     });
 
     it('waits for the cutoff pool lock before taking any scheduler request lock', async () => {
-        const baseline = readFileSync(new URL(
-            '../../../supabase/dev-ui/production-baseline.sql', import.meta.url,
-        ), 'utf8');
-        for (const name of ['analysis_v2_valid_ai_operation_key', 'acquire_analysis_v2_scheduler_gemini_lease_v1']) {
-            const start = baseline.indexOf(`CREATE FUNCTION public.${name}(`);
-            const end = baseline.indexOf('\n$_$;', start);
-            if (start < 0 || end < 0) throw new Error(`Missing baseline function ${name}`);
-            await pool.query(baseline.slice(start, end + '\n$_$;'.length));
-        }
-        await pool.query(readFileSync(new URL(
-            '../../../supabase/migrations/20261122140000_order_scheduler_gemini_slot_lock.sql', import.meta.url,
-        ), 'utf8'));
         const fixture = input(42);
-        await pool.query('ALTER TABLE public.analysis_requests ADD COLUMN policy_versions_snapshot jsonb');
         await pool.query(`
             INSERT INTO public.analysis_requests(id, pipeline_version, status, policy_versions_snapshot)
             VALUES ($1, 'v2', 'processing', $2)
@@ -476,6 +490,96 @@ describePostgres('provider admission true-session concurrency', () => {
             await acquire;
             scheduler.release();
             holder.release();
+        }
+    });
+
+    it('defers a locked request while other requests can acquire a slot, then reuses the granted fence', async () => {
+        const locked = input(43), other = input(44);
+        const ids = [locked.requestId, other.requestId];
+        await pool.query(`
+            INSERT INTO public.analysis_requests(id, pipeline_version, status, policy_versions_snapshot)
+            SELECT id, 'v2', 'processing', $2::jsonb FROM unnest($1::uuid[]) AS id
+        `, [ids, { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.12', scheduler: 'ai-scheduler-v1' }]);
+        const holder = await pool.connect();
+        const worker = await pool.connect();
+        const acquire = async (fixture: AnalysisProviderAdmissionInput) => (await worker.query(`
+            SELECT outcome, slot, fence FROM public.acquire_analysis_v2_scheduler_gemini_lease_v1(
+                $1, $2, $3, 'genderTriage', 1, $4, 240
+            )
+        `, [fixture.requestId, jobKey, `gender-triage:${'a'.repeat(64)}`, fixture.claimToken])).rows[0];
+        try {
+            await worker.query("SET statement_timeout='2s'");
+            await holder.query('BEGIN');
+            await holder.query('SELECT id FROM public.analysis_requests WHERE id=$1 FOR UPDATE', [locked.requestId]);
+            expect(await acquire(locked)).toEqual({ outcome: 'capacity_pending', slot: null, fence: null });
+            expect(await acquire(other)).toMatchObject({ outcome: 'acquired' });
+            await holder.query('COMMIT');
+            const granted = await acquire(locked);
+            expect(granted).toMatchObject({ outcome: 'acquired' });
+            expect(await acquire(locked)).toEqual(granted);
+            await expect(acquire(input(45))).rejects.toThrow('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
+            await worker.query("UPDATE public.analysis_requests SET policy_versions_snapshot='{}' WHERE id=$1", [locked.requestId]);
+            await expect(acquire(locked)).rejects.toThrow('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
+        } finally {
+            await holder.query('ROLLBACK');
+            await worker.query('RESET statement_timeout');
+            await worker.query(`
+                WITH used AS (DELETE FROM public.analysis_v2_gemini_leases WHERE request_id=ANY($1::uuid[]) RETURNING slot)
+                INSERT INTO public.analysis_v2_gemini_leases(slot,state) SELECT slot, 'available' FROM used
+            `, [ids]);
+            await worker.query('DELETE FROM public.analysis_requests WHERE id=ANY($1::uuid[])', [ids]);
+            worker.release();
+            holder.release();
+        }
+    });
+
+    it('preserves both the lock order and Dev ceiling when their installers overlap', async () => {
+        const override = readFileSync(new URL(
+            '../../../supabase/dev-ui/live-standard-feature-concurrency.sql', import.meta.url,
+        ), 'utf8');
+        await pool.query(`
+            CREATE SCHEMA dev_ui;
+            CREATE TABLE dev_ui.runs(id int);
+            CREATE SCHEMA dev_live_budget;
+            CREATE TABLE dev_live_budget.standard_owner_policy(id int);
+            CREATE FUNCTION public.dev_live_owner_start_v4(uuid,text,uuid) RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
+        `);
+        // The guarded override may only run while the synthetic Dev database is idle.
+        const active = await pool.query("UPDATE public.analysis_requests SET status='completed' WHERE status='processing' RETURNING id");
+        const holder = await pool.connect();
+        const waiter = await pool.connect();
+        try {
+            const holderPid = (await holder.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            const waiterPid = (await waiter.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            for (const first of ['override', 'migration']) {
+                await pool.query(schedulerBaselineFunction('acquire_analysis_v2_scheduler_gemini_lease_v1'));
+                // Keep the first installer open until the second one is demonstrably waiting.
+                await holder.query(first === 'override' ? override.replace(/COMMIT;\s*$/, '') : `BEGIN; ${schedulerLockMigration}`);
+                const next = waiter.query(first === 'override' ? schedulerLockMigration : override)
+                    .then(() => 'installed', (error: Error) => error.message);
+                try {
+                    await expect.poll(async () => (await holder.query(
+                        'SELECT $1 = ANY(pg_blocking_pids($2)) AS waiting', [holderPid, waiterPid],
+                    )).rows[0].waiting).toBe(true);
+                } finally {
+                    await holder.query('COMMIT');
+                }
+                expect(await next).toBe('installed');
+                const { rows } = await pool.query(`
+                    SELECT prosrc FROM pg_proc WHERE oid =
+                    'public.acquire_analysis_v2_scheduler_gemini_lease_v1(uuid,text,text,text,integer,uuid,integer)'::regprocedure
+                `);
+                expect(rows[0].prosrc).toMatch(/PERFORM pg_catalog\.pg_advisory_xact_lock[\s\S]*SELECT request\.\* INTO v_request/);
+                expect(rows[0].prosrc).toContain("WHEN 'featureAnalysis' THEN 6");
+            }
+        } finally {
+            await holder.query('ROLLBACK');
+            await waiter.query('ROLLBACK');
+            holder.release();
+            waiter.release();
+            await pool.query("UPDATE public.analysis_requests SET status='processing' WHERE id=ANY($1::uuid[])", [
+                active.rows.map(row => row.id),
+            ]);
         }
     });
 

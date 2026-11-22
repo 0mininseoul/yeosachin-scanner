@@ -11,8 +11,8 @@ DECLARE
     before_sha constant text := '73faeec9547570fb756b76a2b06c9097807bcfe0c7b6e085516805767d6062d3';
     after_sha constant text := '985ebe6eac41b990874c816096a6066f0724c86703ac47b6ce9d8634b73ddaaa';
     -- The shared lock-order migration can run before or after this Dev override.
-    ordered_before constant text := 'c7bafbd3be7fd9e3d0efcc6833b5dc02d99964f5474908414fb90456f803620b';
-    ordered_after constant text := '2e412e42a8cecd13539276b418f3d0600e67d7656bad2ce306bc50421f2f4aff';
+    ordered_before constant text := 'e91deaea73d60cd98cd13878394434717e4be7fb5525c64f418a82914392bcce';
+    ordered_after constant text := '9379d945549a738a97877e05959323e7843faa3e60993052cca19ddf4d50801d';
     expected_sha text;
 BEGIN
     IF pg_catalog.to_regclass('dev_ui.runs') IS NULL
