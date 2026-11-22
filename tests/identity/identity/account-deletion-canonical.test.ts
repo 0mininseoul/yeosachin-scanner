@@ -20,6 +20,7 @@ describe('account deletion canonical maintenance mirror', () => {
         const mirrorMaintenanceJob = vi.fn(async () => ({ status: 'mirrored' }));
 
         await deleteAccountPermanently(accountId, {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject: vi.fn(async () => undefined),
             deleteAuthUser: vi.fn(async () => undefined),
@@ -43,6 +44,7 @@ describe('account deletion canonical maintenance mirror', () => {
         const deleteAuthUser = vi.fn(async () => undefined);
 
         await deleteAccountPermanently(accountId, {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject: vi.fn(async () => undefined),
             deleteAuthUser,

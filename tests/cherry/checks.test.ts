@@ -9,7 +9,7 @@ import type { CherryCheck, CherrySettings, CherrySubscription } from '@/lib/serv
 const CREATED = '2026-12-02T22:00:00.000Z';
 const NOW = Date.parse('2026-12-02T22:05:00.000Z');
 const check = (kind: CherryCheck['kind']): CherryCheck => ({
-    id: '33333333-3333-4333-8333-333333333333', subscription_id: 'sub', kind, check_date: '2026-12-03', attempts: 1,
+    id: '33333333-3333-4333-8333-333333333333', subscription_id: 'sub', kind, check_date: '2026-12-03', attempts: 1, series: 0,
     lease_token: 'lease', created_at: CREATED,
 });
 const profileRow = (overrides: Record<string, unknown> = {}) => ({
@@ -85,7 +85,7 @@ describe('cherry check', () => {
             profile: profileRow({ followersCount: 31 }), followers: [...ids(1, 30), 99], relations: stored(ids(1, 30), [99, ...ids(101, 29)]),
         });
         await processCherryCheck(check('daily'), NOW + 500_000, deps);
-        expect(runs.map(run => run.operation)).toEqual(['profile_b0', 'followers_b0']);
+        expect(runs.map(run => run.operation)).toEqual(['profile_s0_b0', 'followers_s0_b0']);
         expect(payload(calls).events).toMatchObject([{ id: '99', kind: 'new', certainty: 'confirmed' }]);
         expect(payload(calls)).toMatchObject({ followers: { count: 31, gap: 0 } });
         expect(payload(calls)).not.toHaveProperty('following');
@@ -95,14 +95,14 @@ describe('cherry check', () => {
         for (const followers_listed_at of [null, '2026-11-15T00:00:00.000Z']) {
             const { deps, runs } = setup({ followers: ids(1, 30), relations: stored(ids(1, 30), []), subscription: { followers_listed_at } });
             await processCherryCheck(check('daily'), NOW + 500_000, deps);
-            expect(runs.map(run => run.operation)).toEqual(['profile_b0', 'followers_b0']);
+            expect(runs.map(run => run.operation)).toEqual(['profile_s0_b0', 'followers_s0_b0']);
         }
     });
 
     it('leaves a change pending when the month is used up faster than it passes', async () => {
         const { deps, runs, calls } = setup({ profile: profileRow({ followersCount: 31 }), subscription: { items_used: 5990 } });
         expect(await processCherryCheck(check('daily'), NOW + 500_000, deps)).toEqual({ outcome: 'done' });
-        expect(runs.map(run => run.operation)).toEqual(['profile_b0']);
+        expect(runs.map(run => run.operation)).toEqual(['profile_s0_b0']);
         expect(payload(calls)).not.toHaveProperty('followers');
         expect(payload(calls).result).toMatchObject({ paced: ['followers'] });
     });
@@ -113,6 +113,12 @@ describe('cherry check', () => {
         expect(reject).toHaveBeenCalledWith('Followers', 'incomplete');
         expect(payload(calls)).toBeUndefined();
         expect(calls.at(-1)).toMatchObject({ name: 'cherry_defer_check', params: { p_terminal: false, p_error: 'list_incomplete' } });
+    });
+
+    it('uses fresh paid runs when an operator asks again', async () => {
+        const { deps, runs } = setup({});
+        await processCherryCheck({ ...check('daily'), series: 2 }, NOW + 500_000, deps);
+        expect(runs[0].operation).toBe('profile_s2_b0');
     });
 
     it('treats private, missing, replaced and unreadable targets differently', async () => {
@@ -151,7 +157,7 @@ describe('cherry provider rows', () => {
 
 describe('cherry paid runs', () => {
     const request: CherryRunRequest = {
-        ownerKey: 'check:33333333-3333-4333-8333-333333333333', operation: 'followers_full_b0', subscriptionId: null, slot: 'secondary',
+        ownerKey: 'check:33333333-3333-4333-8333-333333333333', operation: 'followers_full_s0_b0', subscriptionId: null, slot: 'secondary',
         actorId: 'actor', input: {}, items: 100, maxChargeUsd: 0.1, estimatedUsdPerItem: 0.0007, timeoutSecs: 900,
         deadlineAtMs: Date.now() + 300_000,
     };

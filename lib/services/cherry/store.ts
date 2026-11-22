@@ -67,6 +67,7 @@ export interface CherryCheck {
     kind: 'baseline' | 'daily';
     check_date: string;
     attempts: number;
+    series: number;
     lease_token: string;
     created_at: string;
 }

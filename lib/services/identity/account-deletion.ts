@@ -14,6 +14,7 @@ import {
     createResultImageR2Writer,
     loadResultImageR2Config,
 } from '@/lib/services/media/r2-result-image-store';
+import { purgeCherryAccount } from '@/lib/services/cherry/account';
 
 const beginResultSchema = z.object({
     state: z.enum(['requested', 'objects_purged', 'database_purged', 'completed']),
@@ -25,6 +26,7 @@ type Dependencies = {
     rpc?: (name: string, params: Record<string, unknown>) => RpcResult;
     deleteObject?: (objectKey: string) => Promise<void>;
     deleteAuthUser?: (accountId: string) => Promise<void>;
+    purgeCherry?: (accountId: string) => Promise<void>;
     dualWrite?: boolean;
     dualWriteMaintenance?: boolean;
     appendLifecycle?: (input: AccountLifecycleInput) => Promise<unknown>;
@@ -127,6 +129,13 @@ export async function deleteAccountPermanently(
             completed_at_begin: true,
         });
         return;
+    }
+
+    // Cherry data is removed first: its step is idempotent and keeps only payment records.
+    try {
+        await (dependencies.purgeCherry ?? purgeCherryAccount)(id);
+    } catch {
+        throw new AccountDeletionError('ACCOUNT_DELETION_DATABASE_PURGE_FAILED');
     }
 
     if (parsed.data.state !== 'database_purged') {

@@ -51,8 +51,8 @@ export function relationshipBuild(env: Record<string, string | undefined> = proc
 }
 
 /** A retry inside the window resumes the same paid run; a later one starts fresh data. */
-function bucket(base: string, createdAt: string, nowMs: number, hours: number): string {
-    return `${base}_b${Math.max(0, Math.floor((nowMs - Date.parse(createdAt)) / (hours * 3_600_000)))}`;
+function operation(base: string, check: CherryCheck, nowMs: number, hours: number): string {
+    return `${base}_s${check.series}_b${Math.max(0, Math.floor((nowMs - Date.parse(check.created_at)) / (hours * 3_600_000)))}`;
 }
 
 export async function collectCherryProfiles(input: {
@@ -76,7 +76,7 @@ async function collectList(input: {
     if (declared === 0) return [];
     const limit = Math.max(CHERRY_LIST_MIN, Math.min(HARD_LIST_LIMIT, declared + 10));
     const result = await deps.run({
-        ownerKey: `check:${input.check.id}`, operation: bucket(input.direction, input.check.created_at, deps.now(), 6),
+        ownerKey: `check:${input.check.id}`, operation: operation(input.direction, input.check, deps.now(), 6),
         subscriptionId: input.subscription.id, slot: 'secondary', actorId: APIFY_RELATIONSHIP_ACTOR_ID,
         actorBuild: relationshipBuild(), input: relationshipInput(input.profile.username, input.direction, limit), items: limit,
         maxChargeUsd: relationshipMaxCharge(limit), estimatedUsdPerItem: CHERRY_RELATIONSHIP_USD_PER_ITEM,
@@ -154,7 +154,7 @@ async function runCheck(check: CherryCheck, deadlineAtMs: number, deps: CherryCh
         throw new CherryDeferError('target_blocked', { delaySeconds: 0, terminal: true });
     }
     const profiles = await collectCherryProfiles({
-        ownerKey: `check:${check.id}`, operation: bucket('profile', check.created_at, deps.now(), 1),
+        ownerKey: `check:${check.id}`, operation: operation('profile', check, deps.now(), 1),
         subscriptionId: subscription.id, slot: 'secondary', usernames: [subscription.target_username], deadlineAtMs,
     }, deps.run);
     const observed = profiles.get(subscription.target_username.toLowerCase());

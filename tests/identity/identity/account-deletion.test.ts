@@ -14,6 +14,7 @@ describe('deleteAccountPermanently', () => {
         });
 
         await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => { calls.push('cherry'); },
             rpc,
             deleteObject: vi.fn(async (key: string) => { calls.push(`object:${key}`); }),
             deleteAuthUser: vi.fn(async () => { calls.push('auth'); }),
@@ -21,6 +22,7 @@ describe('deleteAccountPermanently', () => {
 
         expect(calls).toEqual([
             'rpc:begin_account_deletion_v1',
+            'cherry',
             'object:v1/a.webp',
             'object:v1/b.webp',
             'rpc:finalize_account_deletion_database_v1',
@@ -41,6 +43,7 @@ describe('deleteAccountPermanently', () => {
         const deleteAuthUser = vi.fn();
 
         await expect(deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject: vi.fn(async () => { throw new Error('secret provider body'); }),
             deleteAuthUser,
@@ -48,6 +51,16 @@ describe('deleteAccountPermanently', () => {
 
         expect(rpc).toHaveBeenCalledTimes(1);
         expect(deleteAuthUser).not.toHaveBeenCalled();
+    });
+
+    it('stops before any analyzer deletion when Cherry data cannot be removed', async () => {
+        const deleteObject = vi.fn();
+        await expect(deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => { throw new Error('unavailable'); },
+            rpc: vi.fn(async () => ({ data: { state: 'requested', objectKeys: ['v1/a.webp'] }, error: null })),
+            deleteObject,
+        })).rejects.toMatchObject({ code: 'ACCOUNT_DELETION_DATABASE_PURGE_FAILED' });
+        expect(deleteObject).not.toHaveBeenCalled();
     });
 
     it('resumes database-purged work without touching objects again', async () => {
@@ -61,6 +74,7 @@ describe('deleteAccountPermanently', () => {
         const deleteAuthUser = vi.fn();
 
         await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject,
             deleteAuthUser,
@@ -83,6 +97,7 @@ describe('deleteAccountPermanently', () => {
         });
 
         await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => undefined,
             rpc,
             dualWrite: true,
             appendLifecycle,
@@ -111,6 +126,7 @@ describe('deleteAccountPermanently', () => {
         }));
 
         await deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject: vi.fn(async () => undefined),
             deleteAuthUser: vi.fn(async () => undefined),
@@ -150,6 +166,7 @@ describe('deleteAccountPermanently', () => {
         });
 
         await expect(deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+            purgeCherry: async () => undefined,
             rpc,
             deleteObject,
             deleteAuthUser: vi.fn(),
@@ -166,6 +183,7 @@ describe('deleteAccountPermanently', () => {
         try {
             const rpc = vi.fn();
             const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                purgeCherry: async () => undefined,
                 rpc,
                 dualWrite: true,
                 appendLifecycle: vi.fn(() => new Promise<never>(() => undefined)),
@@ -189,6 +207,7 @@ describe('deleteAccountPermanently', () => {
             const rpc = vi.fn();
             const queueMaintenanceJob = vi.fn(() => new Promise<never>(() => undefined));
             const pending = deleteAccountPermanently('6d809496-1cb8-4e4f-a081-8efc14a7a64c', {
+                purgeCherry: async () => undefined,
                 rpc,
                 dualWrite: true,
                 appendLifecycle: vi.fn(async () => {

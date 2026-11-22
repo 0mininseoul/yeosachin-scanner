@@ -222,6 +222,14 @@ describe('cherry checks', () => {
         expect((await one<{ n: number }>('select (select count(*) from public.cherry_payments) + (select count(*) from public.cherry_refunds) as n')).n).toBe(0);
     });
 
+    it('lets an operator look again without reusing earlier runs', async () => {
+        const { subscriptionId } = await activate();
+        expect(await rpc('cherry_operator_requeue($1)', [subscriptionId])).toEqual({ outcome: 'queued' });
+        const check = await claimOne();
+        expect(check).toMatchObject({ kind: 'daily', series: 1 });
+        expect(await rpc('cherry_operator_requeue($1)', [subscriptionId])).toEqual({ outcome: 'running' });
+    });
+
     it('lapses an unrenewed pass, then ends it after the grace period', async () => {
         const { subscriptionId } = await activate();
         await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '1 minute'`);
