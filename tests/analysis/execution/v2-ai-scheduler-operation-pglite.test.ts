@@ -203,7 +203,7 @@ afterAll(async () => {
 });
 
 describe('analysis V2 live scheduler migration', () => {
-    it('changes only the Dev shared feature lease ceiling and rejects the production catalog', async () => {
+    it.each(['before', 'after'])('preserves the Dev override applied %s the slot lock migration', async (overrideOrder) => {
         const safeBaseline = await readFile(
             path.join(process.cwd(), 'supabase/dev-ui/production-baseline.sql'), 'utf8'
         );
@@ -213,6 +213,9 @@ describe('analysis V2 live scheduler migration', () => {
         expect(acquireDefinition).toBeDefined();
         const devOverride = await readFile(
             path.join(process.cwd(), 'supabase/dev-ui/live-standard-feature-concurrency.sql'), 'utf8'
+        );
+        const lockMigration = await readFile(
+            path.join(process.cwd(), 'supabase/migrations/20261122140000_order_scheduler_gemini_slot_lock.sql'), 'utf8'
         );
         const devDb = await PGlite.create();
         try {
@@ -244,6 +247,9 @@ describe('analysis V2 live scheduler migration', () => {
                 CREATE FUNCTION public.dev_live_owner_start_v4(uuid,text,uuid)
                 RETURNS boolean LANGUAGE sql AS $$ SELECT true $$;
             `);
+            if (overrideOrder === 'before') await devDb.exec(devOverride);
+            await devDb.exec(lockMigration);
+            await devDb.exec(lockMigration);
             await devDb.exec(devOverride);
             await devDb.exec(devOverride);
             await devDb.query(`

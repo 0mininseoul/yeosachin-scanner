@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { ownerGrantFixtureSql, seedOwnerGrantAccount } from './fixtures/owner-grant';
 import { PGlite } from '@electric-sql/pglite';
 import { MediaResolution, type GenerateContentParameters } from '@google/genai';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -156,25 +157,7 @@ async function installPreflightOverlays() {
 describe('Dev owner-start grant SQL', () => {
     beforeAll(async () => {
         db = await PGlite.create();
-        await db.exec(`
-            CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;
-            CREATE SCHEMA auth;
-            CREATE TABLE auth.users (id uuid PRIMARY KEY, email text, raw_app_meta_data jsonb);
-            CREATE TABLE auth.identities (user_id uuid, provider text, identity_data jsonb);
-            CREATE TABLE public.account_e2e_test_runners (
-                account_id uuid PRIMARY KEY, runner_plan text UNIQUE, command_version text
-            );
-            CREATE TABLE public.account_classification_audit (
-                account_id uuid, command_version text, reason_code text,
-                next_account_class text, next_traffic_class text, next_lifecycle text
-            );
-            CREATE FUNCTION public.load_e2e_test_runner_v1(owner_id uuid) RETURNS TABLE(runner_plan text)
-            LANGUAGE sql STABLE AS $$
-                SELECT runner.runner_plan FROM public.account_e2e_test_runners AS runner
-                JOIN auth.users AS owner ON owner.id = runner.account_id
-                WHERE runner.account_id = owner_id AND owner.raw_app_meta_data ->> 'analysis_test_runner_v1' = runner.runner_plan
-            $$;
-        `);
+        await db.exec(ownerGrantFixtureSql);
         await db.exec(await readSql('live-budget'));
         const ownerStartSql = await readSql('live-owner-start');
         await expect(db.exec(ownerStartSql)).rejects.toThrow('DEV_LIVE_OWNER_START_WRONG_DATABASE');
@@ -229,20 +212,7 @@ describe('Dev owner-start grant SQL', () => {
                 public.account_classification_audit,
                 public.account_e2e_test_runners, auth.identities, auth.users;
         `);
-        await db.query(`
-            INSERT INTO auth.users VALUES ($1, $2, '{"provider":"kakao","analysis_test_runner_v1":"basic"}')
-        `, [ownerId, fixtureEmail]);
-        await db.query(`
-            INSERT INTO auth.identities VALUES ($1, 'kakao', jsonb_build_object('email', $2::text, 'email_verified', true))
-        `, [ownerId, fixtureEmail]);
-        await db.query(`
-            INSERT INTO public.account_e2e_test_runners VALUES ($1, 'basic', 'dev-live-basic-v1')
-        `, [ownerId]);
-        await db.query(`
-            INSERT INTO public.account_classification_audit VALUES (
-                $1, 'dev-live-basic-v1', 'DEV_LIVE_BASIC_TESTER', 'e2e_test', 'e2e_test', 'active'
-            )
-        `, [ownerId]);
+        await seedOwnerGrantAccount((sql, values) => db.query(sql, values), ownerId, fixtureEmail);
     });
 
     afterAll(async () => { await db?.close(); });
@@ -425,6 +395,41 @@ describe('Dev owner-start grant SQL', () => {
         await expect(reserve({ ...grant, expiresAt: new Date(Date.parse(grant.expiresAt) + 1).toISOString() }, 'apify', 1))
             .rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
         await expect(reserve({ ...grant, aiMaxCents: 1_801 }, 'vertex', 1)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+    });
+
+    it('serializes Standard spend on its grant and preserves committed and pending reservations on reinstall', async () => {
+        await configureStandard();
+        const grant = await startDurableStandard();
+        const pending = randomUUID();
+        const settled = randomUUID();
+        await db.exec('BEGIN');
+        try {
+            expect(await reserve(grant, 'vertex', 100_000, pending)).toBe(true);
+            expect((await db.query(`
+                SELECT 1 FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'
+                AND classid = 49736740 AND objid = 1 AND objsubid = 2
+            `)).rows).toHaveLength(0);
+            await db.exec('COMMIT');
+        } catch (error) {
+            await db.exec('ROLLBACK');
+            throw error;
+        }
+        expect(await reserve(grant, 'vertex', 200_000, settled)).toBe(true);
+        await db.query('SELECT public.dev_live_budget_settle_vertex_v1($1, $2, 50000)', [grant.id, settled]);
+        await db.exec(await readSql('live-owner-start-standard'));
+
+        await expect(reserve(grant, 'vertex', 100_000, pending)).rejects.toMatchObject({ code: '23505' });
+        await expect(reserve(grant, 'apify', 1, settled)).rejects.toMatchObject({ code: '23505' });
+        expect((await db.query(`
+            SELECT reserved_micros, actual_micros FROM dev_live_budget.reservations
+            WHERE grant_id = $1 ORDER BY reserved_micros
+        `, [grant.id])).rows).toEqual([
+            { reserved_micros: 100_000, actual_micros: null },
+            { reserved_micros: 200_000, actual_micros: 50_000 },
+        ]);
+        expect((await db.query(`
+            SELECT ai_committed_micros, apify_committed_micros FROM dev_live_budget.grants WHERE grant_id = $1
+        `, [grant.id])).rows).toEqual([{ ai_committed_micros: 150_000, apify_committed_micros: 0 }]);
     });
 
     it('caps a burst of concurrent durable Standard Vertex reservations until usage settles', async () => {

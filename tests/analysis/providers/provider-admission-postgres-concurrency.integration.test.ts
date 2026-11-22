@@ -424,6 +424,61 @@ describePostgres('provider admission true-session concurrency', () => {
         await pool?.end();
     });
 
+    it('waits for the cutoff pool lock before taking any scheduler request lock', async () => {
+        const baseline = readFileSync(new URL(
+            '../../../supabase/dev-ui/production-baseline.sql', import.meta.url,
+        ), 'utf8');
+        for (const name of ['analysis_v2_valid_ai_operation_key', 'acquire_analysis_v2_scheduler_gemini_lease_v1']) {
+            const start = baseline.indexOf(`CREATE FUNCTION public.${name}(`);
+            const end = baseline.indexOf('\n$_$;', start);
+            if (start < 0 || end < 0) throw new Error(`Missing baseline function ${name}`);
+            await pool.query(baseline.slice(start, end + '\n$_$;'.length));
+        }
+        await pool.query(readFileSync(new URL(
+            '../../../supabase/migrations/20261122140000_order_scheduler_gemini_slot_lock.sql', import.meta.url,
+        ), 'utf8'));
+        const fixture = input(42);
+        await pool.query('ALTER TABLE public.analysis_requests ADD COLUMN policy_versions_snapshot jsonb');
+        await pool.query(`
+            INSERT INTO public.analysis_requests(id, pipeline_version, status, policy_versions_snapshot)
+            VALUES ($1, 'v2', 'processing', $2)
+        `, [fixture.requestId, {
+            pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.12', scheduler: 'ai-scheduler-v1',
+        }]);
+
+        const holder = await pool.connect();
+        const scheduler = await pool.connect();
+        let acquire: Promise<string> | undefined;
+        try {
+            await holder.query('BEGIN');
+            // Hold exactly the advisory lock shared by both cutoff entry points.
+            const holderPid = (await holder.query(`
+                SELECT pg_backend_pid() AS pid, pg_advisory_xact_lock(hashtextextended('analysis-v2-gemini-leases', 0))
+            `)).rows[0].pid;
+            const schedulerPid = (await scheduler.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+            acquire = scheduler.query(`
+                SELECT * FROM public.acquire_analysis_v2_scheduler_gemini_lease_v1(
+                    $1, $2, $3, 'genderTriage', 1, $4, 240
+                )
+            `, [fixture.requestId, jobKey, `gender-triage:${'a'.repeat(64)}`, fixture.claimToken])
+                .then(result => result.rows[0].outcome, (error: Error) => error.message);
+            await expect.poll(async () => (await holder.query(
+                'SELECT $1 = ANY(pg_blocking_pids($2)) AS waiting', [holderPid, schedulerPid],
+            )).rows[0].waiting).toBe(true);
+
+            // The original request-first scheduler prevented cutoff from taking this row.
+            await holder.query('SELECT id FROM public.analysis_requests WHERE id = $1 FOR UPDATE NOWAIT', [fixture.requestId]);
+            await holder.query("UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1", [fixture.requestId]);
+            await holder.query('COMMIT');
+            expect(await acquire).toBe('ANALYSIS_V2_SCHEDULER_OPERATION_POLICY_MISMATCH');
+        } finally {
+            await holder.query('ROLLBACK');
+            await acquire;
+            scheduler.release();
+            holder.release();
+        }
+    });
+
     it('serializes competing sessions and never returns a secret to a changed claim', async () => {
         const first = await pool.connect();
         const second = await pool.connect();
