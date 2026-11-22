@@ -539,9 +539,9 @@ begin
     end if;
     if v_offer.code in (select offer.code from public.cherry_offers as offer where offer.audience = 'reservation')
         and not exists (select 1 from public.cherry_reservation_claims where user_id = p_user and confirmed) then
-        delete from public.cherry_reservation_claims where user_id = p_user;
+        delete from public.cherry_reservation_claims where user_id = p_user and not confirmed;
         insert into public.cherry_reservation_claims as claim (reservation_hash, user_id, locked_until)
-        values (public.cherry_reservation_hash_for(p_user), p_user, v_now + interval '2 hours')
+        values (public.cherry_reservation_hash_for(p_user), p_user, v_now + interval '6 hours')
         on conflict (reservation_hash) do update set user_id = excluded.user_id, locked_until = excluded.locked_until
             where not claim.confirmed and claim.locked_until <= v_now;
         if not found then
@@ -570,6 +570,9 @@ begin
     -- The order keeps its identity while price, product, and provider are unchanged.
     select * into v_payment from public.cherry_payments as payment
     where payment.subscription_id = v_subscription.id and payment.status in ('ready', 'processing') for update;
+    if found and v_payment.status = 'processing' then
+        return pg_catalog.jsonb_build_object('outcome', 'payment_in_progress');
+    end if;
     if found and (v_payment.amount_krw <> v_offer.price_krw or v_payment.provider <> v_settings.payment_provider
         or v_payment.groble_product_id is distinct from
             case when v_settings.payment_provider = 'groble' then v_offer.groble_product_id end) then
@@ -867,7 +870,8 @@ begin
         where payment_id = v_payment.id and status in ('pending', 'processing', 'manual_required');
         -- A full refund takes back only the period it paid for; an earlier paid period keeps running.
         select pg_catalog.max(payment.cycle) into v_latest from public.cherry_payments as payment
-        where payment.subscription_id = v_payment.subscription_id and payment.granted;
+        where payment.subscription_id = v_payment.subscription_id and payment.granted
+            and (payment.status <> 'refunded' or payment.id = v_payment.id);
         if v_payment.granted and v_refunded >= v_payment.amount_krw and v_payment.cycle = v_latest then
             select * into v_earlier from public.cherry_payments as payment
             where payment.subscription_id = v_payment.subscription_id and payment.granted and payment.id <> v_payment.id
@@ -1028,9 +1032,15 @@ begin
         end if;
     end loop;
     -- Automatic billing that could not run for a day stops checks instead of leaving the plan open forever.
-    update public.cherry_subscriptions set status = 'past_due', status_reason = 'payment_failed', updated_at = p_now
-    where status = 'active' and payment_provider = 'toss' and not cancel_at_period_end
-        and current_period_end <= p_now - interval '1 day';
+    for v_row in
+        update public.cherry_subscriptions set status = 'past_due', status_reason = 'payment_failed', updated_at = p_now
+        where status = 'active' and payment_provider = 'toss' and not cancel_at_period_end
+            and current_period_end <= p_now - interval '1 day'
+        returning id, current_period_end
+    loop
+        perform public.cherry_queue_notification(v_row.id, 'payment_failed',
+            'billing-late:' || v_row.id::text || ':' || v_row.current_period_end::date::text, '{}'::jsonb);
+    end loop;
     update public.cherry_subscriptions set status = 'ended', status_reason = 'payment_lapsed', ended_at = p_now,
         next_check_at = null, updated_at = p_now
     where status = 'past_due' and current_period_end <= p_now - interval '4 days'
@@ -1390,7 +1400,9 @@ $$;
 -- being worked on that are still usable are left out, because reading them again costs nothing.
 create function public.cherry_rows_used(p_subscription uuid, p_since timestamptz, p_check uuid) returns integer
 language sql stable security definer set search_path = '' as $$
-    select coalesce(pg_catalog.sum(coalesce(run.items_returned, case when run.status = 'ambiguous' then run.requested_items end)), 0)::integer
+    -- A run that ended without a readable count is taken at its full request.
+    select coalesce(pg_catalog.sum(coalesce(run.items_returned,
+        case when run.status in ('ambiguous', 'failed') then run.requested_items end)), 0)::integer
     from public.cherry_provider_runs as run
     where run.subscription_id = p_subscription and run.created_at >= p_since
         and (run.operation like 'followers%' or run.operation like 'following%')
@@ -1420,6 +1432,9 @@ begin
     update public.cherry_reports set status = 'ready', ready_at = pg_catalog.now(), lease_token = null, lease_expires_at = null
     where id = p_report and status = 'building' and lease_token = p_lease returning * into v_report;
     if not found then return false; end if;
+    -- A second look before the first notice went out replaces it.
+    update public.cherry_notifications set status = 'canceled', error_code = 'replaced'
+    where report_id = v_report.id and kind = 'new_mutual' and status = 'queued';
     perform public.cherry_queue_notification(v_report.subscription_id, 'new_mutual',
         'report:' || v_report.id::text || ':' || v_report.new_count::text,
         pg_catalog.jsonb_build_object('count', v_report.new_count, 'confirmed', (select pg_catalog.count(*)

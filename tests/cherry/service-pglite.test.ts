@@ -174,6 +174,8 @@ describe('cherry checkout and payment', () => {
         const row = await one<{ status: string; days: number }>(`select status, round(extract(epoch from current_period_end - now()) / 86400)::int as days
             from public.cherry_subscriptions where id = $1`, [subscriptionId]);
         expect(row).toEqual({ status: 'active', days: 5 });
+        await rpc('cherry_record_refund($1,$2,$3,$4,$5)', ['evt_first', 'groble', 'pay_1', 9900, false]);
+        expect((await one<{ status: string }>('select status from public.cherry_subscriptions where id = $1', [subscriptionId])).status).toBe('ended');
     });
 
     it('ends the service on a full refund and leaves an unknown refund unmatched', async () => {
@@ -398,8 +400,9 @@ describe('cherry provider ledger and messages', () => {
             values ('check:${check}', 'followers_s0', 1, $1, 'secondary', 'a', 800, 1, 'failed', 700),
                 ('check:${check}', 'followers_s0', 2, $1, 'secondary', 'a', 800, 1, 'succeeded', 750),
                 ('check:44444444-4444-4444-8444-444444444444', 'following_s0', 1, $1, 'secondary', 'a', 800, 1, 'succeeded', 600),
+                ('check:44444444-4444-4444-8444-444444444444', 'following_s0', 2, $1, 'secondary', 'a', 800, 1, 'failed', null),
                 ('check:44444444-4444-4444-8444-444444444444', 'profile_s0', 1, $1, 'secondary', 'a', 2, 1, 'succeeded', 1)`, [subscriptionId]);
-        expect(await rpc(`cherry_rows_used($1, now() - interval '1 day', $2)`, [subscriptionId, check])).toBe(1300);
+        expect(await rpc(`cherry_rows_used($1, now() - interval '1 day', $2)`, [subscriptionId, check])).toBe(2100);
     });
 
     it('resumes a started run instead of starting another', async () => {

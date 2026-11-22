@@ -125,6 +125,23 @@ describe('cherry check', () => {
         expect([await stop(0, 2), await stop(3, 1), await stop(3, 2), await stop(0, 4)]).toEqual([false, false, true, true]);
     });
 
+    it('drops an unusable profile run so the next try buys a new one', async () => {
+        const { deps, reject, calls } = setup({ profile: null });
+        await processCherryCheck(check('daily'), NOW + 500_000, deps);
+        expect(reject).toHaveBeenCalledWith('p', 'profile_unusable');
+        expect(calls.at(-1)?.params.p_error).toBe('profile_unavailable');
+    });
+
+    it('keeps counting a list that has failed for longer than a month', async () => {
+        const { deps, runs } = setup({ profile: profileRow({ followersCount: 31 }), rowsUsed: 6000,
+            subscription: { items_period_start: '2026-10-01T00:00:00.000Z' } });
+        const since: string[] = [];
+        deps.rowsUsed = async (_id, from) => { since.push(from); return 6000; };
+        await processCherryCheck(check('daily'), NOW + 500_000, deps);
+        expect(runs.map(run => run.operation)).toEqual(['profile_s0']);
+        expect(Date.parse(since[0])).toBe(NOW - 30 * 86_400_000);
+    });
+
     it('uses fresh paid runs when an operator asks again', async () => {
         const { deps, runs } = setup({});
         await processCherryCheck({ ...check('daily'), series: 2 }, NOW + 500_000, deps);
@@ -200,6 +217,12 @@ describe('cherry paid runs', () => {
         const { deps, start } = runner({ outcome: 'resume', runId: 'run1234567', status: 'started' });
         await runCherryActor(request, deps);
         expect(start).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh the age of a finished run it reads again', async () => {
+        const { deps, updates } = runner({ outcome: 'resume', runId: 'run1234567', status: 'succeeded' });
+        await runCherryActor(request, deps);
+        expect(updates).toEqual([]);
     });
 
     it('waits for a running actor, and records an unknown start for an operator', async () => {

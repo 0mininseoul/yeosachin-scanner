@@ -99,7 +99,11 @@ jq -er '.metadata.annotations["run.googleapis.com/build-environment-variables"] 
   || die "the source worker has no reusable build settings"
 
 # A redeploy keeps the Cherry settings and secret references the running worker already has.
-if gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" --format=json > "$WORK/current.json" 2>/dev/null; then
+EXISTING="$(gcloud run services list --project="$PROJECT" --region="$REGION" --format='value(metadata.name)')" \
+  || die "could not list the existing services"
+if grep -qx "$SERVICE" <<<"$EXISTING"; then
+  gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" --format=json > "$WORK/current.json" \
+    || die "could not read the running worker; its settings would be lost"
   jq -c --slurpfile next "$WORK/env.json" '
     ([.spec.template.spec.containers[0].env[]? | select(has("value")) | select(.name | test("^CHERRY_"))
       | {key: .name, value: .value}] | from_entries) + $next[0]' "$WORK/current.json" > "$WORK/merged.json"

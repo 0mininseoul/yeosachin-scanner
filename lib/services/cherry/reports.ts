@@ -90,7 +90,7 @@ export async function processCherryReport(report: CherryReportRow, deadlineAtMs:
     try {
         if (pending.length > 0) {
             const settings = await loadCherrySettings();
-            const profiles = await collectCherryProfiles({
+            const { profiles } = await collectCherryProfiles({
                 ownerKey: `report:${report.id}`, operation: `details_${events.length}`, subscriptionId: report.subscription_id,
                 slot: 'secondary', usernames: pending.map(event => event.username), deadlineAtMs, reuseSeconds: 6 * 3600,
             });

@@ -66,7 +66,7 @@ function operation(base: string, check: CherryCheck): string {
 export async function collectCherryProfiles(input: {
     ownerKey: string; operation: string; subscriptionId: string | null; slot: ApifyCredentialSlot;
     usernames: readonly string[]; deadlineAtMs: number; reuseSeconds?: number;
-}, run: CherryCheckDeps['run'] = defaultDeps.run): Promise<Map<string, CherryProfileResult>> {
+}, run: CherryCheckDeps['run'] = defaultDeps.run): Promise<{ profiles: Map<string, CherryProfileResult>; ledgerId: string }> {
     const charge = Number((input.usernames.length * CHERRY_PROFILE_USD).toFixed(6));
     const result = await run({
         ownerKey: input.ownerKey, operation: input.operation, subscriptionId: input.subscriptionId, slot: input.slot,
@@ -75,7 +75,7 @@ export async function collectCherryProfiles(input: {
         estimatedUsdPerItem: 0.0023, timeoutSecs: 300, deadlineAtMs: input.deadlineAtMs,
         reuseSeconds: input.reuseSeconds ?? PROFILE_REUSE_SECONDS,
     });
-    return parseProfileRows(result.rows, input.usernames);
+    return { profiles: parseProfileRows(result.rows, input.usernames), ledgerId: result.ledgerId };
 }
 
 async function collectList(input: {
@@ -179,12 +179,15 @@ async function runCheck(check: CherryCheck, deadlineAtMs: number, deps: CherryCh
         });
         throw new CherryDeferError('target_blocked', { delaySeconds: 0, terminal: true });
     }
-    const profiles = await collectCherryProfiles({
+    const { profiles, ledgerId } = await collectCherryProfiles({
         ownerKey: `check:${check.id}`, operation: operation('profile', check),
         subscriptionId: subscription.id, slot: 'secondary', usernames: [subscription.target_username], deadlineAtMs,
     }, deps.run);
     const observed = profiles.get(subscription.target_username.toLowerCase());
-    if (!observed || observed.status === 'unavailable') throw new CherryDeferError('profile_unavailable', { delaySeconds: 900 });
+    if (!observed || observed.status === 'unavailable') {
+        await deps.reject(ledgerId, 'profile_unusable');
+        throw new CherryDeferError('profile_unavailable', { delaySeconds: 900 });
+    }
     const unavailable = unavailableCode(observed, subscription);
     if (unavailable) {
         await deps.rpc('cherry_mark_unavailable', {
@@ -210,17 +213,16 @@ async function runCheck(check: CherryCheck, deadlineAtMs: number, deps: CherryCh
         const at = listedAt[direction];
         return at === null || nowMs - Date.parse(at) >= RELIST_DAYS * 86_400_000;
     };
-    const periodStartMs = subscription.items_period_start ? Date.parse(subscription.items_period_start) : nowMs;
-    const expired = nowMs - periodStartMs > 30 * 86_400_000;
-    // Counted from the paid-run ledger, so lists that could not be used are included.
-    let used = expired || !subscription.items_period_start ? 0
-        : await deps.rowsUsed(subscription.id, subscription.items_period_start, check.id);
+    // Counted from the paid-run ledger over at most the last 30 days, so unusable lists are included
+    // and a list that never succeeds cannot start a new month of its own.
+    const periodStartMs = Math.max(nowMs - 30 * 86_400_000, Date.parse(subscription.items_period_start ?? subscription.created_at));
+    let used = await deps.rowsUsed(subscription.id, new Date(periodStartMs).toISOString(), check.id);
     const wanted: CherryDirection[] = [];
     const paced: CherryDirection[] = [];
     for (const direction of CHERRY_DIRECTIONS) {
         if (stale(direction) || declared[direction] !== previous[direction]) {
             const allowed = canCollect({
-                nowMs, periodStartMs: expired ? nowMs : periodStartMs, used, planned: declared[direction],
+                nowMs, periodStartMs, used, planned: declared[direction],
                 monthlyLimit: settings.monthly_item_limit, listTotal: declared.followers + declared.following,
             });
             (allowed ? wanted : paced).push(direction);

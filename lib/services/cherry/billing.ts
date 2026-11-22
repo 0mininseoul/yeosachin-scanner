@@ -32,6 +32,14 @@ function cipherKey(env: Record<string, string | undefined> = process.env): Buffe
     return key;
 }
 
+function billingKeysReadable(): boolean {
+    try {
+        return cipherKey().length === 32;
+    } catch {
+        return false;
+    }
+}
+
 /** The customer key is bound as associated data, so a stored value cannot be moved to another member. */
 export function encryptBillingKey(value: string, customerKey: string, key: Buffer = cipherKey()): string {
     const iv = randomBytes(12);
@@ -108,18 +116,19 @@ async function recordTossPayment(paymentKey: string, orderId: string, amount: nu
 /** Stores a newly authorized card and makes the first charge of the member's open order. */
 export async function completeTossBilling(input: { userId: string; authKey: string; customerKey: string }): Promise<ChargeOutcome | 'invalid' | 'no_order'> {
     const config = readTossConfig();
-    if (!config) return 'invalid';
+    if (!config || !billingKeysReadable()) return 'invalid';
     if (await ensureCustomerKey(input.userId) !== input.customerKey) return 'invalid';
     let issued;
     const authHash = createHash('sha256').update(input.authKey).digest('hex');
     try {
         issued = await issueTossBillingKey(config, input.authKey, input.customerKey);
-    } catch (caught) {
+    } catch {
         // Only a repeated return with the same authorization may use the stored key; any other
         // failure must not fall back to a card the member did not just choose.
         const { data, error } = await supabaseAdmin.from('cherry_billing_keys').select('last_auth_hash').eq('user_id', input.userId).maybeSingle();
         assertNoDatabaseError('billing_key_repeat', error);
-        if (data?.last_auth_hash !== authHash) return caught instanceof TossUnknownError ? 'unknown' : 'declined';
+        // Nothing has been charged at this point, so every other failure is simply a failed card.
+        if (data?.last_auth_hash !== authHash) return 'declined';
     }
     if (issued) {
         const label = [issued.card?.cardType, issued.card?.number?.slice(-4)].filter(Boolean).join(' ').slice(0, 60);
@@ -142,7 +151,8 @@ export async function completeTossBilling(input: { userId: string; authKey: stri
 
 export async function processDueBilling(limit: number): Promise<number> {
     const config = readTossConfig();
-    if (!config) return 0;
+    // Without a usable key no card can be read, so no order may be opened for charging.
+    if (!config || !billingKeysReadable()) return 0;
     // One at a time: a payment that was claimed but not yet sent must not age into a lost charge.
     for (let done = 0; done < limit; done += 1) {
         const [payment] = await cherryRpc<CherryPayment[]>('cherry_claim_billing', { p_limit: 1 });

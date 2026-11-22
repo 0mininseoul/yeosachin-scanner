@@ -151,7 +151,8 @@ export async function runCherryActor(request: CherryRunRequest, deps: CherryRunD
         throw new CherryDeferError('provider_run_failed', { delaySeconds: 300 });
     }
     const rows = await readDataset(client, run.defaultDatasetId, request.items, deps);
-    await deps.update(reservation.id, {
+    // Reading a finished run again must not make it look newly finished.
+    if (reservation.status !== 'succeeded') await deps.update(reservation.id, {
         status: 'succeeded', items_returned: rows.length, finished_at: new Date().toISOString(),
         estimated_cost_usd: Number((rows.length * request.estimatedUsdPerItem).toFixed(6)),
     });
