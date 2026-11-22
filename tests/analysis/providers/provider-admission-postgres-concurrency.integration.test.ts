@@ -580,6 +580,11 @@ describePostgres('provider admission true-session concurrency', () => {
             await pool.query("UPDATE public.analysis_requests SET status='processing' WHERE id=ANY($1::uuid[])", [
                 active.rows.map(row => row.id),
             ]);
+            await pool.query(`
+                DROP FUNCTION public.dev_live_owner_start_v4(uuid,text,uuid);
+                DROP TABLE dev_ui.runs, dev_live_budget.standard_owner_policy;
+                DROP SCHEMA dev_ui, dev_live_budget;
+            `);
         }
     });
 
