@@ -328,15 +328,28 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
     active_grant dev_live_budget.grants%ROWTYPE;
+    grant_plan text;
 BEGIN
     IF p_reservation_id IS NULL OR p_provider IS NULL OR p_provider NOT IN ('apify', 'vertex')
         OR p_amount_micros IS NULL OR p_amount_micros NOT BETWEEN 1 AND 5000000 THEN
         RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
     END IF;
-    PERFORM pg_catalog.pg_advisory_xact_lock(49736740, 1);
-    IF EXISTS (SELECT FROM dev_live_budget.grants WHERE grant_id = p_grant_id AND plan_id = 'standard') THEN
-        -- Order this reservation and a concurrent policy update or deletion.
+    -- Admit only a published grant. A grant still being issued must not fall
+    -- through to Basic locking and become visible during the subsequent check.
+    SELECT g.plan_id INTO grant_plan FROM dev_live_budget.grants AS g WHERE g.grant_id = p_grant_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    END IF;
+    IF grant_plan = 'standard' THEN
+        -- Standard grants and their owner binding are issued atomically. Independent
+        -- grants can spend in parallel; revocation still fences reservations.
         PERFORM 1 FROM dev_live_budget.standard_owner_policy WHERE singleton FOR SHARE;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+        END IF;
+    ELSE
+        -- Basic/legacy admission retains its cross-grant exclusion.
+        PERFORM pg_catalog.pg_advisory_xact_lock(49736740, 1);
     END IF;
     PERFORM public.dev_live_budget_check_v1(
         p_grant_id, p_approved_at, p_expires_at, p_apify_limit_micros, p_ai_limit_micros
