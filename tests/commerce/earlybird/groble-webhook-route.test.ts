@@ -27,7 +27,11 @@ vi.mock('next/server', async importOriginal => {
     return { ...actual, after: mocks.after };
 });
 vi.mock('@/lib/supabase/admin', () => ({
-    supabaseAdmin: { rpc: mocks.rpc },
+    supabaseAdmin: {
+        rpc: mocks.rpc,
+        // Cherry asks whether an unknown product is one of its own; here none is.
+        from: () => ({ select: () => ({ eq: () => ({ limit: async () => ({ data: [], error: null }) }) }) }),
+    },
 }));
 vi.mock('@/lib/services/earlybird/payment-discord', () => ({
     deliverEarlybirdPaymentDiscordNotifications: mocks.deliverPayment,

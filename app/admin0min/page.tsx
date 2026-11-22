@@ -8,6 +8,7 @@ import {
     getAnalysisAuditOperatorDecision,
 } from '@/lib/services/analysis/score-audit';
 import { AdminConsole } from '../admin/console/admin-console';
+import { CherryServiceConsole } from '../admin/console/cherry-service-console';
 import { NamchinWaitlistConsole } from '../admin/console/namchin-waitlist-console';
 import { buildPipelineMap } from '@/lib/services/admin/pipeline-map';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
@@ -135,7 +136,7 @@ export default async function AnalysisAuditPage({
     }
     if (decision !== 'authorized') return <ConsoleAccessState state={decision} destination={destination} />;
 
-    if (namchinWorkspace) return <NamchinWaitlistConsole />;
+    if (namchinWorkspace) return params.view === 'service' ? <CherryServiceConsole /> : <NamchinWaitlistConsole />;
 
     return <AdminConsole
         initialRequestId={new URL(destination, 'https://admin-console.invalid').searchParams.get('requestId') ?? ''}

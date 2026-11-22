@@ -57,6 +57,7 @@ export function NamchinWaitlistConsole() {
             </Link>
             <nav className="ac-nav" aria-label="콘솔 메뉴">
                 <div className="ac-nav-label">운영</div>
+                <Link className="ac-nav-btn" href={`${NAMCHIN_ADMIN_CONSOLE_PATH}&view=service`}>서비스 운영</Link>
                 <Link className="ac-nav-btn is-active" href={NAMCHIN_ADMIN_CONSOLE_PATH} aria-current="page">사전 예약 명단</Link>
             </nav>
             <div className="ac-side-bottom"><ConsoleWorkspaceSwitch active="namchin" /></div>

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { after, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { handleCherryGrobleEvent } from '@/lib/services/cherry/groble';
 import { isJsonRequest } from '@/lib/services/earlybird/contracts';
 import { deliverEarlybirdPaymentDiscordNotifications } from '@/lib/services/earlybird/payment-discord';
 import {
@@ -283,6 +284,32 @@ async function handlePOST(
         && envelope.type !== 'payment.cancel_requested'
         && envelope.type !== 'payment.refunded') {
         return response(200, { received: true, disposition: 'ignored' });
+    }
+
+    let cherryDisposition: string | null;
+    try {
+        cherryDisposition = await handleCherryGrobleEvent(
+            envelope.type, rawBody, Object.values(config.productIds),
+        );
+    } catch {
+        return reject(
+            500,
+            { received: false, code: 'PERSISTENCE_FAILED' },
+            'INTERNAL_ERROR',
+            { webhookEventType },
+        );
+    }
+    if (cherryDisposition !== null) {
+        operationalLogger.emit({
+            event: 'groble.webhook_finalized',
+            severity: ['activated', 'renewed', 'refunded', 'partially_refunded'].includes(cherryDisposition)
+                ? 'info' : 'warn',
+            fields: {
+                ...webhookFields(context, { webhookEventType }),
+                disposition: `cherry_${cherryDisposition}`,
+            },
+        });
+        return response(200, { received: true, disposition: cherryDisposition });
     }
 
     let persistence;
