@@ -11,13 +11,17 @@ const landingRoot = '../../public/namchin/';
 const landingPage = [landingRoot + 'index.html', 'text/html; charset=utf-8'];
 const staticFiles = new Map([
   ['/', landingPage],
-  ['/namchin', landingPage],
-  ['/namchin/', landingPage],
+  ['/cherry', landingPage],
+  ['/cherry/', landingPage],
   ['/namchin/landing.css', [landingRoot + 'landing.css', 'text/css; charset=utf-8']],
   ['/namchin/landing.js', [landingRoot + 'landing.js', 'text/javascript; charset=utf-8']],
   ['/namchin/intro.js', [landingRoot + 'intro.js', 'text/javascript; charset=utf-8']],
   ['/namchin/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
   ['/namchin/logo.png', [landingRoot + 'logo.png', 'image/png']],
+  ['/namchin/og.jpg', [landingRoot + 'og.jpg', 'image/jpeg']],
+  ['/og/', ['./og/index.html', 'text/html; charset=utf-8']],
+  ...['a', 'b', 'c'].map(name => [`/og/${name}.html`, [`./og/${name}.html`, 'text/html; charset=utf-8']]),
+  ...['og', 'board'].map(name => [`/og/${name}.css`, [`./og/${name}.css`, 'text/css; charset=utf-8']]),
   ['/namchin/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
   ['/namchin/assets/notification-bell.jpg', [landingRoot + 'assets/notification-bell.jpg', 'image/jpeg']],
   ...['barlow-condensed-bold.woff2', 'Paperlogy-4Regular.woff2', 'Paperlogy-8ExtraBold.woff2'].map(name => [
@@ -46,6 +50,7 @@ const staticDirectories = [
   ['/namchin/3d/', landingRoot + '3d/'],
   ['/namchin/assets/hero/', landingRoot + 'assets/hero/'],
   ['/cherry-logo-concepts/', './cherry-logo-concepts/'],
+  ['/og/', './og/'],
 ];
 const contentTypes = {
   '.js': 'text/javascript; charset=utf-8',
@@ -162,6 +167,11 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'GET' && pathname === '/preview/stats') {
     return json(response, 200, { pageViews, registrations: countRegistrations.get().count });
+  }
+
+  if (pathname === '/namchin' || pathname === '/namchin/' || pathname === '/namchin/index.html') {
+    response.writeHead(308, { ...responseHeaders, Location: '/cherry' + (request.url.includes('?') ? request.url.slice(request.url.indexOf('?')) : '') });
+    return response.end();
   }
 
   if (request.method === 'GET' && pathname === '/privacy') {
