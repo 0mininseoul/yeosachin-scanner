@@ -17,6 +17,7 @@
 | provider·수집·정산 | lib/services/analysis/v2-collection-executors.ts, lib/services/instagram/ | analysis/providers/ |
 | job·재시도·정책 | lib/services/analysis/v2-worker.ts, v2-tasks.ts | analysis/execution/job-policy.test.ts, retry-policy.test.ts |
 | 진행·결과·보관함 | app/progress/, app/result/, app/mypage/ | analysis/results/archive-history.test.ts, presentation-policy.test.ts, interaction-evidence.test.ts |
+| 체리(남친 맞팔 알리미) 감지·알림·구독 | lib/services/cherry/, app/api/cherry/, app/cherry/ | cherry/ |
 | 결제·주문·대기 등록 | app/api/earlybird/, lib/services/earlybird/ | commerce/checkout-policy.test.ts, commerce/ |
 | 계정·권한·인증 | lib/services/identity/, app/auth/ | identity/request-credentials.test.ts, identity/ |
 | 운영자 조회·감사 | app/admin0min/, app/admin/analysis-audit/workbench.tsx, app/api/admin/ | operations/console-model.test.ts, operations/ |
