@@ -53,7 +53,7 @@ export function NamchinWaitlistConsole() {
         <aside className="ac-side">
             <Link className="ac-brand" href={NAMCHIN_ADMIN_CONSOLE_PATH}>
                 <Image src="/namchin/logo.png" className="ac-namchin-mark" alt="" width={34} height={34} unoptimized />
-                <span><b>남친 맞팔 알리미</b><small>운영 콘솔</small></span>
+                <span><b>체리</b><small>운영 콘솔</small></span>
             </Link>
             <nav className="ac-nav" aria-label="콘솔 메뉴">
                 <div className="ac-nav-label">운영</div>
@@ -64,7 +64,7 @@ export function NamchinWaitlistConsole() {
         <main className="ac-main"><div className="ac-wrap">
             <header className="ac-top">
                 <div>
-                    <div className="ac-crumb"><span>운영 콘솔</span><span aria-hidden="true">/</span><span>남친 맞팔 알리미</span></div>
+                    <div className="ac-crumb"><span>운영 콘솔</span><span aria-hidden="true">/</span><span>체리(남친 맞팔 알리미)</span></div>
                     <h1>사전 예약 명단</h1>
                     <p>신청 이메일, 휴대폰 번호, 출시 알림 수신 동의 일시를 확인합니다.</p>
                 </div>

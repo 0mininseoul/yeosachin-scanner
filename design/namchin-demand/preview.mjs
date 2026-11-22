@@ -1,7 +1,7 @@
 import { closeSync, mkdtempSync, openSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { normalizeKoreanMobileNumber } from '../../lib/services/identity/phone-number.ts';
@@ -15,8 +15,10 @@ const staticFiles = new Map([
   ['/namchin/', landingPage],
   ['/namchin/landing.css', [landingRoot + 'landing.css', 'text/css; charset=utf-8']],
   ['/namchin/landing.js', [landingRoot + 'landing.js', 'text/javascript; charset=utf-8']],
+  ['/namchin/intro.js', [landingRoot + 'intro.js', 'text/javascript; charset=utf-8']],
   ['/namchin/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
   ['/namchin/logo.png', [landingRoot + 'logo.png', 'image/png']],
+  ['/namchin/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
   ...['notification-bell.jpg', 'sample-posts.jpg', 'sample-profile-and-posts.jpg'].map(name => [
     `/namchin/assets/${name}`, [landingRoot + `assets/${name}`, 'image/jpeg'],
   ]),
@@ -28,7 +30,43 @@ const staticFiles = new Map([
   ...['a-bell', 'b-links', 'c-bird', 'd-envelope'].map(name => [
     `/logo-concepts/${name}.png`, [`./logo-concepts/${name}.png`, 'image/png'],
   ]),
+  ['/cherry-logo-concepts/', ['./cherry-logo-concepts/index.html', 'text/html; charset=utf-8']],
+  ['/cherry-logo-concepts/board.css', ['./cherry-logo-concepts/board.css', 'text/css; charset=utf-8']],
+  ['/cherry-logo-concepts/render.html', ['./cherry-logo-concepts/render.html', 'text/html; charset=utf-8']],
+  ['/cherry-logo-concepts/render.css', ['./cherry-logo-concepts/render.css', 'text/css; charset=utf-8']],
+  ['/cherry-logo-concepts/render.js', ['./cherry-logo-concepts/render.js', 'text/javascript; charset=utf-8']],
+  ['/intro-concepts/', ['./intro-concepts/index.html', 'text/html; charset=utf-8']],
+  ['/intro-concepts/intros.css', ['./intro-concepts/intros.css', 'text/css; charset=utf-8']],
+  ['/intro-concepts/intros.js', ['./intro-concepts/intros.js', 'text/javascript; charset=utf-8']],
+  ['/timer-concepts/', ['./timer-concepts/index.html', 'text/html; charset=utf-8']],
+  ['/timer-concepts/timers.css', ['./timer-concepts/timers.css', 'text/css; charset=utf-8']],
+  ['/timer-concepts/timers.js', ['./timer-concepts/timers.js', 'text/javascript; charset=utf-8']],
 ]);
+
+// Directories whose files are served as-is (3D bundles and hero media).
+const staticDirectories = [
+  ['/namchin/3d/', landingRoot + '3d/'],
+  ['/namchin/assets/hero/', landingRoot + 'assets/hero/'],
+  ['/cherry-logo-concepts/', './cherry-logo-concepts/'],
+];
+const contentTypes = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+};
+
+function directoryResource(pathname) {
+  for (const [prefix, directory] of staticDirectories) {
+    if (!pathname.startsWith(prefix)) continue;
+    const name = pathname.slice(prefix.length);
+    const type = contentTypes[extname(name).toLowerCase()];
+    if (!type || !/^[\w.-]+$/.test(name)) return null;
+    return [directory + name, type];
+  }
+  return null;
+}
 
 const port = Number(process.env.NAMCHIN_PREVIEW_PORT ?? 4327);
 const previewStart = process.env.NAMCHIN_PREVIEW_NOW;
@@ -133,7 +171,7 @@ const server = createServer(async (request, response) => {
     return response.end();
   }
 
-  const resource = staticFiles.get(pathname);
+  const resource = staticFiles.get(pathname) ?? directoryResource(pathname);
   if ((request.method !== 'GET' && request.method !== 'HEAD') || !resource) {
     return json(response, 404, { error: 'not_found' });
   }

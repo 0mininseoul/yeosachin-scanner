@@ -2,22 +2,33 @@
 <html lang="ko">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#fcfaf6">
     <meta name="robots" content="noindex, nofollow">
-    <meta name="description" content="남자친구의 새 인스타그램 맞팔 소식을 카카오 알림톡으로 받아보세요. 선착순 300명 사전 예약, 11월 30일 자정 마감.">
-    <title>남친 맞팔 알리미 | 사전 예약</title>
+    <meta name="description" content="체리 · 남친 맞팔 알리미. 남자친구의 새 인스타그램 맞팔 소식을 카카오 알림톡으로 받아보세요. 선착순 300명 프라이빗 오픈, 11월 30일 자정 마감.">
+    <title>체리 · 남친 맞팔 알리미 | 사전 예약</title>
     <link rel="canonical" href="https://yeosachin.com/namchin">
     <link rel="icon" href="/namchin/logo.png" type="image/png">
+    <link rel="preload" href="/namchin/assets/Paperlogy-8ExtraBold.woff2" as="font" type="font/woff2" crossorigin>
+    <script src="/namchin/intro.js"></script>
     <link rel="stylesheet" href="/namchin/landing.css">
     <script type="module" src="/namchin/landing.js"></script>
   </head>
   <body id="top">
+    <div class="intro" data-intro aria-hidden="true">
+      <div class="intro-face"><span class="intro-eye"><i></i></span><span class="intro-eye"><i></i></span></div>
+      <div class="intro-count">
+        <p class="intro-label">남친 팔로잉</p>
+        <p class="intro-digits"><span>23</span><span class="intro-roll"><i>0</i><i>1</i></span><b>+1</b></p>
+      </div>
+      <p class="intro-lines"><span><i>남친이 맞팔하자마자</i></span><span><i>체리가 알려드려요</i></span></p>
+    </div>
     <a class="skip-link" href="#main">본문으로 건너뛰기</a>
     <header class="site-header shell">
-      <a class="wordmark" href="#top"><img class="brand-icon" src="/namchin/logo.png" width="33" height="33" alt=""> 남친 맞팔 알리미</a>
+      <a class="wordmark" href="#top" aria-label="체리, 남친 맞팔 알리미"><img class="brand-icon" src="/namchin/logo.png" width="33" height="33" alt=""><span class="brand-name">체리</span><span class="brand-tag">남친 맞팔 알리미</span></a>
       <nav class="main-nav" aria-label="주요 메뉴">
         <a class="nav-detail" href="#example">알림 예시</a>
+        <a class="nav-detail" href="#trust">비밀 보장</a>
         <a class="nav-detail" href="#how">이용 방법</a>
         <a class="nav-detail" href="#faq">자주 묻는 질문</a>
         <a class="button button--small button--outline" href="#waitlist" data-reservation-cta>출시 알림 받기</a>
@@ -27,21 +38,28 @@
     <main id="main">
       <section class="hero shell" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="offer-label"><span aria-hidden="true"></span><span data-reservation-badge>선착순 300명 · 11월 30일 자정 마감</span></p>
-          <h1 id="hero-title">내 남친은 나 몰래<br><em>누구랑 맞팔하고 다닐까?</em></h1>
-          <p class="hero-lede">남친 인스타 팔로잉, 이제 안 뒤져도 돼요.<br>남친이 새로 맞팔할 때마다 누군지 카톡으로 받아보세요.</p>
+          <p class="offer-label offer-label--private"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7.5a5 5 0 0 1 10 0V10"/><rect x="4.5" y="10" width="15" height="11" rx="3"/><path d="M12 14.5v2.5"/></svg><span data-reservation-badge>선착순 300명 프라이빗 오픈</span></p>
+          <h1 id="hero-title"><span>내 남친은 나 몰래</span> <em>누구랑 맞팔하고 다닐까?</em></h1>
+          <p class="hero-lede"><span>남친 인스타 팔로잉, 이제 안 뒤져도 돼요.</span> <span>남친이 맞팔하자마자 누군지 카톡으로 알려드려요.</span></p>
           <div class="countdown" data-countdown data-while-open hidden></div>
           <div class="hero-actions">
             <a class="button button--dark" href="#waitlist"><span data-reservation-cta>출시 알림 받기</span> <span class="arrow" aria-hidden="true">↗</span></a>
             <a class="button button--outline" href="#example">알림 예시 보기 <span class="arrow" aria-hidden="true">↓</span></a>
           </div>
+          <p class="hero-promise">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7.5a5 5 0 0 1 10 0V10"/><rect x="4.5" y="10" width="15" height="11" rx="3"/><path d="M12 14.5v2.5"/></svg>
+            <b>남자친구에게는 절대 알림이 가지 않아요.</b>
+          </p>
         </div>
-        <figure class="hero-art">
-          <img src="/namchin/assets/notification-bell.jpg" width="1200" height="1200" alt="두 개의 주황빛 고리와 떠 있는 알림 종" fetchpriority="high">
+        <figure class="hero-stage" data-hero-stage role="img" aria-label="남친의 팔로잉 수가 230에서 231로 늘면 휴대폰에 체리의 새 소식 알림이 도착하고, 알림을 누르면 새로 맞팔한 계정의 프로필, 계정 규모, 최근 게시물, AI 요약 리포트가 펼쳐지는 영상 예시">
+          <div class="stage-fallback" aria-hidden="true">
+            <p class="fallback-count">남친 팔로잉 <b>231</b> <span>+1</span></p>
+            <div class="fallback-push"><img class="kakao-icon" src="/namchin/assets/kakao-symbol.svg" width="32" height="32" alt=""><div><p class="fallback-meta"><b>체리</b><span>지금</span></p><p class="fallback-text">새 소식이 도착했어요</p></div></div>
+          </div>
         </figure>
       </section>
 
-      <section class="demo content-width" id="example" aria-labelledby="example-title">
+      <section class="demo content-width" id="example" aria-labelledby="example-title" data-reveal>
         <div class="demo-copy">
           <p class="overline">알림 예시</p>
           <h2 id="example-title">누구와 맞팔했는지<br>알림에서 바로 확인.</h2>
@@ -55,13 +73,13 @@
 
         <div class="demo-display">
           <div class="sample" id="panel-alert" role="tabpanel" aria-labelledby="tab-alert" tabindex="0">
-            <div class="sample-header"><span class="talk-icon" aria-hidden="true">톡</span><b>남친 맞팔 알리미</b><span class="sample-time">오전 9:07</span></div>
+            <div class="sample-header"><img class="kakao-icon" src="/namchin/assets/kakao-symbol.svg" width="27" height="27" alt="카카오톡"><b>체리</b><span class="sample-time">오전 9:07</span></div>
             <div class="sample-body">
               <p class="sample-kicker">@sample_maru의 맞팔 변화</p>
               <h3>새 맞팔 2명을 확인했어요.</h3>
               <ul class="accounts">
-                <li><span class="avatar avatar--photo" aria-hidden="true"></span><span><b>@sample_yeon</b><small>공개 계정</small></span></li>
-                <li><span class="avatar avatar--sage" aria-hidden="true">H</span><span><b>@sample_haru</b><small>공개 계정</small></span></li>
+                <li><span class="avatar avatar--photo" aria-hidden="true"></span><span><b>@sample_yeon</b><small>공개 계정</small></span><span class="new-tag">새 맞팔</span></li>
+                <li><span class="avatar avatar--sage" aria-hidden="true">H</span><span><b>@sample_haru</b><small>공개 계정</small></span><span class="new-tag">새 맞팔</span></li>
               </ul>
               <button class="sample-button" type="button" data-show-report>예시 리포트 열기 <span aria-hidden="true">↗</span></button>
             </div>
@@ -98,7 +116,54 @@
         </div>
       </section>
 
-      <section class="how content-width" id="how" aria-labelledby="how-title">
+      <section class="trust shell" id="trust" aria-labelledby="trust-title">
+        <div class="trust-head" data-reveal>
+          <p class="overline">비밀 보장</p>
+          <h2 id="trust-title">남자친구에게는<br><em>절대 알림이 가지 않아요.</em></h2>
+          <p class="trust-lede">맞팔 확인은 누구나 볼 수 있는 공개 정보로 조용히 진행돼요. 남자친구 인스타그램에는 아무것도 보내지 않고, 소식은 내 카카오톡으로만 와요.</p>
+        </div>
+
+        <figure class="flow" data-reveal>
+          <div class="flow-stage" data-flow-stage role="img" aria-label="남자친구의 공개 프로필에서 읽기 전용으로 가져온 정보가 막힌 통로를 따라 체리를 거쳐 내 카카오톡으로만 이동하고, 남자친구 쪽으로는 아무 신호도 돌아가지 않는 애니메이션"></div>
+          <figcaption>
+            <ol class="flow-steps">
+              <li><b>남자친구 공개 프로필</b><span>읽기만 해요 · 남친은 몰라요</span></li>
+              <li><b>체리</b><span>새 맞팔만 골라 정리</span></li>
+              <li><b>내 카카오톡</b><span>나에게만 도착</span></li>
+            </ol>
+          </figcaption>
+        </figure>
+
+        <ul class="promises" data-reveal>
+          <li>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19.5a3 3 0 0 0 6 0"/><path d="M17.5 13.5V10a5.5 5.5 0 0 0-9-4.2M6.5 10v4L4.5 17h12"/><path d="m3.5 3.5 17 17"/></svg>
+            <h3>남자친구에게 가는 알림 0건</h3>
+            <p>팔로우, 좋아요, 메시지를 보내지 않아요. 남자친구에게도, 맞팔 상대에게도 아무것도 전달되지 않아요.</p>
+          </li>
+          <li>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15.5" r="4"/><path d="m11 12.5 9-9M16.5 7l2.5 2.5M14 9.5l2 2"/></svg>
+            <h3>남자친구 비밀번호는 필요 없어요</h3>
+            <p>남자친구 계정은 공개 아이디만 있으면 돼요. 그 계정에 로그인하지 않으니 새 기기 로그인 알림도 뜨지 않아요.</p>
+          </li>
+          <li>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+            <h3>공개된 정보만 확인해요</h3>
+            <p>공개 계정의 팔로워·팔로잉 목록을 비교하고, 리포트에는 공개 게시물만 담아요. 비공개 계정은 등록할 수 없어요.</p>
+          </li>
+          <li>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M10.5 18.5h3"/><path d="m9.5 10.5 2 2 3.5-4"/></svg>
+            <h3>소식은 나에게만</h3>
+            <p>새 맞팔 알림과 리포트 링크는 내가 등록한 휴대폰 번호의 카카오톡으로만 보내요.</p>
+          </li>
+        </ul>
+
+        <p class="trust-data" data-reveal>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 4.5 5.5v6c0 4.6 3.1 8.4 7.5 10 4.4-1.6 7.5-5.4 7.5-10v-6L12 2.5Z"/><path d="m9 12 2 2 4-4.5"/></svg>
+          <span>사전 예약 연락처는 예약 관리와 출시 알림 1회 발송에만 쓰고, 목적이 달성되면 파기해요. 사전 예약에서는 결제 정보를 받지 않아요. <a href="/privacy#namchin">개인정보처리방침</a></span>
+        </p>
+      </section>
+
+      <section class="how content-width" id="how" aria-labelledby="how-title" data-reveal>
         <div>
           <p class="overline">이용 방법</p>
           <h2 id="how-title">설정은 한 번,<br>확인은 매일.</h2>
@@ -110,24 +175,70 @@
         </ol>
       </section>
 
+      <section class="missed content-width" aria-labelledby="missed-title" data-reveal data-while-open>
+        <div class="missed-copy">
+          <p class="overline">프라이빗 오픈</p>
+          <h2 id="missed-title">같은 날, 같은 맞팔.<br><em><span>300</span>명만 먼저 알아요.</em></h2>
+          <p>체리는 선착순 300명에게만 먼저 열려요. 등록하지 않으면 남친이 누구랑 맞팔하든 모르고 지나가요.</p>
+        </div>
+        <div class="futures">
+          <figure class="future future--in">
+            <div class="future-scene" aria-hidden="true">
+              <p class="future-count">남친 팔로잉 <b>231</b><span>+1</span></p>
+              <div class="future-phone">
+                <p class="future-time">9:07</p>
+                <div class="future-push"><img class="kakao-icon" src="/namchin/assets/kakao-symbol.svg" width="26" height="26" alt=""><p><b>체리</b><span>새 소식이 도착했어요</span></p></div>
+              </div>
+            </div>
+            <figcaption><b>초대받은 300명</b><span>맞팔하자마자 카톡이 와요.</span></figcaption>
+          </figure>
+          <figure class="future future--out">
+            <div class="future-scene" aria-hidden="true">
+              <p class="future-count">남친 팔로잉 <b>231</b><span>+1</span></p>
+              <div class="future-phone">
+                <p class="future-time">9:07</p>
+                <p class="future-empty">알림 없음</p>
+              </div>
+            </div>
+            <figcaption><b>등록 안 한 사람</b><span>오늘도 모르고 지나가요.</span></figcaption>
+          </figure>
+        </div>
+      </section>
+
       <section class="waitlist shell" id="waitlist" aria-labelledby="waitlist-title">
         <div class="waitlist-copy">
-          <p class="offer-label"><span aria-hidden="true"></span><span data-reservation-badge>선착순 300명</span></p>
-          <h2 id="waitlist-title">남친 맞팔 알리미를<br>먼저 만나보세요.</h2>
-          <p data-while-open>이메일과 휴대폰 번호를 남기면, 출시 소식을 한 번 알려드려요.</p>
-          <p class="waitlist-condition" data-while-open>11월 30일 자정까지 사전 예약을 받아요.</p>
+          <p class="offer-label offer-label--private"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7.5a5 5 0 0 1 10 0V10"/><rect x="4.5" y="10" width="15" height="11" rx="3"/><path d="M12 14.5v2.5"/></svg><span data-reservation-badge>선착순 300명 프라이빗 오픈</span></p>
+          <h2 id="waitlist-title">내 초대장이<br>아직 비어 있어요.</h2>
+          <p class="waitlist-lede" data-while-open data-until-registered>이메일과 휴대폰 번호를 남기면 초대장에 내 자리가 생겨요. 체리가 열리는 날 먼저 알려드려요.</p>
+          <div class="pass" data-pass data-while-open aria-hidden="true">
+            <div class="pass-face">
+              <div class="pass-top"><img src="/namchin/logo.png" width="36" height="36" alt=""><b>체리</b><span>프라이빗 오픈 초대장</span></div>
+              <p class="pass-number"><span>선착순</span><b>300</b><span>명</span></p>
+              <dl class="pass-owner">
+                <div><dt>받는 사람</dt><dd data-pass-email>아직 비어 있어요</dd></div>
+                <div><dt>연락처</dt><dd data-pass-phone>아직 비어 있어요</dd></div>
+              </dl>
+              <span class="pass-stamp">등록 완료</span>
+            </div>
+          </div>
+          <p class="waitlist-condition" data-while-open data-until-registered>11월 30일 자정이 지나면 이 초대장은 사라져요.</p>
           <div class="countdown" data-countdown data-while-open hidden></div>
         </div>
 
         <div class="form-card">
           <form id="interest-form" method="post" action="/api/namchin/reservations" aria-labelledby="form-title">
-            <h3 id="form-title">사전 예약</h3>
+            <div class="form-head">
+              <h3 id="form-title">사전 예약</h3>
+              <span class="form-required">모든 항목 필수</span>
+            </div>
             <label class="contact-label" for="email">이메일</label>
             <input id="email" name="email" type="email" placeholder="you@example.com" autocomplete="email" maxlength="254" required>
             <label class="contact-label" for="phone">휴대폰 번호</label>
-            <input id="phone" name="phone" type="tel" placeholder="010-1234-5678" autocomplete="tel" maxlength="24" required>
-            <label class="consent"><input type="checkbox" name="private_ack" required> <span>남자친구에게는 비밀로 할게요.</span></label>
-            <label class="consent"><input type="checkbox" name="consent" aria-describedby="form-note" required> <span>개인정보 수집 및 출시 알림 수신에 동의해요</span></label>
+            <input id="phone" name="phone" type="tel" inputmode="numeric" placeholder="010-1234-5678" autocomplete="tel" maxlength="24" required>
+            <div class="consents">
+              <label class="consent"><span class="check"><input type="checkbox" name="consent" aria-describedby="form-note" required><span class="check-box" aria-hidden="true"></span></span><span>개인정보 수집 및 출시 알림 수신에 동의해요</span></label>
+              <label class="consent"><span class="check"><input type="checkbox" name="private_ack" required><span class="check-box" aria-hidden="true"></span></span><span>남자친구에게는 비밀로 할게요.</span></label>
+            </div>
             <p class="form-note" id="form-note">수집 항목은 이메일과 휴대폰 번호입니다. 사전 예약 관리와 출시 알림 1회 발송에 사용하며, 목적이 달성되면 파기합니다. 동의를 거부할 수 있으며, 동의하지 않으면 출시 알림을 신청할 수 없어요. <a href="/privacy#namchin">개인정보처리방침</a></p>
             <p class="form-error" id="form-error" role="alert" hidden></p>
             <button class="button button--dark submit" id="submit" type="submit" aria-describedby="form-note" disabled>출시 알림 받기 <span class="arrow" aria-hidden="true">↗</span></button>
@@ -135,8 +246,8 @@
           </form>
           <div class="form-state" id="form-success" hidden>
             <span class="success-mark" aria-hidden="true">✓</span>
-            <h3 id="success-title" tabindex="-1">사전 예약을 확인했어요.</h3>
-            <p>출시되면 남겨주신 연락처 중 하나로 한 번 알려드릴게요.</p>
+            <h3 id="success-title" tabindex="-1">초대 명단에 올렸어요.</h3>
+            <p>체리가 열리면 남겨주신 연락처 중 하나로 한 번 알려드릴게요.</p>
             <a class="text-link" href="#example">알림 예시 다시 보기 <span aria-hidden="true">↗</span></a>
           </div>
           <div class="form-state" id="reservation-closed" hidden>
@@ -147,33 +258,52 @@
         </div>
       </section>
 
-      <section class="faq content-width" id="faq" aria-labelledby="faq-title">
+      <section class="faq content-width" id="faq" aria-labelledby="faq-title" data-reveal>
         <h2 id="faq-title">자주 묻는 질문</h2>
         <div class="faq-list">
+          <details><summary>남자친구가 알게 될 수도 있나요?</summary><p>남자친구 계정에 로그인하거나 팔로우·좋아요·메시지를 보내지 않아요. 공개된 목록만 확인하고, 알림은 내가 등록한 번호의 카카오톡으로만 보내요. <a class="inline-link" href="#trust">비밀 보장 원칙 보기</a></p></details>
+          <details><summary>남자친구 말고 다른 사람도 되나요?</summary><p>네, 누구든 등록할 수 있어요. 여자친구, 썸 타는 사람, 친한 친구처럼 새 맞팔이 궁금한 사람의 공개 계정이라면 괜찮아요. 처음에는 한 사람의 계정 1개부터 등록할 수 있어요.</p></details>
           <details><summary>어떤 계정을 등록할 수 있나요?</summary><p>처음에는 팔로워와 팔로잉 합계가 1,500명 이하인 공개 계정 1개를 등록할 수 있어요.</p></details>
           <details><summary>새 맞팔이 생기면 바로 알림이 오나요?</summary><p>매일 확인한 결과로 안내해요. 팔로워·팔로잉 수가 그대로인 경우에는 14일마다 진행하는 전체 점검까지 발견이 늦어질 수 있어요. 점검 사이 생겼다가 사라진 관계는 확인되지 않을 수 있어요.</p></details>
-          <details><summary>사전 예약하면 무엇을 받나요?</summary><p>서비스가 출시되면 남겨주신 연락처 중 하나로 출시 소식을 한 번 보내드려요.</p></details>
+          <details><summary>사전 예약하면 무엇을 받나요?</summary><p>체리는 사전 예약한 분께 먼저 열려요. 열리는 날 남겨주신 연락처 중 하나로 출시 소식을 한 번 보내드려요.</p></details>
+          <details data-while-open><summary>지금 등록하지 않으면 어떻게 되나요?</summary><p>프라이빗 오픈 사전 예약은 11월 30일 자정에 마감돼요. 그 뒤에는 정식 오픈을 기다려야 해요.</p></details>
           <details><summary>등록한 계정이 비공개로 전환되면 어떻게 되나요?</summary><p>비공개 전환을 확인하면 구독을 정지할 예정이에요.</p></details>
         </div>
       </section>
     </main>
 
     <footer class="site-footer shell">
-      <a class="wordmark" href="#top"><img class="brand-icon" src="/namchin/logo.png" width="33" height="33" alt=""> 남친 맞팔 알리미</a>
-      <a class="text-link" href="#top">맨 위로 <span aria-hidden="true">↑</span></a>
+      <a class="wordmark" href="#top" aria-label="체리, 남친 맞팔 알리미"><img class="brand-icon" src="/namchin/logo.png" width="33" height="33" alt=""><span class="brand-name">체리</span><span class="brand-tag">남친 맞팔 알리미</span></a>
+      <div class="footer-links">
+        <a class="text-link" href="/privacy#namchin">개인정보처리방침</a>
+        <a class="text-link" href="#top">맨 위로 <span aria-hidden="true">↑</span></a>
+      </div>
     </footer>
+
+    <div class="dock" data-dock hidden>
+      <div class="dock-inner">
+        <div class="dock-offer"><p class="dock-label">선착순 300명 프라이빗 오픈</p>
+        <p class="dock-timer led-line" data-dock-timer aria-hidden="true">
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">일</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">시간</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">분</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">초</span>
+          <span class="led led--ms"><span class="led-ghost">888</span><strong>000</strong></span>
+        </p></div>
+        <a class="button button--dark" href="#waitlist"><span data-reservation-cta>출시 알림 받기</span> <span class="arrow" aria-hidden="true">↗</span></a>
+      </div>
+    </div>
 
     <template id="countdown-template">
       <div class="countdown-face" role="timer" aria-live="off">
-        <div class="countdown-day" aria-hidden="true"><span class="countdown-unit"><strong>00</strong><span class="countdown-label">일</span></span></div>
-        <div class="countdown-clock" aria-hidden="true">
-          <p class="countdown-caption">사전 예약 마감까지</p>
-          <div class="countdown-time">
-            <span class="countdown-unit"><strong>00</strong><span class="countdown-label">시간</span></span>
-            <span class="countdown-unit"><strong>00</strong><span class="countdown-label">분</span></span>
-            <span class="countdown-unit"><strong>00</strong><span class="countdown-fraction">.<strong>000</strong></span><span class="countdown-label">초</span></span>
-          </div>
-        </div>
+        <p class="countdown-caption"><span>사전 예약 마감까지</span><span>11월 30일 자정</span></p>
+        <p class="led-line" aria-hidden="true">
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">일</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">시간</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">분</span>
+          <span class="led"><span class="led-ghost">88</span><strong>00</strong></span><span class="led-unit">초</span>
+          <span class="led led--ms"><span class="led-ghost">888</span><strong>000</strong></span>
+        </p>
       </div>
     </template>
   </body>

@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated three.js bundles; the sources live in design/namchin-demand/three.
+    "public/namchin/3d/**",
   ]),
 ]);
 
