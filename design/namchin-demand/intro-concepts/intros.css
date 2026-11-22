@@ -14,6 +14,7 @@
   position: fixed;
   inset: 0;
   z-index: 60;
+  display: block;
   overflow: hidden;
   color: #fff4f2;
   cursor: pointer;

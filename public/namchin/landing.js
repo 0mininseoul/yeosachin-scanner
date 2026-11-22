@@ -88,20 +88,22 @@ if ('IntersectionObserver' in window && !prefersReducedMotion) {
 function canUseWebGL() {
   try {
     const canvas = document.createElement('canvas');
-    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'));
+    return Boolean(canvas.getContext('webgl2'));
   } catch {
     return false;
   }
 }
 
-function mountWhenNear(stage, load) {
-  if (!stage || !('IntersectionObserver' in window) || !canUseWebGL()) return;
-  const observer = new IntersectionObserver(([entry]) => {
-    if (!entry.isIntersecting) return;
+function mountWhenNear(stage, load, onUnavailable) {
+  if (!('IntersectionObserver' in window) || !canUseWebGL()) {
+    onUnavailable?.();
+    return;
+  }
+  const observer = new IntersectionObserver((entries) => {
+    if (!entries.at(-1).isIntersecting) return;
     observer.disconnect();
-    load().catch(() => {
-      // Keep the static fallback when the 3D bundle cannot load.
-    });
+    // Keep the static fallback when the 3D bundle cannot load.
+    load().catch(() => onUnavailable?.());
   }, { rootMargin: '300px 0px' });
   observer.observe(stage);
 }
@@ -110,7 +112,9 @@ function mountWhenNear(stage, load) {
 const heroStage = document.querySelector('[data-hero-stage]');
 const stageLanded = openingOver.then(() => Promise.allSettled(heroStage.getAnimations().map((animation) => animation.finished)));
 mountWhenNear(heroStage, async () => (await import('./3d/hero.js')).mountHero(heroStage, { startWhen: stageLanded }));
-mountWhenNear(document.querySelector('[data-flow-stage]'), async () => (await import('./3d/trust.js')).mountTrust(document.querySelector('[data-flow-stage]')));
+// The flow stage has no still version: without 3D, its written steps stand alone.
+const flowStage = document.querySelector('[data-flow-stage]');
+mountWhenNear(flowStage, async () => (await import('./3d/trust.js')).mountTrust(flowStage), () => { flowStage.hidden = true; });
 
 const form = document.querySelector('#interest-form');
 const submit = document.querySelector('#submit');
@@ -185,6 +189,8 @@ function startCountdown(clockOffset) {
   const clocks = Array.from(document.querySelectorAll('[data-countdown]'), (clock) => {
     clock.append(template.content.cloneNode(true));
     clock.hidden = false;
+    // Join the hero entrance already under way instead of starting its delay now.
+    for (const animation of clock.getAnimations()) animation.currentTime = document.timeline.currentTime;
     return {
       face: clock.querySelector('[role="timer"]'),
       digits: clock.querySelectorAll('strong'),
@@ -259,8 +265,8 @@ void initializeReservationForm();
 phoneInput.addEventListener('input', (event) => {
   const { value, selectionStart } = phoneInput;
   if (event.inputType?.startsWith('delete') || selectionStart !== value.length || value.trim().startsWith('+')) return;
-  const digits = value.replace(/\D/g, '').slice(0, 11);
-  if (!digits.startsWith('01')) return;
+  const digits = value.replace(/\D/g, '');
+  if (!digits.startsWith('01') || digits.length > 11) return; // too long: leave it for validation, never cut digits
   const formatted = digits.length <= 3
     ? digits
     : digits.length <= 7
@@ -275,7 +281,7 @@ phoneInput.addEventListener('input', (event) => {
 function fillPass() {
   const email = emailInput.value.trim();
   const at = email.indexOf('@');
-  const digits = phoneInput.value.replace(/\D/g, '');
+  const digits = phoneInput.value.replace(/\D/g, '').replace(/^82/, '0').replace(/^00/, '0');
   const entries = [
     [passEmail, email && `${email[0]}•••${at > 0 ? email.slice(at) : ''}`],
     [passPhone, digits && `${digits.slice(0, 3)}-••••${digits.length >= 10 ? `-${digits.slice(-4)}` : ''}`],
@@ -343,7 +349,7 @@ form.addEventListener('submit', async (event) => {
     updateDock();
     pass.classList.add('is-registered');
     for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;
-    waitlistTitle.textContent = '초대장에\n내 자리가 생겼어요.';
+    waitlistTitle.textContent = '초대장 등록을\n마쳤어요.';
     form.hidden = true;
     closedPanel.hidden = true;
     success.hidden = false;

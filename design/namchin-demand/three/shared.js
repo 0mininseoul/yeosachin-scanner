@@ -236,8 +236,8 @@ export function runLoop({ container, renderer, camera, duration, render, stillAt
   };
 
   new ResizeObserver(resize).observe(container);
-  new IntersectionObserver(([entry]) => {
-    visible = entry.isIntersecting;
+  new IntersectionObserver((entries) => {
+    visible = entries.at(-1).isIntersecting;
     if (visible && !document.hidden) start();
     else stop();
   }, { threshold: 0.05 }).observe(container);
