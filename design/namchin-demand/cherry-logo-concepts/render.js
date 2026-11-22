@@ -1,4 +1,5 @@
 // Renders one cherry mascot icon with a ray-marched distance field: render.html?c=a|b|c|d&size=1024
+// `&cutout=1` (concept B) shows the whole character on a transparent background.
 const params = new URLSearchParams(location.search);
 const concept = ['a', 'b', 'c', 'd'].indexOf(params.get('c') ?? 'a');
 const size = Number(params.get('size') ?? 1024);
@@ -161,7 +162,17 @@ function compile(type, source) {
 
 const program = gl.createProgram();
 gl.attachShader(program, compile(gl.VERTEX_SHADER, vertex));
-gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragment));
+const cutout = params.has('cutout')
+  ? fragment
+    .replace('vec3 render(vec2 uv) {', 'float covered = 0.;\nvec3 render(vec2 uv) {')
+    .replace('concept == 1 ? vec3(.84, .04, -.13)', 'concept == 1 ? vec3(1.36, .03, -.47)')
+    .replace('if (!found) return background(uv);', 'covered = found ? 1. : 0.; if (!found) return vec3(0.);')
+    .replace('vec3 c = vec3(0.);', 'vec3 c = vec3(0.); float a = 0.;')
+    .replace('c += render((f * 2. - res) / res.y);', 'c += render((f * 2. - res) / res.y); a += covered;')
+    .replace('c /= 9.;', 'c /= max(a, 1.); a /= 9.;')
+    .replace('outColor = vec4(pow(clamp(c, 0., 1.), vec3(1. / 2.2)), 1.);', 'outColor = vec4(pow(clamp(c, 0., 1.), vec3(1. / 2.2)) * a, a);')
+  : fragment;
+gl.attachShader(program, compile(gl.FRAGMENT_SHADER, cutout));
 gl.linkProgram(program);
 if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
 gl.useProgram(program);

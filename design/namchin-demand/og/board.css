@@ -1,0 +1,4 @@
+body { max-width: 1240px; margin: 32px auto; padding: 0 20px; font-family: 'Apple SD Gothic Neo', sans-serif; color: #251b17; background: #fcfaf6; }
+h1 { font-size: 24px; }
+h2 { margin: 36px 0 10px; font-size: 17px; }
+iframe { display: block; width: 1200px; height: 630px; border: 0; border-radius: 16px; }

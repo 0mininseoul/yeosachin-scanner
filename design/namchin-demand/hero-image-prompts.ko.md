@@ -70,4 +70,4 @@ The same woman taking a close-up selfie under blooming cherry blossom trees, wea
    - 계정 규모: 첫 번째 팔로워 320 / 팔로잉 306 / 게시물 6, 두 번째 팔로워 1,312 / 팔로잉 503 / 게시물 20
    - 계정 아이디: `seoa.ondo_`, `rina.wknd_`, 남자친구 `maru.onair_` (2026-11-22에 로그아웃 상태의 인스타그램·웹 검색과 앱에서 확인. 아이디를 바꿀 때는 다시 확인한다)
 2. `node design/namchin-demand/build-3d.mjs`로 `public/namchin/3d/`를 다시 만든다.
-3. `node design/namchin-demand/preview.mjs` 실행 후 [랜딩](http://127.0.0.1:4327/namchin)을 연다. 리포트는 `?scene-t=5.6`과 `?scene-t=9.6`으로 멈춰 확인한다.
+3. `node design/namchin-demand/preview.mjs` 실행 후 [랜딩](http://127.0.0.1:4327/cherry)을 연다. 리포트는 `?scene-t=5.6`과 `?scene-t=9.6`으로 멈춰 확인한다.
