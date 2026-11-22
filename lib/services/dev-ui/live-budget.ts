@@ -72,7 +72,7 @@ async function budgetRpc(name: string, args: Record<string, string | number>): P
         const execute = () => supabaseAdmin.rpc(name, args);
         // Only replay the pre-dispatch reservation, using the ID already in args.
         const { data, error } = name === 'dev_live_budget_reserve_v1'
-            ? await retryPostgresAbortedRpc(execute)
+            ? await retryPostgresAbortedRpc(execute, { retryDeadlock: false })
             : await execute();
         if (!error) return data;
     } catch {

@@ -163,12 +163,14 @@ describe('analyzeWithGemini generation retry policy', () => {
 
     const rollback = { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
     const canceled = { data: null, error: { code: '57014', message: 'canceling statement due to user request' } };
+    const deadlock = { data: null, error: { code: '40P01', message: 'deadlock detected' } };
     const committed = { data: true, error: null };
     it.each([
         { scenario: 'confirmed rollback then success', replies: [rollback, committed], successful: true },
         { scenario: 'two confirmed rollbacks', replies: [rollback, rollback], successful: false },
         { scenario: 'unknown commit after connection loss', replies: [new Error('connection lost')], successful: false },
         { scenario: 'operator cancellation', replies: [canceled], successful: false },
+        { scenario: 'deadlock', replies: [deadlock], successful: false },
     ])('replays only the budget transaction: $scenario', async ({ replies, successful }) => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${devRegistry.deployments[0].supabaseProjectRef}.supabase.co`);
