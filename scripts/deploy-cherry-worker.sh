@@ -93,6 +93,8 @@ SECRETS="$(jq -r '
 [[ "$SECRETS" == *SUPABASE_SERVICE_ROLE_KEY=* && "$SECRETS" == *APIFY_SECONDARY_API_TOKEN=* ]] || die "shared secret references are missing"
 [[ -z "${CHERRY_SECRETS:-}" ]] || SECRETS="$SECRETS,$CHERRY_SECRETS"
 RUNTIME_SA="$(jq -r '.spec.template.spec.serviceAccountName' "$WORK/source.json")"
+BUILD_SA="$(jq -er '.metadata.annotations["run.googleapis.com/build-service-account"]' "$WORK/source.json")" \
+  || die "the source worker has no dedicated build account"
 # The two public Supabase values are compiled into the shared Next.js build.
 jq -er '.metadata.annotations["run.googleapis.com/build-environment-variables"] | fromjson
   | with_entries(select(.key | test("^NEXT_PUBLIC_SUPABASE_(URL|ANON_KEY)$")))' "$WORK/source.json" > "$WORK/build.json" \
@@ -131,7 +133,7 @@ gcloud run deploy "$SERVICE" --project="$PROJECT" --region="$REGION" --source="$
   --min-instances=0 --max-instances=3 --timeout=600s --port=8080 --cpu-throttling --cpu-boost \
   --ingress=all --invoker-iam-check --no-allow-unauthenticated --labels="cherry-source-commit=$COMMIT" \
   --description='Private Cherry worker' --env-vars-file="$WORK/env.json" --set-secrets="$SECRETS" \
-  --build-env-vars-file="$WORK/build.json" --quiet
+  --build-env-vars-file="$WORK/build.json" --build-service-account="$BUILD_SA" --quiet
 
 gcloud tasks queues describe "$QUEUE" --project="$PROJECT" --location="$REGION" >/dev/null 2>&1 \
   || gcloud tasks queues create "$QUEUE" --project="$PROJECT" --location="$REGION" \
