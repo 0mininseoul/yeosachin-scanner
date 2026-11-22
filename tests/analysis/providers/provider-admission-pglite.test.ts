@@ -2313,6 +2313,41 @@ describe('provider admission migration PGlite contract', () => {
             expect(await budgetCounts()).toEqual(afterAcquisition);
             expect((await db.query('SELECT run_id,status FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1',
                 [preflight.requestId])).rows).toEqual([{ run_id: actorRun, status: 'running' }]);
+
+            // A terminal checkpoint can outlive its release RPC. Recovery must leave the
+            // original receipt (including an unknown cost) intact for either parent state.
+            const consumedRequest = randomUUID();
+            const receipt = () => db.query(`
+                SELECT run_id,status,max_charge_usd,actual_usage_usd,usage_reconciled_at
+                FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1
+            `, [preflight.requestId]).then(result => result.rows);
+            for (const status of ['ready', 'consumed']) {
+                await db.exec('SAVEPOINT terminal_receipt');
+                await db.query(`UPDATE public.analysis_preflight_provider_runs
+                    SET status='succeeded',terminalized_at=now(),actual_usage_usd=$2,
+                        usage_reconciled_at=CASE WHEN $2::numeric IS NOT NULL THEN now() END
+                    WHERE preflight_id=$1`, [preflight.requestId, status === 'ready' ? null : 0.0026]);
+                await db.query("UPDATE public.analysis_provider_admission_leases SET expires_at=now()-interval '1 second' WHERE admission_id=$1", [admissionId]);
+                await db.query('UPDATE public.analysis_preflights SET status=$2,lease_token=NULL,lease_expires_at=NULL WHERE id=$1', [preflight.requestId, status]);
+                if (status === 'consumed') {
+                    await db.query(`INSERT INTO public.analysis_requests
+                        (id,pipeline_version,status,preflight_id,user_id,selected_plan_id_snapshot,completed_at)
+                        VALUES ($1,'v2','completed',$2,$3,'standard',now())`, [consumedRequest, preflight.requestId, owner]);
+                    await db.query(`UPDATE public.analysis_preflights SET consumed_request_id=$2,
+                        target_instagram_id='scrubbed' WHERE id=$1`, [preflight.requestId, consumedRequest]);
+                    expect(await recover()).toMatchObject({ resolved: 0 }); // actual target differs without a scrub receipt
+                    await db.query('UPDATE public.analysis_preflights SET pii_scrubbed_at=now() WHERE id=$1', [preflight.requestId]);
+                    await asService('SELECT public.recover_expired_analysis_provider_admission($1,$2)', [admissionId, randomUUID()]);
+                }
+                const originalReceipt = await receipt();
+                expect(await recover()).toMatchObject({ scanned: 1, resolved: 1, skipped: 0, failed: 0 });
+                expect(await recover()).toMatchObject({ scanned: 0, resolved: 0 });
+                expect((await db.query('SELECT state,resolution_source FROM public.analysis_provider_admission_leases WHERE admission_id=$1',
+                    [admissionId])).rows).toEqual([{ state: 'released', resolution_source: 'provider_ledger_terminal' }]);
+                expect(await receipt()).toEqual(originalReceipt);
+                expect(await budgetCounts()).toEqual(afterAcquisition);
+                await db.exec('ROLLBACK TO SAVEPOINT terminal_receipt');
+            }
         } finally {
             await db.exec('ROLLBACK');
         }
