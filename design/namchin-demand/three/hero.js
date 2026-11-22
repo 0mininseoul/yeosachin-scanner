@@ -55,10 +55,10 @@ const LEAD = 1.4;
 const DURATION = LEAD + 8.35;
 const COUNT = { in: [0, 0.4], roll: [0.6, 0.86], plus: [0.8, 1.06], out: [LEAD - 0.24, LEAD + 0.06], fly: [LEAD - 0.06, LEAD + 0.6] };
 const HANDLE = '@sample_seoa';
-const SUMMARY = '필라테스, 루프톱 바, 호캉스 사진이 많아요. 밤 외출 셀피를 자주 올리는 계정이에요.';
-const KEYWORDS = ['필라테스', '루프톱', '바,', '호캉스', '밤', '외출'];
-const STATS = [['팔로워', 8412], ['팔로잉', 503], ['게시물', 286]];
-const TAGS = ['필라테스', '루프톱 바', '수영장', '밤 외출', '호캉스', '라운지'];
+const SUMMARY = '캠퍼스, 카페, 전시회 사진이 많아요. 벚꽃과 한강 나들이 셀카를 자주 올리는 계정이에요.';
+const KEYWORDS = ['캠퍼스', '카페', '전시회', '벚꽃과', '한강'];
+const STATS = [['팔로워', 1284], ['팔로잉', 612], ['게시물', 94]];
+const TAGS = ['캠퍼스', '카페', '한강', '전시회', '도서관', '벚꽃'];
 const FACTS = [['성별', '여성'], ['확인 시각', '오전 9:07']];
 
 // Act 1 is shared; the report timeline differs per layout (see `timeline`).

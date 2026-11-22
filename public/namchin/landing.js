@@ -287,7 +287,7 @@ function fillPass() {
     [passPhone, digits && `${digits.slice(0, 3)}-••••${digits.length >= 10 ? `-${digits.slice(-4)}` : ''}`],
   ];
   for (const [field, text] of entries) {
-    field.textContent = text || '아직 비어 있어요';
+    field.textContent = text || '등록 전';
     field.classList.toggle('is-filled', Boolean(text));
   }
 }
