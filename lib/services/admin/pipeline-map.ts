@@ -111,7 +111,7 @@ const BEFORE_PAYMENT: Record<string, NodeSpec> = {
     preflight: {
         col: 1, row: 0, kind: 'collect', title: 'Preflight 사전 점검', subtitle: '대상 프로필 · 필요 플랜',
         does: [
-            '유효한 익명 프로필 캐시를 재사용합니다. 새로 수집할 때는 잔액과 예약액을 확인해 Apify 무료 계정을 선택합니다.',
+            '일반 익명 사전 점검은 유효한 프로필 캐시를 재사용합니다. 새로 수집할 때는 잔액과 예약액을 확인해 Apify 무료 계정을 선택합니다.',
             '비공개·없는 계정·형식 오류를 판정하고 팔로워·팔로잉 수로 필요한 플랜을 계산합니다.',
         ],
         services: 'Apify 무료 계정 풀',
