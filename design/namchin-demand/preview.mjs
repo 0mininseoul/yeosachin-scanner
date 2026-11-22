@@ -22,6 +22,9 @@ const staticFiles = new Map([
   ['/og/', ['./og/index.html', 'text/html; charset=utf-8']],
   ...['a', 'b', 'c'].map(name => [`/og/${name}.html`, [`./og/${name}.html`, 'text/html; charset=utf-8']]),
   ...['og', 'board'].map(name => [`/og/${name}.css`, [`./og/${name}.css`, 'text/css; charset=utf-8']]),
+  ['/private-concepts/', ['./private-concepts/index.html', 'text/html; charset=utf-8']],
+  ...['a', 'b', 'c'].map(name => [`/private-concepts/${name}.html`, [`./private-concepts/${name}.html`, 'text/html; charset=utf-8']]),
+  ...['concepts', 'board'].map(name => [`/private-concepts/${name}.css`, [`./private-concepts/${name}.css`, 'text/css; charset=utf-8']]),
   ['/namchin/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
   ['/namchin/assets/notification-bell.jpg', [landingRoot + 'assets/notification-bell.jpg', 'image/jpeg']],
   ...['barlow-condensed-bold.woff2', 'Paperlogy-4Regular.woff2', 'Paperlogy-8ExtraBold.woff2'].map(name => [

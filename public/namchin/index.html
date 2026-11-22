@@ -229,27 +229,19 @@
           <h2 id="missed-title">이 서비스는 사전예약하는<br><em><span>300</span>명에게만 먼저 제공돼요</em></h2>
           <p>체리는 선착순 300명에게만 먼저 열려요. 등록하지 않으면 남친이 누구랑 맞팔하든 모르고 지나가요.</p>
         </div>
-        <div class="futures">
-          <figure class="future future--in">
-            <div class="future-scene" aria-hidden="true">
-              <p class="future-count">남친 팔로잉 <b>231</b><span>+1</span></p>
-              <div class="future-phone">
-                <p class="future-time">9:07</p>
-                <div class="future-push"><img class="kakao-icon" src="/namchin/assets/kakao-symbol.svg" width="26" height="26" alt=""><p><b>체리</b><span>새 소식이 도착했어요</span></p></div>
-              </div>
-            </div>
-            <figcaption><b>사전예약 300명</b><span>맞팔하자마자 카톡이 와요.</span></figcaption>
-          </figure>
-          <figure class="future future--out">
-            <div class="future-scene" aria-hidden="true">
-              <p class="future-count">남친 팔로잉 <b>231</b><span>+1</span></p>
-              <div class="future-phone">
-                <p class="future-time">9:07</p>
-                <p class="future-empty">알림 없음</p>
-              </div>
-            </div>
-            <figcaption><b>등록 안 한 사람</b><span>지금처럼 계속 모르고 지나가요.</span></figcaption>
-          </figure>
+        <div class="reveal">
+          <p class="reveal-title">남친이 방금 맞팔한 사람</p>
+          <div class="reveal-stage" role="img" aria-label="같은 프로필 사진의 왼쪽 절반은 선명하고 이름이 보이고, 오른쪽 절반은 흐리게 가려져 누군지 알 수 없는 예시">
+            <img class="reveal-photo" src="/namchin/assets/hero/seoa-profile.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="">
+            <span class="reveal-hidden"><img class="reveal-photo" src="/namchin/assets/hero/seoa-profile.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt=""></span>
+            <span class="reveal-line"></span>
+            <p class="reveal-id reveal-id--in"><b>@seoa.ondo_</b><span>박서아</span></p>
+            <p class="reveal-id reveal-id--out"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7.5a5 5 0 0 1 10 0V10"/><rect x="4.5" y="10" width="15" height="11" rx="3"/></svg><span>누군지 모름</span></p>
+          </div>
+          <div class="reveal-captions">
+            <p class="is-in"><b>사전예약 300명</b><span>누군지 바로 알아요.</span></p>
+            <p><b>등록 안 한 사람</b><span>계속 모르고 지나가요.</span></p>
+          </div>
         </div>
       </section>
 
@@ -284,7 +276,7 @@
             <label class="contact-label" for="phone">휴대폰 번호</label>
             <input id="phone" name="phone" type="tel" inputmode="numeric" placeholder="010-1234-5678" autocomplete="tel" maxlength="24" required>
             <div class="consents">
-              <label class="consent"><span class="check"><input type="checkbox" name="consent" aria-describedby="form-note" required><span class="check-box" aria-hidden="true"></span></span><span>개인정보 수집 및 출시 알림·혜택 수신에 동의해요</span></label>
+              <label class="consent"><span class="check"><input type="checkbox" name="consent" aria-describedby="form-note" required><span class="check-box" aria-hidden="true"></span></span><span>개인정보 수집 및 출시 알림, <span class="keep">혜택 수신에 동의해요</span></span></label>
               <label class="consent"><span class="check"><input type="checkbox" name="private_ack" required><span class="check-box" aria-hidden="true"></span></span><span>남자친구에게는 비밀로 할게요.</span></label>
             </div>
             <p class="form-note" id="form-note">수집 항목은 이메일과 휴대폰 번호입니다. 사전 예약 관리와 출시 알림·혜택 발송에 사용하며, 목적이 달성되면 파기합니다. 동의를 거부할 수 있으며, 동의하지 않으면 출시 알림을 신청할 수 없어요.</p>
