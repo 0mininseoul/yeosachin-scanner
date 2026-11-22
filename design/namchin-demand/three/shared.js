@@ -1,7 +1,6 @@
 import {
   CanvasTexture,
   LinearFilter,
-  LinearMipmapLinearFilter,
   Mesh,
   MeshBasicMaterial,
   PlaneGeometry,
@@ -140,11 +139,13 @@ export function canvasPlane({ width, height, pixels = 512, draw, renderer }) {
   canvas.width = Math.round(pixels * (width >= height ? 1 : width / height));
   canvas.height = Math.round(pixels * (height > width ? 1 : height / width));
   const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingQuality = 'high';
   const texture = new CanvasTexture(canvas);
   texture.colorSpace = SRGBColorSpace;
-  texture.minFilter = LinearMipmapLinearFilter;
+  // Planes are drawn close to their size on screen. Mipmaps would blend in a half-size copy and blur text and faces.
+  texture.minFilter = LinearFilter;
   texture.magFilter = LinearFilter;
-  texture.generateMipmaps = true;
+  texture.generateMipmaps = false;
   if (renderer) texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
   const material = new MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, toneMapped: false });
   const mesh = new Mesh(new PlaneGeometry(width, height), material);
@@ -173,9 +174,12 @@ export function glowTexture(color = '255, 120, 90', size = 128) {
   return texture;
 }
 
+/** Phones have three pixels per point; a stage this small can draw all of them. Large stages stop at two. */
+export const stagePixelRatio = () => Math.min(window.devicePixelRatio || 1, window.innerWidth < 768 ? 3 : 2);
+
 export function createRenderer(container) {
   const renderer = new WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(stagePixelRatio());
   renderer.outputColorSpace = SRGBColorSpace;
   renderer.domElement.setAttribute('aria-hidden', 'true');
   container.append(renderer.domElement);
@@ -215,7 +219,8 @@ export function runLoop({ container, renderer, camera, duration, render, stillAt
   };
 
   const resize = () => {
-    const { width, height } = container.getBoundingClientRect();
+    // Layout size: the measured box is smaller while the stage is still scaling in, and would leave the canvas too small.
+    const { clientWidth: width, clientHeight: height } = container;
     if (!width || !height) return;
     renderer.setSize(width, height, false);
     camera.aspect = width / height;

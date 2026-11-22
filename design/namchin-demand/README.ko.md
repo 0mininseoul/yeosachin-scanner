@@ -25,6 +25,7 @@ node design/namchin-demand/preview.mjs
 | 히어로 영상 이미지 | `public/namchin/assets/hero/` ([생성 요청문](hero-image-prompts.ko.md)) |
 | 체리 로고 시안 비교 (B안 선택) | [design/namchin-demand/cherry-logo-concepts/](cherry-logo-concepts/index.html) ([미리보기](http://127.0.0.1:4327/cherry-logo-concepts/)) |
 | 첫 접속 장치 시안 비교 (B안 ‘눈을 뜬다’ 선택, 팔로잉 230→231 신호를 더해 적용) | [design/namchin-demand/intro-concepts/](intro-concepts/index.html) ([미리보기](http://127.0.0.1:4327/intro-concepts/)) |
+| 프라이빗 오픈 목업 시안 비교 (A안 ‘보이는 사람, 안 보이는 사람’ 선택) | [design/namchin-demand/private-concepts/](private-concepts/index.html) ([미리보기](http://127.0.0.1:4327/private-concepts/)) |
 | 타이머 시안 비교 | [design/namchin-demand/timer-concepts/](timer-concepts/index.html) ([미리보기](http://127.0.0.1:4327/timer-concepts/)) |
 | 접수 API | [app/api/namchin/reservations/route.ts](../../app/api/namchin/reservations/route.ts) |
 | 운영 명단 | [app/admin/console/namchin-waitlist-console.tsx](../../app/admin/console/namchin-waitlist-console.tsx) |
@@ -35,7 +36,7 @@ node design/namchin-demand/preview.mjs
 
 히어로 영상은 두 계정의 리포트를 이어서 반복한다(팔로잉 230→231 `seoa`, 231→232 `rina`). 문구와 수치는 `three/hero.js`의 `PEOPLE`에 있다. ‘알림 예시’는 화면에 들어오면 알림톡 → 리포트 순서로 자동 재생하고, 스크립트가 없거나 움직임 줄이기 설정이면 두 화면을 나란히 세워 보여준다.
 
-사전 예약 구간의 초대장은 입력 중인 이메일·휴대폰을 가려서 보여준다. 화면 안에서만 쓰고 전송하지 않으며, 등록하면 ‘등록 완료’ 도장이 찍힌다. ‘같은 날, 같은 맞팔’ 구간과 초대장은 마감 뒤에는 숨는다.
+사전 예약 구간의 초대장은 입력 중인 이메일·휴대폰을 가려서 보여준다. 화면 안에서만 쓰고 전송하지 않으며, 등록하면 ‘등록 완료’ 도장이 찍힌다. ‘프라이빗 오픈’ 구간과 초대장은 마감 뒤에는 숨는다.
 
 첫 접속 장치는 브라우저 탭마다 한 번만 나온다. 장치가 걷히면 히어로 문구, 영상 무대 순서로 들어오고 무대가 자리를 잡으면 영상이 시작된다. 다시 보려면 새 탭에서 연다. 화면을 누르거나 스크롤하거나 아무 키를 누르면 건너뛴다. `#waitlist`처럼 특정 위치로 바로 들어오거나 움직임 줄이기 설정이면 나오지 않는다.
 

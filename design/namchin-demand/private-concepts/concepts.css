@@ -1,0 +1,68 @@
+/* Drafts for the private-open section. The section copy and tokens come from landing.css. */
+.concept-page .missed { margin-block: 34px; }
+
+/* A: one photo, half of it out of reach */
+.reveal-title { width: fit-content; margin: 0 auto -19px; position: relative; z-index: 2; padding: 10px 18px 11px; border-radius: 99px; background: var(--ink); color: #fff6f3; font-size: 14px; font-weight: 800; letter-spacing: -0.03em; box-shadow: 0 12px 24px -12px #251b1799; }
+.reveal-stage { position: relative; overflow: hidden; aspect-ratio: 1 / 1.06; border-radius: 28px; background: #3a1820; }
+.reveal-photo { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.reveal-photo--hidden { clip-path: inset(0 0 0 50%); filter: grayscale(1) blur(13px) brightness(0.74) contrast(1.1); scale: 1.06; }
+.reveal-stage::after { content: ''; position: absolute; inset: 55% 0 0; background: linear-gradient(180deg, transparent, #12060ad9 88%); }
+.reveal-line { position: absolute; z-index: 1; left: 50%; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: #fff; box-shadow: 0 0 22px #ff5f78; }
+.reveal-line::after { content: ''; position: absolute; left: 50%; top: 71%; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: #fff url('/namchin/logo.png') center / 30px no-repeat; box-shadow: 0 10px 24px -8px #000000a6; }
+.reveal-id { position: absolute; z-index: 1; bottom: 18px; width: 50%; padding-inline: 16px; color: #fff4f1; }
+.reveal-id b { display: block; font-size: clamp(14px, 4.4vw, 19px); letter-spacing: -0.03em; }
+.reveal-id span { display: block; font-size: 14px; }
+.reveal-id--in { left: 0; }
+.reveal-id--out { right: 0; display: flex; align-items: center; justify-content: center; gap: 7px; color: #d9d0cb; }
+.reveal-id--out .icon { width: 20px; height: 20px; }
+.reveal-id--out span { font-size: 16px; font-weight: 800; letter-spacing: -0.03em; }
+.reveal-captions { display: grid; grid-template-columns: 1fr 1fr; margin-top: 15px; text-align: center; }
+.reveal-captions b { display: block; color: #7a6f68; font-size: 17px; letter-spacing: -0.04em; }
+.reveal-captions span { color: var(--muted); font-size: 14px; letter-spacing: -0.04em; white-space: nowrap; }
+.reveal-captions .is-in b { color: var(--cherry); }
+
+/* B: a room with 300 places, and everyone else outside */
+.seats-room { position: relative; overflow: hidden; padding: 24px 22px 22px; border-radius: 28px; background: radial-gradient(80% 60% at 78% 30%, #e0344b66, transparent 72%), linear-gradient(160deg, #4d0c1d, #1d070d); color: #fff4f1; }
+.seats-head { display: flex; align-items: baseline; justify-content: space-between; }
+.seats-head span { color: #ffc2c9; font-size: 15px; font-weight: 800; letter-spacing: -0.03em; }
+.seats-head b { font-size: 22px; letter-spacing: -0.04em; }
+.seats-head i { margin-right: 2px; font: normal 700 38px/1 var(--digits); }
+/* 20 columns by 15 rows: 300 dots */
+.seats-grid { position: relative; aspect-ratio: 20 / 15; margin: 16px 0 18px; background: radial-gradient(circle at 50% 50%, #ff6b80 0 30%, transparent 34%) 0 0 / 5% calc(100% / 15); }
+.seat-mine { position: absolute; left: 61%; top: 38%; display: grid; place-items: center; width: 52px; height: 52px; margin: -10px 0 0 -10px; border: 3px solid #fff; border-radius: 50%; background: #2a0712; box-shadow: 0 0 0 9px #ff5f7847, 0 0 44px 8px #ff5f78b3; }
+.seat-mine img { border-radius: 50%; }
+.seat-label { position: absolute; left: 61%; top: 20%; padding: 5px 12px 6px; border-radius: 99px; background: #fff; color: #c01836; font-size: 14px; font-weight: 800; letter-spacing: -0.03em; transform: translateX(-12px); white-space: nowrap; }
+.seats-note b { display: block; font-size: 18px; letter-spacing: -0.04em; }
+.seats-note span { color: #ffd6db; font-size: 14px; letter-spacing: -0.03em; }
+.seats-out { position: relative; padding: 18px 22px 0; }
+.seats-crowd { height: 46px; margin-bottom: 8px; background: radial-gradient(circle at 50% 50%, #b9b0a9 0 30%, transparent 34%) 0 0 / 5% 16px; mask-image: linear-gradient(180deg, #000, transparent); }
+.seats-out .seats-note b { color: #7a6f68; }
+.seats-out .seats-note span { color: var(--muted); }
+
+/* C: one event, two lanes */
+.lanes-start { display: flex; align-items: center; gap: 10px; width: fit-content; margin: 0 auto; padding: 8px 10px 8px 8px; border-radius: 99px; background: var(--ink); color: #fff6f3; font-size: 15px; font-weight: 800; letter-spacing: -0.04em; }
+.lanes-start img { width: 40px; height: 40px; border: 2px solid var(--cherry-hot); border-radius: 50%; object-fit: cover; }
+.lanes-start b { padding: 3px 11px 4px; border-radius: 99px; background: var(--cherry-hot); font: 700 20px/1.1 var(--digits); }
+.lanes-body { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding-top: 30px; }
+.lanes-body::before { content: ''; position: absolute; left: 25%; right: 25%; top: 0; height: 30px; border: solid #d8c6bd; border-width: 2px 2px 0; border-radius: 18px 18px 0 0; margin-top: 12px; }
+.lane { position: relative; padding: 18px 14px 16px; border-radius: 24px; }
+.lane--in { background: radial-gradient(90% 50% at 80% 0%, #ff6076a6, transparent 72%), linear-gradient(#a3142f, #6f0e25); color: #fff4f1; box-shadow: 0 24px 40px -24px #7a1028; }
+.lane--out { background: #e6e1dc; color: #665b54; }
+.lane-name { font-size: 16px; font-weight: 800; letter-spacing: -0.04em; text-align: center; }
+.lane ol { list-style: none; display: grid; gap: 12px; margin: 14px 0 0; padding: 0; }
+.lane li { display: grid; gap: 5px; padding: 12px 10px 13px; border-radius: 16px; text-align: center; }
+.lane li span { font-size: 12.5px; }
+.lane li b { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 30px; font-size: 16px; letter-spacing: -0.04em; white-space: nowrap; }
+.lane--in li { background: #ffffff1c; }
+.lane--in li span { color: #ffd6db; }
+.lane--in li:first-child { background: #fffaf6; color: var(--ink); }
+.lane--in li:first-child span { color: var(--muted); }
+.lane-who img { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; }
+.lane-done .icon { width: 20px; height: 20px; stroke-width: 3; }
+.lane--out li { border: 1.5px dashed #c4bab2; }
+.lane--out li:nth-child(2) { opacity: 0.86; }
+.lane--out li:nth-child(3) { opacity: 0.72; }
+
+@media (min-width: 768px) {
+  .reveal, .seats, .lanes { max-width: 520px; }
+}

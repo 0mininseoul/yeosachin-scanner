@@ -43,6 +43,7 @@ import {
   roundRect,
   runLoop,
   span,
+  stagePixelRatio,
   waitForFonts,
   wrapText,
 } from './shared.js';
@@ -629,7 +630,7 @@ export async function mountHero(container, { startWhen } = {}) {
     aspect = width / height;
     const viewWidth = VIEW * aspect;
     if (frame && Math.abs(frame.viewWidth - viewWidth) < 0.02) return;
-    const unitPixels = Math.max(150, (height / VIEW) * Math.min(window.devicePixelRatio || 1, 2) * 1.15);
+    const unitPixels = Math.max(150, (height / VIEW) * stagePixelRatio() * 1.3);
     frame = { viewWidth, unitPixels };
     for (const item of layouts) disposeTree(item.group);
     layouts = people.map(buildFor);
