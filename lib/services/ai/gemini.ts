@@ -7,7 +7,7 @@ import {
     ThinkingLevel,
     type GenerateContentConfig,
     type Part,
-} from '@google/genai';
+} from '@google/genai/node';
 import { toJSONSchema, type ZodType } from 'zod';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import {

@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
     settleDevAttempt: vi.fn(),
 }));
 
-vi.mock('@google/genai', async (importOriginal) => ({
+vi.mock('@google/genai/node', async (importOriginal) => ({
     ...await importOriginal<typeof import('@google/genai')>(),
     GoogleGenAI: class {
         constructor(options: { fetch: typeof fetch }) {
