@@ -2209,9 +2209,10 @@ describe('provider admission migration PGlite contract', () => {
             CREATE TABLE public.analysis_v2_scheduler_operations (
             request_id uuid, job_key text, operation_key text, stage text, status text, claim_token uuid,
             lease_expires_at timestamptz, recovery_deadline_at timestamptz, not_before_at timestamptz,
-            updated_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
+            updated_at timestamptz, completed_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
         );
-            ALTER TABLE public.analysis_v2_ai_attempts ADD stage text, ADD job_claim_token uuid;
+            ALTER TABLE public.analysis_v2_ai_attempts ADD stage text, ADD job_claim_token uuid,
+                ADD created_at timestamptz NOT NULL DEFAULT now();
             ALTER TABLE public.analysis_requests ADD user_id uuid, ADD completed_at timestamptz,
                 ADD selected_plan_id_snapshot text;
             ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
@@ -2407,11 +2408,31 @@ describe('provider admission migration PGlite contract', () => {
         await gemini(5, 'reserved', 'live', nonOwner);
         await db.exec(`
             UPDATE public.analysis_requests SET status='failed',completed_at=now() - interval '1 day';
+            UPDATE public.analysis_v2_ai_attempts SET created_at=now()-interval '1 day';
             UPDATE public.analysis_pipeline_jobs SET status='failed',lease_token=NULL,lease_expires_at=NULL,updated_at=now()-interval '1 day';
             UPDATE public.analysis_v2_gemini_leases SET expires_at=now()-interval '1 day' WHERE state='leased';
             UPDATE public.analysis_provider_admission_leases SET expires_at=now()-interval '1 day' WHERE logical_provider='gemini';
         `);
         const retireDev = () => asService('SELECT public.retire_dev_live_standard_gemini_slots_v1(8) AS retired');
+        // While the first request is running, only its explicitly terminal operation plus
+        // the drained second request are eligible. Roll back to test both closed together.
+        await db.exec('BEGIN');
+        try {
+            await db.query("UPDATE public.analysis_requests SET status='processing',completed_at=NULL WHERE id=$1", [request]);
+            await db.query('UPDATE public.analysis_preflights SET target_instagram_id=$1 WHERE id=$2', [target, preflight]);
+            await db.exec(`
+                INSERT INTO public.analysis_v2_scheduler_operations(request_id,job_key,operation_key,stage,status,
+                    claim_token,lease_expires_at,recovery_deadline_at,updated_at)
+                SELECT request_id,job_key,operation_key,stage,'terminal_unavailable',
+                    gen_random_uuid(),now()-interval '1 day',now()-interval '1 day',now()-interval '1 day'
+                FROM public.analysis_v2_gemini_leases WHERE slot=2
+            `);
+            expect((await retireDev()).rows).toEqual([{ retired: 2 }]);
+            expect((await db.query("SELECT slot FROM public.analysis_v2_gemini_leases WHERE slot IN (1,2,3,5) AND state='available' ORDER BY slot")).rows)
+                .toEqual([{ slot: 1 }, { slot: 2 }]);
+        } finally {
+            await db.exec('ROLLBACK');
+        }
         expect((await retireDev()).rows).toEqual([{ retired: 3 }]);
         expect((await retireDev()).rows).toEqual([{ retired: 0 }]);
         expect((await db.query('SELECT state FROM public.analysis_v2_gemini_leases WHERE slot=5')).rows)

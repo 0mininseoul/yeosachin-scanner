@@ -353,11 +353,12 @@ async function bootstrap(pool: Pool): Promise<void> {
         CREATE TABLE public.analysis_v2_scheduler_operations (
             request_id uuid, job_key text, operation_key text, stage text, status text, claim_token uuid,
             lease_expires_at timestamptz, recovery_deadline_at timestamptz, not_before_at timestamptz,
-            updated_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
+            updated_at timestamptz, completed_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
         );
         CREATE TABLE public.analysis_v2_ai_attempts (
             request_id UUID, job_key TEXT, operation_key TEXT, attempt SMALLINT, stage TEXT, status TEXT,
-            job_claim_token UUID, reservation_token UUID, terminalized_at TIMESTAMPTZ, estimated_cost_usd NUMERIC
+            job_claim_token UUID, reservation_token UUID, terminalized_at TIMESTAMPTZ, estimated_cost_usd NUMERIC,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         -- Historical dispatch RPCs are supplied as inert fixtures so the additive migration can
         -- revoke and wrap their exact signatures without applying the complete production schema.
@@ -953,7 +954,8 @@ describePostgres('provider admission true-session concurrency', () => {
         try {
             for (const name of [
                 'renew_analysis_v2_gemini_lease_v2', 'release_analysis_v2_gemini_lease_v2',
-                'reap_analysis_v2_scheduler_gemini_leases', 'claim_analysis_v2_scheduler_operation',
+                'reap_analysis_v2_scheduler_gemini_leases', 'reap_analysis_v2_gemini_cutoff_leases_v2',
+                'claim_analysis_v2_scheduler_operation',
             ]) await worker.query(schedulerBaselineFunction(name));
             // Install the same post-baseline admission resolver and replay checks as the deployment.
             for (const name of [
@@ -989,8 +991,8 @@ describePostgres('provider admission true-session concurrency', () => {
                        gen_random_uuid(),'leased',acquired_at,expires_at
                 FROM public.analysis_v2_gemini_leases;
                 INSERT INTO public.analysis_v2_ai_attempts(request_id,job_key,operation_key,attempt,stage,status,
-                    job_claim_token,reservation_token)
-                SELECT s.request_id,s.job_key,s.operation_key,1,s.stage,'reserved',a.job_claim_token,gen_random_uuid()
+                    job_claim_token,reservation_token,created_at)
+                SELECT s.request_id,s.job_key,s.operation_key,1,s.stage,'reserved',a.job_claim_token,gen_random_uuid(),now()-interval '1 day'
                 FROM public.analysis_v2_gemini_leases s JOIN public.analysis_provider_admission_leases a
                     ON a.request_id=s.request_id AND a.credential_slot='gemini-' || s.slot;
                 INSERT INTO dev_live_budget.grants(grant_id,approved_at,expires_at,apify_limit_micros,ai_limit_micros,ai_committed_micros)
@@ -1009,6 +1011,16 @@ describePostgres('provider admission true-session concurrency', () => {
             await worker.query("UPDATE public.analysis_v2_ai_attempts SET status='ambiguous' WHERE request_id=ANY($1::uuid[])", [ids]);
             expect(await retire(ids[0])).toBe(0);
             expect((await worker.query('SELECT public.reap_analysis_v2_scheduler_gemini_leases(8) AS n')).rows[0].n).toBe(0);
+            await worker.query(`
+                UPDATE public.analysis_v2_gemini_leases SET stage='genderResolution',
+                    operation_key=replace(operation_key, 'gender-triage:', 'gender-resolution:') WHERE slot=1
+            `);
+            await worker.query(`
+                UPDATE public.analysis_v2_ai_attempts SET stage='genderResolution',
+                    operation_key=replace(operation_key, 'gender-triage:', 'gender-resolution:')
+                WHERE request_id=$1 AND operation_key=$2
+            `, [ids[0], op]);
+            expect((await worker.query('SELECT public.reap_analysis_v2_gemini_cutoff_leases_v2(8) AS n')).rows[0].n).toBe(0);
             await worker.query("UPDATE public.analysis_requests SET status='failed',completed_at=now() WHERE id=$1", [ids[0]]);
             expect(await retire(ids[0])).toBe(0);
             await worker.query("UPDATE public.analysis_requests SET status='failed' WHERE id=$1", [ids[1]]);
@@ -1026,11 +1038,12 @@ describePostgres('provider admission true-session concurrency', () => {
             `, [ids[0], closed[0].claimToken]);
             await worker.query(`
                 INSERT INTO public.analysis_v2_scheduler_operations(request_id,job_key,operation_key,stage,
-                    status,claim_token,lease_expires_at,recovery_deadline_at,updated_at,result_json)
+                    status,claim_token,lease_expires_at,recovery_deadline_at,updated_at,completed_at,result_json)
                 SELECT s.request_id,s.job_key,s.operation_key,s.stage,
                     CASE s.slot WHEN 2 THEN 'ready' WHEN 3 THEN 'claimed' ELSE 'terminal_unavailable' END,
-                    gen_random_uuid(),now()-interval '1 day',now()-interval '1 day',
-                    CASE WHEN s.slot=4 THEN now() ELSE now()-interval '1 day' END,
+                    gen_random_uuid(),now()-interval '1 day',
+                    CASE WHEN s.slot=4 THEN now() ELSE now()-interval '1 day' END,now(),
+                    CASE WHEN s.slot=2 THEN now()-interval '1 day' END,
                     CASE WHEN s.slot=2 THEN '{"fixture": true}'::jsonb END
                 FROM public.analysis_v2_gemini_leases s WHERE s.request_id=$1 AND s.slot<>5
             `, [ids[0]]);

@@ -1,3 +1,4 @@
+import { VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
 import {
     ApiError,
@@ -293,13 +294,20 @@ function getGenAIClient(): GoogleGenAI {
         throw new Error('GOOGLE_CLOUD_PROJECT is required to use Gemini through Vertex AI');
     }
 
-    genAI = new GoogleGenAI({
+    let transportConfigured = false;
+    const options = {
+        get fetch() {
+            transportConfigured = true;
+            return vertexDispatchFetch;
+        },
         vertexai: true,
         project,
         location: GOOGLE_CLOUD_LOCATION,
-    });
-
-    return genAI;
+    };
+    const client = new GoogleGenAI(options);
+    if (!transportConfigured) throw new Error('VERTEX_DISPATCH_TRANSPORT_UNAVAILABLE');
+    genAI = client;
+    return client;
 }
 
 // 재시도 설정
@@ -1204,7 +1212,8 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     attemptStartedAt = performance.now();
-                    const dispatchDeadline = Date.now() + AI_GEMINI_LEASE_SECONDS * 1_000;
+                    const window = new VertexDispatchWindow(AI_GEMINI_LEASE_SECONDS * 1_000);
+                    let intent: GeminiAttemptStartTelemetry | undefined;
                     // Stage audit acquires provider leases as well as writing the attempt.
                     // Check the Dev cap before it can acquire either.
                     const devReservation = devLiveBudget && devLiveApproval
@@ -1217,7 +1226,7 @@ export async function analyzeWithGemini<T>(
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                            const intent: GeminiAttemptStartTelemetry = {
+                            intent = {
                                 requestId,
                                 modelName,
                                 location: GOOGLE_CLOUD_LOCATION,
@@ -1245,29 +1254,28 @@ export async function analyzeWithGemini<T>(
                                 }
                                 throw durableAuditFailure('intent', stage, error);
                             }
-                            // A suspended worker may resume before its abort timer fires.
-                            // A permit obtained during this window cannot authorize a late SDK start.
-                            if (Date.now() >= dispatchDeadline
-                                || performance.now() - attemptStartedAt >= AI_GEMINI_LEASE_SECONDS * 1_000) {
-                                await emitAttemptTelemetry({
-                                    ...intent,
-                                    tokenUsage: null,
-                                    usageComplete: false,
-                                    usageMetadataStatus: 'missing',
-                                    latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
-                                    estimatedCostUsd: null,
-                                    disposition: 'rejected',
-                                    finishReason: null,
-                                }, onAttemptTelemetry, undefined, 'pre-dispatch');
-                                throw new GeminiPreDispatchAdmissionError();
-                            }
+                            window.assertCanStart();
                         }
                         if (abortSignal?.aborted) {
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
-                    } catch (error) {
-                        // Return the unused budget before leaving the Dev dispatch slot.
+
+                        providerDispatchStarted = true;
+                        const generated = intent
+                            ? await window.run(() => client.models.generateContent(generationRequest))
+                            : await client.models.generateContent(generationRequest);
                         if (devLiveBudget && devReservation) {
+                            const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
+                            if (status === 'complete' && tokenUsage) {
+                                const cost = estimateGeminiRequestCost(tokenUsage, modelName, GOOGLE_CLOUD_LOCATION);
+                                if (cost) await devLiveBudget.settleDevLiveVertexAttempt(devReservation, cost.totalCostUsd);
+                            }
+                        }
+                        return generated;
+                    } catch (error) {
+                        // Entering the SDK may only have started authentication.
+                        if (window.rejectedBeforeSend) providerDispatchStarted = false;
+                        if (!providerDispatchStarted && devLiveBudget && devReservation) {
                             try {
                                 await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0)
                                     .catch(() => devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0));
@@ -1277,16 +1285,21 @@ export async function analyzeWithGemini<T>(
                                 throw new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
                             }
                         }
-                        throw error;
-                    }
-
-                    providerDispatchStarted = true;
-                    let generated;
-                    try {
-                        generated = await client.models.generateContent(generationRequest);
-                    } catch (error) {
+                        if (window.rejectedBeforeSend && intent) {
+                            await emitAttemptTelemetry({
+                                ...intent,
+                                tokenUsage: null,
+                                usageComplete: false,
+                                usageMetadataStatus: 'missing',
+                                latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
+                                estimatedCostUsd: null,
+                                disposition: 'rejected',
+                                finishReason: null,
+                            }, onAttemptTelemetry, undefined, 'pre-dispatch');
+                            throw new GeminiPreDispatchAdmissionError();
+                        }
                         // Settle only the single Dev call that Vertex explicitly rejected.
-                        if (devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
+                        if (providerDispatchStarted && devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
                             try {
                                 await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0);
                             } catch {
@@ -1296,14 +1309,6 @@ export async function analyzeWithGemini<T>(
                         }
                         throw error;
                     }
-                    if (devLiveBudget && devReservation) {
-                        const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
-                        if (status === 'complete' && tokenUsage) {
-                            const cost = estimateGeminiRequestCost(tokenUsage, modelName, GOOGLE_CLOUD_LOCATION);
-                            if (cost) await devLiveBudget.settleDevLiveVertexAttempt(devReservation, cost.totalCostUsd);
-                        }
-                    }
-                    return generated;
                 };
                 response = await runWithGenerationSlot(
                     stage ?? null,

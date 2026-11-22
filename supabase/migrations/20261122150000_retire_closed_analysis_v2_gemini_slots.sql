@@ -7,7 +7,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
 AS $$
 DECLARE
     -- Allow the 600s paid worker request and 210s SDK deadline to drain after
-    -- the durable closure evidence and expiry of both leases.
+    -- any former dispatch authority and both leases have expired.
     v_before timestamptz := pg_catalog.clock_timestamp() - interval '15 minutes';
     closed_request boolean;
     candidate record;
@@ -63,7 +63,7 @@ BEGIN
                AND ((closed_request AND j.status IN ('failed', 'cancelled', 'completed'))
                  OR (j.status = 'completed' AND j.completed_at <= v_before)))
               OR (
-                  NOT closed_request
+                  NOT closed_request AND t.created_at <= v_before
                   AND (j.lease_token IS DISTINCT FROM a.job_claim_token OR j.lease_expires_at <= v_before)
                   AND EXISTS (
                       -- Reclaiming this identity yields the saved result or
@@ -71,8 +71,10 @@ BEGIN
                       SELECT 1 FROM public.analysis_v2_scheduler_operations AS operation
                       WHERE operation.request_id = s.request_id AND operation.job_key = s.job_key
                         AND operation.operation_key = s.operation_key AND operation.stage = s.stage
-                        AND operation.status IN ('terminal_unavailable', 'ready')
-                        AND operation.updated_at <= v_before
+                        -- A fallback claim refreshes updated_at, not the original
+                        -- recovery deadline. It cannot dispatch model traffic.
+                        AND ((operation.status = 'terminal_unavailable' AND operation.recovery_deadline_at <= v_before)
+                          OR (operation.status = 'ready' AND operation.completed_at <= v_before))
                       FOR SHARE OF operation SKIP LOCKED
                   )
               )
@@ -181,5 +183,62 @@ BEGIN
     WHERE lease.slot = expired.slot;
     GET DIAGNOSTICS v_other = ROW_COUNT;
     RETURN v_reaped + v_other;
+END;
+$$;
+
+-- The resolver cutoff reaper runs before the scheduler reaper in production.
+-- Keep ambiguous calls subject to the same evidence test there as well.
+CREATE OR REPLACE FUNCTION public.reap_analysis_v2_gemini_cutoff_leases_v2(p_limit integer DEFAULT 8) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+DECLARE
+    v_now TIMESTAMP WITH TIME ZONE := pg_catalog.clock_timestamp();
+    v_reaped INTEGER := 0;
+BEGIN
+    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 8 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'ANALYSIS_V2_GEMINI_LEASE_INVALID',
+            ERRCODE = 'P0001';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('analysis-v2-gemini-leases', 0)
+    );
+    WITH expired AS (
+        SELECT lease.slot
+        FROM public.analysis_v2_gemini_leases AS lease
+        WHERE lease.state = 'quarantined'
+          AND lease.stage = 'genderResolution'
+          AND lease.expires_at <= v_now
+          AND NOT EXISTS (
+                SELECT 1
+                FROM public.analysis_v2_ai_attempts AS ai_attempt
+                WHERE ai_attempt.request_id = lease.request_id
+                  AND ai_attempt.job_key = lease.job_key
+                  AND ai_attempt.operation_key = lease.operation_key
+                  AND ai_attempt.attempt = lease.attempt
+                  AND ai_attempt.stage = 'genderResolution'
+                  AND ai_attempt.status IN ('reserved', 'ambiguous')
+          )
+        ORDER BY lease.slot
+        LIMIT p_limit
+        FOR UPDATE
+    )
+    UPDATE public.analysis_v2_gemini_leases AS lease
+    SET state = 'available',
+        request_id = NULL,
+        job_key = NULL,
+        operation_key = NULL,
+        stage = NULL,
+        attempt = NULL,
+        lease_claim_token = NULL,
+        acquired_at = NULL,
+        expires_at = NULL,
+        quarantined_at = NULL,
+        updated_at = v_now
+    FROM expired
+    WHERE lease.slot = expired.slot;
+    GET DIAGNOSTICS v_reaped = ROW_COUNT;
+    RETURN v_reaped;
 END;
 $$;

@@ -1,0 +1,61 @@
+diff --git a/node_modules/@google/genai/dist/node/index.cjs b/node_modules/@google/genai/dist/node/index.cjs
+index 886981b..ca65822 100644
+--- a/node_modules/@google/genai/dist/node/index.cjs
++++ b/node_modules/@google/genai/dist/node/index.cjs
+@@ -13384,11 +13384,12 @@ class ApiClient {
+     async apiCall(url, requestInit) {
+         var _a;
++        const send = this.clientOptions.fetch ?? globalThis.fetch;
+         if (!this.clientOptions.httpOptions ||
+             !this.clientOptions.httpOptions.retryOptions) {
+-            return fetch(url, requestInit);
++            return send(url, requestInit);
+         }
+         const retryOptions = this.clientOptions.httpOptions.retryOptions;
+         const runFetch = async () => {
+-            const response = await fetch(url, requestInit);
++            const response = await send(url, requestInit);
+             if (response.ok) {
+                 return response;
+@@ -22016,4 +22017,5 @@ class GoogleGenAI {
+         this.apiClient = new ApiClient({
+             auth: auth,
++            fetch: options.fetch,
+             project: this.project,
+             location: this.location,
+diff --git a/node_modules/@google/genai/dist/node/index.mjs b/node_modules/@google/genai/dist/node/index.mjs
+index 8eef452..5ab3874 100644
+--- a/node_modules/@google/genai/dist/node/index.mjs
++++ b/node_modules/@google/genai/dist/node/index.mjs
+@@ -13362,11 +13362,12 @@ class ApiClient {
+     async apiCall(url, requestInit) {
+         var _a;
++        const send = this.clientOptions.fetch ?? globalThis.fetch;
+         if (!this.clientOptions.httpOptions ||
+             !this.clientOptions.httpOptions.retryOptions) {
+-            return fetch(url, requestInit);
++            return send(url, requestInit);
+         }
+         const retryOptions = this.clientOptions.httpOptions.retryOptions;
+         const runFetch = async () => {
+-            const response = await fetch(url, requestInit);
++            const response = await send(url, requestInit);
+             if (response.ok) {
+                 return response;
+@@ -21994,4 +21995,5 @@ class GoogleGenAI {
+         this.apiClient = new ApiClient({
+             auth: auth,
++            fetch: options.fetch,
+             project: this.project,
+             location: this.location,
+diff --git a/node_modules/@google/genai/dist/node/node.d.ts b/node_modules/@google/genai/dist/node/node.d.ts
+index cf58606..5ca0549 100644
+--- a/node_modules/@google/genai/dist/node/node.d.ts
++++ b/node_modules/@google/genai/dist/node/node.d.ts
+@@ -5572,4 +5572,6 @@ export declare class GoogleGenAI {
+  */
+ export declare interface GoogleGenAIOptions {
++    /** Node HTTP transport used by model requests, including SDK retries. */
++    fetch?: typeof globalThis.fetch;
+     /**
+      * Optional. Determines whether to use the Vertex AI or the Gemini API.
