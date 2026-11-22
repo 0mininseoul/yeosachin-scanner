@@ -625,6 +625,11 @@ export async function startOrResumeApifyActor(
                 // Apify documents the first terminal cost as preliminary. A later
                 // authenticated reconciliation finalizes usage without delaying users.
                 usageTotalUsd: null,
+                ...(devApproval?.planId === 'standard' && process.env.DEV_LIVE_WORKLOAD === 'preflight'
+                    && resumeRunId && run.id === resumeRunId && credentialSlot !== 'secondary'
+                    && run.finishedAt instanceof Date && typeof run.usageTotalUsd === 'number'
+                    ? { resumedReceipt: { finishedAt: run.finishedAt, usageTotalUsd: run.usageTotalUsd } }
+                    : {}),
             });
         } catch (error) {
             throw sanitizedProviderCallbackError(

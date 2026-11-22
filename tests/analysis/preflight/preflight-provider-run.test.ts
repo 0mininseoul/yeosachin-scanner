@@ -765,6 +765,65 @@ describe('preflight provider-run adapter', () => {
         expect(store.reserve).not.toHaveBeenCalled();
     });
 
+    it.each([
+        { name: 'stable', ageMs: 60_000, usage: 0.0025, dbError: false, settles: true },
+        { name: 'stable zero', ageMs: 60_000, usage: 0, dbError: false, settles: true },
+        { name: 'preliminary', ageMs: 5_000, usage: 0.0025, dbError: false, settles: false },
+        { name: 'out of budget', ageMs: 60_000, usage: 0.05, dbError: false, settles: false },
+        { name: 'unavailable ledger', ageMs: 60_000, usage: 0.0025, dbError: true, settles: false },
+    ])('handles a $name receipt from the adopted Dev Actor without blocking its terminal checkpoint', async scenario => {
+        // Keep all synthetic receipt and run times relative to the same clock.
+        const now = Date.now();
+        const finishedAt = new Date(now - scenario.ageMs);
+        let durable = row('running', {
+            reservedAt: new Date(now - 180_000).toISOString(),
+            runStartedAt: new Date(now - 170_000).toISOString(),
+        }) as StoredPreflightProviderRun;
+        const rpc = vi.fn(async (name: string, args: Record<string, unknown>) => {
+            switch (name) {
+                case PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.loadRpc:
+                    break;
+                case PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reconcileUsageRpc:
+                    expect(args).toMatchObject({
+                        p_run_id: runId, p_preflight_id: preflightId, p_input_hash: inputHash,
+                        p_credential_slot: 'quinary', p_actual_usage_usd: scenario.usage,
+                        p_provider_finished_at: finishedAt.toISOString(),
+                    });
+                    if (scenario.dbError) return { data: null, error: { code: '57014' } };
+                    durable = {
+                        ...durable, status: 'succeeded', actualUsageUsd: scenario.usage,
+                        usageReconciledAt: new Date(now).toISOString(), terminalizedAt: finishedAt.toISOString(),
+                    };
+                    break;
+                case PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc:
+                    expect(args.p_actual_usage_usd).toBeNull();
+                    durable = { ...durable, status: 'succeeded', terminalizedAt: durable.terminalizedAt ?? new Date(now).toISOString() };
+                    break;
+                default:
+                    throw new Error('unexpected provider start or reservation');
+            }
+            return { data: durable, error: null };
+        });
+        const store = createPreflightProviderRunStore({ rpc });
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const { checkpoint } = await bindPreflightProviderRunCheckpoint({
+                store, claim: { preflightId, claimToken }, inputHash, identity: preflightProviderIdentity('quinary'),
+            });
+            expect(checkpoint.resumeRunId).toBe(runId);
+            await checkpoint.onCostRunFinished?.({
+                ...preflightProviderIdentity('quinary'), runId, status: 'succeeded', usageTotalUsd: null,
+                resumedReceipt: { finishedAt, usageTotalUsd: scenario.usage },
+            });
+        }
+        const calls = rpc.mock.calls.map(([name]) => name);
+        const settled = PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.reconcileUsageRpc;
+        const terminal = PREFLIGHT_PROVIDER_RUN_DATABASE_NAMES.checkpointTerminalRpc;
+        expect(calls.filter(name => name === terminal)).toHaveLength(2);
+        expect(calls.filter(name => name === settled)).toHaveLength(scenario.settles ? 1 : scenario.dbError ? 2 : 0);
+        if (scenario.settles) expect(calls.indexOf(settled)).toBeLessThan(calls.indexOf(terminal));
+        expect(durable).toMatchObject({ status: 'succeeded', actualUsageUsd: scenario.settles ? scenario.usage : null });
+    });
+
     it('rejects terminal usage above the fixed charge before any RPC', async () => {
         const rpc = vi.fn();
         const store = createPreflightProviderRunStore({ rpc });

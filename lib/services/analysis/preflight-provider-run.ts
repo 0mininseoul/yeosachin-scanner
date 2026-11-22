@@ -828,6 +828,32 @@ async function withinReconciliationTimeout<T>(pending: Promise<T>): Promise<T> {
     }
 }
 
+function preflightReceiptInput(
+    run: StoredPreflightProviderRun,
+    status: ProviderCostTerminalStatus | null,
+    usage: unknown,
+    finishedAt: unknown,
+): PreflightProviderRunUsageReconciliationInput {
+    if (!run.runId || status === null || (run.status !== 'running' && status !== run.status)
+        || typeof usage !== 'number' || !Number.isFinite(usage) || usage < 0) {
+        throw new Error('provider usage is not stable');
+    }
+    const actualUsageUsd = Number(usage.toFixed(12));
+    if (actualUsageUsd > run.maxChargeUsd) throw new Error('provider usage exceeds its fixed charge');
+    return {
+        preflightId: run.preflightId,
+        inputHash: run.inputHash,
+        logicalProvider: run.logicalProvider,
+        actorId: run.actorId,
+        credentialSlot: run.credentialSlot,
+        maxChargeUsd: run.maxChargeUsd,
+        runId: run.runId,
+        status,
+        actualUsageUsd,
+        providerFinishedAt: providerFinishedAt(finishedAt, run),
+    };
+}
+
 export async function reconcileSettledPreflightProviderCosts(
     store: PreflightProviderRunReconciliationStore = preflightProviderRunStore,
     dependencies: {
@@ -850,38 +876,9 @@ export async function reconcileSettledPreflightProviderCosts(
                 const snapshot = await withinReconciliationTimeout(
                     apify.run(run.runId).get()
                 );
-                const usageTotalUsd = snapshot?.usageTotalUsd;
-                const remoteStatus = terminalStatus(snapshot?.status);
-                const remoteFinishedAt = providerFinishedAt(snapshot?.finishedAt, run);
-                if (
-                    remoteStatus === null
-                    || (run.status !== 'running' && remoteStatus !== run.status)
-                    || typeof usageTotalUsd !== 'number'
-                    || !Number.isFinite(usageTotalUsd)
-                    || usageTotalUsd < 0
-                ) {
-                    throw new Error('provider usage is not stable');
-                }
-                const actualUsageUsd = Number(usageTotalUsd.toFixed(12));
-                if (
-                    !Number.isFinite(actualUsageUsd)
-                    || actualUsageUsd < 0
-                    || actualUsageUsd > run.maxChargeUsd
-                ) {
-                    throw new Error('provider usage exceeds its fixed charge');
-                }
-                await store.reconcileUsage({
-                    preflightId: run.preflightId,
-                    inputHash: run.inputHash,
-                    logicalProvider: run.logicalProvider,
-                    actorId: run.actorId,
-                    credentialSlot: run.credentialSlot,
-                    maxChargeUsd: run.maxChargeUsd,
-                    runId: run.runId,
-                    status: remoteStatus,
-                    actualUsageUsd,
-                    providerFinishedAt: remoteFinishedAt,
-                });
+                await store.reconcileUsage(preflightReceiptInput(
+                    run, terminalStatus(snapshot?.status), snapshot?.usageTotalUsd, snapshot?.finishedAt,
+                ));
                 return true;
             } catch {
                 return false;
@@ -910,7 +907,7 @@ export function preflightProviderIdentity(
 }
 
 export async function bindPreflightProviderRunCheckpoint(input: {
-    store: PreflightProviderRunStore;
+    store: PreflightProviderRunStore & Partial<Pick<PreflightProviderRunReconciliationStore, 'reconcileUsage'>>;
     claim: PreflightProviderRunClaim;
     inputHash: string;
     identity: ProviderIdentity;
@@ -977,6 +974,17 @@ export async function bindPreflightProviderRunCheckpoint(input: {
             // caller's provisional identity. Persist the durable row's
             // selected identity, not the provisional input identity.
             const stored = assertCostEvent(event);
+            if (event.resumedReceipt && stored.operationKey === INITIAL_PROFILE_OPERATION_KEY
+                && stored.actualUsageUsd === null && input.store.reconcileUsage) {
+                try {
+                    await input.store.reconcileUsage(preflightReceiptInput(
+                        stored, event.status, event.resumedReceipt.usageTotalUsd, event.resumedReceipt.finishedAt,
+                    ));
+                } catch {
+                    // A provisional receipt or a temporarily unavailable ledger must not block readiness.
+                    // Keep the terminal checkpoint below; ordinary receipt reconciliation remains idempotent.
+                }
+            }
             current = await input.store.checkpointTerminal({
                 ...claimInput,
                 logicalProvider: stored.logicalProvider,

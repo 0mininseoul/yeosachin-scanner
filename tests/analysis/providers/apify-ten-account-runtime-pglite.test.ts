@@ -1043,7 +1043,17 @@ describe('ordinary B-lite initial profile budget', () => {
         const finish = `SELECT public.checkpoint_analysis_preflight_provider_run_terminal(
             $1,$2,$3,'tenth',0.003,'TestRun12345','succeeded',$4)`;
         await expect(isolated.query(finish, [...claim, 0.0031])).rejects.toThrow('INVALID');
-        await isolated.query(finish, [...claim, 0.0028]);
+        // Terminal status comes before billing settles. Two deliveries of the same
+        // stable receipt must leave one final debit at the original run identity.
+        await isolated.query(finish, [...claim, null]);
+        await isolated.query(`UPDATE public.analysis_preflight_provider_runs
+            SET reserved_at=now()-interval '3 minutes', run_started_at=now()-interval '2 minutes',
+                terminalized_at=now()-interval '1 minute' WHERE preflight_id=$1`, [freePreflightId]);
+        const receipt = `SELECT public.reconcile_analysis_preflight_provider_run_usage(
+            preflight_id,input_hash,run_id,logical_provider,actor_id,credential_slot,max_charge_usd,
+            status,0.0028,terminalized_at) FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1`;
+        await isolated.query(receipt, [freePreflightId]);
+        await isolated.query(receipt, [freePreflightId]);
         const costs = await isolated.query(`SELECT max_charge_usd::real AS cap, actual_usage_usd::real AS actual
             FROM public.analysis_preflight_acquisition_cost_events`);
         expect(costs.rows).toEqual([{ cap: 0.003, actual: 0.0028 }]);
