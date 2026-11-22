@@ -92,7 +92,7 @@ export function NamchinWaitlistConsole() {
                         <thead><tr>
                             <th scope="col">신청 이메일</th>
                             <th scope="col">휴대폰 번호</th>
-                            <th scope="col">1회 수신 동의 일시 <span className="ac-namchin-timezone">KST</span></th>
+                            <th scope="col">수신 동의 일시 <span className="ac-namchin-timezone">KST</span></th>
                         </tr></thead>
                         <tbody>{roster?.rows.length ? roster.rows.map(row => <tr key={row.email}>
                             <td><b>{row.email}</b></td>

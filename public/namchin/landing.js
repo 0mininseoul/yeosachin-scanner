@@ -37,35 +37,111 @@ const openingOver = new Promise((resolve) => {
   }
 });
 
-const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+// The sample film plays by itself while it is on screen: the alert, a tap, then the report scrolling once.
+const FILM_SCENES = [
+  ['wait', 500, 0], ['message', 1850, 0], ['reach', 600, 0], ['press', 260, 0],
+  ['profile', 2400, 1],
+  ['posts', 2400, 2], ['summary', 2750, 2], ['out', 450, 2],
+];
 
-function showTab(tab, focus = false) {
-  for (const item of tabs) {
-    const selected = item === tab;
-    item.setAttribute('aria-selected', String(selected));
-    item.tabIndex = selected ? 0 : -1;
-    const panel = document.getElementById(item.getAttribute('aria-controls'));
-    panel.hidden = !selected;
-  }
-  if (focus) tab.focus({ preventScroll: true });
-}
-
-for (const [index, tab] of tabs.entries()) {
-  tab.addEventListener('click', () => showTab(tab));
-  tab.addEventListener('keydown', (event) => {
-    const next = {
-      ArrowRight: (index + 1) % tabs.length,
-      ArrowLeft: (index + tabs.length - 1) % tabs.length,
-      Home: 0,
-      End: tabs.length - 1,
-    }[event.key];
-    if (next === undefined) return;
-    event.preventDefault();
-    showTab(tabs[next], true);
+function playFilm(film) {
+  const screen = film.querySelector('[data-film-window]');
+  const view = film.querySelector('[data-film-view]');
+  const scroller = film.querySelector('[data-film-scroll]');
+  const button = film.querySelector('.chat-button');
+  const steps = document.querySelector('[data-film-steps]');
+  const beats = Array.from(steps.children);
+  let timer = 0;
+  let current = 0;
+  let visible = false;
+  film.classList.add('is-live');
+  steps.classList.add('is-live');
+  beats.forEach((beat, index) => {
+    const length = FILM_SCENES.reduce((sum, [, ms, owner]) => sum + (owner === index ? ms : 0), 0);
+    beat.style.setProperty('--beat', `${length}ms`);
   });
+
+  // Layout positions, unaffected by the transforms that are still running.
+  function offsetWithin(element, root) {
+    let x = 0;
+    let y = 0;
+    for (let node = element; node && node !== root; node = node.offsetParent) {
+      x += node.offsetLeft;
+      y += node.offsetTop;
+    }
+    return [x, y];
+  }
+
+  function aim() {
+    const [name] = FILM_SCENES[current];
+    const down = ['posts', 'summary', 'out'].includes(name);
+    scroller.style.setProperty('--y', down ? `${-Math.max(0, scroller.offsetHeight - view.clientHeight)}px` : '0px');
+    const [x, y] = offsetWithin(button, screen);
+    film.style.setProperty('--fx', `${Math.round(x + button.offsetWidth * 0.66)}px`);
+    film.style.setProperty('--fy', `${Math.round(y + button.offsetHeight * 0.6)}px`);
+  }
+
+  function show(index) {
+    current = index;
+    const [name, ms, owner] = FILM_SCENES[index];
+    film.dataset.scene = name;
+    beats.forEach((beat, position) => {
+      beat.classList.toggle('is-active', position === owner);
+      beat.classList.toggle('is-done', position < owner);
+    });
+    aim();
+    timer = setTimeout(() => show((index + 1) % FILM_SCENES.length), ms);
+  }
+
+  // Coming back into view starts the film, and its progress, from the top.
+  function update() {
+    clearTimeout(timer);
+    for (const beat of beats) beat.classList.remove('is-active', 'is-done');
+    void steps.offsetWidth;
+    if (visible && !document.hidden) show(0);
+  }
+
+  film.dataset.scene = 'wait';
+  aim();
+  const observer = new IntersectionObserver((entries) => {
+    const { intersectionRect, boundingClientRect, rootBounds } = entries[entries.length - 1];
+    // Nearly half of the film, or most of the window when the window is shorter than that.
+    const enough = Math.min(boundingClientRect.height * 0.45, (rootBounds ? rootBounds.height : window.innerHeight) * 0.6);
+    const next = intersectionRect.height > 0 && intersectionRect.height >= enough;
+    if (next === visible) return;
+    visible = next;
+    update();
+  }, { threshold: Array.from({ length: 21 }, (_, index) => index / 20) });
+  observer.observe(film);
+  document.addEventListener('visibilitychange', update);
+  window.addEventListener('resize', aim);
+
+  // Back to the two still screens.
+  return () => {
+    clearTimeout(timer);
+    observer.disconnect();
+    document.removeEventListener('visibilitychange', update);
+    window.removeEventListener('resize', aim);
+    film.classList.remove('is-live');
+    steps.classList.remove('is-live');
+  };
 }
 
-document.querySelector('[data-show-report]').addEventListener('click', () => showTab(tabs[1], true));
+const sampleFilm = document.querySelector('[data-film]');
+if ('IntersectionObserver' in window) {
+  const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let stopFilm = null;
+  const followMotion = () => {
+    if (motion.matches) {
+      stopFilm?.();
+      stopFilm = null;
+    } else {
+      stopFilm ??= playFilm(sampleFilm);
+    }
+  };
+  followMotion();
+  motion.addEventListener('change', followMotion);
+}
 
 // Reveal sections as they scroll in. Anything already on screen is shown immediately so nothing flashes.
 if ('IntersectionObserver' in window && !prefersReducedMotion) {
@@ -100,7 +176,7 @@ function mountWhenNear(stage, load, onUnavailable) {
     return;
   }
   const observer = new IntersectionObserver((entries) => {
-    if (!entries.at(-1).isIntersecting) return;
+    if (!entries[entries.length - 1].isIntersecting) return;
     observer.disconnect();
     // Keep the static fallback when the 3D bundle cannot load.
     load().catch(() => onUnavailable?.());

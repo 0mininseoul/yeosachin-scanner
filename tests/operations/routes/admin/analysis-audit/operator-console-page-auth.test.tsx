@@ -296,7 +296,7 @@ describe('operator console page authentication boundary', () => {
         const authorized = renderToStaticMarkup(await reservationsPage());
         expect(authorized).toContain('사전 예약 명단');
         expect(authorized).toContain('휴대폰 번호');
-        expect(authorized).toContain('1회 수신 동의 일시');
+        expect(authorized).toContain('수신 동의 일시');
         expect(authorized).toContain(`href="${destination}"`);
         expect(authorized).not.toContain('Apify 계정');
 

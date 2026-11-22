@@ -17,7 +17,7 @@ node design/namchin-demand/preview.mjs
 | --- | --- |
 | 문구, 마크업 | [public/namchin/index.html](../../public/namchin/index.html) |
 | 레이아웃과 스타일 | [public/namchin/landing.css](../../public/namchin/landing.css) |
-| 타이머, 리포트 예시 탭, 폼 | [public/namchin/landing.js](../../public/namchin/landing.js) |
+| 타이머, 알림 예시 영상, 폼 | [public/namchin/landing.js](../../public/namchin/landing.js) |
 | 첫 접속 장치 | [public/namchin/intro.js](../../public/namchin/intro.js)(재생 여부), `landing.css`의 Opening 구간(동작), `landing.js`(건너뛰기) |
 | 예약 마감 시각 | [public/namchin/campaign.mjs](../../public/namchin/campaign.mjs) |
 | 히어로·비밀 보장 3D 장면 원본 | [design/namchin-demand/three/](three/) (수정 후 `node design/namchin-demand/build-3d.mjs`로 `public/namchin/3d/`를 다시 만든다) |
@@ -30,7 +30,9 @@ node design/namchin-demand/preview.mjs
 
 미리보기는 테스트용 연락처를 로컬 SQLite에 저장한다. 동일한 이메일 또는 휴대폰 번호는 최초 신청을 유지한다. 서버가 시작할 때 SQLite 파일 경로를 표시한다. `NAMCHIN_PREVIEW_DB`에 그 경로를 지정하면 기존 로컬 테스트 기록을 다시 열 수 있다. 포트가 이미 사용 중이면 `NAMCHIN_PREVIEW_PORT`로 바꿀 수 있다. 개인정보처리방침 링크는 공개 정책 페이지로 연결된다.
 
-3D 장면은 랜딩 주소에 `?scene-t=초`를 붙이면 그 시점에 멈춘다(예: 팔로잉 +1 `?scene-t=1.1`, 푸시 알림 `?scene-t=2.6`, 리포트 `?scene-t=8.7`). 움직임 줄이기 설정에서도 정지 화면으로 보인다.
+3D 장면은 랜딩 주소에 `?scene-t=초`를 붙이면 그 시점에 멈춘다(예: 팔로잉 +1 `?scene-t=1.1`, 푸시 알림 `?scene-t=2.6`, 프로필·계정 규모 `?scene-t=5.6`, 게시물·AI 요약 `?scene-t=9.6`). 두 번째 계정은 11초를 더한다. 움직임 줄이기 설정에서도 정지 화면으로 보인다.
+
+히어로 영상은 두 계정의 리포트를 이어서 반복한다(팔로잉 230→231 `seoa`, 231→232 `rina`). 문구와 수치는 `three/hero.js`의 `PEOPLE`에 있다. ‘알림 예시’는 화면에 들어오면 알림톡 → 리포트 순서로 자동 재생하고, 스크립트가 없거나 움직임 줄이기 설정이면 두 화면을 나란히 세워 보여준다.
 
 사전 예약 구간의 초대장은 입력 중인 이메일·휴대폰을 가려서 보여준다. 화면 안에서만 쓰고 전송하지 않으며, 등록하면 ‘등록 완료’ 도장이 찍힌다. ‘같은 날, 같은 맞팔’ 구간과 초대장은 마감 뒤에는 숨는다.
 

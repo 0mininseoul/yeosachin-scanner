@@ -195,17 +195,24 @@ export function supportsWebGL() {
  * Runs `render(seconds)` in a loop of `duration` seconds while the container is on screen.
  * With reduced motion, renders a single still at `stillAt`.
  * `startWhen` holds the first frame until it resolves.
+ * Returns the second it is frozen at (null when playing) and `refresh`, which redraws the picture while the loop is not running.
  */
 export function runLoop({ container, renderer, camera, duration, render, stillAt: defaultStill, onResize, startWhen }) {
   // `?scene-t=5.2` freezes every scene at that second, for design review screenshots.
   const frozen = new URLSearchParams(window.location.search).get('scene-t');
-  const stillAt = frozen !== null && Number.isFinite(Number(frozen)) ? Number(frozen) % duration : defaultStill;
+  const stillAt = frozen !== null && Number.isFinite(Number(frozen)) ? ((Number(frozen) % duration) + duration) % duration : defaultStill;
   const reduceMotion = frozen !== null || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let visible = false;
   let held = Boolean(startWhen);
   let frame = 0;
   let clockStart = performance.now();
   let pausedAt = 0;
+
+  const refresh = (before) => {
+    if (!reduceMotion && !held && visible) return;
+    before?.();
+    render(reduceMotion ? stillAt : pausedAt);
+  };
 
   const resize = () => {
     const { width, height } = container.getBoundingClientRect();
@@ -214,11 +221,12 @@ export function runLoop({ container, renderer, camera, duration, render, stillAt
     camera.aspect = width / height;
     onResize?.(width, height);
     camera.updateProjectionMatrix();
-    if (reduceMotion || held || !visible) render(reduceMotion ? stillAt : pausedAt);
+    refresh();
   };
 
   const tick = (now) => {
-    const seconds = ((now - clockStart) / 1000) % duration;
+    // A frame's timestamp can be slightly older than the clock it is measured against.
+    const seconds = (Math.max(0, now - clockStart) / 1000) % duration;
     pausedAt = seconds;
     render(seconds);
     frame = requestAnimationFrame(tick);
@@ -237,7 +245,7 @@ export function runLoop({ container, renderer, camera, duration, render, stillAt
 
   new ResizeObserver(resize).observe(container);
   new IntersectionObserver((entries) => {
-    visible = entries.at(-1).isIntersecting;
+    visible = entries[entries.length - 1].isIntersecting;
     if (visible && !document.hidden) start();
     else stop();
   }, { threshold: 0.05 }).observe(container);
@@ -251,4 +259,5 @@ export function runLoop({ container, renderer, camera, duration, render, stillAt
   });
   resize();
   render(reduceMotion ? stillAt : 0);
+  return { still: reduceMotion ? stillAt : null, refresh };
 }
