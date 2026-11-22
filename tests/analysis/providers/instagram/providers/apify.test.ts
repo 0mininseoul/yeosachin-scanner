@@ -1,12 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ApifyApiError } from 'apify-client';
+import devRegistry from '@/config/dev-ui-deployment.json';
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: devBudget.rpc } }));
 
 const devBudget = vi.hoisted(() => ({
     require: vi.fn(),
     reserve: vi.fn(),
     check: vi.fn(),
+    rpc: vi.fn(),
 }));
 
 vi.mock('@/lib/services/dev-ui/live-budget', () => ({
@@ -132,6 +134,39 @@ describe('Dev live Apify budget', () => {
             expect(devBudget.reserve).toHaveBeenCalledWith(grant, APIFY_RELATIONSHIP_ACTOR_ID, 0.003);
             expect(onRunStartRejected).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 412 }));
             expect(call).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('starts the Actor once after a rolled-back budget reservation is retried', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${devRegistry.deployments[0].supabaseProjectRef}.supabase.co`);
+        try {
+            const budget = await vi.importActual<typeof import('@/lib/services/dev-ui/live-budget')>(
+                '@/lib/services/dev-ui/live-budget',
+            );
+            devBudget.require.mockReturnValue({
+                id: 'synthetic-grant', approvedAt: '2026-01-01T00:00:00Z', expiresAt: null,
+                apifyMaxCents: 600, aiMaxCents: 1800,
+            });
+            devBudget.reserve.mockImplementationOnce(budget.reserveDevLiveApifyStart);
+            devBudget.rpc.mockReset()
+                .mockResolvedValueOnce({ data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } })
+                .mockResolvedValueOnce({ data: true, error: null });
+            const { client, call } = mockClient([]);
+            await startOrResumeApifyActor(
+                client, APIFY_RELATIONSHIP_ACTOR_ID, { Account: ['target'] }, {
+                    logicalProvider: 'apify', credentialSlot: 'primary', timeoutSecs: 300,
+                    maxItems: 1, maxTotalChargeUsd: 0.003,
+                }, { recordUsage: vi.fn() },
+            );
+            expect(devBudget.rpc).toHaveBeenCalledTimes(2);
+            expect(devBudget.rpc.mock.calls[0]).toEqual(['dev_live_budget_reserve_v1', expect.objectContaining({
+                p_provider: 'apify', p_reservation_id: expect.any(String), p_amount_micros: 3000,
+            })]);
+            expect(devBudget.rpc.mock.calls[1]).toEqual(devBudget.rpc.mock.calls[0]);
+            expect(call).toHaveBeenCalledOnce();
         } finally {
             vi.unstubAllEnvs();
         }

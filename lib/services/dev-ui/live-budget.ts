@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import { devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
 import { estimateDevLiveVertexReservation } from './live-vertex-reservation';
@@ -68,7 +69,11 @@ function grantArguments(approval: DevLiveApproval) {
 
 async function budgetRpc(name: string, args: Record<string, string | number>): Promise<unknown> {
     try {
-        const { data, error } = await supabaseAdmin.rpc(name, args);
+        const execute = () => supabaseAdmin.rpc(name, args);
+        // Only replay the pre-dispatch reservation, using the ID already in args.
+        const { data, error } = name === 'dev_live_budget_reserve_v1'
+            ? await retryPostgresAbortedRpc(execute)
+            : await execute();
         if (!error) return data;
     } catch {
         // The caller only needs the stable budget error, never a database response.

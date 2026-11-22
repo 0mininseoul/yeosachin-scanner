@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
 import { issueReplayStatelessCapability } from '@/lib/services/ai/replay-stateless-capability';
@@ -13,18 +14,14 @@ const mocks = vi.hoisted(() => ({
     tokenUsageInsert: vi.fn(),
     requireDevApproval: vi.fn(),
     reserveDevAttempt: vi.fn(),
+    rpc: vi.fn(),
     settleDevAttempt: vi.fn(),
 }));
 
 vi.mock('@google/genai', async (importOriginal) => ({
-    ApiError: (await importOriginal<typeof import('@google/genai')>()).ApiError,
+    ...await importOriginal<typeof import('@google/genai')>(),
     GoogleGenAI: class {
         models = { generateContent: mocks.generateContent };
-    },
-    MediaResolution: {
-        MEDIA_RESOLUTION_LOW: 'low',
-        MEDIA_RESOLUTION_MEDIUM: 'medium',
-        MEDIA_RESOLUTION_HIGH: 'high',
     },
     ThinkingLevel: {
         MINIMAL: 'minimal',
@@ -40,6 +37,7 @@ vi.mock('@/lib/services/google/credentials', () => ({
 
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: {
+        rpc: mocks.rpc,
         from: vi.fn(() => ({ insert: mocks.tokenUsageInsert })),
     },
 }));
@@ -161,6 +159,47 @@ describe('analyzeWithGemini generation retry policy', () => {
         })).resolves.toEqual({ value: 'ok' });
         expect(audit.onBeforeAttempt).toHaveBeenCalledOnce();
         expect(mocks.generateContent).toHaveBeenCalledOnce();
+    });
+
+    const rollback = { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+    const canceled = { data: null, error: { code: '57014', message: 'canceling statement due to user request' } };
+    const committed = { data: true, error: null };
+    it.each([
+        { scenario: 'confirmed rollback then success', replies: [rollback, committed], successful: true },
+        { scenario: 'two confirmed rollbacks', replies: [rollback, rollback], successful: false },
+        { scenario: 'unknown commit after connection loss', replies: [new Error('connection lost')], successful: false },
+        { scenario: 'operator cancellation', replies: [canceled], successful: false },
+    ])('replays only the budget transaction: $scenario', async ({ replies, successful }) => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${devRegistry.deployments[0].supabaseProjectRef}.supabase.co`);
+        const budget = await vi.importActual<typeof import('@/lib/services/dev-ui/live-budget')>(
+            '@/lib/services/dev-ui/live-budget',
+        );
+        mocks.requireDevApproval.mockReturnValue({
+            id: 'synthetic-approval', approvedAt: '2026-01-01T00:00:00Z', expiresAt: null,
+            apifyMaxCents: 600, aiMaxCents: 1800,
+        });
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.rpc.mockReset();
+        for (const reply of replies) {
+            if (reply instanceof Error) mocks.rpc.mockRejectedValueOnce(reply);
+            else mocks.rpc.mockResolvedValueOnce(reply);
+        }
+        const audit = stageAuditOptions();
+        if (successful) mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        const response = analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        });
+        if (successful) await expect(response).resolves.toEqual({ value: 'ok' });
+        else await expect(response).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        expect(mocks.rpc).toHaveBeenCalledTimes(replies.length);
+        expect(mocks.rpc.mock.calls[0]).toEqual(['dev_live_budget_reserve_v1', expect.objectContaining({
+            p_reservation_id: expect.any(String), p_provider: 'vertex',
+        })]);
+        if (replies.length === 2) expect(mocks.rpc.mock.calls[1]).toEqual(mocks.rpc.mock.calls[0]);
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
+        expect(mocks.generateContent).toHaveBeenCalledTimes(successful ? 1 : 0);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
     });
 
     it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {
@@ -1148,10 +1187,10 @@ describe('analyzeWithGemini stage request policy', () => {
     });
 
     it.each([
-        ['genderTriage', 'gemini-3.1-flash-lite', 'minimal', 'low', 512, 5],
-        ['featureAnalysis', 'gemini-3.1-flash-lite', 'medium', 'medium', 2_048, 11],
-        ['highRiskNarrative', 'gemini-3-flash-preview', 'high', 'medium', 4_096, 11],
-        ['privateAccountName', 'gemini-3.1-flash-lite', 'minimal', 'low', 8_192, 0],
+        ['genderTriage', 'gemini-3.1-flash-lite', 'minimal', 'MEDIA_RESOLUTION_LOW', 512, 5],
+        ['featureAnalysis', 'gemini-3.1-flash-lite', 'medium', 'MEDIA_RESOLUTION_MEDIUM', 2_048, 11],
+        ['highRiskNarrative', 'gemini-3-flash-preview', 'high', 'MEDIA_RESOLUTION_MEDIUM', 4_096, 11],
+        ['privateAccountName', 'gemini-3.1-flash-lite', 'minimal', 'MEDIA_RESOLUTION_LOW', 8_192, 0],
     ] as const)(
         'maps the %s policy into the generated SDK request',
         async (stage, model, thinking, resolution, maxOutputTokens, expectedMediaCount) => {
@@ -1245,7 +1284,7 @@ describe('analyzeWithGemini stage request policy', () => {
             model: 'gemini-3-flash-preview',
             config: expect.objectContaining({
                 maxOutputTokens: 777,
-                mediaResolution: 'high',
+                mediaResolution: 'MEDIA_RESOLUTION_HIGH',
                 thinkingConfig: { thinkingLevel: 'low' },
             }),
         }));
@@ -1290,7 +1329,7 @@ describe('analyzeWithGemini stage request policy', () => {
         expect(request.model).toBe('gemini-3.1-flash-lite');
         expect(request.config).toMatchObject({
             thinkingConfig: { thinkingLevel: 'high' },
-            mediaResolution: 'low',
+            mediaResolution: 'MEDIA_RESOLUTION_LOW',
             maxOutputTokens: 1_024,
         });
         expect(request.contents[0].parts).toHaveLength(4);
@@ -1343,7 +1382,7 @@ describe('analyzeWithGemini stage request policy', () => {
         expect(request.model).toBe('gemini-3.1-flash-lite');
         expect(request.config).toMatchObject({
             maxOutputTokens: 1_024,
-            mediaResolution: 'low',
+            mediaResolution: 'MEDIA_RESOLUTION_LOW',
             thinkingConfig: { thinkingLevel: 'minimal' },
         });
         expect(request.contents[0].parts).toHaveLength(4);
