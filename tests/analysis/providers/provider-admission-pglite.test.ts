@@ -2187,7 +2187,13 @@ describe('provider admission migration PGlite contract', () => {
         },
     );
 
-    it('recovers only evidenced leases for the approved Dev Standard request and cleans proven terminal capacity when idle', async () => {
+    describe('Dev Standard recovery', () => {
+        beforeAll(installDevRecovery);
+        it('rotates exactly the expired preflight with a checkpointed Actor and lets the next delivery adopt it', verifyPreflightRecovery);
+        it('recovers only evidenced leases for the approved Dev Standard request and cleans proven terminal capacity when idle', verifyPaidRecovery);
+    });
+
+    async function installDevRecovery() {
         await db.exec(`
             CREATE SCHEMA dev_ui;
             CREATE TABLE dev_ui.runs (id uuid);
@@ -2216,7 +2222,7 @@ describe('provider admission migration PGlite contract', () => {
             ALTER TABLE public.analysis_requests ADD user_id uuid, ADD completed_at timestamptz,
                 ADD selected_plan_id_snapshot text;
             ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
-                ADD access_mode text;
+                ADD access_mode text, ADD target_input_hash text;
             ALTER TABLE public.analysis_pipeline_jobs ADD completed_at timestamptz, ADD recovery_not_before timestamptz,
                 ADD scheduler_not_before_at timestamptz;
             UPDATE public.analysis_provider_admission_leases SET state = 'released', released_at = clock_timestamp(),
@@ -2242,7 +2248,112 @@ describe('provider admission migration PGlite contract', () => {
         ].map(fragment => recoverySql.indexOf(fragment));
         expect(lockOrder.every(index => index >= 0)).toBe(true);
         expect(lockOrder).toEqual([...lockOrder].sort((left, right) => left - right));
+    }
 
+    async function verifyPreflightRecovery() {
+        const owner = randomUUID();
+        const grant = randomUUID();
+        const policy = randomUUID();
+        const preflight = { ...preflightInput(210), credentialSlot: 'tenth', budgetKey: 'preflight:apify:tenth' };
+        const target = 'dev_fixture';
+        const hash = 'a'.repeat(64);
+        const actorRun = 'FixtureActorRun123';
+        const admissionId = analysisProviderAdmissionId(preflight);
+        const recover = () => asService<{ summary: { recovered: number; resolved: number } }>(
+            'SELECT public.recover_dev_live_standard_provider_admissions_v1(16) AS summary',
+        ).then(result => result.rows[0].summary);
+
+        await db.exec('BEGIN');
+        try {
+            await db.query('INSERT INTO dev_live_budget.standard_policy VALUES ($1,$2,$3)', [policy, owner, target]);
+            await db.query('INSERT INTO dev_live_budget.owner_starts VALUES ($1,$2,$3)', [grant, owner, target]);
+            await db.query("INSERT INTO dev_live_budget.grants VALUES ($1,'standard','infinity',now(),false,$2)", [grant, policy]);
+            await db.query(`
+                INSERT INTO public.analysis_preflights(id,status,user_id,expires_at,idempotency_key,target_instagram_id,
+                    target_input_hash,access_mode,lease_token,lease_expires_at)
+                VALUES ($1,'processing',$2,now()+interval '30 minutes','dev-live:owner:standard:' || $3,$4,$5,
+                    'test_entitlement',$6,now()+interval '5 minutes')
+            `, [preflight.requestId, owner, grant, target, hash, preflight.claimToken]);
+            await db.query(`
+                INSERT INTO public.analysis_preflight_provider_runs(preflight_id,operation_key,input_hash,
+                    credential_slot,max_charge_usd,status,run_id,run_started_at)
+                VALUES ($1,$2,$3,$4,0.003,'running',$5,now())
+            `, [preflight.requestId, preflight.operationKey, hash, preflight.credentialSlot, actorRun]);
+
+            const initial = await acquire(preflight);
+            const budgetCounts = () => db.query(`
+                SELECT budget_key,window_count FROM public.analysis_provider_admission_budgets
+                WHERE budget_key IN ('preflight:apify:global',$1) ORDER BY budget_key
+            `, [preflight.budgetKey]).then(result => result.rows);
+            const afterAcquisition = await budgetCounts();
+            expect(await recover()).toMatchObject({ recovered: 0 });
+            await db.query("UPDATE public.analysis_provider_admission_leases SET expires_at=now()-interval '1 second' WHERE admission_id=$1", [admissionId]);
+            expect(await recover()).toMatchObject({ recovered: 0 }); // parent still processing
+
+            await db.query("UPDATE public.analysis_preflights SET status='pending',lease_token=NULL,lease_expires_at=NULL WHERE id=$1", [preflight.requestId]);
+            await db.query("UPDATE public.analysis_preflight_provider_runs SET input_hash=repeat('b',64) WHERE preflight_id=$1", [preflight.requestId]);
+            expect(await recover()).toMatchObject({ recovered: 0 }); // mismatched lineage
+            await db.query("UPDATE public.analysis_preflight_provider_runs SET input_hash=$2,run_id=NULL WHERE preflight_id=$1", [preflight.requestId, hash]);
+            expect(await recover()).toMatchObject({ recovered: 0 }); // uncertain start, no Actor ID
+            await db.query("UPDATE public.analysis_preflight_provider_runs SET run_id=$2 WHERE preflight_id=$1", [preflight.requestId, actorRun]);
+            await db.query("UPDATE dev_live_budget.grants SET blocked=true WHERE grant_id=$1", [grant]);
+            expect(await recover()).toMatchObject({ recovered: 0 });
+            await db.query("UPDATE dev_live_budget.grants SET blocked=false WHERE grant_id=$1", [grant]);
+            expect(await recover()).toMatchObject({ scanned: 1, recovered: 1, resolved: 0, failed: 0, skipped: 1 });
+            expect(await recover()).toMatchObject({ scanned: 0, recovered: 0, resolved: 0, failed: 0 });
+
+            const nextToken = randomUUID();
+            await db.query("UPDATE public.analysis_preflights SET status='processing',lease_token=$2,lease_expires_at=now()+interval '5 minutes' WHERE id=$1", [preflight.requestId, nextToken]);
+            const next = { ...preflight, jobClaimToken: nextToken, claimToken: nextToken };
+            const adopted = await acquireWithLeaseToken(next, randomUUID());
+            expect(adopted).toMatchObject({ outcome: 'adopted', admissionId: initial.admissionId });
+            expect(await acquireWithLeaseToken(next, randomUUID())).toMatchObject({
+                outcome: 'already_acquired', leaseToken: adopted.leaseToken, fence: adopted.fence,
+            });
+            expect(await budgetCounts()).toEqual(afterAcquisition);
+            expect((await db.query('SELECT run_id,status FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1',
+                [preflight.requestId])).rows).toEqual([{ run_id: actorRun, status: 'running' }]);
+
+            // A terminal checkpoint can outlive its release RPC. Recovery must leave the
+            // original receipt (including an unknown cost) intact for either parent state.
+            const consumedRequest = randomUUID();
+            const receipt = () => db.query(`
+                SELECT run_id,status,max_charge_usd,actual_usage_usd,usage_reconciled_at
+                FROM public.analysis_preflight_provider_runs WHERE preflight_id=$1
+            `, [preflight.requestId]).then(result => result.rows);
+            for (const status of ['ready', 'consumed']) {
+                await db.exec('SAVEPOINT terminal_receipt');
+                await db.query(`UPDATE public.analysis_preflight_provider_runs
+                    SET status='succeeded',terminalized_at=now(),actual_usage_usd=$2,
+                        usage_reconciled_at=CASE WHEN $2::numeric IS NOT NULL THEN now() END
+                    WHERE preflight_id=$1`, [preflight.requestId, status === 'ready' ? null : 0.0026]);
+                await db.query("UPDATE public.analysis_provider_admission_leases SET expires_at=now()-interval '1 second' WHERE admission_id=$1", [admissionId]);
+                await db.query('UPDATE public.analysis_preflights SET status=$2,lease_token=NULL,lease_expires_at=NULL WHERE id=$1', [preflight.requestId, status]);
+                if (status === 'consumed') {
+                    await db.query(`INSERT INTO public.analysis_requests
+                        (id,pipeline_version,status,preflight_id,user_id,selected_plan_id_snapshot,completed_at)
+                        VALUES ($1,'v2','completed',$2,$3,'standard',now())`, [consumedRequest, preflight.requestId, owner]);
+                    await db.query(`UPDATE public.analysis_preflights SET consumed_request_id=$2,
+                        target_instagram_id='scrubbed' WHERE id=$1`, [preflight.requestId, consumedRequest]);
+                    expect(await recover()).toMatchObject({ resolved: 0 }); // actual target differs without a scrub receipt
+                    await db.query('UPDATE public.analysis_preflights SET pii_scrubbed_at=now() WHERE id=$1', [preflight.requestId]);
+                    await asService('SELECT public.recover_expired_analysis_provider_admission($1,$2)', [admissionId, randomUUID()]);
+                }
+                const originalReceipt = await receipt();
+                expect(await recover()).toMatchObject({ scanned: 1, resolved: 1, skipped: 0, failed: 0 });
+                expect(await recover()).toMatchObject({ scanned: 0, resolved: 0 });
+                expect((await db.query('SELECT state,resolution_source FROM public.analysis_provider_admission_leases WHERE admission_id=$1',
+                    [admissionId])).rows).toEqual([{ state: 'released', resolution_source: 'provider_ledger_terminal' }]);
+                expect(await receipt()).toEqual(originalReceipt);
+                expect(await budgetCounts()).toEqual(afterAcquisition);
+                await db.exec('ROLLBACK TO SAVEPOINT terminal_receipt');
+            }
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+    }
+
+    async function verifyPaidRecovery() {
         const owner = randomUUID();
         const request = randomUUID();
         const preflight = randomUUID();
@@ -2441,5 +2552,5 @@ describe('provider admission migration PGlite contract', () => {
             SELECT count(*)::int AS unresolved FROM public.analysis_v2_ai_attempts WHERE request_id=ANY($1::uuid[])
               AND status IN ('reserved','ambiguous') AND estimated_cost_usd IS NULL
         `, [[request, second]])).rows).toEqual([{ unresolved: 3 }]);
-    });
+    }
 });

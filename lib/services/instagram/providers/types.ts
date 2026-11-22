@@ -68,6 +68,8 @@ export interface ProviderCostRunStarted {
 export interface ProviderCostRunFinished extends ProviderCostRunStarted {
     status: ProviderCostTerminalStatus;
     usageTotalUsd: number | null;
+    /** Receipt from an authenticated poll of an already checkpointed Dev preflight run. */
+    resumedReceipt?: { finishedAt: Date; usageTotalUsd: number };
 }
 
 interface ProviderCostRunCallbacks {

@@ -172,6 +172,43 @@ describe('Dev live Apify budget', () => {
         }
     });
 
+    it('starts and reserves a B-lite Actor once across two pending preflight deliveries and terminal adoption', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        try {
+            const { client, call, waitForFinish } = mockClient([]);
+            const finishedAt = new Date(Date.now() - 60_000);
+            waitForFinish
+                .mockResolvedValueOnce({ status: 'RUNNING' })
+                .mockResolvedValueOnce({ status: 'RUNNING' })
+                .mockResolvedValueOnce({ id: 'RunAbcd1234567890', status: 'SUCCEEDED', finishedAt, usageTotalUsd: 0.0026 });
+            const approval = { id: 'synthetic-preflight-approval', planId: 'standard' };
+            devBudget.require.mockReturnValue(approval);
+            devBudget.reserve.mockClear();
+            const onRunStarted = vi.fn<(runId: string) => Promise<void>>().mockResolvedValue(undefined);
+            const onCostRunFinished = vi.fn();
+            const deliver = (resumeRunId?: string) => startOrResumeApifyActor(
+                client, APIFY_PROFILE_ACTOR_ID, { usernames: ['synthetic'] }, {
+                    logicalProvider: 'apify', credentialSlot: 'tenth', timeoutSecs: 120, maxItems: 1, maxTotalChargeUsd: 0.003,
+                }, { resumeRunId, credentialSlot: 'tenth', maxChargeUsd: 0.003, onRunStarted, onCostRunFinished, recordUsage: vi.fn() },
+            );
+            await expect(deliver()).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+            expect(onRunStarted).toHaveBeenCalledOnce();
+            const id = onRunStarted.mock.calls[0][0];
+            await expect(deliver(id)).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+            await expect(deliver(id)).resolves.toMatchObject({ status: 'SUCCEEDED' });
+            expect(client.run).toHaveBeenCalledTimes(3);
+            expect(vi.mocked(client.run).mock.calls.map(([runId]) => runId)).toEqual([id, id, id]);
+            expect(call).toHaveBeenCalledOnce();
+            expect(devBudget.reserve.mock.calls).toEqual([[approval, APIFY_PROFILE_ACTOR_ID, 0.003]]);
+            expect(onCostRunFinished.mock.calls).toEqual([[expect.objectContaining({
+                runId: id, status: 'succeeded', usageTotalUsd: null,
+                resumedReceipt: { finishedAt, usageTotalUsd: 0.0026 },
+            })]]);
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('checks an approved resumed Actor run without reserving or dispatching a new start', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         try {

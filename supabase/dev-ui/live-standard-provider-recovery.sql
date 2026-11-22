@@ -337,6 +337,71 @@ BEGIN
         END LOOP;
     END IF;
 
+    -- This lease belongs to the preflight even after formal admission. A
+    -- running Actor stays fenced for adoption. A terminal ledger also covers
+    -- a worker lost between its terminal checkpoint and capacity release.
+    FOR v_candidate IN
+        SELECT lease.admission_id, run.status AS run_status
+        FROM public.analysis_preflights AS preflight
+        JOIN dev_live_budget.owner_starts AS owner_start
+          ON owner_start.user_id = preflight.user_id
+        JOIN dev_live_budget.grants AS approval
+          ON approval.grant_id = owner_start.grant_id
+         AND preflight.idempotency_key = 'dev-live:owner:standard:' || approval.grant_id::text
+        JOIN public.analysis_preflight_provider_runs AS run
+          ON run.preflight_id = preflight.id AND run.input_hash = preflight.target_input_hash
+        JOIN public.analysis_provider_admission_leases AS lease
+          ON lease.request_id = preflight.id AND lease.operation_key = run.operation_key
+         AND lease.credential_slot = run.credential_slot AND lease.logical_provider = run.logical_provider
+        WHERE preflight.access_mode = 'test_entitlement'
+          AND approval.plan_id = 'standard' AND approval.approved_at <= v_now
+          AND approval.expires_at = 'infinity'::timestamptz AND NOT approval.blocked
+          AND approval.standard_policy_id = dev_live_budget.standard_policy_for_owner(
+              owner_start.user_id, owner_start.target_instagram_id
+          )
+          AND lease.workload_role = 'preflight' AND lease.job_key = 'preflight:provider'
+          AND lease.operation_key = 'target-profile-fallback' AND lease.logical_provider = 'apify'
+          AND public.analysis_beta_valid_apify_credential_slot(lease.credential_slot)
+          AND lease.expires_at <= v_now AND NULLIF(run.run_id, '') IS NOT NULL
+          AND run.run_started_at IS NOT NULL
+          AND (
+              (lease.state = 'leased' AND run.status = 'running' AND run.terminalized_at IS NULL
+               AND owner_start.target_instagram_id = preflight.target_instagram_id
+               AND preflight.expires_at > v_now AND preflight.consumed_request_id IS NULL
+               AND (preflight.status = 'pending'
+                    OR (preflight.status = 'processing' AND preflight.lease_expires_at <= v_now))
+               AND NOT EXISTS (SELECT 1 FROM public.analysis_requests AS r WHERE r.preflight_id = preflight.id))
+              OR
+              (lease.state IN ('leased', 'recovery_required')
+               AND run.status IN ('succeeded', 'failed', 'aborted', 'timed_out')
+               AND run.terminalized_at IS NOT NULL
+               AND (owner_start.target_instagram_id = preflight.target_instagram_id
+                    OR preflight.pii_scrubbed_at IS NOT NULL))
+          )
+        ORDER BY lease.expires_at, lease.admission_id
+        LIMIT (p_limit - v_scanned + 1)
+        FOR SHARE OF preflight, owner_start, approval, run SKIP LOCKED
+        FOR UPDATE OF lease SKIP LOCKED
+    LOOP
+        IF v_scanned = p_limit THEN
+            v_has_more := true;
+            EXIT;
+        END IF;
+        v_scanned := v_scanned + 1;
+        IF (public.recover_expired_analysis_provider_admission(
+            v_candidate.admission_id, pg_catalog.gen_random_uuid()
+        ) ->> 'recovered')::boolean THEN
+            v_recovered := v_recovered + 1;
+            IF v_candidate.run_status <> 'running' AND (public.resolve_analysis_provider_admission(
+                v_candidate.admission_id, pg_catalog.gen_random_uuid()
+            ) ->> 'resolved')::boolean THEN
+                v_resolved := v_resolved + 1;
+                CONTINUE;
+            END IF;
+        END IF;
+        v_skipped := v_skipped + 1;
+    END LOOP;
+
     RETURN pg_catalog.jsonb_build_object(
         'scanned', v_scanned, 'recovered', v_recovered, 'resolved', v_resolved,
         'skipped', v_skipped, 'failed', v_failed, 'hasMore', v_has_more,
