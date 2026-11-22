@@ -642,7 +642,8 @@ export async function mountHero(container, { startWhen } = {}) {
   const canvas = renderer.domElement;
 
   function redraw(item, state) {
-    const id = Object.values(state).flat().map((value) => (typeof value === 'number' ? value.toFixed(3) : value)).join('|');
+    // 0.9996 and 1 must not share a key: the panel would never get its finished drawing.
+    const id = Object.values(state).flat().map((value) => (typeof value === 'number' && value < 1 ? Math.min(value, 0.999).toFixed(3) : value)).join('|');
     if (item.key === id) return;
     item.key = id;
     item.redraw(state);
