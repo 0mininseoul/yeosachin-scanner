@@ -10,7 +10,7 @@
     "predev": "node scripts/build-cherry-analytics.mjs --dev",
     "dev": "next dev",
     "prebuild": "node scripts/build-cherry-analytics.mjs",
-    "build": "next build --webpack",
+    "build": "NODE_OPTIONS=\"${NODE_OPTIONS:-} --max-old-space-size=4096\" next build --webpack",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
