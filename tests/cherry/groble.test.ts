@@ -36,6 +36,7 @@ describe('cherry groble events', () => {
     it('leaves analyzer sales untouched without asking the database', async () => {
         expect(await handleCherryGrobleEvent('payment.completed', completed('basic', `ord.${'b'.repeat(32)}`), ['basic', 'standard'])).toBeNull();
         expect(await handleCherryGrobleEvent('payment.completed', completed('basic', ref), ['basic', 'standard'])).toBeNull();
+        expect(await handleCherryGrobleEvent('payment.completed', completed('wrong_product', `ord.${'b'.repeat(32)}`), ['basic'])).toBeNull();
         expect(await handleCherryGrobleEvent('payment.completed', '{"broken":true}', ['basic'])).toBeNull();
         expect(db.lookups).toBe(0);
         expect(db.rpc).not.toHaveBeenCalled();

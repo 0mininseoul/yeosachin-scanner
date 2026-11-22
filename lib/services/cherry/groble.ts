@@ -2,6 +2,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     parseGroblePaymentCancelRequestedEvent, parseGroblePaymentCompletedEvent, parseGroblePaymentRefundedEvent,
 } from '@/lib/services/groble/webhook';
+import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { assertNoDatabaseError, cherryRpc } from './rpc';
 
@@ -33,7 +34,8 @@ export async function handleCherryGrobleEvent(
             return null;
         }
         const orderRef = payment.sellerReference && ORDER_REF.test(payment.sellerReference) ? payment.sellerReference : null;
-        if (analyzerProductIds.includes(payment.productId)) return null;
+        // An analyzer product or order number is never Cherry's, whatever else the event says.
+        if (analyzerProductIds.includes(payment.productId) || parseGrobleSellerReference(payment.sellerReference)) return null;
         if (!orderRef && !await isCherryEvent(payment.productId, payment.paymentId)) return null;
         const result = await cherryRpc<{ disposition: string }>('cherry_record_payment', {
             p_event_id: payment.eventId, p_provider: 'groble', p_order_ref: orderRef, p_provider_payment_id: payment.paymentId,
