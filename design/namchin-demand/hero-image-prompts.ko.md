@@ -1,8 +1,8 @@
 # 히어로 영상 이미지 생성 요청 (Codex용)
 
-히어로 3D 영상(`design/namchin-demand/three/hero.js`)이 쓰는 이미지다. 타깃(10대 후반~20대 초반)에 맞춰 여성 계정을 **청순한 대학생** 분위기로 다시 만든다. 남자친구 사진(`maru-profile.jpg`)은 그대로 쓴다.
+히어로 3D 영상(`design/namchin-demand/three/hero.js`)과 ‘알림 예시’ 구간의 알림·리포트(`public/namchin/index.html`)가 함께 쓰는 이미지다. 타깃(10대 후반~20대 초반)에 맞춰 여성 계정을 **청순한 대학생** 분위기로 만들었고, 2026-11-22에 아래 요청으로 받은 7장을 적용했다. 남자친구 사진(`maru-profile.jpg`)은 그대로 쓴다.
 
-| 파일 | 쓰이는 곳 | 새 사진 태그 |
+| 파일 | 쓰이는 곳 | 사진 태그 |
 | --- | --- | --- |
 | `seoa-profile.jpg` | 리포트 대표 사진 | – |
 | `seoa-post-1.jpg` | 최근 게시물 1 | 캠퍼스 |
@@ -60,9 +60,9 @@ The same woman taking a close-up selfie under blooming cherry blossom trees, wea
 완료하면 저장한 파일 7개의 이름, 해상도, 용량을 알려줘.
 ```
 
-## 받은 뒤 할 일
+## 사진을 다시 바꿀 때
 
-1. 사진이 바뀌면 `design/namchin-demand/three/hero.js`의 리포트 문구도 함께 바꾼다. 지금 문구는 이전 사진(필라테스·루프톱 바·호캉스)에 맞춰져 있다.
+1. 사진이 바뀌면 `design/namchin-demand/three/hero.js`의 리포트 문구(`TAGS`, `SUMMARY`, `KEYWORDS`, `STATS`)와 `public/namchin/index.html`의 ‘맞팔 리포트’ 예시(사진 설명, 태그, AI 요약, 계정 규모)를 함께 바꾼다. 지금 문구는 다음과 같다.
    - 태그: 캠퍼스, 카페, 한강, 전시회, 도서관, 벚꽃
    - AI 요약: “캠퍼스, 카페, 전시회 사진이 많아요. 벚꽃과 한강 나들이 셀카를 자주 올리는 계정이에요.”
    - 계정 규모: 팔로워 1,284 / 팔로잉 612 / 게시물 94

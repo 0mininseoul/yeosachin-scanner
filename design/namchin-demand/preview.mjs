@@ -19,9 +19,7 @@ const staticFiles = new Map([
   ['/namchin/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
   ['/namchin/logo.png', [landingRoot + 'logo.png', 'image/png']],
   ['/namchin/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
-  ...['notification-bell.jpg', 'sample-posts.jpg', 'sample-profile-and-posts.jpg'].map(name => [
-    `/namchin/assets/${name}`, [landingRoot + `assets/${name}`, 'image/jpeg'],
-  ]),
+  ['/namchin/assets/notification-bell.jpg', [landingRoot + 'assets/notification-bell.jpg', 'image/jpeg']],
   ...['barlow-condensed-bold.woff2', 'Paperlogy-4Regular.woff2', 'Paperlogy-8ExtraBold.woff2'].map(name => [
     `/namchin/assets/${name}`, [landingRoot + `assets/${name}`, 'font/woff2'],
   ]),

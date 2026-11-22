@@ -63,7 +63,7 @@
         <div class="demo-copy">
           <p class="overline">알림 예시</p>
           <h2 id="example-title">누구와 맞팔했는지<br>알림에서 바로 확인.</h2>
-          <p>새로 확인한 계정을 한 번에 알려드려요. 리포트에서 프로필, 최근 게시물 이미지와 AI 요약을 확인할 수 있어요.</p>
+          <p>새로 확인한 계정을 한 번에 알려드려요. 리포트에서 프로필, 계정 규모, 최근 게시물과 AI&nbsp;요약을 볼 수 있어요.</p>
           <div class="tabs" role="tablist" aria-label="알림과 리포트 예시">
             <button type="button" id="tab-alert" role="tab" aria-selected="true" aria-controls="panel-alert">카카오 알림</button>
             <button type="button" id="tab-report" role="tab" aria-selected="false" aria-controls="panel-report" tabindex="-1">맞팔 리포트</button>
@@ -78,38 +78,49 @@
               <p class="sample-kicker">@sample_maru의 맞팔 변화</p>
               <h3>새 맞팔 2명을 확인했어요.</h3>
               <ul class="accounts">
-                <li><span class="avatar avatar--photo" aria-hidden="true"></span><span><b>@sample_yeon</b><small>공개 계정</small></span><span class="new-tag">새 맞팔</span></li>
+                <li><img class="avatar" src="/namchin/assets/hero/seoa-profile.jpg" width="38" height="38" loading="lazy" decoding="async" alt=""><span><b>@sample_seoa</b><small>공개 계정</small></span><span class="new-tag">새 맞팔</span></li>
                 <li><span class="avatar avatar--sage" aria-hidden="true">H</span><span><b>@sample_haru</b><small>공개 계정</small></span><span class="new-tag">새 맞팔</span></li>
               </ul>
               <button class="sample-button" type="button" data-show-report>예시 리포트 열기 <span aria-hidden="true">↗</span></button>
             </div>
           </div>
 
-          <div class="sample" id="panel-report" role="tabpanel" aria-labelledby="tab-report" tabindex="0" hidden>
+          <div class="sample sample--report" id="panel-report" role="tabpanel" aria-labelledby="tab-report" tabindex="0" hidden>
             <div class="sample-header"><img class="brand-icon brand-icon--small" src="/namchin/logo.png" width="27" height="27" alt=""><b>오늘의 맞팔 리포트</b><span class="sample-time">예시</span></div>
             <div class="sample-body report-body">
-              <div class="report-account">
-                <span class="avatar avatar--photo" role="img" aria-label="연의 예시 프로필 사진"></span>
-                <div><h3>@sample_yeon</h3><small>연 · 공개 계정</small></div>
+              <div class="report-top">
+                <div class="report-profile">
+                  <img src="/namchin/assets/hero/seoa-profile.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="예시 계정의 프로필 사진">
+                  <span class="report-chip">분석 완료</span>
+                  <div class="report-name"><h3>@sample_seoa</h3><small>새로 맞팔한 공개 계정</small></div>
+                </div>
+                <section class="report-panel report-stats" aria-labelledby="report-stats-title">
+                  <h4 id="report-stats-title">계정 규모</h4>
+                  <dl>
+                    <div class="stat stat--followers"><dt>팔로워</dt><dd>1,284</dd></div>
+                    <div class="stat stat--following"><dt>팔로잉</dt><dd>612</dd></div>
+                    <div class="stat stat--posts"><dt>게시물</dt><dd>94</dd></div>
+                  </dl>
+                </section>
               </div>
               <dl class="report-facts">
                 <div><dt>성별</dt><dd>여성 <small>공개 프로필에 표기</small></dd></div>
                 <div><dt>확인 시각</dt><dd>오늘 오전 9:07</dd></div>
               </dl>
-              <section class="report-summary" aria-labelledby="report-summary-title">
-                <h4 id="report-summary-title">AI 요약</h4>
-                <p>최근 게시물에는 카페, 한강 산책, 책과 꽃 사진이 있어요. 일상의 풍경을 사진으로 자주 남기는 계정이에요.</p>
-              </section>
               <section class="report-feed" aria-labelledby="report-feed-title">
                 <div class="report-feed-heading"><h4 id="report-feed-title">최근 공개 게시물</h4><span>6장</span></div>
                 <ul class="report-posts">
-                  <li><span class="report-photo photo-strip photo-coffee" role="img" aria-label="카페 창가의 아이스 라테"></span></li>
-                  <li><span class="report-photo photo-strip photo-river" role="img" aria-label="은행나무가 늘어선 한강 산책로"></span></li>
-                  <li><span class="report-photo photo-strip photo-book" role="img" aria-label="이불 위에 놓인 책과 꽃 한 송이"></span></li>
-                  <li><span class="report-photo photo-sheet photo-flowers" role="img" aria-label="종이에 싸인 노란 꽃다발"></span></li>
-                  <li><span class="report-photo photo-sheet photo-cake" role="img" aria-label="찻잔과 레몬 케이크"></span></li>
-                  <li><span class="report-photo photo-sheet photo-sunset" role="img" aria-label="서울 지붕 너머로 보이는 노을"></span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-1.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="은행나무가 늘어선 캠퍼스 길"><span class="report-tag">캠퍼스</span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-2.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="카페 창가의 아이스 라테"><span class="report-tag">카페</span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-3.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="한강 공원에서 튤립을 든 소풍"><span class="report-tag">한강</span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-4.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="전시회에서 그림을 보는 모습"><span class="report-tag">전시회</span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-5.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="도서관 책상에서 공부하는 모습"><span class="report-tag">도서관</span></li>
+                  <li><img src="/namchin/assets/hero/seoa-post-6.jpg" width="1080" height="1080" loading="lazy" decoding="async" alt="벚꽃 아래에서 찍은 셀카"><span class="report-tag">벚꽃</span></li>
                 </ul>
+              </section>
+              <section class="report-panel report-summary" aria-labelledby="report-summary-title">
+                <h4 id="report-summary-title">AI 요약</h4>
+                <p><b>캠퍼스, 카페, 전시회</b> 사진이 많아요. <b>벚꽃</b>과 <b>한강</b> 나들이 셀카를 자주 올리는 계정이에요.</p>
               </section>
             </div>
           </div>
@@ -208,15 +219,15 @@
       <section class="waitlist shell" id="waitlist" aria-labelledby="waitlist-title">
         <div class="waitlist-copy">
           <p class="offer-label offer-label--private"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7.5a5 5 0 0 1 10 0V10"/><rect x="4.5" y="10" width="15" height="11" rx="3"/><path d="M12 14.5v2.5"/></svg><span data-reservation-badge>선착순 300명 프라이빗 오픈</span></p>
-          <h2 id="waitlist-title">내 초대장이<br>아직 비어 있어요.</h2>
+          <h2 id="waitlist-title">지금 등록해야<br>출시 알림과 혜택을<br>받을 수 있어요.</h2>
           <p class="waitlist-lede" data-while-open data-until-registered>이메일과 휴대폰 번호를 남기면 초대장이 채워져요. 체리가 열리는 날 먼저 알려드려요.</p>
           <div class="pass" data-pass data-while-open aria-hidden="true">
             <div class="pass-face">
               <div class="pass-top"><img src="/namchin/logo.png" width="36" height="36" alt=""><b>체리</b><span>프라이빗 오픈 초대장</span></div>
               <p class="pass-number"><span>선착순</span><b>300</b><span>명</span></p>
               <dl class="pass-owner">
-                <div><dt>받는 사람</dt><dd data-pass-email>아직 비어 있어요</dd></div>
-                <div><dt>연락처</dt><dd data-pass-phone>아직 비어 있어요</dd></div>
+                <div><dt>받는 사람</dt><dd data-pass-email>등록 전</dd></div>
+                <div><dt>연락처</dt><dd data-pass-phone>등록 전</dd></div>
               </dl>
               <span class="pass-stamp">등록 완료</span>
             </div>
