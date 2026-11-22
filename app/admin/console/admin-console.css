@@ -69,7 +69,7 @@
 .ac-live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #3cc97a; }
 
 /* ---------- mutual-follow reservations ---------- */
-.ac-namchin-mark { display: block; width: 34px; height: 34px; flex: none; border-radius: 9px; background: #ffe3ca; object-fit: contain; }
+.ac-namchin-mark { display: block; width: 34px; height: 34px; flex: none; }
 .ac-namchin .ac-nav-btn { text-decoration: none; }
 .ac-namchin .ac-nav-btn.is-active { box-shadow: inset 2px 0 #ffb782; }
 .ac-namchin-timezone { margin-left: 3px; font-size: 10px; font-weight: 650; }

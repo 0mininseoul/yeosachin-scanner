@@ -3,7 +3,7 @@ import { ADMIN_CONSOLE_PATH, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/
 
 const workspaces = [
     { id: 'yeosachin', label: '여사친 판독기', name: '위장여사친판독기', href: ADMIN_CONSOLE_PATH },
-    { id: 'namchin', label: '맞팔 알리미', name: '남친 맞팔 알리미', href: NAMCHIN_ADMIN_CONSOLE_PATH },
+    { id: 'namchin', label: '체리', name: '체리(남친 맞팔 알리미)', href: NAMCHIN_ADMIN_CONSOLE_PATH },
 ] as const;
 
 export function ConsoleWorkspaceSwitch({ active }: { active: typeof workspaces[number]['id'] }) {

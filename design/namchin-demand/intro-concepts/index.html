@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="robots" content="noindex, nofollow">
+    <title>체리 | 첫 접속 장치 시안</title>
+    <link rel="icon" href="/namchin/logo.png" type="image/png">
+    <link rel="stylesheet" href="/namchin/landing.css">
+    <link rel="stylesheet" href="./intros.css">
+    <script type="module" src="./intros.js"></script>
+  </head>
+  <body class="review">
+    <iframe class="page" src="/namchin#top" title="랜딩 페이지"></iframe>
+    <div class="slot" data-slot></div>
+
+    <nav class="controls" aria-label="시안 선택">
+      <button type="button" data-intro="a"><b>A</b> 알림이 울린다</button>
+      <button type="button" data-intro="b"><b>B</b> 눈을 뜬다</button>
+      <button type="button" data-intro="c"><b>C</b> 129명째</button>
+    </nav>
+
+    <template id="intro-a">
+      <div class="intro intro-a" aria-hidden="true">
+        <div class="a-shake">
+          <span class="a-wave"></span><span class="a-wave"></span><span class="a-wave"></span>
+          <div class="a-push"><img src="/namchin/assets/kakao-symbol.svg" width="46" height="46" alt=""><div><p><b>체리</b><span>지금</span></p><p>새 소식이 도착했어요</p></div></div>
+          <div class="lines"><p><span>내 남친은 나 몰래</span></p><p><span class="hot">누구랑 맞팔하고 다닐까?</span></p></div>
+        </div>
+      </div>
+    </template>
+
+    <template id="intro-b">
+      <div class="intro intro-b" aria-hidden="true">
+        <div class="b-face"><span class="b-eye"><i></i></span><span class="b-eye"><i></i></span></div>
+        <div class="lines"><p><span>내 남친은 나 몰래</span></p><p><span class="hot">누구랑 맞팔하고 다닐까?</span></p></div>
+      </div>
+    </template>
+
+    <template id="intro-c">
+      <div class="intro intro-c" aria-hidden="true">
+        <span class="c-half c-half--top"></span><span class="c-half c-half--bottom"></span>
+        <div class="c-stage">
+          <p class="c-label">남친의 맞팔</p>
+          <p class="c-count"><span class="c-fixed">12</span><span class="c-roll"><i>8</i><i>9</i></span><em>+1</em></p>
+          <div class="c-reel"><div class="c-strip">
+            <img src="/namchin/assets/hero/seoa-post-2.jpg" alt=""><img src="/namchin/assets/hero/seoa-post-4.jpg" alt=""><img src="/namchin/assets/hero/seoa-post-6.jpg" alt=""><img src="/namchin/assets/hero/seoa-post-1.jpg" alt=""><img src="/namchin/assets/hero/seoa-post-3.jpg" alt=""><img src="/namchin/assets/hero/seoa-post-5.jpg" alt=""><img src="/namchin/assets/hero/seoa-profile.jpg" alt="">
+          </div><span class="c-mark">?</span></div>
+          <div class="lines"><p><span class="hot">누구랑 맞팔하고 다닐까?</span></p></div>
+        </div>
+      </div>
+    </template>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-# 남친 맞팔 알리미 랜딩 작업 안내
+# 체리(남친 맞팔 알리미) 랜딩 작업 안내
 
 새 워크트리는 최신 `origin/main`을 기준으로 만든다. Node 24에서 저장소 루트로 이동한 뒤 아래 명령으로 미리보기를 연다.
 
@@ -8,7 +8,7 @@ node design/namchin-demand/preview.mjs
 ```
 
 - [랜딩 미리보기](http://127.0.0.1:4327/namchin)에서 운영과 같은 HTML과 정적 파일을 확인한다. 기존 미리보기 주소 `/`도 사용할 수 있다.
-- [로고 시안 비교](http://127.0.0.1:4327/logo-concepts/)에서 네 가지 원본 PNG와 32px 미리보기를 확인한다. 선택된 원본은 [A안 알림 종](logo-concepts/a-bell.png)이다.
+- 로고는 [체리 B안 ‘빼꼼’](cherry-logo-concepts/b.png)이다. `public/namchin/logo.png`는 이 원본을 192px로 줄이고 모서리를 둥글게 잘라 만든다. 이전 [알림 종 시안](http://127.0.0.1:4327/logo-concepts/)은 기록으로 남긴다.
 - [테스트 집계](http://127.0.0.1:4327/preview/stats)는 현재 미리보기 프로세스의 랜딩 조회수와 로컬 신청 건수를 반환한다.
 
 ## 수정 위치
@@ -18,11 +18,23 @@ node design/namchin-demand/preview.mjs
 | 문구, 마크업 | [public/namchin/index.html](../../public/namchin/index.html) |
 | 레이아웃과 스타일 | [public/namchin/landing.css](../../public/namchin/landing.css) |
 | 타이머, 리포트 예시 탭, 폼 | [public/namchin/landing.js](../../public/namchin/landing.js) |
+| 첫 접속 장치 | [public/namchin/intro.js](../../public/namchin/intro.js)(재생 여부), `landing.css`의 Opening 구간(동작), `landing.js`(건너뛰기) |
 | 예약 마감 시각 | [public/namchin/campaign.mjs](../../public/namchin/campaign.mjs) |
+| 히어로·비밀 보장 3D 장면 원본 | [design/namchin-demand/three/](three/) (수정 후 `node design/namchin-demand/build-3d.mjs`로 `public/namchin/3d/`를 다시 만든다) |
+| 히어로 영상 이미지 | `public/namchin/assets/hero/` ([생성 요청문](hero-image-prompts.ko.md)) |
+| 체리 로고 시안 비교 (B안 선택) | [design/namchin-demand/cherry-logo-concepts/](cherry-logo-concepts/index.html) ([미리보기](http://127.0.0.1:4327/cherry-logo-concepts/)) |
+| 첫 접속 장치 시안 비교 (B안 ‘눈을 뜬다’ 선택, 팔로잉 230→231 신호를 더해 적용) | [design/namchin-demand/intro-concepts/](intro-concepts/index.html) ([미리보기](http://127.0.0.1:4327/intro-concepts/)) |
+| 타이머 시안 비교 | [design/namchin-demand/timer-concepts/](timer-concepts/index.html) ([미리보기](http://127.0.0.1:4327/timer-concepts/)) |
 | 접수 API | [app/api/namchin/reservations/route.ts](../../app/api/namchin/reservations/route.ts) |
 | 운영 명단 | [app/admin/console/namchin-waitlist-console.tsx](../../app/admin/console/namchin-waitlist-console.tsx) |
 
 미리보기는 테스트용 연락처를 로컬 SQLite에 저장한다. 동일한 이메일 또는 휴대폰 번호는 최초 신청을 유지한다. 서버가 시작할 때 SQLite 파일 경로를 표시한다. `NAMCHIN_PREVIEW_DB`에 그 경로를 지정하면 기존 로컬 테스트 기록을 다시 열 수 있다. 포트가 이미 사용 중이면 `NAMCHIN_PREVIEW_PORT`로 바꿀 수 있다. 개인정보처리방침 링크는 공개 정책 페이지로 연결된다.
+
+3D 장면은 랜딩 주소에 `?scene-t=초`를 붙이면 그 시점에 멈춘다(예: 팔로잉 +1 `?scene-t=1.1`, 푸시 알림 `?scene-t=2.6`, 리포트 `?scene-t=8.7`). 움직임 줄이기 설정에서도 정지 화면으로 보인다.
+
+사전 예약 구간의 초대장은 입력 중인 이메일·휴대폰을 가려서 보여준다. 화면 안에서만 쓰고 전송하지 않으며, 등록하면 ‘등록 완료’ 도장이 찍힌다. ‘같은 날, 같은 맞팔’ 구간과 초대장은 마감 뒤에는 숨는다.
+
+첫 접속 장치는 브라우저 탭마다 한 번만 나온다. 장치가 걷히면 히어로 문구, 영상 무대 순서로 들어오고 무대가 자리를 잡으면 영상이 시작된다. 다시 보려면 새 탭에서 연다. 화면을 누르거나 스크롤하거나 아무 키를 누르면 건너뛴다. `#waitlist`처럼 특정 위치로 바로 들어오거나 움직임 줄이기 설정이면 나오지 않는다.
 
 마감 이후에도 신청 폼을 검토하려면 미리보기 시작 시각을 한국시간으로 지정한다. 타이머는 지정한 시각에서 시작해 실제 시간처럼 진행된다.
 
