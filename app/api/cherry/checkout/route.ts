@@ -10,7 +10,7 @@ export async function POST(request: Request) {
     const member = await requireCherryMember();
     if (!member.ok) return member.response;
     try {
-        return cherryJson(await beginCherryCheckout(member.userId, parsed.data.targetCheckId));
+        return cherryJson(await beginCherryCheckout(member.userId, parsed.data.targetCheckId, parsed.data.expectedAmountKrw));
     } catch {
         return cherryJson({ code: 'UNAVAILABLE' }, 503);
     }

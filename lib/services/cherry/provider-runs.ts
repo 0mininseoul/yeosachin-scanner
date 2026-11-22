@@ -24,6 +24,8 @@ export interface CherryRunRequest {
     estimatedUsdPerItem: number;
     timeoutSecs: number;
     deadlineAtMs: number;
+    /** A finished run younger than this is read again instead of being bought again. */
+    reuseSeconds: number;
 }
 
 interface Reservation {
@@ -38,6 +40,7 @@ interface Reservation {
 
 export interface CherryRunResult {
     ledgerId: string;
+    /** One more than the number of runs that failed or could not be used. */
     attempt: number;
     rows: unknown[];
 }
@@ -60,7 +63,7 @@ const DEFERRED: Record<string, { delaySeconds: number; terminal?: boolean; count
 const defaultDeps: CherryRunDeps = {
     reserve: request => cherryRpc<Reservation>('cherry_reserve_run', {
         p_owner_key: request.ownerKey, p_operation: request.operation, p_subscription: request.subscriptionId,
-        p_slot: request.slot, p_actor: request.actorId, p_items: request.items, p_max_charge: request.maxChargeUsd,
+        p_slot: request.slot, p_actor: request.actorId, p_items: request.items, p_max_charge: request.maxChargeUsd, p_reuse_seconds: request.reuseSeconds,
     }),
     async update(id, patch) {
         const { error } = await supabaseAdmin.from('cherry_provider_runs').update(patch).eq('id', id);

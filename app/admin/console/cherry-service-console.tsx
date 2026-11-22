@@ -17,7 +17,7 @@ const OUTCOMES: Record<string, string> = {
     done: '반영했습니다.', queued: '다시 확인하도록 예약했습니다.', running: '지금 확인 중입니다.', not_allowed: '지금 상태에서는 할 수 없습니다.',
     user_not_found: '해당 이메일의 회원이 없습니다.', username_invalid: '아이디 형식을 확인하세요.', checking: '계정을 확인하고 있습니다. 1분 뒤 다시 누르세요.',
     granted: '무료 이용권을 시작했습니다.', already_subscribed: '이미 이용 중인 회원입니다.', limited: '조회 한도를 넘었습니다.',
-    payment_unavailable: '토스 설정이 없습니다.', invalid: '지급할 수 없는 상태입니다.',
+    payment_unavailable: '토스 설정이 없습니다.', offer_in_use: '이 요금을 약속받은 회원이 있어 금액을 바꿀 수 없습니다. 새 혜택을 추가하세요.', invalid: '지급할 수 없는 상태입니다.',
 };
 const TOGGLES = [
     ['sales_enabled', '판매'], ['monitoring_enabled', '감시'], ['notifications_enabled', '알림 발송'],
@@ -165,7 +165,7 @@ export function CherryServiceConsole() {
                             <td>{when(refund.requested_at)}</td><td className="ac-tabular">{WON.format(Number(refund.amount_krw))}원</td><td>{text(refund.reason)}</td>
                             <td>{text(refund.status)}{refund.failure_code ? ` (${refund.failure_code})` : ''}</td>
                             <td>{refund.status === 'manual_required' ? <button type="button" className="ac-link" disabled={busy} onClick={() => act({ action: 'refund_done', refundId: String(refund.id) }, '결제사에서 환불을 마쳤나요?')}>완료로 표시</button>
-                                : refund.status === 'pending' ? <button type="button" className="ac-link" disabled={busy} onClick={() => act({ action: 'refund_approve', refundId: String(refund.id) }, `토스에서 ${WON.format(Number(refund.amount_krw))}원을 환불할까요? 되돌릴 수 없습니다.`)}>토스로 환불</button> : '-'}</td>
+                                : refund.status === 'pending' || refund.status === 'processing' ? <button type="button" className="ac-link" disabled={busy} onClick={() => act({ action: 'refund_approve', refundId: String(refund.id) }, `토스에서 ${WON.format(Number(refund.amount_krw))}원을 환불할까요? 되돌릴 수 없습니다.`)}>토스로 환불</button> : '-'}</td>
                         </tr>)}
                     </Table>
                 </Card>

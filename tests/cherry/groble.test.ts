@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const db = vi.hoisted(() => ({ rpc: vi.fn(), products: new Set<string>(), lookups: 0, upsert: vi.fn() }));
+const db = vi.hoisted(() => ({ rpc: vi.fn(), products: new Set<string>(), pastProducts: new Set<string>(), payments: new Set<string>(), lookups: 0, upsert: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {
     rpc: db.rpc,
-    from: () => ({
-        select: () => ({ eq: (_column: string, value: string) => ({ limit: async () => {
+    from: (table: string) => ({
+        select: () => ({ eq: (column: string, value: string) => ({ limit: async () => {
             db.lookups += 1;
-            return { data: db.products.has(value) ? [{ code: 'standard' }] : [], error: null };
+            const known = column === 'groble_product_id' ? (table === 'cherry_offers' ? db.products : db.pastProducts) : db.payments;
+            return { data: known.has(value) ? [{ id: 'x' }] : [], error: null };
         } }) }),
         upsert: db.upsert,
     }),
@@ -26,12 +27,15 @@ beforeEach(() => {
     db.rpc.mockReset().mockResolvedValue({ data: { disposition: 'activated' }, error: null });
     db.upsert.mockReset().mockResolvedValue({ error: null });
     db.products = new Set(['cherry_product']);
+    db.pastProducts = new Set(['old_cherry_product']);
+    db.payments = new Set();
     db.lookups = 0;
 });
 
 describe('cherry groble events', () => {
     it('leaves analyzer sales untouched without asking the database', async () => {
         expect(await handleCherryGrobleEvent('payment.completed', completed('basic', `ord.${'b'.repeat(32)}`), ['basic', 'standard'])).toBeNull();
+        expect(await handleCherryGrobleEvent('payment.completed', completed('basic', ref), ['basic', 'standard'])).toBeNull();
         expect(await handleCherryGrobleEvent('payment.completed', '{"broken":true}', ['basic'])).toBeNull();
         expect(db.lookups).toBe(0);
         expect(db.rpc).not.toHaveBeenCalled();
@@ -51,7 +55,7 @@ describe('cherry groble events', () => {
             refund: { amount: 4000, currency: 'KRW', partialRefund: true, cancelledBy: 'SELLER', refundedAt: at },
         });
         expect(await handleCherryGrobleEvent('payment.refunded', refund('basic'), ['basic'])).toBeNull();
-        await handleCherryGrobleEvent('payment.refunded', refund('cherry_product'), ['basic']);
+        await handleCherryGrobleEvent('payment.refunded', refund('old_cherry_product'), ['basic']);
         expect(db.rpc).toHaveBeenLastCalledWith('cherry_record_refund', expect.objectContaining({ p_amount_krw: 4000, p_partial: true }));
         expect(await handleCherryGrobleEvent('payment.cancel_requested', body('payment.cancel_requested', {
             merchantUid: 'pay', content: content('cherry_product'), pricing: { currency: 'KRW', finalAmount: 9900 },

@@ -45,12 +45,15 @@ export type CherryConsentId = typeof CHERRY_CONSENTS[number]['id'];
 
 export const checkoutRequestSchema = z.object({
     targetCheckId: z.string().uuid(),
+    /** The price the member saw; a different one is never charged. */
+    expectedAmountKrw: z.number().int().positive(),
     termsVersion: z.literal(CHERRY_TERMS_VERSION),
     consents: z.object({
         detection: z.literal(true), price: z.literal(true), privacy: z.literal(true), notice: z.literal(true),
     }).strict(),
 }).strict();
 
+export const renewRequestSchema = z.object({ expectedAmountKrw: z.number().int().positive() }).strict();
 export const targetRequestSchema = z.object({ username: z.string().min(1).max(120) }).strict();
 export const memberActionSchema = z.object({ action: z.enum(['cancel', 'resume', 'cancel_preparing']) }).strict();
 
@@ -68,4 +71,5 @@ export interface CherryTargetView {
 }
 
 export type CherryCheckoutOutcome = 'ready' | 'sales_closed' | 'account_unavailable' | 'phone_required' | 'already_subscribed'
-    | 'target_check_required' | 'target_blocked' | 'capacity_wait' | 'payment_unavailable' | 'payment_in_progress' | 'not_renewable';
+    | 'target_check_required' | 'target_blocked' | 'capacity_wait' | 'payment_unavailable' | 'payment_in_progress' | 'not_renewable'
+    | 'price_changed' | 'reservation_in_use';

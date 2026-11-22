@@ -30,6 +30,11 @@ export function readCherryEmailConfig(env: Record<string, string | undefined> = 
     return apiKey && apiKey !== 'xxx' && from ? { apiKey, from } : null;
 }
 
+const UNAVAILABLE_REASONS: Record<string, string> = {
+    private: '비공개로 전환되어', not_found: '확인되지 않아', too_large: '확인할 수 있는 인원을 넘어',
+    blocked: '확인 중단 대상이 되어', operator: '고객센터에서 처리되어',
+};
+
 function date(value: unknown): string {
     return typeof value === 'string' ? koreanDate.format(new Date(value)) : '';
 }
@@ -65,7 +70,7 @@ export function buildCherryMessage(
                 variables: { target: id, link: home } };
         case 'target_unavailable': {
             const refund = Number(payload.refundKrw ?? 0);
-            const reason = payload.code === 'private' ? '비공개로 전환되어' : '확인되지 않아';
+            const reason = UNAVAILABLE_REASONS[String(payload.code)] ?? UNAVAILABLE_REASONS.not_found;
             return { subject: '체리 이용 중지 안내',
                 text: `[체리] ${id} 계정이 ${reason} 이용을 중지했어요. 다음 결제는 청구되지 않아요.${refund > 0 ? `\n남은 기간 요금 ${won.format(refund)}원을 환불해 드려요.` : ''}\n\n내 서비스\n${home}`,
                 variables: { target: id, reason, refund: won.format(refund), link: home } };
@@ -175,13 +180,22 @@ export async function processCherryNotifications(limit: number, deps = cherryDel
     for (let sent = 0; sent < limit; sent += 1) {
         const [row] = await cherryRpc<CherryNotificationRow[]>('cherry_claim_notifications', { p_limit: 1, p_lease_seconds: 120 });
         if (!row) return sent;
-        const subscription: CherrySubscription | null = await loadCherrySubscription(row.subscription_id);
+        let subscription: CherrySubscription | null;
+        let accounts: string[];
+        try {
+            subscription = await loadCherrySubscription(row.subscription_id);
+            accounts = await accountsForReport(row.report_id);
+        } catch {
+            // Nothing was sent yet, so it is safe to try again.
+            await settle(row, { status: 'queued', send_after: new Date(Date.now() + 5 * 60_000).toISOString() });
+            continue;
+        }
         if (!subscription || (!subscription.recipient_phone && !subscription.recipient_email)) {
             await settle(row, { status: 'canceled', error_code: 'recipient_removed' });
             continue;
         }
         const message = buildCherryMessage(row.kind, subscription.target_username, row.payload, {
-            reportId: row.report_id, accounts: await accountsForReport(row.report_id),
+            reportId: row.report_id, accounts,
         });
         const result = await deliverCherryMessage({
             id: row.id, kind: row.kind, phone: subscription.recipient_phone, email: subscription.recipient_email, message,

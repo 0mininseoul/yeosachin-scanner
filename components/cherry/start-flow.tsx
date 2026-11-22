@@ -29,7 +29,9 @@ const OUTCOME_MESSAGES: Record<string, string> = {
     already_subscribed: '이미 이용 중인 계정이 있어요. 내 서비스에서 확인해 주세요.',
     target_check_required: '계정 확인 시간이 지났어요. 아이디를 다시 확인해 주세요.',
     target_blocked: '등록할 수 없는 계정이에요.',
-    capacity_wait: '지금 등록할 수 있는 자리가 모두 찼어요. 청구된 금액은 없고, 자리가 나면 알려드릴게요.',
+    capacity_wait: '지금 등록할 수 있는 자리가 모두 찼어요. 청구된 금액은 없어요. 나중에 다시 시도해 주세요.',
+    price_changed: '요금이 바뀌었어요. 화면을 새로고침해 금액을 다시 확인해 주세요.',
+    reservation_in_use: '이 사전 예약 혜택은 다른 계정에서 사용 중이에요. 예약한 카카오 계정으로 로그인해 주세요.',
     payment_unavailable: '지금은 결제를 시작할 수 없어요. 잠시 뒤 다시 시도해 주세요.',
     payment_in_progress: '앞서 시작한 결제를 확인하고 있어요. 잠시 뒤 내 서비스에서 확인해 주세요.',
 };
@@ -173,7 +175,7 @@ export function CherryStartFlow({ signedIn, salesOpen, offer, email, initialChec
         setError(null);
         try {
             const { status, data } = await postJson('/api/cherry/checkout', {
-                targetCheckId: checkId, termsVersion: CHERRY_TERMS_VERSION,
+                targetCheckId: checkId, expectedAmountKrw: offer?.priceKrw ?? CHERRY_LIST_PRICE_KRW, termsVersion: CHERRY_TERMS_VERSION,
                 consents: Object.fromEntries(CHERRY_CONSENTS.map(item => [item.id, accepted.has(item.id)])),
             });
             if (status === 401) return window.location.reload();

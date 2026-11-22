@@ -91,12 +91,13 @@ async function toCheckout(row: CheckoutRow, userId: string): Promise<CherryCheck
     return { outcome: 'ready', provider: 'toss', amountKrw: row.amountKrw ?? 0, clientKey: toss.clientKey, customerKey: await ensureCustomerKey(userId) };
 }
 
-export async function beginCherryCheckout(userId: string, targetCheckId: string): Promise<CherryCheckout> {
+export async function beginCherryCheckout(userId: string, targetCheckId: string, expectedAmountKrw: number): Promise<CherryCheckout> {
     return toCheckout(await cherryRpc<CheckoutRow>('cherry_begin_checkout', {
         p_user: userId, p_target_check: targetCheckId, p_terms_version: CHERRY_TERMS_VERSION,
+        p_expected_amount: expectedAmountKrw,
     }), userId);
 }
 
-export async function beginCherryRenewal(userId: string): Promise<CherryCheckout> {
-    return toCheckout(await cherryRpc<CheckoutRow>('cherry_begin_renewal', { p_user: userId }), userId);
+export async function beginCherryRenewal(userId: string, expectedAmountKrw: number): Promise<CherryCheckout> {
+    return toCheckout(await cherryRpc<CheckoutRow>('cherry_begin_renewal', { p_user: userId, p_expected_amount: expectedAmountKrw }), userId);
 }

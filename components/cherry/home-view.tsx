@@ -14,6 +14,7 @@ const ENDED: Record<string, string> = {
     target_private: '등록한 계정이 비공개로 바뀌어 이용을 멈췄어요.',
     target_not_found: '등록한 계정을 더는 확인할 수 없어 이용을 멈췄어요.',
     target_blocked: '등록한 계정의 확인을 중단했어요.',
+    target_too_large: '등록한 계정이 확인할 수 있는 인원을 넘어 이용을 멈췄어요.',
     baseline_failed: '첫 목록을 저장하지 못해 이용을 취소했어요.',
     canceled: '해지한 이용 기간이 끝났어요.',
     payment_lapsed: '이용권이 끝났어요.',
@@ -29,8 +30,9 @@ function PaymentNotice({ pay }: { pay: string | null }) {
     return null;
 }
 
-export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
+export function CherryHomeView({ subscription, overview, refund, pay, nowMs, renewalPriceKrw }: {
     subscription: CherrySubscription | null; overview: MemberOverview | null; refund: CherryHomeRefund | null; pay: string | null; nowMs: number;
+    renewalPriceKrw: number;
 }) {
     if (!subscription || !overview) {
         return <>
@@ -70,8 +72,8 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
             <strong>첫 목록 저장이 늦어지고 있어요</strong>계속 기다리거나 전액을 환불받을 수 있어요.
             <CherryActionButton action="cancel_preparing" label="전액 환불받기" />
         </div> : null}
-        {renewable ? <div className="ch-actions"><CherryRenewButton label={`월 ${won.format(subscription.price_krw)}원으로 연장하기`} /></div> : null}
-        {declined ? <div className="ch-actions"><CherryRenewButton label="카드 바꾸고 다시 결제하기" /></div> : null}
+        {renewable ? <div className="ch-actions"><CherryRenewButton label={`월 ${won.format(renewalPriceKrw)}원으로 연장하기`} amountKrw={renewalPriceKrw} /></div> : null}
+        {declined ? <div className="ch-actions"><CherryRenewButton label={`카드 바꾸고 ${won.format(renewalPriceKrw)}원 결제하기`} amountKrw={renewalPriceKrw} /></div> : null}
         {ended ? <div className="ch-form"><Link href="/cherry/start" className="ch-button">계정 다시 등록하기</Link></div> : null}
 
         <section className="ch-section">
@@ -107,8 +109,8 @@ export function CherryHomeView({ subscription, overview, refund, pay, nowMs }: {
                 {subscription.recipient_phone ? <div><dt>알림 받는 번호</dt><dd>{subscription.recipient_phone.replace(/^\+82(\d{2})(\d{4})(\d{4})$/, '0$1-****-$3')}</dd></div> : null}
             </dl>
             <div className="ch-actions">
-                {automatic && subscription.status === 'active' ? <CherryRenewButton label="결제 카드 바꾸기" quiet /> : null}
-                {subscription.status === 'active' && !subscription.cancel_at_period_end ? <CherryActionButton action="cancel" label="해지하기" /> : null}
+                {automatic && subscription.status === 'active' ? <CherryRenewButton label="결제 카드 바꾸기" amountKrw={renewalPriceKrw} quiet /> : null}
+                {['active', 'past_due'].includes(subscription.status) && !subscription.cancel_at_period_end ? <CherryActionButton action="cancel" label="해지하기" /> : null}
                 {subscription.status === 'active' && subscription.cancel_at_period_end && subscription.payment_provider !== 'grant'
                     ? <CherryActionButton action="resume" label="해지 취소하기" /> : null}
                 <a className="ch-text-button" href="mailto:contact@ascentum.co.kr">문의하기</a>

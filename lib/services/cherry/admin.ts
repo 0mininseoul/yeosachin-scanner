@@ -102,6 +102,13 @@ async function apply(action: CherryAdminAction, operatorId: string): Promise<str
             return 'done';
         }
         case 'offer': {
+            // A locked price is a promise to the members who have it; a different price is a new offer.
+            if (action.patch.price_krw !== undefined) {
+                const { data: locked, error: lockError } = await supabaseAdmin.from('cherry_subscriptions').select('id')
+                    .eq('offer_code', action.code).neq('status', 'ended').not('price_lock_until', 'is', null).limit(1);
+                assertNoDatabaseError('admin_offer', lockError);
+                if ((locked?.length ?? 0) > 0) return 'offer_in_use';
+            }
             const { data, error } = await supabaseAdmin.from('cherry_offers').update({ ...action.patch, updated_at: now }).eq('code', action.code).select('code');
             assertNoDatabaseError('admin_offer', error);
             if ((data?.length ?? 0) > 0) return 'done';
@@ -139,13 +146,22 @@ async function apply(action: CherryAdminAction, operatorId: string): Promise<str
         }
         case 'recheck':
             return (await cherryRpc<{ outcome: string }>('cherry_operator_requeue', { p_subscription: action.subscriptionId })).outcome;
-        case 'end':
-            return (await cherryRpc<{ ended: boolean }>('cherry_end_with_refund', { p_subscription: action.subscriptionId, p_reason: 'operator' })).ended ? 'done' : 'not_allowed';
+        case 'end': {
+            const result = await cherryRpc<{ ended: boolean; refundKrw?: number }>('cherry_end_with_refund', { p_subscription: action.subscriptionId, p_reason: 'operator' });
+            if (!result.ended) return 'not_allowed';
+            await cherryRpc('cherry_queue_notification', {
+                p_subscription: action.subscriptionId, p_kind: 'target_unavailable', p_dedupe: `unavailable:${action.subscriptionId}`,
+                p_payload: { code: 'operator', refundKrw: result.refundKrw ?? 0 }, p_report: null,
+            });
+            return 'done';
+        }
         case 'refund_approve': {
             const toss = readTossConfig();
             if (!toss) return 'payment_unavailable';
+            // A request whose answer was lost is repeated with the same idempotency key.
+            const stale = new Date(Date.now() - 15 * 60_000).toISOString();
             const { data, error } = await supabaseAdmin.from('cherry_refunds').update({ status: 'processing', updated_at: now })
-                .eq('id', action.refundId).eq('status', 'pending').select('*');
+                .eq('id', action.refundId).or(`status.eq.pending,and(status.eq.processing,updated_at.lt."${stale}")`).select('*');
             assertNoDatabaseError('admin_refund', error);
             if (!data?.[0]) return 'not_allowed';
             await refundWithToss(data[0], toss);

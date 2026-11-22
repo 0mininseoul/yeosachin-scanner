@@ -56,7 +56,11 @@ async function targetCheck(user: string | null = null, followers = 400, followin
     return row.id;
 }
 async function checkout(user = USER) {
-    return rpc<Record<string, string & number>>('cherry_begin_checkout($1, $2, $3)', [user, await targetCheck(), 'v1']);
+    const offer = await one<{ price_krw: number }>('select price_krw from public.cherry_resolve_offer($1)', [user]);
+    return rpc<Record<string, string & number>>('cherry_begin_checkout($1, $2, $3, $4)', [user, await targetCheck(), 'v1', offer?.price_krw ?? 0]);
+}
+async function renew(amount = 9900) {
+    return rpc<Record<string, unknown>>('cherry_begin_renewal($1, $2)', [USER, amount]);
 }
 async function pay(order: Record<string, unknown>, event = 'evt_1', payment = 'pay_1', overrides: Record<string, unknown> = {}) {
     return rpc<{ disposition: string }>('cherry_record_payment($1,$2,$3,$4,$5,$6,now(),null)', [
@@ -109,6 +113,26 @@ describe('cherry checkout and payment', () => {
         expect((await checkout(OTHER)).amountKrw).toBe(9900);
     });
 
+    it('holds a reservation for the member who is checking out with it', async () => {
+        await db.exec(`insert into public.namchin_launch_reservations (email, phone) values ('other@example.com', '+821011112222')`);
+        const mine = await checkout();
+        expect(mine.amountKrw).toBe(4900);
+        expect((await checkout(OTHER)).amountKrw).toBe(9900);
+        expect((await checkout()).orderRef).toBe(mine.orderRef);
+        await db.exec(`update public.cherry_reservation_claims set locked_until = now() - interval '1 minute'`);
+        const theirs = await checkout(OTHER);
+        expect(theirs.amountKrw).toBe(4900);
+        await pay(theirs, 'evt_o', 'pay_o', { offer: 'reservation' });
+        // The expired holder still gets the price already shown, but not the year.
+        expect((await pay(mine, 'evt_m', 'pay_m', { offer: 'reservation' })).disposition).toBe('activated');
+        const locks = await db.query<{ locked: boolean }>('select price_lock_until is not null as locked from public.cherry_subscriptions order by user_id');
+        expect(locks.rows.map(row => row.locked)).toEqual([false, true]);
+    });
+
+    it('never charges a price the member did not see', async () => {
+        expect(await rpc('cherry_begin_checkout($1,$2,$3,$4)', [USER, await targetCheck(), 'v1', 4900])).toEqual({ outcome: 'price_changed', amountKrw: 9900 });
+    });
+
     it('refuses to sell when the shared budget cannot cover the first list', async () => {
         await db.exec('update public.cherry_settings set apify_limit_usd = 25.2, apify_usage_usd = 10');
         expect((await checkout()).outcome).toBe('capacity_wait');
@@ -129,6 +153,27 @@ describe('cherry checkout and payment', () => {
         expect((await pay(retry, 'evt_3', 'pay_2')).disposition).toBe('unmatched');
         expect((await one<{ n: number }>(`select count(*)::int as n from public.cherry_checks where kind = 'baseline'`)).n).toBe(1);
         expect((await checkout()).outcome).toBe('already_subscribed');
+    });
+
+    it('records the refund of a duplicate payment without touching the paid service', async () => {
+        const first = await checkout();
+        await db.exec(`update public.cherry_offers set price_krw = 8900 where code = 'standard'`);
+        const second = await checkout();
+        await db.exec(`update public.cherry_offers set price_krw = 9900 where code = 'standard'`);
+        expect((await pay(second, 'evt_2', 'pay_2')).disposition).toBe('activated');
+        expect((await pay(first, 'evt_1', 'pay_1')).disposition).toBe('review');
+        expect((await rpc<{ disposition: string }>('cherry_record_refund($1,$2,$3,$4,$5)', ['evt_r', 'groble', 'pay_1', 9900, false])).disposition).toBe('refunded');
+        expect((await one<{ status: string }>('select status from public.cherry_subscriptions')).status).toBe('preparing');
+    });
+
+    it('returns to the earlier paid period when an early renewal is refunded', async () => {
+        const { subscriptionId } = await activate();
+        await db.exec(`update public.cherry_subscriptions set current_period_end = now() + interval '5 days'; update public.cherry_payments set period_end = now() + interval '5 days'`);
+        await pay(await renew(), 'evt_n', 'pay_n');
+        await rpc('cherry_record_refund($1,$2,$3,$4,$5)', ['evt_nr', 'groble', 'pay_n', 9900, false]);
+        const row = await one<{ status: string; days: number }>(`select status, round(extract(epoch from current_period_end - now()) / 86400)::int as days
+            from public.cherry_subscriptions where id = $1`, [subscriptionId]);
+        expect(row).toEqual({ status: 'active', days: 5 });
     });
 
     it('ends the service on a full refund and leaves an unknown refund unmatched', async () => {
@@ -235,7 +280,7 @@ describe('cherry checks', () => {
         const { subscriptionId } = await activate();
         await db.exec(`update public.cherry_subscriptions set current_period_start = now() - interval '24 days', current_period_end = now() + interval '6 days';
             update public.cherry_payments set period_start = now() - interval '24 days', period_end = now() + interval '6 days'`);
-        const renewal = await rpc<Record<string, unknown>>('cherry_begin_renewal($1)', [USER]);
+        const renewal = await renew();
         expect((await pay(renewal, 'evt_early', 'pay_early')).disposition).toBe('renewed');
         await db.exec(`insert into public.cherry_checks (subscription_id, kind, check_date, created_at)
             values ('${subscriptionId}', 'daily', current_date - 1, now() - interval '21 hours')`);
@@ -248,17 +293,46 @@ describe('cherry checks', () => {
     it('moves a pass to automatic billing at its next renewal, and lets a declined card be replaced', async () => {
         const { subscriptionId } = await activate();
         await db.exec(`update public.cherry_settings set payment_provider = 'toss'; update public.cherry_subscriptions set current_period_end = now() + interval '1 day'`);
-        const renewal = await rpc<Record<string, unknown>>('cherry_begin_renewal($1)', [USER]);
+        const renewal = await renew();
         expect(renewal).toMatchObject({ outcome: 'ready', provider: 'toss', amountKrw: 9900 });
         await rpc('cherry_record_payment($1,$2,$3,$4,$5,$6,now(),null)', ['toss:1', 'toss', renewal.orderRef, 'tpay_1', null, 9900]);
         expect((await one<{ payment_provider: string }>('select payment_provider from public.cherry_subscriptions where id = $1', [subscriptionId])).payment_provider).toBe('toss');
-        expect(await rpc('cherry_begin_renewal($1)', [USER])).toEqual({ outcome: 'ready', provider: 'toss', amountKrw: 0 });
+        expect(await renew()).toEqual({ outcome: 'ready', provider: 'toss', amountKrw: 0 });
         await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '1 minute'`);
         const charge = await one<{ id: string }>('select * from public.cherry_claim_billing(5)');
         await rpc('cherry_fail_payment($1,$2)', [charge.id, 'EXPIRED_CARD']);
-        expect(await rpc('cherry_begin_renewal($1)', [USER])).toMatchObject({ outcome: 'ready', provider: 'toss', amountKrw: 9900 });
+        expect(await renew()).toMatchObject({ outcome: 'ready', provider: 'toss', amountKrw: 9900 });
         await db.exec('update public.cherry_subscriptions set billing_next_attempt_at = now()');
         expect(await one('select * from public.cherry_claim_billing(5)')).toMatchObject({ status: 'processing' });
+    });
+
+    it('keeps the paid period when an early renewal card is declined', async () => {
+        const { subscriptionId } = await activate();
+        await db.exec(`update public.cherry_settings set payment_provider = 'toss'; update public.cherry_subscriptions set current_period_end = now() + interval '5 days'`);
+        const renewal = await renew();
+        await rpc('cherry_fail_payment($1,$2)', [renewal.paymentId, 'REJECT_CARD_PAYMENT']);
+        expect((await one<{ status: string }>('select status from public.cherry_subscriptions where id = $1', [subscriptionId])).status).toBe('active');
+        expect((await one<{ n: number }>(`select count(*)::int as n from public.cherry_notifications where kind = 'payment_failed'`)).n).toBe(0);
+    });
+
+    it('tells a member without a price lock before a higher charge, and closes a plan billing cannot reach', async () => {
+        const { subscriptionId } = await activate();
+        await db.exec(`update public.cherry_subscriptions set payment_provider = 'toss', price_krw = 5900, current_period_end = now() + interval '3 days'`);
+        await rpc('cherry_enqueue_due(now())');
+        expect((await one<{ n: number }>(`select count(*)::int as n from public.cherry_notifications where kind = 'price_change'`)).n).toBe(1);
+        await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '2 days'`);
+        await rpc('cherry_enqueue_due(now())');
+        expect((await one<{ status: string }>('select status from public.cherry_subscriptions where id = $1', [subscriptionId])).status).toBe('past_due');
+        await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '5 days'`);
+        await rpc('cherry_enqueue_due(now())');
+        expect((await one<{ status: string }>('select status from public.cherry_subscriptions where id = $1', [subscriptionId])).status).toBe('ended');
+    });
+
+    it('forgets a checkout that was never paid', async () => {
+        await checkout();
+        await db.exec(`update public.cherry_subscriptions set updated_at = now() - interval '8 days'`);
+        await rpc('cherry_retention_batch(10)');
+        expect(await one('select status, recipient_phone, target_username from public.cherry_subscriptions')).toEqual({ status: 'ended', recipient_phone: null, target_username: 'purged' });
     });
 
     it('lapses an unrenewed pass, then ends it after the grace period', async () => {
@@ -266,7 +340,7 @@ describe('cherry checks', () => {
         await db.exec(`update public.cherry_subscriptions set current_period_end = now() - interval '1 minute'`);
         await rpc('cherry_enqueue_due(now())');
         expect((await one<{ status: string }>('select status from public.cherry_subscriptions where id = $1', [subscriptionId])).status).toBe('past_due');
-        const renewal = await rpc<Record<string, unknown>>('cherry_begin_renewal($1)', [USER]);
+        const renewal = await renew();
         expect(renewal.outcome).toBe('ready');
         expect((await pay(renewal, 'evt_renew', 'pay_renew')).disposition).toBe('renewed');
         const renewed = await one<{ status: string; followers_listed_at: string | null }>('select status, followers_listed_at from public.cherry_subscriptions where id = $1', [subscriptionId]);
@@ -278,8 +352,8 @@ describe('cherry checks', () => {
 });
 
 describe('cherry provider ledger and messages', () => {
-    const reserve = (owner: string, charge = 0.5) => rpc<{ outcome: string; id: string }>(
-        'cherry_reserve_run($1,$2,$3,$4,$5,$6,$7)', [`check:${owner}`, 'followers', null, 'secondary', 'actor', 100, charge]);
+    const reserve = (owner: string, charge = 0.5, reuse = 3600) => rpc<{ outcome: string; id: string; attempt: number }>(
+        'cherry_reserve_run($1,$2,$3,$4,$5,$6,$7,$8)', [`check:${owner}`, 'followers_s0', null, 'secondary', 'actor', 100, charge, reuse]);
 
     it('limits active runs, keeps the analyzer reserve, and never repeats an unknown start', async () => {
         const ids = ['a', 'b', 'c', 'd'].map(letter => `${letter.repeat(8)}-0000-4000-8000-000000000000`);
@@ -294,6 +368,40 @@ describe('cherry provider ledger and messages', () => {
         expect((await reserve(ids[3])).outcome).toBe('budget');
     });
 
+    it('counts spending that the last balance reading could not include', async () => {
+        await db.exec('update public.cherry_settings set apify_usage_usd = 83, apify_observed_at = now()');
+        for (const [index, outcome] of ['reserved', 'budget'].entries()) {
+            const run = await reserve(`${index}`.repeat(8) + '-0000-4000-8000-000000000000', 1.275);
+            expect(run.outcome).toBe(outcome);
+            if (run.id) await db.query(`update public.cherry_provider_runs set status = 'succeeded', run_id = $2, estimated_cost_usd = 1.0,
+                finished_at = now() + interval '1 second' where id = $1`, [run.id, `run0000${index}`]);
+        }
+    });
+
+    it('buys a list again only after its reuse time, and stops after five unusable runs', async () => {
+        const owner = 'f'.repeat(8) + '-0000-4000-8000-000000000000';
+        const first = await reserve(owner);
+        await db.query(`update public.cherry_provider_runs set status = 'succeeded', run_id = 'runaaaaa', finished_at = now() - interval '2 hours' where id = $1`, [first.id]);
+        expect((await reserve(owner, 0.5, 3 * 3600)).outcome).toBe('resume');
+        expect(await reserve(owner, 0.5, 3600)).toMatchObject({ outcome: 'reserved', attempt: 1 });
+        for (let index = 0; index < 5; index += 1) {
+            await db.query(`update public.cherry_provider_runs set status = 'failed', finished_at = now() where owner_key = $1 and status = 'reserved'`, [`check:${owner}`]);
+            if (index < 4) expect(await reserve(owner, 0.5, 60)).toMatchObject({ outcome: 'reserved', attempt: index + 2 });
+        }
+        expect((await reserve(owner, 0.5, 60)).outcome).toBe('exhausted');
+    });
+
+    it('counts unusable lists toward the month', async () => {
+        const { subscriptionId } = await activate();
+        const check = '33333333-3333-4333-8333-333333333333';
+        await db.query(`insert into public.cherry_provider_runs (owner_key, operation, attempt, subscription_id, credential_slot, actor_id, requested_items, max_charge_usd, status, items_returned)
+            values ('check:${check}', 'followers_s0', 1, $1, 'secondary', 'a', 800, 1, 'failed', 700),
+                ('check:${check}', 'followers_s0', 2, $1, 'secondary', 'a', 800, 1, 'succeeded', 750),
+                ('check:44444444-4444-4444-8444-444444444444', 'following_s0', 1, $1, 'secondary', 'a', 800, 1, 'succeeded', 600),
+                ('check:44444444-4444-4444-8444-444444444444', 'profile_s0', 1, $1, 'secondary', 'a', 2, 1, 'succeeded', 1)`, [subscriptionId]);
+        expect(await rpc(`cherry_rows_used($1, now() - interval '1 day', $2)`, [subscriptionId, check])).toBe(1300);
+    });
+
     it('resumes a started run instead of starting another', async () => {
         const owner = 'e'.repeat(8) + '-0000-4000-8000-000000000000';
         const first = await reserve(owner);
@@ -304,9 +412,9 @@ describe('cherry provider ledger and messages', () => {
     it('does not resend a message whose outcome is unknown', async () => {
         await activate();
         await db.exec(`update public.cherry_notifications set send_after = now()`);
-        const message = await one<{ id: string }>('select * from public.cherry_claim_notifications(5, 60)');
+        const message = await one<{ id: string }>('select * from public.cherry_claim_notifications(5, 60, true)');
         await db.query(`update public.cherry_notifications set lease_expires_at = now() - interval '1 minute' where id = $1`, [message.id]);
-        expect(await one('select * from public.cherry_claim_notifications(5, 60)')).toBeUndefined();
+        expect(await one('select * from public.cherry_claim_notifications(5, 60, true)')).toBeUndefined();
         expect((await one<{ status: string }>('select status from public.cherry_notifications where id = $1', [message.id])).status).toBe('unconfirmed');
     });
 

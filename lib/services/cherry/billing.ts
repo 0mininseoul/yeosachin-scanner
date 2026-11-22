@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { assertNoDatabaseError, cherryRpc } from './rpc';
 import { loadCherrySubscription } from './store';
@@ -111,22 +111,30 @@ export async function completeTossBilling(input: { userId: string; authKey: stri
     if (!config) return 'invalid';
     if (await ensureCustomerKey(input.userId) !== input.customerKey) return 'invalid';
     let issued;
+    const authHash = createHash('sha256').update(input.authKey).digest('hex');
     try {
         issued = await issueTossBillingKey(config, input.authKey, input.customerKey);
-    } catch {
-        // A repeated return to this page uses the key that the first visit stored.
-        if (!await loadBillingKey(input.userId)) return 'declined';
+    } catch (caught) {
+        // Only a repeated return with the same authorization may use the stored key; any other
+        // failure must not fall back to a card the member did not just choose.
+        const { data, error } = await supabaseAdmin.from('cherry_billing_keys').select('last_auth_hash').eq('user_id', input.userId).maybeSingle();
+        assertNoDatabaseError('billing_key_repeat', error);
+        if (data?.last_auth_hash !== authHash) return caught instanceof TossUnknownError ? 'unknown' : 'declined';
     }
     if (issued) {
         const label = [issued.card?.cardType, issued.card?.number?.slice(-4)].filter(Boolean).join(' ').slice(0, 60);
         const { error } = await supabaseAdmin.from('cherry_billing_keys').update({
             billing_key_ciphertext: encryptBillingKey(issued.billingKey, input.customerKey), card_label: label || null,
-            updated_at: new Date().toISOString(),
+            last_auth_hash: authHash, updated_at: new Date().toISOString(),
         }).eq('user_id', input.userId);
         assertNoDatabaseError('billing_key_store', error);
     }
+    const { data: open, error: openError } = await supabaseAdmin.from('cherry_payments').select('id').eq('user_id', input.userId)
+        .eq('provider', 'toss').eq('status', 'ready').order('created_at', { ascending: false }).limit(1);
+    assertNoDatabaseError('open_payment', openError);
+    if (!open?.[0]) return 'no_order';
     const { data, error } = await supabaseAdmin.from('cherry_payments').update({ status: 'processing', updated_at: new Date().toISOString() })
-        .eq('user_id', input.userId).eq('provider', 'toss').eq('status', 'ready').select('*');
+        .eq('id', open[0].id).eq('status', 'ready').select('*');
     assertNoDatabaseError('open_payment', error);
     const payment = (data as CherryPayment[] | null)?.[0];
     return payment ? chargeCherryPayment(payment, config) : 'no_order';
@@ -135,9 +143,17 @@ export async function completeTossBilling(input: { userId: string; authKey: stri
 export async function processDueBilling(limit: number): Promise<number> {
     const config = readTossConfig();
     if (!config) return 0;
-    const payments = await cherryRpc<CherryPayment[]>('cherry_claim_billing', { p_limit: limit });
-    for (const payment of payments) await chargeCherryPayment(payment, config);
-    return payments.length;
+    // One at a time: a payment that was claimed but not yet sent must not age into a lost charge.
+    for (let done = 0; done < limit; done += 1) {
+        const [payment] = await cherryRpc<CherryPayment[]>('cherry_claim_billing', { p_limit: 1 });
+        if (!payment) return done;
+        try {
+            await chargeCherryPayment(payment, config);
+        } catch {
+            // This order stays 'processing' and is settled by lookup; the next member is unaffected.
+        }
+    }
+    return limit;
 }
 
 /** Settles charges whose answer was lost. Toss is asked by order; nothing is charged here. */
@@ -145,9 +161,10 @@ export async function reconcileCherryPayments(limit: number): Promise<number> {
     const config = readTossConfig();
     if (!config) return 0;
     const { data, error } = await supabaseAdmin.from('cherry_payments').select('*').eq('status', 'processing').eq('provider', 'toss')
-        .lt('updated_at', new Date(Date.now() - 5 * 60_000).toISOString()).order('updated_at').limit(limit);
+        .lt('updated_at', new Date(Date.now() - 15 * 60_000).toISOString()).order('updated_at').limit(limit);
     assertNoDatabaseError('processing_payments', error);
     for (const payment of (data ?? []) as CherryPayment[]) {
+        // Far longer than one charge request can stay open.
         let found;
         try {
             found = await findTossPayment(config, payment.order_ref);
@@ -163,7 +180,7 @@ export async function reconcileCherryPayments(limit: number): Promise<number> {
     return data?.length ?? 0;
 }
 
-interface RefundRow { id: string; payment_id: string; subscription_id: string; amount_krw: number; reason: string }
+export interface RefundRow { id: string; payment_id: string; subscription_id: string; amount_krw: number; reason: string }
 
 export async function processCherryRefunds(limit: number): Promise<number> {
     const config = readTossConfig();

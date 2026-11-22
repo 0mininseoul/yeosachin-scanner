@@ -40,7 +40,7 @@ export function CherryActionButton({ action, label, quiet = true }: { action: Ac
     </div>;
 }
 
-export function CherryRenewButton({ label, quiet = false }: { label: string; quiet?: boolean }) {
+export function CherryRenewButton({ label, amountKrw, quiet = false }: { label: string; amountKrw: number; quiet?: boolean }) {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     async function run() {
@@ -48,12 +48,13 @@ export function CherryRenewButton({ label, quiet = false }: { label: string; qui
         setBusy(true);
         setError(null);
         try {
-            const { data } = await post('/api/cherry/renew', {});
+            const { data } = await post('/api/cherry/renew', { expectedAmountKrw: amountKrw });
             if (data.outcome === 'ready' && typeof data.redirectUrl === 'string') return window.location.assign(data.redirectUrl);
             if (data.outcome === 'ready' && data.provider === 'toss') {
                 return await openTossBilling({ clientKey: String(data.clientKey), customerKey: String(data.customerKey), email: null, checkId: null });
             }
-            setError(data.outcome === 'payment_in_progress' ? '결제를 확인하고 있어요. 잠시 뒤 다시 확인해 주세요.' : '지금은 결제를 시작할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
+            setError(data.outcome === 'price_changed' ? '요금이 바뀌었어요. 화면을 새로고침해 금액을 다시 확인해 주세요.'
+                : data.outcome === 'payment_in_progress' ? '결제를 확인하고 있어요. 잠시 뒤 다시 확인해 주세요.' : '지금은 결제를 시작할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
         } catch {
             setError('인터넷 연결을 확인하고 다시 시도해 주세요.');
         }

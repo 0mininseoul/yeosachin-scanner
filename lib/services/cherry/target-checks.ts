@@ -92,7 +92,7 @@ export async function processTargetCheck(id: string, deadlineAtMs: number): Prom
     try {
         const profiles = await collectCherryProfiles({
             ownerKey: `target:${check.id}`, operation: 'profile', subscriptionId: null, slot: await lookupSlot(check.id),
-            usernames: [check.username], deadlineAtMs,
+            usernames: [check.username], deadlineAtMs, reuseSeconds: 3600,
         });
         const result = profiles.get(check.username);
         if (result?.status === 'not_found') await complete('not_found');

@@ -2,7 +2,7 @@ import { CherryHomeView, type CherryHomeRefund } from '@/components/cherry/home-
 import { CherryBar } from '@/components/cherry/shell';
 import { CherrySignIn } from '@/components/cherry/sign-in';
 import { loadMemberOverview } from '@/lib/services/cherry/member';
-import { assertNoDatabaseError } from '@/lib/services/cherry/rpc';
+import { assertNoDatabaseError, cherryRpc } from '@/lib/services/cherry/rpc';
 import { cherryUser } from '@/lib/services/cherry/session';
 import { loadMemberSubscription } from '@/lib/services/cherry/store';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -18,9 +18,10 @@ async function loadRefund(subscriptionId: string): Promise<CherryHomeRefund | nu
 
 async function loadHome(userId: string) {
     const subscription = await loadMemberSubscription(userId);
-    const [overview, refund] = subscription
-        ? await Promise.all([loadMemberOverview(subscription), loadRefund(subscription.id)]) : [null, null];
-    return { subscription, overview, refund, nowMs: Date.now() };
+    const [overview, refund, renewalPriceKrw] = subscription ? await Promise.all([
+        loadMemberOverview(subscription), loadRefund(subscription.id), cherryRpc<number>('cherry_renewal_price', { p_subscription: subscription.id }),
+    ]) : [null, null, 0];
+    return { subscription, overview, refund, renewalPriceKrw, nowMs: Date.now() };
 }
 
 export default async function CherryHomePage({ searchParams }: { searchParams: Promise<{ pay?: string | string[] }> }) {

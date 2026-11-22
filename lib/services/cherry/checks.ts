@@ -21,6 +21,11 @@ const HARD_LIST_LIMIT = 2000;
 const RELATIONSHIP_BUILD = '0.0.71';
 const CONFIRM_UNAVAILABLE_SECONDS = 3600;
 const HIDDEN_ALLOWANCE = 3;
+/** A public count must be recent, because a private account is confirmed by a second look an hour later. */
+const PROFILE_REUSE_SECONDS = 45 * 60;
+const LIST_REUSE_SECONDS = 12 * 3600;
+/** After repeated bad days one retry is enough; more would only spend the month's rows. */
+const BACKOFF_STREAK = 2;
 /** A direction is read again after this long even when its public count never moved. */
 const RELIST_DAYS = 14;
 
@@ -32,6 +37,7 @@ export interface CherryCheckDeps {
     loadRelations(id: string): Promise<Map<string, CherryRelation>>;
     loadSettings(): Promise<CherrySettings>;
     isBlocked(instagramId: string, username: string): Promise<boolean>;
+    rowsUsed(subscriptionId: string, since: string, checkId: string): Promise<number>;
     now(): number;
 }
 
@@ -43,6 +49,7 @@ const defaultDeps: CherryCheckDeps = {
     loadRelations: loadCherryRelations,
     loadSettings: loadCherrySettings,
     isBlocked: isCherryTargetBlocked,
+    rowsUsed: (subscriptionId, since, checkId) => cherryRpc<number>('cherry_rows_used', { p_subscription: subscriptionId, p_since: since, p_check: checkId }),
     now: () => Date.now(),
 };
 
@@ -51,14 +58,14 @@ export function relationshipBuild(env: Record<string, string | undefined> = proc
     return build && /^\d+\.\d+\.\d+$/.test(build) ? build : RELATIONSHIP_BUILD;
 }
 
-/** A retry inside the window resumes the same paid run; a later one starts fresh data. */
-function operation(base: string, check: CherryCheck, nowMs: number, hours: number): string {
-    return `${base}_s${check.series}_b${Math.max(0, Math.floor((nowMs - Date.parse(check.created_at)) / (hours * 3_600_000)))}`;
+/** One ledger series per check; an operator retry starts a new one. */
+function operation(base: string, check: CherryCheck): string {
+    return `${base}_s${check.series}`;
 }
 
 export async function collectCherryProfiles(input: {
     ownerKey: string; operation: string; subscriptionId: string | null; slot: ApifyCredentialSlot;
-    usernames: readonly string[]; deadlineAtMs: number;
+    usernames: readonly string[]; deadlineAtMs: number; reuseSeconds?: number;
 }, run: CherryCheckDeps['run'] = defaultDeps.run): Promise<Map<string, CherryProfileResult>> {
     const charge = Number((input.usernames.length * CHERRY_PROFILE_USD).toFixed(6));
     const result = await run({
@@ -66,6 +73,7 @@ export async function collectCherryProfiles(input: {
         actorId: APIFY_PROFILE_ACTOR_ID, input: { usernames: [...input.usernames] }, items: input.usernames.length + 1,
         maxChargeUsd: charge, executionMaxChargeUsd: Number((charge + 0.0004).toFixed(6)),
         estimatedUsdPerItem: 0.0023, timeoutSecs: 300, deadlineAtMs: input.deadlineAtMs,
+        reuseSeconds: input.reuseSeconds ?? PROFILE_REUSE_SECONDS,
     });
     return parseProfileRows(result.rows, input.usernames);
 }
@@ -77,11 +85,11 @@ async function collectList(input: {
     if (declared === 0) return [];
     const limit = Math.max(CHERRY_LIST_MIN, Math.min(HARD_LIST_LIMIT, declared + 10));
     const result = await deps.run({
-        ownerKey: `check:${input.check.id}`, operation: operation(input.direction, input.check, deps.now(), 6),
+        ownerKey: `check:${input.check.id}`, operation: operation(input.direction, input.check),
         subscriptionId: input.subscription.id, slot: 'secondary', actorId: APIFY_RELATIONSHIP_ACTOR_ID,
         actorBuild: relationshipBuild(), input: relationshipInput(input.profile.username, input.direction, limit), items: limit,
         maxChargeUsd: relationshipMaxCharge(limit), estimatedUsdPerItem: CHERRY_RELATIONSHIP_USD_PER_ITEM,
-        timeoutSecs: 900, deadlineAtMs: input.deadlineAtMs,
+        timeoutSecs: 900, deadlineAtMs: input.deadlineAtMs, reuseSeconds: LIST_REUSE_SECONDS,
     });
     let accounts: CherryListAccount[];
     try {
@@ -94,7 +102,8 @@ async function collectList(input: {
     const fewHidden = result.attempt >= 2 && accounts.length > 0 && listGap(accounts.length, declared) <= HIDDEN_ALLOWANCE;
     if (!fewHidden && coverageRatio(accounts.length, declared) < requiredCoverage(result.attempt)) {
         await deps.reject(result.ledgerId, 'incomplete');
-        throw new CherryDeferError('list_incomplete', { delaySeconds: 600, terminal: result.attempt >= 4 });
+        const tries = input.subscription.failure_streak >= BACKOFF_STREAK ? 2 : 4;
+        throw new CherryDeferError('list_incomplete', { delaySeconds: 600, terminal: result.attempt >= tries });
     }
     return accounts;
 }
@@ -147,37 +156,44 @@ async function applyDiff(
     } });
 }
 
+/** A target that can no longer be served ends with a refund instead of failing, and charging, every day. */
+function unavailableCode(observed: CherryProfileResult, subscription: CherrySubscription): 'private' | 'not_found' | 'too_large' | null {
+    if (observed.status === 'not_found') return 'not_found';
+    if (observed.status !== 'found') return null;
+    // A recycled handle belongs to someone else, so the registered account is gone.
+    if (observed.profile.id !== subscription.target_instagram_id) return 'not_found';
+    if (observed.profile.isPrivate) return 'private';
+    return observed.profile.followersCount + observed.profile.followingCount > HARD_LIST_LIMIT ? 'too_large' : null;
+}
+
 async function runCheck(check: CherryCheck, deadlineAtMs: number, deps: CherryCheckDeps): Promise<void> {
     const [subscription, settings] = await Promise.all([deps.loadSubscription(check.subscription_id), deps.loadSettings()]);
     if (!subscription || !['preparing', 'active'].includes(subscription.status)) {
         throw new CherryDeferError('subscription_inactive', { delaySeconds: 0, terminal: true });
     }
     if (await deps.isBlocked(subscription.target_instagram_id, subscription.target_username)) {
-        await deps.rpc('cherry_end_with_refund', { p_subscription: subscription.id, p_reason: 'target_blocked' });
+        const ended = await deps.rpc<{ refundKrw?: number }>('cherry_end_with_refund', { p_subscription: subscription.id, p_reason: 'target_blocked' });
+        await deps.rpc('cherry_queue_notification', {
+            p_subscription: subscription.id, p_kind: 'target_unavailable', p_dedupe: `unavailable:${subscription.id}`,
+            p_payload: { code: 'blocked', refundKrw: ended?.refundKrw ?? 0 }, p_report: null,
+        });
         throw new CherryDeferError('target_blocked', { delaySeconds: 0, terminal: true });
     }
     const profiles = await collectCherryProfiles({
-        ownerKey: `check:${check.id}`, operation: operation('profile', check, deps.now(), 1),
+        ownerKey: `check:${check.id}`, operation: operation('profile', check),
         subscriptionId: subscription.id, slot: 'secondary', usernames: [subscription.target_username], deadlineAtMs,
     }, deps.run);
     const observed = profiles.get(subscription.target_username.toLowerCase());
     if (!observed || observed.status === 'unavailable') throw new CherryDeferError('profile_unavailable', { delaySeconds: 900 });
-    if (observed.status === 'not_found' || observed.profile.isPrivate) {
+    const unavailable = unavailableCode(observed, subscription);
+    if (unavailable) {
         await deps.rpc('cherry_mark_unavailable', {
-            p_check: check.id, p_lease: check.lease_token,
-            p_code: observed.status === 'not_found' ? 'not_found' : 'private',
-            p_confirm_seconds: CONFIRM_UNAVAILABLE_SECONDS,
+            p_check: check.id, p_lease: check.lease_token, p_code: unavailable, p_confirm_seconds: CONFIRM_UNAVAILABLE_SECONDS,
         });
         return;
     }
+    if (observed.status !== 'found') throw new CherryDeferError('profile_unavailable', { delaySeconds: 900 });
     const profile = observed.profile;
-    // A recycled handle belongs to someone else.
-    if (profile.id !== subscription.target_instagram_id) {
-        throw new CherryDeferError('target_identity_changed', { delaySeconds: 0, terminal: true });
-    }
-    if (profile.followersCount + profile.followingCount > HARD_LIST_LIMIT) {
-        throw new CherryDeferError('target_too_large', { delaySeconds: 0, terminal: true });
-    }
     const collect = (direction: CherryDirection) => collectList({ check, subscription, profile, direction, deadlineAtMs }, deps);
 
     if (check.kind === 'baseline') {
@@ -195,16 +211,16 @@ async function runCheck(check: CherryCheck, deadlineAtMs: number, deps: CherryCh
         return at === null || nowMs - Date.parse(at) >= RELIST_DAYS * 86_400_000;
     };
     const periodStartMs = subscription.items_period_start ? Date.parse(subscription.items_period_start) : nowMs;
-    let used = nowMs - periodStartMs > 30 * 86_400_000 ? 0 : subscription.items_used;
+    const expired = nowMs - periodStartMs > 30 * 86_400_000;
+    // Counted from the paid-run ledger, so lists that could not be used are included.
+    let used = expired || !subscription.items_period_start ? 0
+        : await deps.rowsUsed(subscription.id, subscription.items_period_start, check.id);
     const wanted: CherryDirection[] = [];
     const paced: CherryDirection[] = [];
     for (const direction of CHERRY_DIRECTIONS) {
-        if (stale(direction)) {
-            wanted.push(direction);
-            used += declared[direction];
-        } else if (declared[direction] !== previous[direction]) {
+        if (stale(direction) || declared[direction] !== previous[direction]) {
             const allowed = canCollect({
-                nowMs, periodStartMs: used === 0 ? nowMs : periodStartMs, used, planned: declared[direction],
+                nowMs, periodStartMs: expired ? nowMs : periodStartMs, used, planned: declared[direction],
                 monthlyLimit: settings.monthly_item_limit, listTotal: declared.followers + declared.following,
             });
             (allowed ? wanted : paced).push(direction);

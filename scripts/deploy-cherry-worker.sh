@@ -98,6 +98,19 @@ jq -er '.metadata.annotations["run.googleapis.com/build-environment-variables"] 
   | with_entries(select(.key | test("^NEXT_PUBLIC_SUPABASE_(URL|ANON_KEY)$")))' "$WORK/source.json" > "$WORK/build.json" \
   || die "the source worker has no reusable build settings"
 
+# A redeploy keeps the Cherry settings and secret references the running worker already has.
+if gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" --format=json > "$WORK/current.json" 2>/dev/null; then
+  jq -c --slurpfile next "$WORK/env.json" '
+    ([.spec.template.spec.containers[0].env[]? | select(has("value")) | select(.name | test("^CHERRY_"))
+      | {key: .name, value: .value}] | from_entries) + $next[0]' "$WORK/current.json" > "$WORK/merged.json"
+  mv "$WORK/merged.json" "$WORK/env.json"
+  KEPT="$(jq -r '[.spec.template.spec.containers[0].env[]? | select(has("valueFrom"))
+    | select(.name | test("^(CHERRY_|RESEND_API_KEY$)")) | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"] | .[]' "$WORK/current.json")"
+  while IFS= read -r reference; do
+    [[ -z "$reference" || ",$SECRETS" == *",${reference%%=*}="* ]] || SECRETS="$SECRETS,$reference"
+  done <<<"$KEPT"
+fi
+
 printf 'commit %s\nservice %s (%s)\n' "$COMMIT" "$SERVICE" "$URL"
 printf 'settings: %s\n' "$(jq -r 'keys | join(", ")' "$WORK/env.json")"
 printf 'secrets: %s\n' "$(tr ',' '\n' <<<"$SECRETS" | cut -d= -f1 | paste -sd, -)"

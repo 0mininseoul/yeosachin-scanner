@@ -7,10 +7,15 @@ import { assertNoDatabaseError, cherryRpc } from './rpc';
 
 const ORDER_REF = /^chr_[0-9a-f]{32}$/;
 
-async function isCherryProduct(productId: string): Promise<boolean> {
-    const { data, error } = await supabaseAdmin.from('cherry_offers').select('code').eq('groble_product_id', productId).limit(1);
-    assertNoDatabaseError('groble_product', error);
-    return (data?.length ?? 0) > 0;
+/** Current products, products of earlier orders, and payments already recorded here. */
+async function isCherryEvent(productId: string, paymentId: string): Promise<boolean> {
+    const lookups = await Promise.all([
+        supabaseAdmin.from('cherry_offers').select('code').eq('groble_product_id', productId).limit(1),
+        supabaseAdmin.from('cherry_payments').select('id').eq('groble_product_id', productId).limit(1),
+        supabaseAdmin.from('cherry_payments').select('id').eq('provider_payment_id', paymentId).limit(1),
+    ]);
+    for (const { error } of lookups) assertNoDatabaseError('groble_product', error);
+    return lookups.some(({ data }) => (data?.length ?? 0) > 0);
 }
 
 /**
@@ -28,7 +33,8 @@ export async function handleCherryGrobleEvent(
             return null;
         }
         const orderRef = payment.sellerReference && ORDER_REF.test(payment.sellerReference) ? payment.sellerReference : null;
-        if (!orderRef && (analyzerProductIds.includes(payment.productId) || !await isCherryProduct(payment.productId))) return null;
+        if (analyzerProductIds.includes(payment.productId)) return null;
+        if (!orderRef && !await isCherryEvent(payment.productId, payment.paymentId)) return null;
         const result = await cherryRpc<{ disposition: string }>('cherry_record_payment', {
             p_event_id: payment.eventId, p_provider: 'groble', p_order_ref: orderRef, p_provider_payment_id: payment.paymentId,
             p_product_id: payment.productId, p_amount_krw: payment.amountKrw, p_paid_at: payment.paidAt,
@@ -43,7 +49,7 @@ export async function handleCherryGrobleEvent(
         } catch {
             return null;
         }
-        if (analyzerProductIds.includes(refund.productId) || !await isCherryProduct(refund.productId)) return null;
+        if (analyzerProductIds.includes(refund.productId) || !await isCherryEvent(refund.productId, refund.paymentId)) return null;
         const result = await cherryRpc<{ disposition: string }>('cherry_record_refund', {
             p_event_id: refund.eventId, p_provider: 'groble', p_provider_payment_id: refund.paymentId,
             p_amount_krw: refund.refundAmountKrw, p_partial: refund.partialRefund,
@@ -57,7 +63,7 @@ export async function handleCherryGrobleEvent(
         } catch {
             return null;
         }
-        if (analyzerProductIds.includes(request.productId) || !await isCherryProduct(request.productId)) return null;
+        if (analyzerProductIds.includes(request.productId) || !await isCherryEvent(request.productId, request.paymentId)) return null;
         const { error } = await supabaseAdmin.from('cherry_payment_events').upsert({
             event_id: request.eventId, provider: 'groble', event_type: 'payment.cancel_requested',
             provider_payment_id: request.paymentId, amount_krw: request.amountKrw, disposition: 'cancel_requested',

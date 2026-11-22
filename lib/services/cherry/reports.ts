@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { summarizeCherryAccount } from './ai-summary';
 import { collectCherryProfiles } from './checks';
 import { CherryDeferError, cherryErrorCode } from './errors';
-import { storeCherryImage, type CherryStoredImage } from './images';
+import { deleteCherryImages, storeCherryImage, type CherryStoredImage } from './images';
 import type { CherryProfile } from './instagram';
 import { assertNoDatabaseError, cherryRpc } from './rpc';
 import { loadCherrySettings, type CherryEventImage, type CherryEventRow, type CherryReportRow } from './store';
@@ -11,7 +11,8 @@ import { loadCherrySettings, type CherryEventImage, type CherryEventRow, type Ch
 export const CHERRY_REPORT_DETAIL_LIMIT = 10;
 /** A notice must not wait on details for longer than this. */
 const MAX_WAIT_MS = 90 * 60_000;
-const AI_CONCURRENCY = 2;
+/** The worker builds two reports at a time, so this keeps Cherry at two AI calls. */
+const AI_CONCURRENCY = 1;
 
 async function loadEvents(reportId: string): Promise<CherryEventRow[]> {
     const { data, error } = await supabaseAdmin.from('cherry_mutual_events').select('*').eq('report_id', reportId).order('position');
@@ -19,9 +20,10 @@ async function loadEvents(reportId: string): Promise<CherryEventRow[]> {
     return (data ?? []) as CherryEventRow[];
 }
 
-async function updateEvent(id: string, patch: Record<string, unknown>): Promise<void> {
-    const { error } = await supabaseAdmin.from('cherry_mutual_events').update(patch).eq('id', id);
+async function updateEvent(id: string, patch: Record<string, unknown>): Promise<boolean> {
+    const { data, error } = await supabaseAdmin.from('cherry_mutual_events').update(patch).eq('id', id).select('id');
     assertNoDatabaseError('report_event_update', error);
+    return (data?.length ?? 0) > 0;
 }
 
 async function storeImages(report: CherryReportRow, event: CherryEventRow, profile: CherryProfile): Promise<CherryStoredImage[]> {
@@ -40,7 +42,8 @@ async function storeImages(report: CherryReportRow, event: CherryEventRow, profi
         stored.push(item.value);
         images.push({ key: item.value.key, role: sources[index].role, shortCode: sources[index].shortCode });
     });
-    await updateEvent(event.id, { images });
+    // The member may have left while images were being stored; nothing may outlive its record.
+    if (!await updateEvent(event.id, { images })) await deleteCherryImages(images.map(image => image.key));
     return stored;
 }
 
@@ -89,7 +92,7 @@ export async function processCherryReport(report: CherryReportRow, deadlineAtMs:
             const settings = await loadCherrySettings();
             const profiles = await collectCherryProfiles({
                 ownerKey: `report:${report.id}`, operation: `details_${events.length}`, subscriptionId: report.subscription_id,
-                slot: 'secondary', usernames: pending.map(event => event.username), deadlineAtMs,
+                slot: 'secondary', usernames: pending.map(event => event.username), deadlineAtMs, reuseSeconds: 6 * 3600,
             });
             await runLimited(pending, AI_CONCURRENCY, async event => {
                 const found = profiles.get(event.username.toLowerCase());
