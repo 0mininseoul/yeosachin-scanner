@@ -184,7 +184,7 @@ describe('Dev live Apify budget', () => {
             const approval = { id: 'synthetic-preflight-approval', planId: 'standard' };
             devBudget.require.mockReturnValue(approval);
             devBudget.reserve.mockClear();
-            const onRunStarted = vi.fn(async (_id: string) => undefined);
+            const onRunStarted = vi.fn<(runId: string) => Promise<void>>().mockResolvedValue(undefined);
             const onCostRunFinished = vi.fn();
             const deliver = (resumeRunId?: string) => startOrResumeApifyActor(
                 client, APIFY_PROFILE_ACTOR_ID, { usernames: ['synthetic'] }, {
