@@ -1,22 +1,36 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { PGlite, type Results } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { PREFLIGHT_DATABASE_NAMES } from '../../../lib/services/analysis/preflight';
+import { APIFY_FREE_CREDENTIAL_SLOTS } from '../../../lib/services/instagram/providers/types';
 import {
     analysisProviderAdmissionId,
     type AnalysisProviderAdmissionInput,
 } from '../../../lib/services/analysis/provider-admission-store';
 
-const migration = readFileSync(new URL(
-    '../../../supabase/migrations/20260831100000_add_analysis_provider_admission_leases.sql',
-    import.meta.url,
-), 'utf8');
-const rearmMigrations = [
+function readMigration(name: string): string {
+    return readFileSync(new URL(`../../../supabase/migrations/${name}.sql`, import.meta.url), 'utf8');
+}
+
+// Load the historical definitions, grants and seed rows that the September
+// allocator extends, without provisioning unrelated beta administration RPCs.
+function readPreflightPrerequisite(migration: string, statement: string): string {
+    const sql = readMigration(migration);
+    const start = sql.indexOf(statement);
+    const end = sql.indexOf('\nCREATE OR REPLACE FUNCTION public.', start + statement.length);
+    if (start < 0 || end < 0) throw new Error(`Missing SQL prerequisite ${statement} in ${migration}`);
+    return sql.slice(start, end);
+}
+
+const admissionMigrations = [
+    '20260831100000_add_analysis_provider_admission_leases',
+    '20260904120000_expand_apify_free_pool_to_nine',
     '20261122020200_rearm_unstarted_apify_admissions',
     '20261122020300_rearm_unstarted_gemini_admissions',
-].map(name => readFileSync(new URL(`../../../supabase/migrations/${name}.sql`, import.meta.url), 'utf8'));
+    '20261122130000_restore_preflight_apify_admission_pool',
+].map(readMigration);
 
 // gitleaks:allow -- deterministic UUID fixtures
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -304,17 +318,41 @@ describe('provider admission migration PGlite contract', () => {
                 operation_family TEXT NOT NULL,
                 credential_slot TEXT NOT NULL,
                 lifecycle_state TEXT NOT NULL,
+                reserved_usd NUMERIC,
+                actual_usd NUMERIC,
+                reconciliation_watermark TIMESTAMPTZ,
                 PRIMARY KEY (allocation_id, operation_family)
+            );
+            CREATE TABLE public.users (id UUID PRIMARY KEY);
+            CREATE TABLE public.analysis_beta_runtime_gate (singleton BOOLEAN PRIMARY KEY, enabled BOOLEAN);
+            CREATE TABLE public.analysis_beta_access_grants (
+                user_id UUID PRIMARY KEY, enabled BOOLEAN, expires_at TIMESTAMPTZ
+            );
+            CREATE TABLE public.analysis_beta_pool_local_debits (
+                credential_slot TEXT, actual_usd NUMERIC, reconciliation_watermark TIMESTAMPTZ
+            );
+            CREATE TABLE public.analysis_beta_pool_reservation_archive (
+                credential_slot TEXT, unabsorbed_debit_usd NUMERIC, archive_state TEXT, reconciliation_watermark TIMESTAMPTZ
             );
             CREATE TABLE public.analysis_preflight_provider_runs (
                 preflight_id UUID NOT NULL,
-                operation_key TEXT NOT NULL,
-                logical_provider TEXT NOT NULL,
+                operation_key TEXT NOT NULL DEFAULT 'target-profile-fallback',
+                input_hash TEXT,
+                logical_provider TEXT NOT NULL DEFAULT 'apify',
+                actor_id TEXT NOT NULL DEFAULT 'apify/instagram-profile-scraper',
                 credential_slot TEXT NOT NULL,
-                status TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'starting',
                 run_id TEXT,
+                max_charge_usd NUMERIC,
+                actual_usage_usd NUMERIC,
+                reserved_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                run_started_at TIMESTAMPTZ,
                 terminalized_at TIMESTAMPTZ,
-                usage_reconciled_at TIMESTAMPTZ
+                usage_reconciled_at TIMESTAMPTZ,
+                usage_reconciliation_attempt_count INTEGER NOT NULL DEFAULT 0,
+                usage_reconciliation_attempted_at TIMESTAMPTZ,
+                manual_resolution_evidence_hash TEXT,
+                manual_resolved_at TIMESTAMPTZ
             );
             CREATE TABLE public.analysis_v2_provider_runs (
                 request_id UUID NOT NULL,
@@ -505,9 +543,21 @@ describe('provider admission migration PGlite contract', () => {
             END;
             $$;
         `);
-        await db.exec(migration);
-        for (const rearmMigration of rearmMigrations) {
-            await db.exec(rearmMigration);
+        await db.exec(readPreflightPrerequisite(
+            '20260714175411_add_preflight_apify_provider_run_ledger',
+            'CREATE OR REPLACE FUNCTION public.analysis_preflight_provider_run_json(',
+        ));
+        const creditPool = '20260802010000_add_betatest_apify_credit_pool';
+        await db.exec(readPreflightPrerequisite(
+            creditPool, 'CREATE OR REPLACE FUNCTION public.analysis_beta_valid_apify_credential_slot(',
+        ));
+        await db.exec(readPreflightPrerequisite(creditPool, 'CREATE TABLE public.analysis_apify_credit_snapshots ('));
+        await db.exec(readPreflightPrerequisite(
+            '20260802100100_harden_betatest_entry_lifecycle_runtime',
+            'CREATE OR REPLACE FUNCTION public.reserve_analysis_preflight_provider_run(',
+        ));
+        for (const sql of admissionMigrations) {
+            await db.exec(sql);
         }
         await db.exec(`
             INSERT INTO public.analysis_v2_gemini_leases(slot, state)
@@ -531,6 +581,84 @@ describe('provider admission migration PGlite contract', () => {
 
     afterAll(async () => {
         await db.close();
+    });
+
+    describe('ordinary preflight Apify slots', () => {
+        const preflight = preflightInput();
+        const reserve = (claimToken: string) => asService<{ reservation: Record<string, unknown> }>(
+            `SELECT public.reserve_analysis_preflight_provider_run($1,$2,$3,NULL,0.0026) AS reservation`,
+            [preflight.requestId, claimToken, 'a'.repeat(64)],
+        ).then(result => result.rows[0].reservation);
+
+        beforeEach(async () => {
+            await db.exec('BEGIN');
+            await db.query(
+                `INSERT INTO public.analysis_preflights(id, status, expires_at, lease_token, lease_expires_at)
+                 VALUES ($1, 'processing', now() + interval '10 minutes', $2, now() + interval '10 minutes')`,
+                [preflight.requestId, preflight.claimToken],
+            );
+        });
+
+        afterEach(async () => {
+            await db.exec('ROLLBACK');
+        });
+
+        it.each(APIFY_FREE_CREDENTIAL_SLOTS)('keeps allocator-selected %s admissible across preflight redelivery', async slot => {
+            // The migrations seed the accounts. Only this account has spendable credit.
+            await db.query(
+                `UPDATE public.analysis_apify_credit_snapshots
+                 SET health_state = 'healthy', monthly_limit_usd = 10, monthly_usage_usd = 1,
+                     billing_cycle_start_at = now() - interval '1 day', billing_cycle_end_at = now() + interval '1 day',
+                     observed_at = now() WHERE credential_slot = $1`, [slot],
+            );
+            expect(await reserve(preflight.claimToken)).toMatchObject({
+                created: true, run: { credentialSlot: slot, status: 'starting' },
+            });
+
+            const input = { ...preflight, credentialSlot: slot, budgetKey: `preflight:apify:${slot}` };
+            const readBudgetCounts = async () => (await db.query<{ window_count: number }>(
+                `SELECT window_count FROM public.analysis_provider_admission_budgets
+                 WHERE budget_key IN ('preflight:apify:global', $1) ORDER BY budget_key`, [input.budgetKey],
+            )).rows.map(row => row.window_count);
+            const before = await readBudgetCounts();
+            expect(before).toHaveLength(2);
+            await db.exec('SET LOCAL ROLE service_role');
+            const lease = await acquire(input);
+            expect(lease).toMatchObject({ outcome: 'acquired', credentialSlot: slot });
+            expect(await acquireWithLeaseToken(input, randomUUID())).toMatchObject({
+                outcome: 'already_acquired', leaseToken: lease.leaseToken, fence: lease.fence,
+            });
+
+            // An accepted Actor start survives redelivery after the preflight claim changes,
+            // even when there is no longer enough credit to allocate a second start.
+            await db.exec('RESET ROLE');
+            await db.query(
+                `UPDATE public.analysis_apify_credit_snapshots SET monthly_usage_usd = monthly_limit_usd
+                 WHERE credential_slot = $1`, [slot],
+            );
+            await db.query(
+                `UPDATE public.analysis_preflight_provider_runs
+                 SET status = 'running', run_id = 'SyntheticActorRun', run_started_at = now()
+                 WHERE preflight_id = $1 AND operation_key = $2`, [input.requestId, input.operationKey],
+            );
+            const nextClaim = randomUUID();
+            await db.query('UPDATE public.analysis_preflights SET lease_token = $2 WHERE id = $1', [input.requestId, nextClaim]);
+            expect(await reserve(nextClaim)).toMatchObject({
+                created: false, run: { credentialSlot: slot, status: 'running', runId: 'SyntheticActorRun' },
+            });
+            await db.exec('SET LOCAL ROLE service_role');
+            expect(await acquireWithLeaseToken({ ...input, claimToken: nextClaim, jobClaimToken: nextClaim }, randomUUID()))
+                .toMatchObject({ outcome: 'adopted', admissionId: lease.admissionId, credentialSlot: slot, fence: 2 });
+            await db.exec('RESET ROLE');
+            expect(await readBudgetCounts()).toEqual(before.map(count => count + 1));
+        });
+
+        it('rejects the paid secondary credential at the preflight RPC boundary', async () => {
+            await db.exec('SET LOCAL ROLE service_role');
+            await expect(acquire({
+                ...preflight, credentialSlot: 'secondary', budgetKey: 'preflight:apify:secondary',
+            })).rejects.toThrow('ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN');
+        });
     });
 
     it('resolves the capacity mark RPC by its exact schema-cache name', async () => {

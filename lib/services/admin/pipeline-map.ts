@@ -24,6 +24,7 @@ import {
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
     type AnalysisV2StageId,
 } from '@/lib/services/analysis/v2-worker';
+import { APIFY_FREE_CREDENTIAL_SLOTS } from '@/lib/services/instagram/providers/types';
 import { RESULT_IMAGE_RETENTION_MS } from '@/lib/services/media/result-image-capture';
 
 /**
@@ -110,11 +111,14 @@ const BEFORE_PAYMENT: Record<string, NodeSpec> = {
     preflight: {
         col: 1, row: 0, kind: 'collect', title: 'Preflight 사전 점검', subtitle: '대상 프로필 · 필요 플랜',
         does: [
-            '대상 프로필을 수집합니다. 자체 크롤러가 먼저, 실패하면 Apify로 넘깁니다.',
+            '일반 익명 사전 점검은 유효한 프로필 캐시를 재사용합니다. 새로 수집할 때는 잔액과 예약액을 확인해 Apify 무료 계정을 선택합니다.',
             '비공개·없는 계정·형식 오류를 판정하고 팔로워·팔로잉 수로 필요한 플랜을 계산합니다.',
         ],
-        services: '자체 크롤러 → Apify (대체)',
-        numbers: [{ label: 'API', value: 'POST /api/analysis/preflight' }],
+        services: 'Apify 무료 계정 풀',
+        numbers: [
+            { label: 'API', value: 'POST /api/analysis/preflight' },
+            { label: '수집 계정', value: `${n(APIFY_FREE_CREDENTIAL_SLOTS.length)}개` },
+        ],
         failure: '실패 사유를 preflight 실패 원장에 남기고, 콘솔 Preflight 메뉴에 실패로 표시합니다.',
         code: ['app/api/analysis/preflight/route.ts', 'lib/services/analysis/preflight.ts', 'lib/services/analysis/preflight-failure-ledger.ts'],
     },
