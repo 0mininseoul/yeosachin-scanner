@@ -452,8 +452,8 @@ h2 { font-size: clamp(33px, 4vw, 60px); letter-spacing: -0.052em; line-height: 1
 .report-profile::after { content: ''; position: absolute; inset: 50% 0 0; background: linear-gradient(180deg, transparent, #12060aeb 88%); }
 .report-chip { position: absolute; z-index: 1; top: 9px; left: 9px; padding: 4px 9px; border-radius: 999px; background: var(--cherry); color: white; font-size: 11px; font-weight: 800; }
 .report-name { position: absolute; z-index: 1; inset: auto 11px 10px; }
-.sample .report-name h3 { font-size: clamp(10.5px, 10.6cqi, 17px); letter-spacing: -0.03em; white-space: nowrap; }
-.report-name small { display: block; margin-top: 1px; color: #f1dcd6; font-size: clamp(9px, 8.4cqi, 11px); white-space: nowrap; }
+.sample .report-name h3 { font-size: 11px; font-size: clamp(10.5px, 10.6cqi, 17px); letter-spacing: -0.03em; white-space: nowrap; }
+.report-name small { display: block; margin-top: 1px; color: #f1dcd6; font-size: 9px; font-size: clamp(9px, 8.4cqi, 11px); white-space: nowrap; }
 .report-panel { border: 1px solid #ffffff1f; border-radius: 15px; background: linear-gradient(160deg, #ffffff14, #ffffff08); }
 .report-panel h4, .report-feed h4 { margin: 0; font-size: 13px; }
 .report-panel h4 { color: var(--night-accent); }

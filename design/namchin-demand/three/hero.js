@@ -435,10 +435,16 @@ function drawSummary(ctx, w, h, { typed = 0, frame = 1, unit = 100 } = {}) {
   const title = tall ? unit * 0.24 : unit * 0.16;
   label(ctx, 'AI 요약', pad, pad + title, title);
 
-  const size = tall ? Math.min(unit * 0.31, w * 0.088) : unit * 0.185;
+  let size = tall ? Math.min(unit * 0.31, w * 0.088) : unit * 0.185;
+  let lines = [];
+  // Narrow stages wrap to more lines, so shrink until the last one stays inside the panel.
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    ctx.font = `400 ${size}px ${FONT}`;
+    lines = wrapText(ctx, SUMMARY, w - pad * 2);
+    if (tall || pad + title * 1.25 + size * 1.5 * lines.length <= h - pad * 0.5) break;
+    size *= 0.94;
+  }
   const leading = size * 1.5;
-  ctx.font = `400 ${size}px ${FONT}`;
-  const lines = wrapText(ctx, SUMMARY, w - pad * 2);
   let left = Math.round(SUMMARY.length * clamp(typed));
   let y = pad + title * 1.25 + leading;
   let caret = null;
