@@ -801,7 +801,8 @@ form[aria-busy='true'] .submit { opacity: 0.75; }
 .faq summary::-webkit-details-marker { display: none; }
 .faq summary::after { content: '+'; flex: none; font: 400 26px/1 sans-serif; color: var(--cherry); transition: transform 220ms var(--ease-out); }
 .faq details[open] summary::after { transform: rotate(45deg); }
-.faq details p { max-width: 900px; color: var(--muted); font-size: 15px; line-height: 1.7; padding-bottom: 20px; word-break: keep-all; }
+.faq details p { max-width: 900px; text-wrap: pretty; color: var(--muted); font-size: 15px; line-height: 1.7; padding-bottom: 20px; word-break: keep-all; }
+.faq .inline-link { display: table; margin-top: 6px; }
 .faq details[open] p { animation: rise 320ms var(--ease-out) both; }
 .inline-link { color: var(--cherry); font-weight: 800; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
 
