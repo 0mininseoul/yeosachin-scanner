@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
@@ -1755,7 +1756,10 @@ describe('V2 AI and scoring executors', () => {
         });
     });
 
-    it('fails closed without checkpointing while an exact resolver attempt awaits recovery', async () => {
+    it.each([
+        { status: { status: 'recovery_pending' }, code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' },
+        { status: { status: 'budget_reservation_pending', error: new DevLiveVertexBudgetReservationPendingError() }, code: 'DEV_LIVE_VERTEX_BUDGET_RESERVATION_PENDING' },
+    ] as const)('leaves profile outcomes uncommitted while the resolver awaits $code', async ({ status, code }) => {
         const memoryState = memory();
         const account = profile('resolver.recovery.pending');
         const deps = dependencies(memoryState, {
@@ -1779,7 +1783,7 @@ describe('V2 AI and scoring executors', () => {
         deps.ai.startGenderResolution = vi.fn(() => ({
             operationKey: `gender-resolution:${digest('recovery-pending-resolver')}`,
             completion: Promise.resolve(),
-            peek: () => ({ status: 'recovery_pending' as const }),
+            peek: () => status,
             cutoff: vi.fn().mockResolvedValue(undefined),
         }));
         const base = state();
@@ -1807,7 +1811,7 @@ describe('V2 AI and scoring executors', () => {
                     }],
                 }),
             }),
-        )).rejects.toThrow('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING');
+        )).rejects.toThrow(code);
         expect(memoryState.outcomes).toEqual([]);
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
@@ -5069,6 +5073,7 @@ describe('V2 retained result image finalization', () => {
     });
 
     it.each([
+        { state: { status: 'budget_reservation_pending', error: new DevLiveVertexBudgetReservationPendingError() }, code: 'DEV_LIVE_VERTEX_BUDGET_RESERVATION_PENDING' },
         { state: { status: 'recovery_pending' }, code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' },
         { state: { status: 'terminal_unavailable', budgetError: 'DEV_LIVE_BUDGET_EXCEEDED' }, code: 'DEV_LIVE_BUDGET_EXCEEDED' },
         { state: { status: 'terminal_unavailable', budgetError: 'DEV_LIVE_BUDGET_UNAVAILABLE' }, code: 'DEV_LIVE_BUDGET_UNAVAILABLE' },

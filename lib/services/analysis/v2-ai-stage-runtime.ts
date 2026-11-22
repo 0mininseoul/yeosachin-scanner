@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { z } from 'zod';
 import {
     aiStagePolicySupports,
@@ -152,6 +153,7 @@ export type AnalysisV2GenderResolutionState =
     }
     | { status: 'cutoff' }
     | { status: 'recovery_pending' }
+    | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError }
     | { status: 'capacity_skipped' }
     | {
         status: 'terminal_unavailable';
@@ -716,6 +718,10 @@ export function createDurableAnalysisV2AiStageRuntime(
                     };
                 } catch (error) {
                     if (state.status !== 'pending') return;
+                    if (error instanceof DevLiveVertexBudgetReservationPendingError) {
+                        state = { status: 'budget_reservation_pending', error };
+                        return;
+                    }
                     if (error instanceof Error && (
                         error.message === 'DEV_LIVE_BUDGET_EXCEEDED'
                         || error.message === 'DEV_LIVE_BUDGET_UNAVAILABLE'

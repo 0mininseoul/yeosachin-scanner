@@ -1835,6 +1835,7 @@ async function runPrimaryRevenueResolverPass(input: {
         });
         await resolver.completion;
         const state = resolver.peek();
+        if (state.status === 'budget_reservation_pending') throw state.error;
         if (state.status === 'terminal_unavailable' && state.budgetError) {
             throw new Error(state.budgetError);
         }
@@ -2798,6 +2799,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (resolverStates.some(state => state?.status === 'recovery_pending')) {
                 throw new AnalysisV2AiResultRecoveryPendingError();
             }
+            const budgetWait = resolverStates.find(state => state?.status === 'budget_reservation_pending');
+            if (budgetWait?.status === 'budget_reservation_pending') throw budgetWait.error;
             const outcomes = await runBounded(
                 preparedOutcomes,
                 profileConcurrency,

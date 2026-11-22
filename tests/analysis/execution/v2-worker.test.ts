@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
@@ -1780,7 +1781,10 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
     });
 
-    it('reports no pending recovery after a delayed continuation is enqueued', async () => {
+    it.each([
+        { error: new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 37), delay: 37 },
+        { error: new DevLiveVertexBudgetReservationPendingError(), delay: 5 },
+    ])('enqueues a delayed continuation for $error.name', async ({ error, delay }) => {
         const claimed = { ...bootstrapClaim, attemptCount: 3 };
         const jobStore = store(claimed);
         const dispatchReservedContinuation = vi.fn().mockResolvedValue('enqueued');
@@ -1788,10 +1792,7 @@ describe('analysis V2 durable DAG worker', () => {
         await expect(processAnalysisV2TaskDelivery(delivery, {
             store: jobStore,
             handler: async () => {
-                throw new AnalysisV2SchedulerContinuationError(
-                    'ANALYSIS_V2_AI_CAPACITY_PENDING',
-                    37,
-                );
+                throw error;
             },
             dispatchReservedContinuation,
         })).resolves.toEqual({
@@ -1801,12 +1802,12 @@ describe('analysis V2 durable DAG worker', () => {
         });
         expect(dispatchReservedContinuation).toHaveBeenCalledWith(
             expect.any(Object),
-            37,
+            delay,
         );
         expect(jobStore.continueScheduler).toHaveBeenCalledWith(
             claimed,
             'ANALYSIS_V2_AI_CAPACITY_PENDING',
-            37,
+            delay,
         );
     });
 

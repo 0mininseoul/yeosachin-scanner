@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { vertexDispatchFetch } from '@/lib/services/ai/vertex-dispatch-window';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
     reserveDevAttempt: vi.fn(),
     rpc: vi.fn(),
     settleDevAttempt: vi.fn(),
+    releaseUnusedDevAttempt: vi.fn(),
 }));
 
 vi.mock('@google/genai/node', async (importOriginal) => ({
@@ -52,6 +54,7 @@ vi.mock('@/lib/services/dev-ui/live-budget', () => ({
     requireDevLiveProviderApproval: mocks.requireDevApproval,
     reserveDevLiveVertexAttempt: mocks.reserveDevAttempt,
     settleDevLiveVertexAttempt: mocks.settleDevAttempt,
+    releaseUnusedDevLiveVertexAttempt: mocks.releaseUnusedDevAttempt,
 }));
 
 import {
@@ -123,6 +126,7 @@ describe('analyzeWithGemini generation retry policy', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.settleDevAttempt.mockReset().mockResolvedValue(undefined);
+        mocks.releaseUnusedDevAttempt.mockReset().mockImplementation(reservation => mocks.settleDevAttempt(reservation, 0));
         mocks.tokenUsageInsert.mockResolvedValue({ error: null });
         vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
         vi.stubEnv('VERTEX_AI_COST_OPTIMIZED', 'false');
@@ -148,7 +152,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, expect.objectContaining({
             model: 'gemini-3.1-flash-lite',
             config: expect.objectContaining({ maxOutputTokens: 128 }),
-        }), 'global');
+        }), 'global', undefined);
         expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
         expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
         expect(mocks.generateContent).not.toHaveBeenCalled();
@@ -206,6 +210,104 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
         expect(mocks.generateContent).toHaveBeenCalledTimes(successful ? 1 : 0);
         expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
+    });
+
+    async function useStagedDevBudget(workload: 'paid' | 'preflight' = 'paid') {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', workload);
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', `https://${devRegistry.deployments[0].supabaseProjectRef}.supabase.co`);
+        mocks.requireDevApproval.mockReturnValue({
+            id: 'synthetic', approvedAt: '2026-01-01T00:00:00Z', expiresAt: null,
+            apifyMaxCents: 600, aiMaxCents: 1800,
+        });
+        return vi.importActual<typeof import('@/lib/services/dev-ui/live-budget')>('@/lib/services/dev-ui/live-budget');
+    }
+
+    it.each(['staged', 'preflight'] as const)('resumes a rolled-back %s Dev reservation under the same ID on redelivery', async caller => {
+        const budget = await useStagedDevBudget(caller === 'preflight' ? 'preflight' : 'paid');
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt)
+            .mockImplementationOnce(budget.reserveDevLiveVertexAttempt)
+            .mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.settleDevAttempt.mockImplementationOnce(budget.settleDevLiveVertexAttempt);
+        mocks.rpc.mockReset().mockResolvedValueOnce(rollback);
+        let accepted = false;
+        mocks.rpc.mockImplementation(async (name: string, args: Record<string, unknown>) => {
+            if (name === 'dev_live_budget_settle_vertex_v1') return committed;
+            if (accepted) return { data: null, error: { code: 'P0001', message: 'DEV_LIVE_BUDGET_UNAVAILABLE' } };
+            accepted = true;
+            return { data: args.p_reservation_id, error: null };
+        });
+        const audit = stageAuditOptions();
+        const invoke = () => analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+            ...(caller === 'staged'
+                ? { ...audit, stage: 'genderTriage' as const, budgetOperationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-stage') }
+                : { requestId: stageRequestId, devLiveBudgetOperationKey: 'preflight:blite' as const, analysisType: 'precheckout_blite', maxAttempts: 1 }),
+        });
+        await expect(invoke()).rejects.toBeInstanceOf(DevLiveVertexBudgetReservationPendingError);
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(mocks.releaseUnusedDevAttempt).not.toHaveBeenCalled();
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        await expect(invoke()).resolves.toEqual({ value: 'ok' });
+        await expect(invoke()).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        const [first, second, settlement, duplicate] = mocks.rpc.mock.calls;
+        expect(first).toEqual(['dev_live_budget_reserve_vertex_attempt_v1', expect.objectContaining({ p_reservation_id: expect.stringMatching(/^[0-9a-f-]{36}$/) })]);
+        expect(second).toEqual(first);
+        expect(duplicate).toEqual(first);
+        expect(settlement).toEqual(['dev_live_budget_settle_vertex_v1', expect.objectContaining({ p_reservation_id: first[1].p_reservation_id })]);
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(mocks.settleDevAttempt).toHaveBeenCalledOnce();
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(caller === 'staged' ? 1 : 0);
+    });
+
+    it.each([
+        ['unconfirmed RPC response', new Error('canceling statement due to statement timeout')],
+        ['operator cancellation', canceled],
+        ['deadlock', deadlock],
+        ['timeout text from another SQLSTATE', { data: null, error: { code: 'P0001', message: rollback.error.message } }],
+        ['unrelated RPC returning the pending text', { data: null, error: { code: 'P0001', message: 'DEV_LIVE_VERTEX_BUDGET_RESERVATION_PENDING' } }],
+    ] as const)('never authorizes redelivery for %s', async (_label, response) => {
+        const budget = await useStagedDevBudget();
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.rpc.mockReset();
+        if (response instanceof Error) mocks.rpc.mockRejectedValueOnce(response);
+        else mocks.rpc.mockResolvedValueOnce(response);
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...stageAuditOptions(), stage: 'genderTriage', schema: responseSchema,
+            budgetOperationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-stage'),
+        })).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        expect(mocks.rpc).toHaveBeenCalledTimes(1);
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it.each(['unused', '429', 'post-send timeout'] as const)('preserves the distinct Dev reservation disposition for %s', async disposition => {
+        const budget = await useStagedDevBudget();
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.releaseUnusedDevAttempt.mockImplementationOnce(budget.releaseUnusedDevLiveVertexAttempt);
+        mocks.settleDevAttempt.mockImplementationOnce(budget.settleDevLiveVertexAttempt);
+        mocks.rpc.mockReset().mockImplementationOnce(async (_name, args) => ({ data: args.p_reservation_id, error: null }))
+            .mockResolvedValueOnce(disposition === 'post-send timeout' ? rollback : committed);
+        const audit = stageAuditOptions();
+        if (disposition === 'unused') audit.onBeforeAttempt.mockRejectedValueOnce(new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'));
+        else if (disposition === '429') mocks.generateContent.mockRejectedValueOnce(new ApiError({ message: 'quota', status: 429 }));
+        else mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+        const expectedError = {
+            unused: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            '429': 'AI_RATE_LIMIT_ERROR',
+            'post-send timeout': 'DEV_LIVE_BUDGET_UNAVAILABLE',
+        }[disposition];
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema, maxAttempts: 1,
+            budgetOperationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-stage'),
+        })).rejects.toThrow(expectedError);
+        const [reserve, close] = mocks.rpc.mock.calls;
+        expect(mocks.rpc).toHaveBeenCalledTimes(2);
+        expect(close[1].p_reservation_id).toBe(reserve[1].p_reservation_id);
+        expect(close[0]).toBe(disposition === 'unused' ? 'dev_live_budget_release_unused_vertex_v1' : 'dev_live_budget_settle_vertex_v1');
+        expect(mocks.generateContent).toHaveBeenCalledTimes(disposition === 'unused' ? 0 : 1);
     });
 
     it.each(['audit', 'SDK authentication'])('rejects a worker suspended during %s and returns its unused reservation once', async suspension => {
@@ -381,7 +483,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         })).resolves.toEqual({ value: 'ok' });
         expect(budgetGuard.reserve).not.toHaveBeenCalled();
         expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(
-            grant, mocks.generateContent.mock.calls[0][0], 'global',
+            grant, mocks.generateContent.mock.calls[0][0], 'global', undefined,
         );
         expect(mocks.settleDevAttempt).toHaveBeenCalledOnce();
     });
@@ -422,7 +524,7 @@ describe('analyzeWithGemini generation retry policy', () => {
                 maxOutputTokens: 1_024,
             },
         });
-        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, request, 'global');
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledExactlyOnceWith(grant, request, 'global', undefined);
         expect(mocks.reserveDevAttempt.mock.calls[0][1]).toBe(request);
         expect(mocks.reserveDevAttempt.mock.invocationCallOrder[0])
             .toBeLessThan(mocks.generateContent.mock.invocationCallOrder[0]);
@@ -1664,6 +1766,7 @@ describe('analyzeWithGemini process concurrency', () => {
         vi.clearAllMocks();
         mocks.reserveDevAttempt.mockReset();
         mocks.settleDevAttempt.mockReset().mockResolvedValue(undefined);
+        mocks.releaseUnusedDevAttempt.mockReset().mockImplementation(reservation => mocks.settleDevAttempt(reservation, 0));
         mocks.tokenUsageInsert.mockResolvedValue({ error: null });
         vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
         vi.stubEnv('VERTEX_AI_COST_OPTIMIZED', 'false');

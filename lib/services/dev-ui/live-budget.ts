@@ -2,12 +2,13 @@ import 'server-only';
 
 import type { GenerateContentParameters } from '@google/genai';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import { devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
+import { DevLiveVertexBudgetReservationPendingError } from './live-budget-signals';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
 import { estimateDevLiveVertexReservation } from './live-vertex-reservation';
 
@@ -35,7 +36,10 @@ export function withDevLiveProviderApproval<T>(approval: DevLiveApproval | null,
 export type DevLiveCostReservation = Readonly<{
     grantId: string;
     reservationId: string;
+    durableAttempt?: true;
 }>;
+
+type VertexAttemptIdentity = Readonly<{ requestId: string; operationKey: string; attempt: number }>;
 
 function micros(usd: number): number {
     const amount = Math.ceil(usd * MICRODOLLARS_PER_DOLLAR);
@@ -68,15 +72,21 @@ function grantArguments(approval: DevLiveApproval) {
 }
 
 async function budgetRpc(name: string, args: Record<string, string | number>): Promise<unknown> {
+    let result;
     try {
         const execute = () => supabaseAdmin.rpc(name, args);
         // Only replay the pre-dispatch reservation, using the ID already in args.
-        const { data, error } = name === 'dev_live_budget_reserve_v1'
+        result = name === 'dev_live_budget_reserve_v1'
             ? await retryPostgresAbortedRpc(execute, { retryDeadlock: false })
             : await execute();
-        if (!error) return data;
     } catch {
-        // The caller only needs the stable budget error, never a database response.
+        throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
+    }
+    if (!result.error) return result.data;
+    // Only a structured database response proves this statement did not commit.
+    if (name === 'dev_live_budget_reserve_vertex_attempt_v1' && isPostgresStatementTimeout(result.error)) {
+        console.warn('Dev Vertex budget reservation rolled back before dispatch', { sqlstate: '57014' });
+        throw new DevLiveVertexBudgetReservationPendingError();
     }
     throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
 }
@@ -121,14 +131,46 @@ export async function reserveDevLiveApifyStart(approval: DevLiveApproval, actorI
     await reserve(approval, 'apify', capUsd);
 }
 
-export function reserveDevLiveVertexAttempt(
+export async function reserveDevLiveVertexAttempt(
     approval: DevLiveApproval,
     request: GenerateContentParameters,
     location: string,
+    identity?: VertexAttemptIdentity,
 ): Promise<DevLiveCostReservation> {
     const cap = estimateDevLiveVertexReservation(request, location);
     if (!cap) throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
-    return reserve(approval, 'vertex', cap.totalCostUsd);
+    if (!identity) return reserve(approval, 'vertex', cap.totalCostUsd);
+
+    // The durable attempt primary key excludes delivery and claim tokens. The DB
+    // advances this seed only after a prior hold was explicitly released before send.
+    const seed = createHash('sha256').update(JSON.stringify([
+        'dev-live-vertex-attempt:v1', approval.id, identity.requestId, identity.operationKey, identity.attempt,
+    ])).digest().subarray(0, 16);
+    seed[6] = (seed[6] & 0x0f) | 0x80;
+    seed[8] = (seed[8] & 0x3f) | 0x80;
+    const hex = seed.toString('hex');
+    const id = [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+    const reserved = await budgetRpc('dev_live_budget_reserve_vertex_attempt_v1', {
+        ...grantArguments(approval),
+        p_reservation_id: id,
+        p_amount_micros: micros(cap.totalCostUsd),
+    });
+    if (reserved === null) throw new Error(DEV_LIVE_BUDGET_EXCEEDED);
+    if (typeof reserved !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(reserved)) {
+        throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
+    }
+    return { grantId: approval.id, reservationId: reserved, durableAttempt: true };
+}
+
+/** A durable attempt hold can be renewed only when this worker proves the SDK did not send it. */
+export async function releaseUnusedDevLiveVertexAttempt(reservation: DevLiveCostReservation): Promise<void> {
+    if (!reservation.durableAttempt) return settleDevLiveVertexAttempt(reservation, 0);
+    assertRegisteredDevDatabase();
+    const released = await budgetRpc('dev_live_budget_release_unused_vertex_v1', {
+        p_grant_id: reservation.grantId,
+        p_reservation_id: reservation.reservationId,
+    });
+    if (released !== true) throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
 }
 
 /** Settle complete provider usage or a confirmed zero charge. Unknown costs retain the whole reservation. */

@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import {
     ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
@@ -1172,11 +1173,15 @@ export async function processAnalysisV2TaskDelivery(
     try {
         successors = await handler(claim);
     } catch (error) {
-        if (error instanceof AnalysisV2SchedulerContinuationError) {
+        // Some durable stages run directly without the per-operation scheduler.
+        const continuation = error instanceof DevLiveVertexBudgetReservationPendingError
+            ? new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5)
+            : error;
+        if (continuation instanceof AnalysisV2SchedulerContinuationError) {
             const reservation = await store.continueScheduler(
                 claim,
-                error.reason,
-                error.delaySeconds,
+                continuation.reason,
+                continuation.delaySeconds,
             );
             let pendingRecoveryCount = 0;
             try {
@@ -1186,7 +1191,7 @@ export async function processAnalysisV2TaskDelivery(
                         reserved,
                         { delaySeconds },
                     ))
-                )(reservation, error.delaySeconds);
+                )(reservation, continuation.delaySeconds);
             } catch {
                 // The atomic reservation remains redispatchable. Recovery will replay the same
                 // deterministic generation/task identity without re-opening provider admission.
@@ -1194,7 +1199,7 @@ export async function processAnalysisV2TaskDelivery(
             }
             return Object.freeze({
                 status: 'continuation',
-                errorCode: error.reason,
+                errorCode: continuation.reason,
                 pendingRecoveryCount,
             });
         }
