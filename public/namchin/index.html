@@ -28,6 +28,7 @@
     <script src="/namchin/intro.js"></script>
     <link rel="stylesheet" href="/namchin/landing.css">
     <script type="module" src="/namchin/landing.js"></script>
+    <script defer src="/namchin/analytics.js"></script>
   </head>
   <body id="top">
     <div class="intro" data-intro aria-hidden="true">
@@ -266,7 +267,7 @@
         </div>
 
         <div class="form-card">
-          <form id="interest-form" method="post" action="/api/namchin/reservations" aria-labelledby="form-title">
+          <form id="interest-form" method="post" action="/api/namchin/reservations" aria-labelledby="form-title" data-amp-mask>
             <div class="form-head">
               <h3 id="form-title">사전 예약</h3>
               <span class="form-required">모든 항목 필수</span>

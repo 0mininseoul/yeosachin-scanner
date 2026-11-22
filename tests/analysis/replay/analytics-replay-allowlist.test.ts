@@ -3,6 +3,8 @@ import { isReplayAllowedPath, replayFieldDisposition } from '../../../lib/servic
 
 describe('Replay allowlist', () => {
     it('allows result/share content but rejects arbitrary and credential paths', () => {
+        expect(isReplayAllowedPath('/cherry')).toBe(true);
+        expect(isReplayAllowedPath('/cherry/private')).toBe(false);
         expect(isReplayAllowedPath('/result/123')).toBe(true);
         expect(isReplayAllowedPath('/share/token_123')).toBe(true);
         expect(isReplayAllowedPath('/result/123?token=secret')).toBe(false);

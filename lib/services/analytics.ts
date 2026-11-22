@@ -33,6 +33,13 @@ export const EVENTS = {
     RESULT_FEEDBACK_SUBMITTED: 'result_feedback_submitted',
 } as const;
 
+export const CHERRY_EVENTS = Object.freeze({
+    VIEWED: 'cherry_viewed',
+    CTA_CLICKED: 'cherry_cta_clicked',
+    RESERVATION_SUBMITTED: 'cherry_reservation_submitted',
+    RESERVATION_COMPLETED: 'cherry_reservation_completed',
+} as const);
+
 /**
  * The precheckout surface has its own immutable vocabulary so adding funnel detail does not
  * change the shape of the established dashboard events above.
@@ -68,6 +75,7 @@ export const ARCHIVE_NOTICE_EVENTS = Object.freeze({
 } as const);
 
 export type AnalyticsEvent = (typeof EVENTS)[keyof typeof EVENTS]
+    | (typeof CHERRY_EVENTS)[keyof typeof CHERRY_EVENTS]
     | (typeof PRECHECKOUT_EVENTS)[keyof typeof PRECHECKOUT_EVENTS]
     | (typeof REVENUE_SHARE_EVENTS)[keyof typeof REVENUE_SHARE_EVENTS]
     | (typeof ARCHIVE_NOTICE_EVENTS)[keyof typeof ARCHIVE_NOTICE_EVENTS];
@@ -132,6 +140,7 @@ const SESSION_REPLAY_SAFE_PATHS = new Set([
     '/betatest',
     '/earlybird',
     '/mypage',
+    '/cherry',
 ]);
 const SESSION_REPLAY_DYNAMIC_PATHS = [
     /^\/progress\/[^/]+$/,
@@ -162,6 +171,8 @@ const SESSION_REPLAY_UGC_FILTER_RULES: readonly ReplayUgcFilterRule[] = [
     { selector: 'https://*/earlybird*', replacement: '/earlybird' },
     { selector: 'http://*/mypage*', replacement: '/mypage' },
     { selector: 'https://*/mypage*', replacement: '/mypage' },
+    { selector: 'http://*/cherry*', replacement: '/cherry' },
+    { selector: 'https://*/cherry*', replacement: '/cherry' },
     { selector: 'http://*/?*', replacement: '/' },
     { selector: 'https://*/?*', replacement: '/' },
     { selector: 'http://*/', replacement: '/' },
@@ -179,6 +190,7 @@ const SESSION_REPLAY_TRACK_TYPES = new Set(['replay', 'interaction']);
 
 const APPROVED_EVENTS = new Set<AnalyticsEvent>([
     ...Object.values(EVENTS),
+    ...Object.values(CHERRY_EVENTS),
     ...Object.values(PRECHECKOUT_EVENTS),
     ...Object.values(REVENUE_SHARE_EVENTS),
     ...Object.values(ARCHIVE_NOTICE_EVENTS),
@@ -291,6 +303,10 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
 };
 
 const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
+    [CHERRY_EVENTS.VIEWED]: [],
+    [CHERRY_EVENTS.CTA_CLICKED]: [],
+    [CHERRY_EVENTS.RESERVATION_SUBMITTED]: [],
+    [CHERRY_EVENTS.RESERVATION_COMPLETED]: [],
     [EVENTS.LANDING_VIEWED]: ['source', 'medium', 'campaign', 'content', 'term'],
     [EVENTS.TARGET_SUBMITTED]: ['stage', 'source'],
     [EVENTS.AUTH_STARTED]: ['provider'],
