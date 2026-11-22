@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import 'server-only';
 import { z } from 'zod';
 import type { InstagramPost, InstagramProfile } from '@/lib/types/instagram';
@@ -618,6 +619,7 @@ export async function inferPrecheckoutBlite(
                 {
                     schema: precheckoutBliteModelResponseSchema,
                     analysisType: 'precheckout_blite',
+                    devLiveBudgetOperationKey: 'preflight:blite',
                     requestId: options.requestId,
                     abortSignal: effectiveDeadline.signal,
                     thinkingLevel: 'MINIMAL',
@@ -663,6 +665,7 @@ export async function inferPrecheckoutBlite(
         // the worker terminal-fail a request while the provider was never invoked.
         if (
             error instanceof AnalysisProviderAdmissionCapacityPendingError
+            || error instanceof DevLiveVertexBudgetReservationPendingError
             || isAnalysisV2AiAdmissionSignal(error)
         ) {
             throw error;

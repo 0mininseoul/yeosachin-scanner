@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
 import {
     AI_STAGE_POLICY_LATEST_VERSION,
@@ -416,6 +417,20 @@ describe('durable V2 AI stage runtime', () => {
         expect(handle.peek()).toEqual({ status: scenario.status });
         await expect(handle.cutoff()).resolves.toBeUndefined();
         expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
+    });
+
+    it('retains the typed budget rollback when a resolver has yet to dispatch', async () => {
+        const error = new DevLiveVertexBudgetReservationPendingError();
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit: cachedAuditFactory({}).createAudit,
+            runGenderResolution: vi.fn().mockRejectedValue(error),
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+        });
+        await handle.completion;
+        await handle.cutoff();
+        expect(handle.peek()).toEqual({ status: 'budget_reservation_pending', error });
     });
 
     it.each(['DEV_LIVE_BUDGET_EXCEEDED', 'DEV_LIVE_BUDGET_UNAVAILABLE'])(

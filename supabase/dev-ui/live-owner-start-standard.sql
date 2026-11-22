@@ -319,15 +319,24 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION public.dev_live_budget_reserve_v1(
+-- Existing reservations retain their balance and have no redispatch authority.
+ALTER TABLE dev_live_budget.reservations
+    ADD COLUMN IF NOT EXISTS vertex_attempt_key uuid,
+    ADD COLUMN IF NOT EXISTS vertex_generation integer,
+    ADD COLUMN IF NOT EXISTS unused_before_dispatch boolean NOT NULL DEFAULT false;
+CREATE UNIQUE INDEX IF NOT EXISTS dev_live_vertex_attempt_generation
+    ON dev_live_budget.reservations (grant_id, vertex_attempt_key, vertex_generation DESC)
+    WHERE vertex_attempt_key IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION dev_live_budget.reserve(
     p_grant_id uuid, p_approved_at timestamptz, p_expires_at timestamptz,
     p_apify_limit_micros integer, p_ai_limit_micros integer,
-    p_reservation_id uuid, p_provider text, p_amount_micros integer
+    p_reservation_id uuid, p_provider text, p_amount_micros integer, p_attempt_key uuid, p_generation integer
 ) RETURNS boolean
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+LANGUAGE plpgsql SET search_path = ''
 AS $$
 DECLARE
-    active_grant dev_live_budget.grants%ROWTYPE;
+    grant_expiry timestamptz;
     grant_plan text;
 BEGIN
     IF p_reservation_id IS NULL OR p_provider IS NULL OR p_provider NOT IN ('apify', 'vertex')
@@ -354,26 +363,153 @@ BEGIN
     PERFORM public.dev_live_budget_check_v1(
         p_grant_id, p_approved_at, p_expires_at, p_apify_limit_micros, p_ai_limit_micros
     );
-    SELECT * INTO STRICT active_grant FROM dev_live_budget.grants g WHERE g.grant_id = p_grant_id FOR UPDATE;
-    IF active_grant.blocked OR active_grant.expires_at <= pg_catalog.clock_timestamp() THEN
-        RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
-    END IF;
-    IF (p_provider = 'apify' AND p_amount_micros > active_grant.apify_limit_micros - active_grant.apify_committed_micros)
-        OR (p_provider = 'vertex' AND p_amount_micros > active_grant.ai_limit_micros - active_grant.ai_committed_micros) THEN
+    -- Claim the unique receipt before touching the shared balance. Its FK takes
+    -- KEY SHARE, compatible with the non-key balance update below. A duplicate
+    -- fails here and can never authorize another dispatch.
+    INSERT INTO dev_live_budget.reservations (reservation_id, grant_id, provider, reserved_micros, vertex_attempt_key, vertex_generation)
+    VALUES (p_reservation_id, p_grant_id, p_provider, p_amount_micros, p_attempt_key, p_generation);
+
+    -- PostgreSQL rechecks the predicate against the latest balance when writers
+    -- race. There is no exclusive approval lock while waiting on a receipt.
+    UPDATE dev_live_budget.grants AS g
+       SET apify_committed_micros = g.apify_committed_micros
+               + CASE WHEN p_provider = 'apify' THEN p_amount_micros ELSE 0 END,
+           ai_committed_micros = g.ai_committed_micros
+               + CASE WHEN p_provider = 'vertex' THEN p_amount_micros ELSE 0 END
+     WHERE g.grant_id = p_grant_id AND NOT g.blocked AND g.expires_at > pg_catalog.clock_timestamp()
+       AND CASE p_provider
+           WHEN 'apify' THEN p_amount_micros <= g.apify_limit_micros - g.apify_committed_micros
+           ELSE p_amount_micros <= g.ai_limit_micros - g.ai_committed_micros
+       END
+     RETURNING g.expires_at INTO grant_expiry;
+    IF NOT FOUND THEN
+        -- Distinguish exhausted capacity from a revoked/expired grant. Only this
+        -- transaction's fresh insert is removed on an ordinary cap denial.
+        PERFORM public.dev_live_budget_check_v1(
+            p_grant_id, p_approved_at, p_expires_at, p_apify_limit_micros, p_ai_limit_micros
+        );
+        IF p_expires_at <= pg_catalog.clock_timestamp() THEN
+            RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+        END IF;
+        DELETE FROM dev_live_budget.reservations WHERE reservation_id = p_reservation_id;
         RETURN false;
     END IF;
-    INSERT INTO dev_live_budget.reservations (reservation_id, grant_id, provider, reserved_micros)
-    VALUES (p_reservation_id, p_grant_id, p_provider, p_amount_micros);
-    IF p_provider = 'apify' THEN
-        UPDATE dev_live_budget.grants SET apify_committed_micros = apify_committed_micros + p_amount_micros
-        WHERE grant_id = p_grant_id;
-    ELSE
-        UPDATE dev_live_budget.grants SET ai_committed_micros = ai_committed_micros + p_amount_micros
+    -- A row lock held without modifying the row can outlast a timed approval.
+    -- Rejecting after acquisition rolls back both the receipt and balance.
+    IF grant_expiry <= pg_catalog.clock_timestamp() THEN
+        RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    END IF;
+    RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION dev_live_budget.reserve(uuid,timestamptz,timestamptz,integer,integer,uuid,text,integer,uuid,integer)
+    FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.dev_live_budget_reserve_v1(
+    p_grant_id uuid, p_approved_at timestamptz, p_expires_at timestamptz,
+    p_apify_limit_micros integer, p_ai_limit_micros integer,
+    p_reservation_id uuid, p_provider text, p_amount_micros integer
+) RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
+AS $$
+    SELECT dev_live_budget.reserve(p_grant_id, p_approved_at, p_expires_at, p_apify_limit_micros, p_ai_limit_micros,
+        p_reservation_id, p_provider, p_amount_micros, NULL, NULL);
+$$;
+
+-- Only a committed refund explicitly marked before SDK dispatch may open a new
+-- generation. An ordinary zero (including a provider 429) does not prove this.
+CREATE OR REPLACE FUNCTION public.dev_live_budget_reserve_vertex_attempt_v1(
+    p_grant_id uuid, p_approved_at timestamptz, p_expires_at timestamptz,
+    p_apify_limit_micros integer, p_ai_limit_micros integer,
+    p_reservation_id uuid, p_amount_micros integer
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+DECLARE
+    previous dev_live_budget.reservations%ROWTYPE;
+    next_id uuid := p_reservation_id;
+    next_generation integer := 0;
+BEGIN
+    SELECT * INTO previous FROM dev_live_budget.reservations AS r
+    WHERE r.grant_id = p_grant_id AND r.vertex_attempt_key = p_reservation_id
+    ORDER BY r.vertex_generation DESC LIMIT 1;
+    IF FOUND THEN
+        IF previous.actual_micros IS DISTINCT FROM 0 OR NOT previous.unused_before_dispatch THEN
+            RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+        END IF;
+        next_generation := previous.vertex_generation + 1;
+        next_id := pg_catalog.md5('dev-live-vertex:' || p_reservation_id::text || ':' || next_generation::text)::uuid;
+    END IF;
+
+    -- The unique receipt claim elects a single dispatcher even when two workers
+    -- observe the same generation. A 57014 rolls back the new receipt as well.
+    IF NOT dev_live_budget.reserve(
+        p_grant_id, p_approved_at, p_expires_at, p_apify_limit_micros, p_ai_limit_micros,
+        next_id, 'vertex', p_amount_micros, p_reservation_id, next_generation
+    ) THEN RETURN NULL; END IF;
+    RETURN next_id;
+END;
+$$;
+
+-- Only complete Vertex usage may release a portion of a reservation. Apify
+-- reservations keep the whole possible charge including ambiguous starts.
+CREATE OR REPLACE FUNCTION dev_live_budget.settle_vertex(
+    p_grant_id uuid, p_reservation_id uuid, p_actual_micros integer, p_unused_before_dispatch boolean
+) RETURNS boolean
+LANGUAGE plpgsql SET search_path = ''
+AS $$
+DECLARE
+    charge dev_live_budget.reservations%ROWTYPE;
+BEGIN
+    IF p_grant_id IS NULL OR p_reservation_id IS NULL OR p_actual_micros IS NULL OR p_actual_micros < 0 THEN
+        RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    END IF;
+    -- Serialize on the individual receipt before touching the shared balance.
+    SELECT * INTO STRICT charge FROM dev_live_budget.reservations r
+    WHERE r.reservation_id = p_reservation_id AND r.grant_id = p_grant_id AND r.provider = 'vertex' FOR NO KEY UPDATE;
+    IF p_unused_before_dispatch AND (p_actual_micros <> 0 OR charge.vertex_attempt_key IS NULL) THEN
+        RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    END IF;
+    IF p_actual_micros > charge.reserved_micros
+        OR (charge.actual_micros IS NOT NULL AND charge.actual_micros <> p_actual_micros) THEN
+        UPDATE dev_live_budget.grants SET blocked = true WHERE grant_id = p_grant_id;
+        RETURN false;
+    END IF;
+    IF charge.actual_micros IS NOT NULL THEN
+        RETURN NOT p_unused_before_dispatch OR charge.unused_before_dispatch;
+    END IF;
+    UPDATE dev_live_budget.reservations SET actual_micros = p_actual_micros, unused_before_dispatch = p_unused_before_dispatch
+    WHERE reservation_id = p_reservation_id;
+    IF p_actual_micros < charge.reserved_micros THEN
+        UPDATE dev_live_budget.grants SET ai_committed_micros = ai_committed_micros - charge.reserved_micros + p_actual_micros
         WHERE grant_id = p_grant_id;
     END IF;
     RETURN true;
 END;
 $$;
+REVOKE ALL ON FUNCTION dev_live_budget.settle_vertex(uuid,uuid,integer,boolean) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.dev_live_budget_settle_vertex_v1(
+    p_grant_id uuid, p_reservation_id uuid, p_actual_micros integer
+) RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
+AS $$
+    SELECT dev_live_budget.settle_vertex(p_grant_id, p_reservation_id, p_actual_micros, false);
+$$;
+
+CREATE OR REPLACE FUNCTION public.dev_live_budget_release_unused_vertex_v1(
+    p_grant_id uuid, p_reservation_id uuid
+) RETURNS boolean
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ''
+AS $$
+    SELECT dev_live_budget.settle_vertex(p_grant_id, p_reservation_id, 0, true);
+$$;
+
+REVOKE ALL ON FUNCTION public.dev_live_budget_reserve_vertex_attempt_v1(uuid,timestamptz,timestamptz,integer,integer,uuid,integer),
+    public.dev_live_budget_release_unused_vertex_v1(uuid,uuid) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.dev_live_budget_reserve_vertex_attempt_v1(uuid,timestamptz,timestamptz,integer,integer,uuid,integer),
+    public.dev_live_budget_release_unused_vertex_v1(uuid,uuid) TO service_role;
 
 REVOKE ALL ON FUNCTION public.dev_live_owner_start_ready_v2(uuid,text),
     public.dev_live_owner_start_v2(uuid,text,uuid),

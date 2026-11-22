@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
 import { runPrecheckoutBlite } from '../../../lib/services/precheckout/blite-runner';
 import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
@@ -248,6 +249,26 @@ describe('runPrecheckoutBlite', () => {
             'complete',
             'release',
         ]);
+    });
+
+    it('rearms the B-lite cache before releasing a slot after a budget rollback', async () => {
+        const terminal = {
+            claim: vi.fn().mockResolvedValue({ disposition: 'claimed', leaseToken: LEASE, source,
+                submittedAt, deadlineAt: '2026-08-13T00:01:00.000Z', followersCount: 40, followingCount: 30 }),
+            deferCapacity: vi.fn().mockResolvedValue(true),
+            complete: vi.fn(), fail: vi.fn(),
+        };
+        const slots = sharedGeminiLeaseStore();
+        const infer = vi.fn().mockRejectedValue(new DevLiveVertexBudgetReservationPendingError());
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: terminal, geminiLeaseStore: slots as never, infer,
+            now: () => Date.parse(submittedAt) + 1_000,
+        })).resolves.toBe('capacity_pending');
+        expect(terminal.deferCapacity).toHaveBeenCalledOnce();
+        expect(slots.release).toHaveBeenCalledOnce();
+        expect(terminal.deferCapacity.mock.invocationCallOrder[0]).toBeLessThan(slots.release.mock.invocationCallOrder[0]);
+        expect(terminal.complete).not.toHaveBeenCalled();
+        expect(terminal.fail).not.toHaveBeenCalled();
     });
 
     it('keeps the Gemini fence when complete returns false or throws an ambiguous persistence error', async () => {

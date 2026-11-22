@@ -9,6 +9,7 @@ import {
     type Part,
 } from '@google/genai/node';
 import { toJSONSchema, type ZodType } from 'zod';
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import {
     estimateGeminiRequestCost,
@@ -436,6 +437,8 @@ export interface AnalyzeWithGeminiOptions<T> {
     budgetRunId?: string;
     budgetOrderId?: string | null;
     budgetOperationKey?: string;
+    /** The preflight claim and single SDK attempt identify this non-staged Dev operation. */
+    devLiveBudgetOperationKey?: 'preflight:blite';
     budgetRoute?: VertexAiCostRoute;
     /** Reserve a durable, PII-free generation intent before the SDK request starts. */
     onBeforeAttempt?: (telemetry: GeminiAttemptStartTelemetry) => void | Promise<void>;
@@ -941,6 +944,7 @@ export async function analyzeWithGemini<T>(
         budgetRunId,
         budgetOrderId,
         budgetOperationKey,
+        devLiveBudgetOperationKey,
         budgetRoute,
         onBeforeAttempt,
         onAttemptTelemetry,
@@ -1077,6 +1081,11 @@ export async function analyzeWithGemini<T>(
             || Boolean(stage && aiStagePolicySupports(resolvedPolicyVersion, 'vertexAiCostGuardV1'))
             ? defaultVertexAiBudgetGuard()
             : null);
+    if (devLiveBudget && devLiveBudgetOperationKey !== undefined && (
+        devLiveBudgetOperationKey !== 'preflight:blite' || analysisType !== 'precheckout_blite'
+        || !requestId || !REQUEST_UUID_PATTERN.test(requestId) || maxAttempts !== 1 || stage
+    )) throw new Error('DEV_LIVE_VERTEX_ATTEMPT_IDENTITY_INVALID');
+    const durableDevOperationKey = stage && !statelessReplay ? budgetOperationKey : devLiveBudgetOperationKey;
     const resolvedCostRoute = budgetRoute
         ?? (isVertexAiEscalationModel(modelName) ? 'high_value' : 'default');
     if (resolvedPolicyVersion === AI_STAGE_POLICY_V212_VERSION) {
@@ -1219,6 +1228,9 @@ export async function analyzeWithGemini<T>(
                     const devReservation = devLiveBudget && devLiveApproval
                         ? await devLiveBudget.reserveDevLiveVertexAttempt(
                             devLiveApproval, generationRequest, GOOGLE_CLOUD_LOCATION,
+                            durableDevOperationKey && requestId
+                                ? { requestId, operationKey: durableDevOperationKey, attempt: attemptNumber }
+                                : undefined,
                         )
                         : null;
                     try {
@@ -1277,8 +1289,8 @@ export async function analyzeWithGemini<T>(
                         if (window.rejectedBeforeSend) providerDispatchStarted = false;
                         if (!providerDispatchStarted && devLiveBudget && devReservation) {
                             try {
-                                await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0)
-                                    .catch(() => devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0));
+                                await devLiveBudget.releaseUnusedDevLiveVertexAttempt(devReservation)
+                                    .catch(() => devLiveBudget.releaseUnusedDevLiveVertexAttempt(devReservation));
                             } catch {
                                 devUnusedSettlementFailed = true;
                                 console.error('Dev Vertex unused reservation settlement could not be confirmed.');
@@ -1342,6 +1354,7 @@ export async function analyzeWithGemini<T>(
                         )
                         || AI_ADMISSION_SIGNAL_CODES.has(generationError.message)
                         || generationError.message === devLiveBudget?.DEV_LIVE_BUDGET_UNAVAILABLE
+                        || (!providerDispatchStarted && generationError instanceof DevLiveVertexBudgetReservationPendingError)
                         || generationError.message === devLiveBudget?.DEV_LIVE_BUDGET_EXCEEDED
                     )
                 ) {

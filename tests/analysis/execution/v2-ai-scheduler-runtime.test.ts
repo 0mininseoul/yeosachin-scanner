@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
 import {
     ANALYSIS_V2_SCHEDULER_V1_POLICY,
@@ -43,6 +44,28 @@ function task(
 }
 
 describe('analysis V2 scheduler-v1 runtime', () => {
+    it('releases the operation fence only for a proven pre-dispatch budget rollback', async () => {
+        const rollback = new DevLiveVertexBudgetReservationPendingError();
+        const store = { ...operationStore(), defer: vi.fn().mockResolvedValue(5_000) };
+        const execute = (error: Error) => runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [task('feature', 'featureAnalysis', 0, vi.fn().mockRejectedValue(error))],
+            operationStore: store, handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+        });
+        await expect(execute(rollback)).rejects.toMatchObject({
+            reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING', notBeforeAtMs: 5_000,
+        });
+        expect(store.defer).toHaveBeenCalledWith({
+            key: 'feature', stage: 'featureAnalysis', claimToken: 'claim:feature',
+            reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+        });
+        store.claim = operationStore().claim;
+        const unconfirmed = new Error(rollback.message);
+        await expect(execute(unconfirmed)).rejects.toBe(unconfirmed);
+        expect(store.defer).toHaveBeenCalledTimes(1);
+        expect(store.commitReady).not.toHaveBeenCalled();
+    });
+
     it('is fail-closed outside the exact persisted scheduler capability', async () => {
         await expect(runAnalysisV2FairAiScheduler({
             capability: 'legacy',

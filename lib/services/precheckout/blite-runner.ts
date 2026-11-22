@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import 'server-only';
 import { computePrecheckoutBliteCandidateRange } from './blite-range';
 import { inferPrecheckoutBlite } from './blite-inference';
@@ -155,6 +156,7 @@ export async function runPrecheckoutBlite(
         if (
             !(
                 error instanceof AnalysisV2AiCapacityPendingError
+                || error instanceof DevLiveVertexBudgetReservationPendingError
                 || error instanceof AnalysisProviderAdmissionCapacityPendingError
                 || error instanceof AnalysisV2AiQuarantineActiveError
                 || error instanceof AnalysisV2AiDeadlineTooShortError

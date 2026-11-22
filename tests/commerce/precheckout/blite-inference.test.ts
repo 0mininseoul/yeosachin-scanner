@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -403,6 +404,7 @@ describe('inferPrecheckoutBlite', () => {
         expect(options.abortSignal).toBeInstanceOf(AbortSignal);
         expect(options.onAttemptTelemetry).toBe(onAttemptTelemetry);
         expect(options.analysisType).toBe('precheckout_blite');
+        expect(options.devLiveBudgetOperationKey).toBe('preflight:blite');
         expect(options.thinkingLevel).toBe('MINIMAL');
         expect(options.maxOutputTokens).toBe(3_072);
         expect(options.maxAttempts).toBe(1);
@@ -564,6 +566,12 @@ describe('inferPrecheckoutBlite', () => {
         const downgraded = result?.signals.find(signal => signal.band !== 'high');
         expect(downgraded?.confidence).toBeLessThan(0.72);
         expect(downgraded?.confidence).toBeLessThan(0.7);
+    });
+
+    it('propagates a pre-dispatch budget rollback to the cache claim owner', async () => {
+        const rollback = new DevLiveVertexBudgetReservationPendingError();
+        mocks.analyzeWithGemini.mockRejectedValue(rollback);
+        await expect(inferPrecheckoutBlite(source(), inferenceOptions())).rejects.toBe(rollback);
     });
 
     it('returns null when the Gemini call throws', async () => {

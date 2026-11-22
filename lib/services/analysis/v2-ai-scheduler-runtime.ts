@@ -1,3 +1,4 @@
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
@@ -138,6 +139,9 @@ export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
 }
 
 function schedulerAdmissionReason(error: unknown): SchedulerAdmissionReason | null {
+    // The operation RPC verifies the claim and absence of an unresolved AI attempt
+    // before releasing it with the existing five-second admission delay.
+    if (error instanceof DevLiveVertexBudgetReservationPendingError) return 'ANALYSIS_V2_AI_CAPACITY_PENDING';
     if (!(error instanceof Error)) return null;
     switch (error.message) {
     case 'ANALYSIS_V2_AI_CAPACITY_PENDING':
