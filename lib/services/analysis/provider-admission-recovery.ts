@@ -40,8 +40,15 @@ export async function recoverDevLiveStandardProviderAdmissions() {
     const { data, error } = await supabaseAdmin.rpc('recover_dev_live_standard_provider_admissions_v1', {
         p_limit: ANALYSIS_PROVIDER_ADMISSION_RECOVERY_PAGE_SIZE,
     });
+    // An error returned by the active-request sweep must not starve older slots.
+    const retired = await supabaseAdmin.rpc('retire_dev_live_standard_gemini_slots_v1', { p_limit: 8 });
     if (error) throw new Error('DEV_STANDARD_PROVIDER_ADMISSION_RECOVERY_FAILED');
-    return devRecoverySummarySchema.parse(data);
+    const summary = devRecoverySummarySchema.parse(data);
+    if (retired.error) return { ...summary, failed: summary.failed + 1 };
+    return {
+        ...summary,
+        geminiSlotsReaped: summary.geminiSlotsReaped + z.number().int().min(0).max(8).parse(retired.data),
+    };
 }
 
 type RecoveryCandidateHandler = (

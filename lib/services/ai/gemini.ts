@@ -1,3 +1,4 @@
+import { VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
 import {
     ApiError,
@@ -6,7 +7,7 @@ import {
     ThinkingLevel,
     type GenerateContentConfig,
     type Part,
-} from '@google/genai';
+} from '@google/genai/node';
 import { toJSONSchema, type ZodType } from 'zod';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import {
@@ -34,6 +35,7 @@ import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
     AI_SHARED_CONCURRENCY_LIMIT,
+    AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
     assertSupportedAiStagePolicyVersion,
@@ -292,13 +294,20 @@ function getGenAIClient(): GoogleGenAI {
         throw new Error('GOOGLE_CLOUD_PROJECT is required to use Gemini through Vertex AI');
     }
 
-    genAI = new GoogleGenAI({
+    let transportConfigured = false;
+    const options = {
+        get fetch() {
+            transportConfigured = true;
+            return vertexDispatchFetch;
+        },
         vertexai: true,
         project,
         location: GOOGLE_CLOUD_LOCATION,
-    });
-
-    return genAI;
+    };
+    const client = new GoogleGenAI(options);
+    if (!transportConfigured) throw new Error('VERTEX_DISPATCH_TRANSPORT_UNAVAILABLE');
+    genAI = client;
+    return client;
 }
 
 // 재시도 설정
@@ -752,9 +761,10 @@ function extractSuccessfulCandidateText(response: GeminiResponseShape): string {
 async function emitAttemptTelemetry<T>(
     telemetry: GeminiAttemptTelemetry,
     hook: AnalyzeWithGeminiOptions<T>['onAttemptTelemetry'],
-    parsedResult?: T
+    parsedResult?: T,
+    source: 'sdk' | 'pre-dispatch' = 'sdk',
 ): Promise<void> {
-    console.log('Gemini SDK attempt telemetry:', telemetry);
+    console.log(source === 'sdk' ? 'Gemini SDK attempt telemetry:' : 'Gemini pre-dispatch rejection:', telemetry);
     if (!hook) return;
 
     try {
@@ -1202,6 +1212,8 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     attemptStartedAt = performance.now();
+                    const window = new VertexDispatchWindow(AI_GEMINI_LEASE_SECONDS * 1_000);
+                    let intent: GeminiAttemptStartTelemetry | undefined;
                     // Stage audit acquires provider leases as well as writing the attempt.
                     // Check the Dev cap before it can acquire either.
                     const devReservation = devLiveBudget && devLiveApproval
@@ -1214,23 +1226,24 @@ export async function analyzeWithGemini<T>(
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
+                            intent = {
+                                requestId,
+                                modelName,
+                                location: GOOGLE_CLOUD_LOCATION,
+                                stage,
+                                thinkingLevel: resolvedThinkingLevel,
+                                mediaCount: selectedImages.length,
+                                mediaResolution: resolvedMediaResolution,
+                                promptVersion: resolvedPromptVersion!,
+                                schemaVersion: resolvedSchemaVersion!,
+                                maxOutputTokens: resolvedMaxOutputTokens
+                                    ?? stagePolicy.maxOutputTokens,
+                                attempt: attemptNumber,
+                                retryCount: attemptNumber - 1,
+                                costRoute: resolvedCostRoute,
+                            };
                             try {
-                                await onBeforeAttempt({
-                                    requestId,
-                                    modelName,
-                                    location: GOOGLE_CLOUD_LOCATION,
-                                    stage,
-                                    thinkingLevel: resolvedThinkingLevel,
-                                    mediaCount: selectedImages.length,
-                                    mediaResolution: resolvedMediaResolution,
-                                    promptVersion: resolvedPromptVersion!,
-                                    schemaVersion: resolvedSchemaVersion!,
-                                    maxOutputTokens: resolvedMaxOutputTokens
-                                        ?? stagePolicy.maxOutputTokens,
-                                    attempt: attemptNumber,
-                                    retryCount: attemptNumber - 1,
-                                    costRoute: resolvedCostRoute,
-                                });
+                                await onBeforeAttempt(intent);
                             } catch (error) {
                                 if (
                                     error instanceof GeminiPreDispatchAdmissionError
@@ -1241,13 +1254,28 @@ export async function analyzeWithGemini<T>(
                                 }
                                 throw durableAuditFailure('intent', stage, error);
                             }
+                            window.assertCanStart();
                         }
                         if (abortSignal?.aborted) {
                             throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                         }
-                    } catch (error) {
-                        // Return the unused budget before leaving the Dev dispatch slot.
+
+                        providerDispatchStarted = true;
+                        const generated = intent
+                            ? await window.run(() => client.models.generateContent(generationRequest))
+                            : await client.models.generateContent(generationRequest);
                         if (devLiveBudget && devReservation) {
+                            const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
+                            if (status === 'complete' && tokenUsage) {
+                                const cost = estimateGeminiRequestCost(tokenUsage, modelName, GOOGLE_CLOUD_LOCATION);
+                                if (cost) await devLiveBudget.settleDevLiveVertexAttempt(devReservation, cost.totalCostUsd);
+                            }
+                        }
+                        return generated;
+                    } catch (error) {
+                        // Entering the SDK may only have started authentication.
+                        if (window.rejectedBeforeSend) providerDispatchStarted = false;
+                        if (!providerDispatchStarted && devLiveBudget && devReservation) {
                             try {
                                 await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0)
                                     .catch(() => devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0));
@@ -1257,16 +1285,21 @@ export async function analyzeWithGemini<T>(
                                 throw new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
                             }
                         }
-                        throw error;
-                    }
-
-                    providerDispatchStarted = true;
-                    let generated;
-                    try {
-                        generated = await client.models.generateContent(generationRequest);
-                    } catch (error) {
+                        if (window.rejectedBeforeSend && intent) {
+                            await emitAttemptTelemetry({
+                                ...intent,
+                                tokenUsage: null,
+                                usageComplete: false,
+                                usageMetadataStatus: 'missing',
+                                latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
+                                estimatedCostUsd: null,
+                                disposition: 'rejected',
+                                finishReason: null,
+                            }, onAttemptTelemetry, undefined, 'pre-dispatch');
+                            throw new GeminiPreDispatchAdmissionError();
+                        }
                         // Settle only the single Dev call that Vertex explicitly rejected.
-                        if (devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
+                        if (providerDispatchStarted && devLiveBudget && devReservation && error instanceof ApiError && error.status === 429) {
                             try {
                                 await devLiveBudget.settleDevLiveVertexAttempt(devReservation, 0);
                             } catch {
@@ -1276,14 +1309,6 @@ export async function analyzeWithGemini<T>(
                         }
                         throw error;
                     }
-                    if (devLiveBudget && devReservation) {
-                        const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
-                        if (status === 'complete' && tokenUsage) {
-                            const cost = estimateGeminiRequestCost(tokenUsage, modelName, GOOGLE_CLOUD_LOCATION);
-                            if (cost) await devLiveBudget.settleDevLiveVertexAttempt(devReservation, cost.totalCostUsd);
-                        }
-                    }
-                    return generated;
                 };
                 response = await runWithGenerationSlot(
                     stage ?? null,

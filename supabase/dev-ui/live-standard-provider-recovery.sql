@@ -106,6 +106,51 @@ REVOKE ALL ON FUNCTION dev_live_budget.standard_provider_expiry_evidence_v1(
     public.analysis_provider_admission_leases, boolean
 ) FROM PUBLIC, anon, authenticated, service_role;
 
+-- Use a separate transaction from redelivery/active-request recovery. A past
+-- owner approval identifies the Dev run even if a later QA target has changed.
+CREATE OR REPLACE FUNCTION public.retire_dev_live_standard_gemini_slots_v1(p_limit integer DEFAULT 8)
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''
+AS $$
+DECLARE
+    candidate_request uuid;
+    active_request uuid := dev_live_budget.active_standard_recovery_request_v1();
+    retired integer := 0;
+BEGIN
+    IF p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 8 THEN
+        RAISE EXCEPTION 'DEV_STANDARD_GEMINI_RETIRE_INVALID';
+    END IF;
+
+    FOR candidate_request IN
+        SELECT DISTINCT request.id
+        FROM public.analysis_v2_gemini_leases AS slot
+        JOIN public.analysis_requests AS request ON request.id = slot.request_id
+        JOIN public.analysis_preflights AS preflight
+          ON preflight.id = request.preflight_id AND preflight.consumed_request_id = request.id
+        JOIN dev_live_budget.grants AS approval
+          ON preflight.idempotency_key = 'dev-live:owner:standard:' || approval.grant_id::text
+        JOIN dev_live_budget.owner_starts AS owner_start
+          ON owner_start.grant_id = approval.grant_id AND owner_start.user_id = request.user_id
+        WHERE slot.state IN ('leased', 'quarantined')
+          AND slot.expires_at <= pg_catalog.statement_timestamp()
+          AND request.pipeline_version = 'v2' AND request.selected_plan_id_snapshot = 'standard'
+          AND ((request.status IN ('completed', 'failed') AND request.completed_at IS NOT NULL)
+               OR (request.id = active_request AND request.status IN ('pending', 'processing')))
+          AND preflight.user_id = request.user_id AND preflight.status = 'consumed'
+          AND preflight.access_mode = 'test_entitlement' AND approval.plan_id = 'standard'
+        ORDER BY request.id
+    LOOP
+        retired := retired + public.retire_inactive_analysis_v2_gemini_slots_v1(candidate_request, p_limit - retired);
+        EXIT WHEN retired = p_limit;
+    END LOOP;
+    RETURN retired;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.retire_dev_live_standard_gemini_slots_v1(integer)
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.retire_dev_live_standard_gemini_slots_v1(integer) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.recover_dev_live_standard_provider_admissions_v1(p_limit integer DEFAULT 16)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''

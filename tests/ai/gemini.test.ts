@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { vertexDispatchFetch } from '@/lib/services/ai/vertex-dispatch-window';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
@@ -18,9 +19,12 @@ const mocks = vi.hoisted(() => ({
     settleDevAttempt: vi.fn(),
 }));
 
-vi.mock('@google/genai', async (importOriginal) => ({
+vi.mock('@google/genai/node', async (importOriginal) => ({
     ...await importOriginal<typeof import('@google/genai')>(),
     GoogleGenAI: class {
+        constructor(options: { fetch: typeof fetch }) {
+            if (!options.fetch) throw new Error('missing test transport');
+        }
         models = { generateContent: mocks.generateContent };
     },
     ThinkingLevel: {
@@ -202,6 +206,31 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
         expect(mocks.generateContent).toHaveBeenCalledTimes(successful ? 1 : 0);
         expect(mocks.settleDevAttempt).toHaveBeenCalledTimes(successful ? 1 : 0);
+    });
+
+    it.each(['audit', 'SDK authentication'])('rejects a worker suspended during %s and returns its unused reservation once', async suspension => {
+        vi.useFakeTimers();
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const reservation = { grantId: 'synthetic', reservationId: 'synthetic-reservation' };
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        const audit = stageAuditOptions();
+        // Move wall time without running timers or aborting the signal.
+        const stall = () => vi.setSystemTime(Date.now() + 300_000);
+        if (suspension === 'audit') audit.onBeforeAttempt.mockImplementationOnce(async () => { stall(); });
+        else mocks.generateContent.mockImplementationOnce(async () => {
+            stall();
+            return vertexDispatchFetch('https://vertex.invalid');
+        });
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema, abortSignal: new AbortController().signal,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        })).rejects.toThrow('ANALYSIS_V2_AI_PREDISPATCH_REJECTED');
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            disposition: 'rejected', attempt: 1,
+        }));
+        expect(mocks.generateContent).toHaveBeenCalledTimes(suspension === 'audit' ? 0 : 1);
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
     });
 
     it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {
