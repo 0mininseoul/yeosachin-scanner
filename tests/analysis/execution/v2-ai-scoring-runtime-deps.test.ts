@@ -11,10 +11,15 @@ import { RevenueCostOperationStore } from '../../../lib/services/analysis/revenu
 import { AnalysisImagePreparationError } from '@/lib/services/ai/image-preprocessing';
 import { SelfHostedAuthWorkerError } from '@/lib/services/instagram/providers/selfhosted-auth/client';
 import {
+    AnalysisV2SchedulerContinuationError,
+    PROFILE_CONSUMER_READ_TIMEOUT,
+} from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
+import {
     ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES,
     createAnalysisV2MediaNormalizer,
     createAnalysisV2ProfileBatchReadModel,
     createAnalysisV2ReverseLikeCollector,
+    createAnalysisV2TargetProfileReadModel,
     type AnalysisV2ProfileConsumerSupabaseClient,
 } from '../../../lib/services/analysis/v2-ai-scoring-runtime-deps';
 
@@ -171,6 +176,62 @@ function reverseLikeContext(policy: ProviderExecutionPolicy | null = null) {
 }
 
 describe('analysis V2 production profile consumer', () => {
+    it.each([
+        {
+            error: { code: '57014', message: 'canceling statement due to statement timeout' },
+            shouldContinue: true,
+        },
+        { error: { code: '57014', message: 'canceling statement due to user request' }, shouldContinue: false },
+        { error: { code: '57014' }, shouldContinue: false },
+        {
+            error: { code: 'PGRST000', message: 'canceling statement due to statement timeout' },
+            shouldContinue: false,
+        },
+        {
+            error: { code: 'P0001', message: 'ANALYSIS_V2_PROFILE_CONSUMER_FENCE_MISMATCH' },
+            shouldContinue: false,
+        },
+    ])('distinguishes a confirmed consumer statement timeout from $error', async ({ error, shouldContinue }) => {
+        const rpc = vi.fn().mockResolvedValue({ data: null, error });
+        const reader = createAnalysisV2ProfileBatchReadModel({ rpc });
+        const result = reader.loadExactBatch({
+            requestId,
+            consumerJobKey: 'track:profile-ai:batch:0',
+            consumerClaimToken: claimToken,
+            consumerInputHash,
+            producerJobKey: 'track:profiles:batch:0',
+            batch: 0,
+            expectedItemCount: 2,
+            expectedProducerInputHash: producerInputHash,
+        });
+        if (shouldContinue) {
+            await expect(result).rejects.toBeInstanceOf(AnalysisV2SchedulerContinuationError);
+            await expect(result).rejects.toMatchObject({ reason: PROFILE_CONSUMER_READ_TIMEOUT, delaySeconds: 5 });
+        } else {
+            await expect(result).rejects.not.toBeInstanceOf(AnalysisV2SchedulerContinuationError);
+        }
+        expect(rpc).toHaveBeenCalledOnce();
+    });
+
+    it('propagates the same pre-provider continuation when partner safety reads the target checkpoint', async () => {
+        const rpc = vi.fn().mockResolvedValue({
+            data: null,
+            error: { code: '57014', message: 'canceling statement due to statement timeout' },
+        });
+        const reader = createAnalysisV2TargetProfileReadModel({ rpc });
+
+        await expect(reader.loadTargetProfile({
+            requestId,
+            jobKey: 'track:partner-safety:batch:0',
+            claimToken,
+            jobInputHash: consumerInputHash,
+        })).rejects.toMatchObject({ reason: PROFILE_CONSUMER_READ_TIMEOUT, delaySeconds: 5 });
+        expect(rpc).toHaveBeenCalledExactlyOnceWith(
+            ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES.loadRpc,
+            expect.objectContaining({ p_producer_job_key: 'track:target-evidence:collect' })
+        );
+    });
+
     it('accepts a terminal unavailable outcome while preserving exact producer order', async () => {
         const fake = profileClient(resume('unavailable'));
         const reader = createAnalysisV2ProfileBatchReadModel(fake.client);

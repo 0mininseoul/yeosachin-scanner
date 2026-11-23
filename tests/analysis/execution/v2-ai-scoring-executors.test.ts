@@ -1,3 +1,4 @@
+import { AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
@@ -2399,6 +2400,40 @@ describe('V2 AI and scoring executors', () => {
         )).rejects.toThrow(message);
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
         expect(memoryState.outcomes).toEqual([]);
+    });
+
+    it('reuses the producer checkpoint after a read timeout without invoking AI on the first delivery', async () => {
+        const checkpoint = {
+            requestedUsernames: ['resume.first', 'resume.second', 'resume.third'],
+            results: ['resume.first', 'resume.second', 'resume.third'].map(username => ({
+                username,
+                status: 'success' as const,
+                profile: profile(username),
+            })),
+        };
+        const defer = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT', 5);
+        const loadExactBatch = vi.fn<AnalysisV2AiScoringExecutorDependencies['profileBatches']['loadExactBatch']>()
+            .mockRejectedValueOnce(defer)
+            .mockResolvedValue(checkpoint);
+        const deps = dependencies(memory(), { profileBatches: { loadExactBatch } });
+        const run = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!;
+        const first = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0 });
+        const second = { ...first, claim: { ...first.claim, claimToken: '20000000-0000-4000-8000-000000000002' } };
+
+        await expect(run(first)).rejects.toBe(defer);
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+
+        const resumed = await run(second);
+        expect(resumed.checkpoint.manifest.itemCount).toBe(3);
+        expect(loadExactBatch).toHaveBeenCalledTimes(2);
+        const [oldRead] = loadExactBatch.mock.calls[0];
+        const [newRead] = loadExactBatch.mock.calls[1];
+        expect(newRead).toEqual({ ...oldRead, consumerClaimToken: second.claim.claimToken });
+        expect(deps.ai.gender).toHaveBeenCalledTimes(3);
+        expect(deps.ai.features).toHaveBeenCalledTimes(3);
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
     });
 
     it('reports each real profile AI task start with its already-loaded bounded media preview', async () => {

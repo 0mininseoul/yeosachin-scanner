@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import {
+    PROFILE_CONSUMER_READ_TIMEOUT,
+    type AnalysisV2SchedulerContinuationReason,
+} from './v2-ai-scheduler-continuation';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT } from './v2-worker-task-contract';
 import type { AnalysisWorkloadRole } from './workload-role';
 
@@ -160,7 +165,7 @@ export interface AnalysisV2JobStore {
     ): Promise<AnalysisV2JobReleaseResult>;
     continueScheduler(
         claim: ClaimedAnalysisV2Job,
-        errorCode: AnalysisV2AiAdmissionErrorCode,
+        errorCode: AnalysisV2SchedulerContinuationReason,
         delaySeconds: number,
     ): Promise<AnalysisV2JobDispatchReservation & {
         attemptCount: number;
@@ -841,6 +846,7 @@ export function createSupabaseAnalysisV2JobStore(
                 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
                 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
                 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+                PROFILE_CONSUMER_READ_TIMEOUT,
             ].includes(errorCode)) {
                 throw new Error(
                     'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid scheduler continuation code.'
@@ -855,17 +861,18 @@ export function createSupabaseAnalysisV2JobStore(
                     'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid scheduler continuation delay.'
                 );
             }
-            const { data, error } = await client.rpc(
-                ANALYSIS_V2_DATABASE_NAMES.continueSchedulerRpc,
-                {
-                    p_request_id: identity.requestId,
-                    p_job_key: identity.jobKey,
-                    p_claim_token: requiredUuid(claim.claimToken, 'claim token'),
-                    p_dispatch_token: randomUUID(),
-                    p_error_code: errorCode,
-                    p_delay_seconds: delaySeconds,
-                }
-            );
+            const params = {
+                p_request_id: identity.requestId,
+                p_job_key: identity.jobKey,
+                p_claim_token: requiredUuid(claim.claimToken, 'claim token'),
+                p_dispatch_token: randomUUID(),
+                p_error_code: errorCode,
+                p_delay_seconds: delaySeconds,
+            };
+            const reserve = () => client.rpc(ANALYSIS_V2_DATABASE_NAMES.continueSchedulerRpc, params);
+            const { data, error } = errorCode === PROFILE_CONSUMER_READ_TIMEOUT
+                ? await retryPostgresAbortedRpc(reserve, { retryDeadlock: false })
+                : await reserve();
             if (error) throwRpcError(error, 'scheduler continuation');
             const row = singleRpcRow(data, 'scheduler continuation');
             const reservation = reservationFromRow(row, identity);

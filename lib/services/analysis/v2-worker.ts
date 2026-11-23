@@ -77,6 +77,7 @@ import {
 } from './v2-tasks';
 import {
     AnalysisV2SchedulerContinuationError,
+    type AnalysisV2SchedulerContinuationReason,
 } from './v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_GENERIC_JOB_FAILURE_CODE,
@@ -216,7 +217,7 @@ export type AnalysisV2WorkerOutcome =
     | Readonly<{ status: 'failed'; errorCode: string }>
     | Readonly<{
         status: 'continuation';
-        errorCode: AnalysisV2AiAdmissionErrorCode;
+        errorCode: AnalysisV2SchedulerContinuationReason;
         pendingRecoveryCount: number;
     }>
     | Readonly<{

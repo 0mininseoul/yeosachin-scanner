@@ -20,6 +20,11 @@ import {
     getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
+import {
+    AnalysisV2SchedulerContinuationError,
+    PROFILE_CONSUMER_READ_TIMEOUT,
+} from './v2-ai-scheduler-continuation';
 import {
     analysisV2ProfileFetchResumeSchema,
     type AnalysisV2CheckpointResult,
@@ -119,6 +124,11 @@ function safeRpcCode(error: { code?: string }): string {
 }
 
 function profileRpcError(error: NonNullable<RpcResult['error']>): never {
+    // This RPC reads the producer checkpoint before this delivery enters any
+    // provider work. A confirmed DB timeout can defer the current job claim.
+    if (isPostgresStatementTimeout(error)) {
+        throw new AnalysisV2SchedulerContinuationError(PROFILE_CONSUMER_READ_TIMEOUT, 5);
+    }
     const known = [
         'ANALYSIS_V2_PROFILE_CONSUMER_FENCE_MISMATCH',
         'ANALYSIS_V2_PROFILE_CONSUMER_NOT_READY',
