@@ -48,8 +48,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
             await control.query(originalProfileConsumerSql);
             await control.query(
                 `INSERT INTO public.analysis_requests(id, pipeline_version, status)
-                     VALUES ($1, 'v2', 'processing');
-                 `.trim(), [requestId],
+                     VALUES ($1, 'v2', 'processing')`, [requestId],
             );
             await control.query(
                 `INSERT INTO public.analysis_preflights(id, consumed_request_id, target_instagram_id)
@@ -88,6 +87,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
                  ) VALUES ($1, $2, $3, $4)`,
                 [requestId, consumerKey(0), consumerHash, replacementClaim],
             );
+            await control.query(profileConsumerReadSql);
             readers = Array.from({ length: workers }, () => new Client({ ...options, statement_timeout: 200 }));
             await Promise.all(readers.map(async reader => {
                 await reader.connect();
@@ -136,6 +136,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
 
         it('preserves the checkpoint under request row contention without taking a manifest write lock', async () => {
             const count = workers * readsPerWorker;
+            await control.query(originalProfileConsumerSql);
             const before = await load();
             expect(before).toMatchObject({ completed: count, timeouts: 0 });
             const baseline = (await read(0)).rows[0].snapshot;
@@ -156,6 +157,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
                 console.info('Profile checkpoint read load', { workers, readsPerWorker, before, beforeLocked, afterLocked });
             } finally {
                 await locker.query('ROLLBACK');
+                await control.query(profileConsumerReadSql);
             }
             await control.query(
                 'SELECT public.analysis_v2_assert_result_job_fence($1,$2,$3,$4)',
@@ -220,7 +222,17 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
         it('rejects stale claims and closed requests without reopening jobs, and honors the strict revenue guard', async () => {
             await expect(defer(3, readTimeout, replacementClaim))
                 .rejects.toMatchObject({ message: 'ANALYSIS_V2_JOB_LEASE_FENCE_MISMATCH' });
-            await control.query('UPDATE public.analysis_requests SET status = $1 WHERE id = $2', ['failed', requestId]);
+            // A read concurrent with an uncommitted cancellation sees one consistent
+            // active snapshot. After commit, both read and continuation reject it.
+            await locker.query('BEGIN');
+            try {
+                await locker.query(
+                    "UPDATE public.analysis_requests SET status = 'failed' WHERE id = $1", [requestId],
+                );
+                expect((await read(3)).rows[0].snapshot.primaryResults).toHaveLength(30);
+            } finally {
+                await locker.query('COMMIT');
+            }
             await expect(read(3)).rejects.toMatchObject({ message: 'ANALYSIS_V2_RESULT_NOT_READY' });
             await expect(defer(3)).rejects.toMatchObject({ message: 'ANALYSIS_V2_JOB_LEASE_FENCE_MISMATCH' });
 

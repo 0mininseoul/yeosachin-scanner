@@ -384,6 +384,42 @@ describe('bounded direct fresh_apify consumer (PGlite)', () => {
         );
     });
 
+    it('keeps the consumed target bound to the allowed target-profile consumers', async () => {
+        const db = await createDb();
+        await seedRequestAndJobs(db);
+        await db.query('UPDATE public.analysis_preflights SET target_instagram_id = $1 WHERE consumed_request_id = $2',
+            ['fixture', REQUEST_ID]);
+        await db.query(
+            `INSERT INTO public.analysis_pipeline_jobs(
+                 request_id, job_key, status, input_hash, track, kind, lease_token, lease_expires_at
+             ) VALUES
+                 ($1, 'track:target-evidence:collect', 'completed', $2, 'target_evidence', 'collection', NULL, NULL),
+                 ($1, 'track:partner-safety:batch:0', 'processing', $3, 'partner_safety', 'ai',
+                     $4, clock_timestamp() + interval '10 minutes')`,
+            [REQUEST_ID, PRODUCER_INPUT_HASH, CONSUMER_INPUT_HASH, CLAIM_TOKEN],
+        );
+        await db.query(
+            `INSERT INTO public.analysis_v2_profile_fetch_batches(
+                 request_id, job_key, requested_usernames, frozen_unresolved_usernames, primary_payload_hash
+             ) VALUES ($1, 'track:target-evidence:collect', ARRAY['fixture'], '{}', $2)`,
+            [REQUEST_ID, PRIMARY_PAYLOAD_HASH],
+        );
+        const loadTarget = (jobKey: string) => asService<{ snapshot: { requestedUsernames: string[] } }>(
+            db,
+            `SELECT public.load_analysis_v2_profile_fetch_for_consumer(
+                 $1, $2, $3, $4, 'track:target-evidence:collect', NULL, 1
+             ) AS snapshot`,
+            [REQUEST_ID, jobKey, CLAIM_TOKEN, CONSUMER_INPUT_HASH],
+        );
+        expect((await loadTarget('track:partner-safety:batch:0')).rows[0].snapshot.requestedUsernames)
+            .toEqual(['fixture']);
+        await expect(loadTarget(CONSUMER_JOB_KEY)).rejects.toThrow('ANALYSIS_V2_PROFILE_CONSUMER_SCOPE_MISMATCH');
+        await db.query('UPDATE public.analysis_preflights SET target_instagram_id = $1 WHERE consumed_request_id = $2',
+            ['other-fixture', REQUEST_ID]);
+        await expect(loadTarget('track:partner-safety:batch:0'))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_CONSUMER_SCOPE_MISMATCH');
+    });
+
     it('rejects when the producer job has not completed', async () => {
         const db = await createDb();
         await seedRequestAndJobs(db, { producerStatus: 'processing' });
