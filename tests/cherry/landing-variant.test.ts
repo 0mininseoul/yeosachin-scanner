@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { NextRequest } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +67,19 @@ describe('cherry landing variant', () => {
 
     it('ships the crush share image', () => {
         expect(readFileSync(path.join(process.cwd(), 'public/cherry/og-crush.jpg')).length).toBeGreaterThan(10_000);
+    });
+});
+
+describe('cherry 3d scenes', () => {
+    const source = (name: string) => readFileSync(path.join(process.cwd(), 'design/namchin-demand/three', name), 'utf8');
+
+    it('3d sources take the target word from the variant', () => {
+        for (const name of ['hero.js', 'trust.js']) expect(source(name), name).not.toMatch(/남친|남자친구/);
+        expect(source('shared.js')).toContain("'짝남'");
+        expect(source('shared.js')).toContain("'남자친구'");
+        const bundleDir = path.join(process.cwd(), 'public/cherry/3d');
+        const bundles = readdirSync(bundleDir).map((name) => readFileSync(path.join(bundleDir, name), 'utf8')).join('\n');
+        expect(bundles.includes('짝남') || bundles.includes('\\uC9DD\\uB0A8')).toBe(true);
     });
 });
 

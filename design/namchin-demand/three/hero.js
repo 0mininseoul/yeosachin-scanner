@@ -46,6 +46,7 @@ import {
   stagePixelRatio,
   waitForFonts,
   wrapText,
+  TARGET,
 } from './shared.js';
 
 // One cycle per account: the count (0 to LEAD), then the story, whose times below start at 0.
@@ -129,7 +130,7 @@ function drawCount(ctx, w, h, { roll = 0, from = 230, him = null } = {}) {
   const x = top + size + h * 0.26;
   ctx.fillStyle = '#ffc2c9';
   ctx.font = `800 ${h * 0.165}px ${FONT}`;
-  ctx.fillText('남친 팔로잉', x, h * 0.27);
+  ctx.fillText(`${TARGET.short} 팔로잉`, x, h * 0.27);
 
   const digit = h * 0.74;
   const baseline = h * 0.9;

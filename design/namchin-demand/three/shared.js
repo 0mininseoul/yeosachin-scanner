@@ -9,6 +9,10 @@ import {
 } from 'three';
 
 export const BRAND = '체리';
+// Who the visitor is watching: the landing's Meta A/B arm (?v=crush) swaps 남친 for 짝남.
+export const TARGET = typeof document !== 'undefined' && document.documentElement.dataset.variant === 'crush'
+  ? { short: '짝남', full: '짝남' }
+  : { short: '남친', full: '남자친구' };
 export const FONT = 'Paperlogy, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
 export const DIGITS = '"Barlow Condensed", Paperlogy, sans-serif';
 export const COLORS = {
