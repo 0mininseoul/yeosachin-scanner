@@ -34,8 +34,8 @@ export const metadata: Metadata = {
 
 const UPDATED = '2026년 11월 24일';
 
-function H({ children }: { children: React.ReactNode }) {
-    return <h2 className="mt-9 text-[15px] font-bold text-fg">{children}</h2>;
+function H({ children, id }: { children: React.ReactNode; id?: string }) {
+    return <h2 id={id} className="mt-9 text-[15px] font-bold text-fg">{children}</h2>;
 }
 
 function Th({ children }: { children: React.ReactNode }) {
@@ -55,6 +55,10 @@ export default function PrivacyPage() {
                 <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
                     Ascentum(이하 &ldquo;회사&rdquo;)은 &ldquo;AI 위장 여사친 판독기&rdquo;(이하 &ldquo;서비스&rdquo;)를 운영하며, 「개인정보 보호법」 등 관계
                     법령을 준수하고 정보주체의 개인정보를 보호하기 위해 다음과 같이 개인정보처리방침을 수립·공개합니다.
+                </p>
+                <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                    개별 개인정보 처리의 법적 판단에는 어떤 정보를 어떤 목적으로 수집하고 누구에게 제공했는지 등 구체적인 사실관계와 적용 법령을 함께 살펴야 합니다.
+                    본인 정보의 처리 내역은 <a href="#privacy-contact" className="underline">제12조의 문의처</a>에서 확인을 요청할 수 있습니다.
                 </p>
 
                 <div className="mt-4 text-[13px] leading-relaxed text-fg-dim [&_li]:mt-1 [&_ul]:mt-1.5 [&_ul]:list-disc [&_ul]:pl-5">
@@ -283,7 +287,7 @@ export default function PrivacyPage() {
                         로그인 등 일부 서비스 이용에 제한이 있을 수 있습니다.
                     </p>
 
-                    <H>제12조 (개인정보 보호책임자 및 문의처)</H>
+                    <H id="privacy-contact">제12조 (개인정보 보호책임자 및 문의처)</H>
                     <p className="mt-2">
                         개인정보 처리에 관한 문의, 불만 처리, 피해 구제 등은 아래로 연락해 주시기 바랍니다.
                     </p>
