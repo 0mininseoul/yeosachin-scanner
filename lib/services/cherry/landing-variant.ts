@@ -30,8 +30,9 @@ const crushPattern = new RegExp(
 );
 
 /**
- * Meta's base pixel code. autoConfig is off so the pixel never reads the form's email and phone
- * fields on its own (automatic advanced matching must also be off in Events Manager).
+ * Meta's base pixel code. autoConfig is off so the pixel does not collect page and button metadata on
+ * its own. Automatic advanced matching (which could read the form's email and phone) is a separate
+ * Events Manager toggle that must be off; the setup guide makes that a gate before ads start.
  */
 function metaPixel(pixelId: string): string {
     return `<script>!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');fbq('set','autoConfig',false,'${pixelId}');fbq('init','${pixelId}');fbq('track','PageView');</script>`;

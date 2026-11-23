@@ -42,7 +42,10 @@ B: https://yeosachin.com/cherry?v=crush&utm_source=meta&utm_medium=paid_social&u
 3. **자동 고급 매칭 끄기.** 이벤트 관리자 → 픽셀 → 설정 → '자동 고급 매칭'을 끈다.
    - 켜져 있으면 예약 폼의 이메일·번호가 메타로 전송될 수 있다. 코드에서도 `autoConfig`를 꺼 두었지만, 이 설정을 끄는 게 기본 방어선이다.
 4. **도메인 확인.** 비즈니스 설정 → 브랜드 가치 보호 → 도메인에서 `yeosachin.com`을 확인하고, 웹 이벤트 설정에서 `Lead`를 우선 이벤트로 둔다.
-5. **배포 확인 후 켜기.** Claude가 `?v=bf`, `?v=crush` 화면, 픽셀 요청, DB 기록을 확인한 다음 광고를 켠다.
+5. **배포 확인 후 켜기.** 광고를 켜기 전에 아래를 모두 확인한다.
+   - `?v=bf`와 `?v=crush` 화면이 맞게 나온다.
+   - 테스트 예약 1건의 `Lead` 픽셀 요청(`facebook.com/tr`)에 `ud[`로 시작하는 매개변수가 **없다**. 있으면 자동 고급 매칭이 켜져 있는 것이니 광고를 켜지 않는다(개인정보처리방침에 이메일·번호를 보내지 않는다고 적었다).
+   - 운영 콘솔 사전예약 화면에서 테스트 예약의 변형이 기록된다.
 
 ## 캠페인 세팅
 
@@ -55,17 +58,21 @@ B: https://yeosachin.com/cherry?v=crush&utm_source=meta&utm_medium=paid_social&u
 
 ## 판정
 
-1. **진행 중:** 변형별 예약 1건당 비용. 메타 보고서의 Lead와 운영 콘솔 사전예약 화면의 변형별 합계(bf / crush / 없음)를 함께 본다.
+1. **진행 중:** 변형별 예약 1건당 비용. 메타 보고서의 Lead와 운영 콘솔 사전예약 화면의 변형별 합계(A 남친 / B 짝남 / 변형 없음)를 함께 본다.
+   - 이미 예약한 사람이 다시 제출해도 메타에는 Lead가 한 번 더 잡히지만 DB 행은 늘지 않는다. 그래서 메타 Lead가 DB보다 조금 많을 수 있고, 판단은 DB 합계 기준으로 한다.
+   - 짝남 링크를 메타(페이스북·메신저)에 공유하면 미리보기는 기본(남친) 이미지로 나온다. `og:url`을 `/cherry`로 둬서 공유 유입이 짝남으로 섞이지 않게 한 의도된 동작이다.
 2. **최종:** 변형별 **결제 1건당 광고비** = 그 변형의 광고비 ÷ 그 변형의 결제자 수.
    - 결제자: 예약자와 같은 계정(휴대폰 번호 우선, 없으면 이메일)이 판매를 켠 시각부터 7일 안에 체리를 처음 결제한 경우. 4,900원 예약가와 9,900원 정가를 모두 포함하고, 무상 지급(`grant`)은 뺀다.
    - 변형별 결제자가 30명 미만이면 결제율 차이는 참고용으로 보고, 예약 1건당 비용과 '예약 → 결제' 비율의 방향으로 판단한다.
 
 ### 결제 분석 쿼리
 
-`:sale_open`에는 실제로 판매 스위치를 켠 시각(timestamptz)을 넣는다.
+첫 줄의 `sale_open` 값을 실제로 판매 스위치를 켠 시각으로 바꿔서 Supabase SQL 편집기에서 실행한다.
 
 ```sql
-with reservations as (
+with params as (
+    select timestamptz '2026-12-01 00:00:00+09' as sale_open
+), reservations as (
     select reservation.variant,
         coalesce(
             (select account.id from public.users as account
@@ -83,10 +90,10 @@ select coalesce(reservations.variant, 'none') as variant,
         select 1 from public.cherry_subscriptions as subscription
         where subscription.user_id = reservations.user_id
           and subscription.payment_provider <> 'grant'
-          and subscription.first_paid_at >= :sale_open
-          and subscription.first_paid_at < :sale_open + interval '7 days'
+          and subscription.first_paid_at >= params.sale_open
+          and subscription.first_paid_at < params.sale_open + interval '7 days'
     )) as payers
-from reservations
+from reservations, params
 group by 1
 order by 1;
 ```

@@ -4,6 +4,10 @@ import { NextRequest } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const db = vi.hoisted(() => ({ insert: vi.fn(), from: vi.fn() }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: db.from } }));
+vi.mock('@/lib/services/admin/operator-route', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/lib/services/admin/operator-route')>()),
+    requireConsoleOperator: async () => ({ ok: true }),
+}));
 
 import { CRUSH_REPLACEMENTS, parseCherryVariant, renderCherryLanding } from '@/lib/services/cherry/landing-variant';
 
@@ -132,5 +136,39 @@ describe('cherry reservation variant', () => {
         const response = await reserve({ variant: 'crush' });
         expect(response.status).toBe(200);
         expect(db.insert).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('cherry admin roster before the variant migration', () => {
+    // A PostgREST builder stand-in: resolves to an undefined-column error whenever the query touches `variant`.
+    const builder = (columns: string) => {
+        let touchesVariant = columns.includes('variant');
+        const result = () => touchesVariant
+            ? { data: null, count: null, error: { code: '42703' } }
+            : { data: [{ email: 'a@b.co', phone: '+821012345678', consented_at: '2026-11-24T00:00:00Z' }], count: 1, error: null };
+        const query: Record<string, unknown> = {
+            eq: (column: string) => { touchesVariant ||= column === 'variant'; return query; },
+            is: (column: string) => { touchesVariant ||= column === 'variant'; return query; },
+            or: () => query, ilike: () => query, order: () => query, range: () => query,
+            then: (resolve: (value: unknown) => unknown) => Promise.resolve(result()).then(resolve),
+        };
+        return query;
+    };
+
+    it('still lists reservations when the variant column is missing', async () => {
+        db.from.mockReset().mockReturnValue({ select: (columns: string) => builder(columns) });
+        const { POST } = await import('@/app/api/admin/namchin/reservations/route');
+        const response = await POST(new Request('https://yeosachin.com/api/admin/cherry/reservations', {
+            method: 'POST',
+            headers: { origin: 'https://yeosachin.com', 'content-type': 'application/json' },
+            body: JSON.stringify({ query: '', page: 1 }),
+        }));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+            rows: [{ email: 'a@b.co', phone: '+821012345678', consentedAt: '2026-11-24T00:00:00Z', variant: null }],
+            count: 1,
+            hasNext: false,
+            variantCounts: null,
+        });
     });
 });

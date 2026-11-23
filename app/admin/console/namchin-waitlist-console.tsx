@@ -12,7 +12,7 @@ type Roster = {
     rows: { email: string; phone: string; consentedAt: string; variant: 'bf' | 'crush' | null }[];
     count: number;
     hasNext: boolean;
-    variantCounts: { bf: number; crush: number; none: number };
+    variantCounts: { bf: number; crush: number; none: number } | null;
 };
 const VARIANT_LABEL = { bf: 'A 남친', crush: 'B 짝남' } as const;
 const DATE_TIME = new Intl.DateTimeFormat('ko-KR', {
@@ -76,7 +76,7 @@ export function NamchinWaitlistConsole() {
             <Card className="ac-namchin-roster">
                 <div className="ac-tools-bar">
                     <span role="status">{roster ? `${filter.query ? '검색 결과' : '전체 신청'} ${roster.count}건` : ''}</span>
-                    {roster ? <span>메타 A/B 전체: A 남친 {roster.variantCounts.bf}건, B 짝남 {roster.variantCounts.crush}건, 광고 외 {roster.variantCounts.none}건</span> : null}
+                    {roster?.variantCounts ? <span>메타 A/B 전체: A 남친 {roster.variantCounts.bf}건, B 짝남 {roster.variantCounts.crush}건, 변형 없음 {roster.variantCounts.none}건</span> : null}
                     <form className="ac-search" role="search" onSubmit={event => {
                         event.preventDefault();
                         setFilter({ query: search.trim(), page: 1 });
@@ -103,7 +103,7 @@ export function NamchinWaitlistConsole() {
                             <td><b>{row.email}</b></td>
                             <td className="ac-tabular">{formatPhone(row.phone)}</td>
                             <td><time dateTime={row.consentedAt}>{DATE_TIME.format(new Date(row.consentedAt))}</time></td>
-                            <td>{row.variant ? VARIANT_LABEL[row.variant] : '광고 외'}</td>
+                            <td>{row.variant ? VARIANT_LABEL[row.variant] : '변형 없음'}</td>
                         </tr>) : <EmptyRow colSpan={4}>{current ? (roster ? (filter.query ? '검색 조건에 맞는 예약이 없습니다.' : '아직 접수된 사전 예약이 없습니다.') : '명단을 표시할 수 없습니다.') : '불러오는 중…'}</EmptyRow>}</tbody>
                     </table>
                 </div>
