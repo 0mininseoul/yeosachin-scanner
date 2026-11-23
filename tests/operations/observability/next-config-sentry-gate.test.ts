@@ -31,6 +31,14 @@ describe('Next config Sentry build gate', () => {
         expect(config.compiler?.runAfterProductionCompile).toBeTypeOf('function');
     });
 
+    it('redirects the pre-move Cherry paths that Meta share cards still cache', async () => {
+        const config = (await import('../../../next.config')).default;
+        expect(await config.redirects?.()).toEqual(expect.arrayContaining([
+            { source: '/namchin', destination: '/cherry', permanent: true },
+            { source: '/namchin/og.jpg', destination: '/cherry/og.jpg', permanent: true },
+        ]));
+    });
+
     it('traces the complete Cloud Tasks build for every Vercel enqueue route', async () => {
         const config = (await import('../../../next.config')).default;
         const includes = config.outputFileTracingIncludes ?? {};

@@ -33,6 +33,7 @@ import {
   roundRect,
   runLoop,
   waitForFonts,
+  TARGET,
 } from './shared.js';
 
 const DURATION = 6;
@@ -106,7 +107,7 @@ export async function mountTrust(container) {
 
   const source = plane({
     width: 1.6, height: 2.0, pixels: 640,
-    draw: (ctx, w, h) => nodeCard(ctx, w, h, { title: '남자친구', lines: ['공개 프로필', '아무것도 몰라요'], accent: '#5b8a4a', picture: him }),
+    draw: (ctx, w, h) => nodeCard(ctx, w, h, { title: TARGET.full, lines: ['공개 프로필', '아무것도 몰라요'], accent: '#5b8a4a', picture: him }),
   });
   const target = plane({
     width: 1.6, height: 2.0, pixels: 640,
@@ -116,7 +117,7 @@ export async function mountTrust(container) {
 
   const readOnly = plane({ width: 1.3, height: 0.36, pixels: 480, draw: (ctx, w, h) => pill(ctx, w, h, '읽기만 해요', '#ffffff1f', '#ffe6dc') });
   const filterLabel = plane({ width: 1.5, height: 0.36, pixels: 540, draw: (ctx, w, h) => pill(ctx, w, h, `${BRAND} · 새 맞팔만`, COLORS.cherry, '#fff') });
-  const noReturn = plane({ width: 1.7, height: 0.36, pixels: 600, draw: (ctx, w, h) => pill(ctx, w, h, '남친은 모르게', '#ffffff24', '#ffe6e6') });
+  const noReturn = plane({ width: 1.7, height: 0.36, pixels: 600, draw: (ctx, w, h) => pill(ctx, w, h, `${TARGET.short}은 모르게`, '#ffffff24', '#ffe6e6') });
   world.add(readOnly.mesh, filterLabel.mesh, noReturn.mesh);
 
   // One-way valve next to the source.

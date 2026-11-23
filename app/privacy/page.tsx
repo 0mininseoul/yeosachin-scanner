@@ -32,7 +32,7 @@ export const metadata: Metadata = {
  * ⚠️ 법률 문서: 표현/항목 변경은 사업자(사용자) 확인 후 진행할 것.
  */
 
-const UPDATED = '2026년 7월 19일';
+const UPDATED = '2026년 11월 24일';
 
 function H({ children }: { children: React.ReactNode }) {
     return <h2 className="mt-9 text-[15px] font-bold text-fg">{children}</h2>;
@@ -148,6 +148,7 @@ export default function PrivacyPage() {
                                 <tr><Td>Apify Technologies s.r.o.</Td><Td>인스타그램 공개 정보 수집 처리</Td></tr>
                                 <tr><Td>Plus Five Five, Inc. (Resend)</Td><Td>이메일 발송</Td></tr>
                                 <tr><Td>Amplitude, Inc.</Td><Td>서비스 이용 통계·전환 및 허용된 서비스 화면의 Session Replay 분석</Td></tr>
+                                <tr><Td>Meta Platforms, Inc.</Td><Td>체리 사전 예약 페이지의 광고 성과 측정(Meta 픽셀)</Td></tr>
                                 <tr><Td>Axiom, Inc.</Td><Td>서버 운영 로그의 수집·보관 및 장애 탐지·진단</Td></tr>
                             </tbody>
                         </table>
@@ -217,6 +218,13 @@ export default function PrivacyPage() {
                                     <Td>서비스 이용 이벤트 발생 시 및 프로덕션에서 Session Replay가 활성화된 표본 세션 이용 시 암호화 전송</Td>
                                     <Td>제품 이용 통계·전환 분석, 허용된 서비스 화면의 이용 흐름·오류 진단</Td>
                                     <Td>Amplitude 프로젝트 보관 설정·계약 기간 및 삭제 요청 시까지</Td><Td>브라우저 차단·처리정지 요청 가능, 핵심 판독은 가능하나 통계에서 제외</Td>
+                                </tr>
+                                <tr>
+                                    <Td>Meta Platforms, Inc.</Td><Td>미국</Td>
+                                    <Td>체리 사전 예약 페이지 방문과 사전 예약 완료 여부, 쿠키, 기기·브라우저 정보, 접속 IP(이메일·휴대폰 번호 제외)</Td>
+                                    <Td>체리 사전 예약 페이지 접속·예약 완료 시 암호화 전송</Td>
+                                    <Td>광고 성과 측정(Meta 픽셀)</Td><Td>Meta 보관 정책 및 계약 기간</Td>
+                                    <Td>브라우저 쿠키 설정·Meta 광고 설정에서 거부 가능, 거부해도 사전 예약 가능</Td>
                                 </tr>
                                 <tr>
                                     <Td>Axiom, Inc.</Td><Td>미국 US East 1</Td><Td>운영 이벤트, 내부 UUID, 오류·성능 수치, 장애 진단용 인스타그램 계정 아이디</Td>
@@ -299,6 +307,10 @@ export default function PrivacyPage() {
                         <p className="mt-2">
                             사전 예약 관리와 출시 알림·혜택 발송을 위해 이메일, 휴대폰 번호, 수신 동의 시각을 처리합니다.
                             처리 목적이 달성되면 지체 없이 파기합니다. 개인정보 수집 및 이용에 동의하지 않을 수 있으며, 동의하지 않으면 출시 알림을 신청할 수 없습니다.
+                        </p>
+                        <p className="mt-2">
+                            체리 사전 예약 페이지는 광고 성과 측정을 위해 Meta Platforms, Inc.의 Meta 픽셀을 사용합니다. 페이지 방문과 사전 예약 완료 여부, 쿠키, 기기·브라우저 정보, 접속 IP가 Meta로 전송되며, 이메일과 휴대폰 번호는 전송하지 않습니다.
+                            브라우저 쿠키 설정이나 Meta 광고 설정에서 거부할 수 있습니다.
                         </p>
                     </section>
                     <p className="mt-8 border-t border-line pt-5 text-[12px] text-fg-mute">

@@ -413,6 +413,7 @@ form.addEventListener('submit', async (event) => {
         phone: fields.get('phone'),
         consent: fields.has('consent'),
         privateAck: fields.has('private_ack'),
+        ...(['bf', 'crush'].includes(document.documentElement.dataset.variant) && { variant: document.documentElement.dataset.variant }),
       }),
       signal: AbortSignal.timeout(8_000),
     });
@@ -431,6 +432,8 @@ form.addEventListener('submit', async (event) => {
 
     reservationDone = true;
     window.dispatchEvent(new Event('cherry-reservation-completed'));
+    // Meta pixel (present only when configured): the variant, never the contact details.
+    window.fbq?.('track', 'Lead', { content_name: document.documentElement.dataset.variant ?? 'none' });
     updateDock();
     pass.classList.add('is-registered');
     for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;

@@ -10,6 +10,8 @@ const reservationSchema = z.object({
     phone: z.string().max(24),
     consent: z.literal(true),
     privateAck: z.literal(true),
+    // Meta A/B arm from the landing URL (?v=); absent for visitors who did not come from a test ad.
+    variant: z.enum(['bf', 'crush']).optional(),
 }).strict();
 
 function reply(body: object, status = 200) {
@@ -55,9 +57,14 @@ export async function POST(request: Request) {
     if (!phone) return reply({ error: 'invalid_registration' }, 400);
     if (Date.now() >= campaignClosesAt) return reply({ status: 'closed' }, 410);
 
-    const { email } = parsed.data;
+    const { email, variant } = parsed.data;
+    const reservations = () => supabaseAdmin.from('namchin_launch_reservations');
     try {
-        const { error } = await supabaseAdmin.from('namchin_launch_reservations').insert({ email, phone });
+        let { error } = await reservations().insert(variant ? { email, phone, variant } : { email, phone });
+        // Tracking must never cost a reservation: retry without the variant if its column is missing.
+        if (variant && (error?.code === 'PGRST204' || error?.code === '42703')) {
+            ({ error } = await reservations().insert({ email, phone }));
+        }
         // Keep the original consent and make retries indistinguishable from new submissions.
         if (!error || error.code === '23505') return reply({ received: true });
     } catch {
