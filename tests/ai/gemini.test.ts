@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
-import { vertexDispatchFetch } from '@/lib/services/ai/vertex-dispatch-window';
+import { vertexDispatchFetch, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
@@ -135,6 +135,7 @@ describe('analyzeWithGemini generation retry policy', () => {
     afterEach(() => {
         vi.useRealTimers();
         vi.unstubAllEnvs();
+        vi.unstubAllGlobals();
         vi.restoreAllMocks();
     });
 
@@ -333,6 +334,159 @@ describe('analyzeWithGemini generation retry policy', () => {
         }));
         expect(mocks.generateContent).toHaveBeenCalledTimes(suspension === 'audit' ? 0 : 1);
         expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0);
+    });
+
+    it('checks for a failure recorded during SDK authentication before reserving an attempt', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const audit = stageAuditOptions();
+        const fetch = vi.fn();
+        let failureRecorded = false;
+        const authorize = vi.fn(async () => !failureRecorded);
+        vi.stubGlobal('fetch', fetch);
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.generateContent.mockImplementationOnce(async () => {
+            failureRecorded = true;
+            return vertexDispatchFetch('https://vertex.invalid');
+        });
+
+        await expect(withVertexDispatchAuthorization(authorize, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        }))).rejects.toThrow('ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH');
+        expect(authorize).toHaveBeenCalledOnce();
+        expect(fetch).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(mocks.reserveDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it('defers a transient dispatch check failure without reserving or recording a rejection', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const audit = stageAuditOptions();
+        const fetch = vi.fn(async () => new Response());
+        const authorize = vi.fn().mockRejectedValueOnce(new Error('synthetic 57014')).mockResolvedValueOnce(true);
+        const reservation = { grantId: 'synthetic', reservationId: 'synthetic-reservation' };
+        vi.stubGlobal('fetch', fetch);
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        const generateWithFetch = async () => {
+            await vertexDispatchFetch('https://vertex.invalid');
+            return successfulResponse();
+        };
+        mocks.generateContent.mockImplementationOnce(generateWithFetch).mockImplementationOnce(generateWithFetch);
+        const run = () => withVertexDispatchAuthorization(authorize, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        }));
+
+        await expect(run()).rejects.toThrow('ANALYSIS_V2_AI_ATTEMPT_NOT_READY');
+        expect(fetch).not.toHaveBeenCalled();
+        expect(mocks.reserveDevAttempt).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        await expect(run()).resolves.toEqual({ value: 'ok' });
+        expect(fetch).toHaveBeenCalledOnce();
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, expect.any(Number));
+        expect(audit.onBeforeAttempt).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ attempt: 1 }));
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ attempt: 1, disposition: 'success' }), { value: 'ok' },
+        );
+    });
+
+    it.each(['cancellation', 'auth failure'])('defers SDK %s before preparing an attempt', async failure => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const audit = stageAuditOptions();
+        const fetch = vi.fn();
+        const authorize = vi.fn(async () => true);
+        vi.stubGlobal('fetch', fetch);
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.generateContent.mockImplementationOnce(async () => {
+            if (failure === 'auth failure') throw new Error('synthetic SDK auth failure');
+            return vertexDispatchFetch('https://vertex.invalid', { signal: AbortSignal.abort() });
+        });
+
+        await expect(withVertexDispatchAuthorization(authorize, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        }))).rejects.toThrow('ANALYSIS_V2_AI_ATTEMPT_NOT_READY');
+        expect(authorize).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+        expect(mocks.reserveDevAttempt).not.toHaveBeenCalled();
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+    });
+
+    it('audits and releases a prepared call if the SDK wire signal aborts during preparation', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const audit = stageAuditOptions();
+        const fetch = vi.fn();
+        const controller = new AbortController();
+        const reservation = { grantId: 'synthetic', reservationId: 'synthetic-reservation', durableAttempt: true };
+        vi.stubGlobal('fetch', fetch);
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.releaseUnusedDevAttempt.mockResolvedValueOnce(undefined);
+        audit.onBeforeAttempt.mockImplementationOnce(async () => { controller.abort(); });
+        mocks.generateContent.mockImplementationOnce(
+            () => vertexDispatchFetch('https://vertex.invalid', { signal: controller.signal }),
+        );
+
+        await expect(withVertexDispatchAuthorization(async () => true, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        }))).rejects.toThrow('ANALYSIS_V2_AI_PREDISPATCH_REJECTED');
+        expect(fetch).not.toHaveBeenCalled();
+        expect(mocks.releaseUnusedDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation);
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            disposition: 'rejected', attempt: 1,
+        }));
+    });
+
+    it('stops at the Dev budget boundary when the database has recorded a failure intent', async () => {
+        const budget = await useStagedDevBudget();
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.rpc.mockResolvedValueOnce({
+            data: null, error: { code: 'P0001', message: 'ANALYSIS_V2_VERTEX_DISPATCH_STOPPED' },
+        });
+        const audit = stageAuditOptions();
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            budgetOperationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-stage'),
+        })).rejects.toThrow('ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH');
+        expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+        expect(mocks.generateContent).not.toHaveBeenCalled();
+        expect(mocks.releaseUnusedDevAttempt).not.toHaveBeenCalled();
+        expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+    });
+
+    it('settles an authorized in-flight Dev call after a sibling failure and does not send a second SDK fetch', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        const reservation = { grantId: 'synthetic', reservationId: 'synthetic-reservation' };
+        const audit = stageAuditOptions();
+        let failureRecorded = false;
+        const fetch = vi.fn(async () => { failureRecorded = true; return new Response(); });
+        const authorize = vi.fn(async () => !failureRecorded);
+        vi.stubGlobal('fetch', fetch);
+        mocks.requireDevApproval.mockReturnValue({ id: 'synthetic' });
+        mocks.reserveDevAttempt.mockResolvedValueOnce(reservation);
+        mocks.generateContent.mockImplementationOnce(async () => {
+            await vertexDispatchFetch('https://vertex.invalid');
+            await expect(vertexDispatchFetch('https://vertex.invalid')).rejects.toThrow('VERTEX_ATTEMPT_ALREADY_SENT');
+            return successfulResponse();
+        });
+
+        await expect(withVertexDispatchAuthorization(authorize, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+        }))).resolves.toEqual({ value: 'ok' });
+        expect(authorize).toHaveBeenCalledOnce();
+        expect(fetch).toHaveBeenCalledOnce();
+        expect(mocks.releaseUnusedDevAttempt).not.toHaveBeenCalled();
+        expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, expect.any(Number));
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledWith(expect.objectContaining({ disposition: 'success' }), { value: 'ok' });
     });
 
     it('releases an approved Dev reservation at zero when audit admission rejects before dispatch', async () => {

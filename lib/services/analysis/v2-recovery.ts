@@ -55,6 +55,7 @@ import {
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
+const ORDER_AUDIT_RECOVERY_TIMEOUT_MS = 5_000;
 
 export interface AnalysisV2RecoverySummary {
     scanned: number;
@@ -270,6 +271,7 @@ export async function recoverDevLiveStandard(
         lookup?: RecoveryLookup;
         dispatch?: RecoveryDispatch;
         recoverLeases?: typeof recoverDevLiveStandardProviderAdmissions;
+        recoverOrderAudits?: OrderAuditRecovery;
     } = {},
 ) {
     let providerAdmissions: Awaited<ReturnType<typeof recoverDevLiveStandardProviderAdmissions>> | null = null;
@@ -286,6 +288,14 @@ export async function recoverDevLiveStandard(
         jobs, store, dependencies.lookup ?? lookupAnalysisV2Task,
         dependencies.dispatch ?? dispatchAnalysisV2Job, ANALYSIS_V2_RECOVERY_CONCURRENCY,
     );
+    try {
+        await boundedBestEffort(
+            dependencies.recoverOrderAudits ?? (() => recoverQueuedAnalysisOrderAudits(supabaseAdmin, 1)),
+            ORDER_AUDIT_RECOVERY_TIMEOUT_MS,
+        );
+    } catch {
+        // Audit recovery is independent of terminal status and lease cleanup.
+    }
     return { ...dispatch, providerAdmissions, failed: dispatch.failed + (providerAdmissions?.failed ?? 1) };
 }
 
@@ -566,7 +576,7 @@ export async function recoverAnalysisV2Jobs(
         await boundedBestEffort(
             dependencies.recoverOrderAudits
                 ?? (() => recoverQueuedAnalysisOrderAudits(supabaseAdmin, 5)),
-            scoreAuditTimeoutMs,
+            ORDER_AUDIT_RECOVERY_TIMEOUT_MS,
         );
     } catch {
         // Audit observability never changes analysis/provider cleanup success.

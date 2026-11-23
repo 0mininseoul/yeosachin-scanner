@@ -565,6 +565,9 @@ export function createAnalysisV2AiAttemptStore(
                     p_metadata: reservationMetadata(parsed),
                 }
             ));
+            if (error?.code === 'P0001' && error.message === 'ANALYSIS_V2_VERTEX_DISPATCH_STOPPED') {
+                throw new VertexDispatchAuthorizationError('closed');
+            }
             if (error) throwRpcError(error, 'reservation');
             if (!data || typeof data !== 'object' || Array.isArray(data)) {
                 throw new Error(
@@ -678,3 +681,4 @@ export function createAnalysisV2AiAttemptStore(
 }
 
 export const analysisV2AiAttemptStore = createAnalysisV2AiAttemptStore();
+import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';

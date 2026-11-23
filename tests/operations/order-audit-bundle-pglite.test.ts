@@ -11,6 +11,19 @@ const reverseScoreMigration = readFileSync(new URL(
     '../../supabase/migrations/20261120160000_allow_current_order_audit_reverse_score.sql',
     import.meta.url,
 ), 'utf8');
+const deferredFailureMigration = readFileSync(new URL(
+    '../../supabase/migrations/20261123211000_defer_failed_analysis_v2_order_audit.sql',
+    import.meta.url,
+), 'utf8');
+
+function readMigrationFunction(filename: string, name: string): string {
+    const sql = readFileSync(new URL(`../../supabase/migrations/${filename}`, import.meta.url), 'utf8');
+    const declaration = `CREATE OR REPLACE FUNCTION public.${name}(`;
+    const start = sql.indexOf(declaration);
+    const end = sql.indexOf('\n$$;', start);
+    if (start < 0 || end < 0) throw new Error(`Missing SQL fixture for ${name}`);
+    return sql.slice(start, end + '\n$$;'.length);
+}
 
 const REQUEST_ID = '80000000-0000-4000-8000-000000000001';
 const PREVIOUS_REQUEST_ID = '80000000-0000-4000-8000-000000000002';
@@ -54,7 +67,14 @@ CREATE TABLE public.analysis_requests (
     status TEXT NOT NULL,
     policy_versions_snapshot JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    background_processing BOOLEAN,
+    progress_step TEXT,
+    current_step TEXT,
+    error_message TEXT,
+    target_instagram_id TEXT,
+    exclusion_decision_snapshot TEXT,
+    excluded_instagram_id TEXT
 );
 CREATE TABLE public.analysis_preflights (
     id UUID PRIMARY KEY,
@@ -64,7 +84,44 @@ CREATE TABLE public.analysis_preflights (
     target_instagram_id TEXT,
     target_profile_image_url TEXT,
     target_followers_count INTEGER,
-    target_following_count INTEGER
+    target_following_count INTEGER,
+    target_full_name TEXT,
+    target_bio TEXT,
+    exclusion_decision TEXT,
+    excluded_instagram_id TEXT,
+    pii_scrubbed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
+);
+CREATE TABLE public.analysis_pipeline_jobs (
+    request_id UUID NOT NULL,
+    job_key TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    lease_token UUID,
+    lease_expires_at TIMESTAMPTZ,
+    last_error_code TEXT,
+    last_error_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    PRIMARY KEY (request_id, job_key)
+);
+CREATE TABLE public.analysis_v2_provider_cleanup_intents (
+    request_id UUID PRIMARY KEY,
+    failed_job_key TEXT NOT NULL,
+    failed_job_input_hash TEXT NOT NULL,
+    failed_claim_token UUID NOT NULL,
+    error_code TEXT NOT NULL,
+    completed_at TIMESTAMPTZ
+);
+CREATE TABLE public.analysis_v2_provider_runs (
+    request_id UUID NOT NULL,
+    status TEXT NOT NULL,
+    reservation_token UUID NOT NULL
+);
+CREATE TABLE public.analysis_v2_unconfirmed_start_resolutions (reservation_token UUID PRIMARY KEY);
+CREATE TABLE public.analysis_progress_state (
+    request_id UUID PRIMARY KEY,
+    status TEXT
 );
 CREATE TABLE public.earlybird_orders (
     id UUID PRIMARY KEY,
@@ -501,6 +558,15 @@ describe('permanent order audit bundle SQL behavior', () => {
         `, [ORDER_ID, REQUEST_ID]);
         await db.exec(migration);
         await db.exec(reverseScoreMigration);
+        await db.exec(readMigrationFunction(
+            '20260713185711_add_analysis_v2_result_finalization.sql',
+            'analysis_v2_scrub_terminal_request_pii',
+        ));
+        await db.exec(readMigrationFunction(
+            '20260714031500_harden_analysis_v2_terminal_invariants.sql',
+            'fail_analysis_v2_request_from_job',
+        ));
+        await db.exec(deferredFailureMigration);
     });
 
     afterAll(async () => {
@@ -1557,6 +1623,113 @@ describe('permanent order audit bundle SQL behavior', () => {
         expect(purged.rows[0]?.count).toBe('0');
         expect(completedFence.rows[0]?.purged_at).toBeTruthy();
         expect(completedFence.rows[0]?.purge_fenced_at).toBeNull();
+    });
+
+    it('commits fenced job failure before audit assembly and purges only after recovery', async () => {
+        const requestId = '80000000-0000-4000-8000-000000000018';
+        const preflightId = '81000000-0000-4000-8000-000000000018';
+        const claimToken = '83000000-0000-4000-8000-000000000018';
+        const failedJobKey = 'profile-ai:0';
+        const errorCode = 'ANALYSIS_V2_JOB_HANDLER_FAILED';
+        await db.query(`
+            INSERT INTO public.analysis_preflights(
+                id, consumed_request_id, status, target_instagram_id, target_full_name
+            ) VALUES ($1, $2, 'consumed', 'fixture.audit.failure', 'Synthetic')
+        `, [preflightId, requestId]);
+        await db.query(`
+            INSERT INTO public.analysis_requests(
+                id, preflight_id, status, selected_plan_id_snapshot, plan_access_mode_snapshot,
+                policy_versions_snapshot, created_at, background_processing, target_instagram_id
+            ) VALUES ($1, $2, 'processing', 'standard', 'production', '{}'::jsonb, $3, TRUE, 'fixture.audit.failure')
+        `, [requestId, preflightId, NOW]);
+        await db.query(`
+            INSERT INTO public.analysis_pipeline_jobs(
+                request_id, job_key, input_hash, status, lease_token, lease_expires_at
+            ) VALUES ($1, $2, $3, 'processing', $4, clock_timestamp() + INTERVAL '1 hour'),
+                     ($1, 'profile-ai:1', $3, 'pending', NULL, NULL)
+        `, [requestId, failedJobKey, HASH_A, claimToken]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_cleanup_intents(
+                request_id, failed_job_key, failed_job_input_hash, failed_claim_token, error_code
+            ) VALUES ($1, $2, $3, $4, $5)
+        `, [requestId, failedJobKey, HASH_A, claimToken, errorCode]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_result_summaries(request_id, target_instagram_id, plan_id)
+            VALUES ($1, 'fixture.audit.failure', 'standard')
+        `, [requestId]);
+
+        await db.exec(`
+            CREATE FUNCTION public.test_interrupt_failed_audit_assembly() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.target_instagram_id = 'fixture.audit.failure' THEN
+                    RAISE EXCEPTION USING ERRCODE = '57014', MESSAGE = 'synthetic audit timeout';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER test_interrupt_failed_audit_assembly
+            BEFORE INSERT ON public.analysis_order_audit_bundles
+            FOR EACH ROW EXECUTE FUNCTION public.test_interrupt_failed_audit_assembly();
+        `);
+        try {
+            await db.query('SELECT public.fail_analysis_v2_request_from_job($1, $2, $3)', [
+                requestId, failedJobKey, errorCode,
+            ]);
+            await expect(db.query(
+                'SELECT public.assemble_analysis_order_audit_bundle($1)', [requestId],
+            )).rejects.toMatchObject({ code: '57014' });
+        } finally {
+            await db.exec(`
+                DROP TRIGGER test_interrupt_failed_audit_assembly ON public.analysis_order_audit_bundles;
+                DROP FUNCTION public.test_interrupt_failed_audit_assembly();
+            `);
+        }
+
+        const readFailure = () => db.query(`
+            SELECT request.status, request.error_message, preflight.pii_scrubbed_at,
+                   queue.status AS audit_status, queue.purge_fence_reason,
+                   queue.purged_at IS NOT NULL AS purged,
+                   EXISTS (SELECT 1 FROM public.analysis_v2_result_summaries WHERE request_id = request.id) AS working_set,
+                   EXISTS (SELECT 1 FROM public.analysis_order_audit_bundles WHERE request_id = request.id) AS audited
+            FROM public.analysis_requests AS request
+            JOIN public.analysis_preflights AS preflight ON preflight.id = request.preflight_id
+            JOIN public.analysis_order_audit_assembly_queue AS queue ON queue.request_id = request.id
+            WHERE request.id = $1
+        `, [requestId]);
+        expect((await readFailure()).rows[0]).toEqual({
+            status: 'failed', error_message: errorCode, pii_scrubbed_at: null,
+            audit_status: 'queued', purge_fence_reason: 'ANALYSIS_ORDER_AUDIT_FAILURE_DEFERRED',
+            purged: false, working_set: true, audited: false,
+        });
+        const jobs = await db.query(`
+            SELECT status, lease_token FROM public.analysis_pipeline_jobs
+            WHERE request_id = $1 ORDER BY job_key
+        `, [requestId]);
+        expect(jobs.rows).toEqual([
+            { status: 'failed', lease_token: null }, { status: 'cancelled', lease_token: null },
+        ]);
+
+        const recovery = await db.query<{ item: { requestId: string } }>(
+            'SELECT public.list_analysis_order_audit_bundle_recovery(50) AS item',
+        );
+        expect(recovery.rows.map(({ item }) => item.requestId)).toContain(requestId);
+        const claim = await db.query<{ claim: { attemptCount: number } }>(
+            'SELECT public.claim_analysis_order_audit_bundle($1) AS claim', [requestId],
+        );
+        expect(claim.rows[0]?.claim.attemptCount).toBe(1);
+        await db.query('SELECT public.assemble_analysis_order_audit_bundle($1)', [requestId]);
+
+        expect((await readFailure()).rows[0]).toMatchObject({
+            status: 'failed', error_message: errorCode, pii_scrubbed_at: expect.any(Date),
+            audit_status: 'completed', purge_fence_reason: null,
+            purged: true, working_set: false, audited: true,
+        });
+        const audit = await db.query(`
+            SELECT target_instagram_id, stage_status->>'finalized' AS finalized
+            FROM public.analysis_order_audit_bundles WHERE request_id = $1
+        `, [requestId]);
+        expect(audit.rows).toEqual([{ target_instagram_id: 'fixture.audit.failure', finalized: 'true' }]);
     });
 
     it('keeps the active queued final-score checkpoint while purging other scoring checkpoints', async () => {

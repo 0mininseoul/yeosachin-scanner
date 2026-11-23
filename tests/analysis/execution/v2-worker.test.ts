@@ -19,6 +19,7 @@ import {
 } from '../../../lib/services/analysis/v2-dag-planner';
 import type { AnalysisV2DagStateStore } from '../../../lib/services/analysis/v2-dag-state-store';
 import type { AnalysisV2ProgressReporter } from '../../../lib/services/analysis/v2-progress-reporter';
+import { createAnalysisV2ProgressHeartbeat } from '../../../lib/services/analysis/v2-progress-heartbeat';
 import type {
     AnalysisV2JobStore,
     ClaimedAnalysisV2Job,
@@ -1291,6 +1292,121 @@ describe('analysis V2 durable DAG worker', () => {
         });
         expect(vi.mocked(dagStore.checkpointManifest).mock.invocationCallOrder[0])
             .toBeLessThan(vi.mocked(progress.report).mock.invocationCallOrder[1]!);
+    });
+
+    it('coalesces a 60-signal profile batch to three writes and flushes the newest preview before checkpointing', async () => {
+        vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+        try {
+            const initial: AnalysisV2DagState = { ...baseState(), relationships: relationshipManifest() };
+            const claim = claimFor(initial, 'track:profiles:batch:0');
+            const manifest = {
+                batch: 0,
+                itemCount: 30,
+                producerInputHash: claim.inputHash,
+                revision: 1,
+                resultHash: digest('coalesced-profile-heartbeat'),
+            };
+            const completed = { ...initial, profileFetchBatches: [manifest] };
+            let state = initial;
+            const dagStore = stateStore(initial, {
+                load: vi.fn(async () => state),
+                checkpointManifest: vi.fn(async () => {
+                    state = completed;
+                    return state;
+                }),
+            });
+            const progress = progressReporter();
+            const heartbeat = vi.fn<NonNullable<AnalysisV2ProgressReporter['heartbeat']>>().mockResolvedValue(true);
+            progress.heartbeat = heartbeat;
+            const executor: NonNullable<AnalysisV2StageExecutorRegistry['profile_fetch']> = async context => {
+                const report = (ordinal: number, callPhase: 'fetching' | 'persisting') =>
+                    context.reportActiveProfile!(
+                        `candidate.${ordinal}`,
+                        callPhase === 'persisting' ? { feedImageUrls: [`https://example.test/${ordinal}.jpg`] } : undefined,
+                        { currentOrdinal: ordinal, totalCount: 30, callPhase },
+                    );
+                for (let ordinal = 1; ordinal <= 20; ordinal++) {
+                    await report(ordinal, 'fetching');
+                    await report(ordinal, 'persisting');
+                }
+                expect(heartbeat).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+                    username: 'candidate.1', currentOrdinal: 1, callPhase: 'fetching',
+                }));
+                await vi.advanceTimersByTimeAsync(999);
+                expect(heartbeat).toHaveBeenCalledOnce();
+                await vi.advanceTimersByTimeAsync(1);
+                expect(heartbeat).toHaveBeenNthCalledWith(2, expect.objectContaining({
+                    username: 'candidate.20', currentOrdinal: 20, callPhase: 'persisting',
+                    preview: { feedImageUrls: ['https://example.test/20.jpg'] },
+                }));
+
+                // Same preview and out-of-order lower ordinals do not refresh the projected timestamp.
+                await report(20, 'persisting');
+                await report(19, 'persisting');
+                await vi.advanceTimersByTimeAsync(100);
+                for (let ordinal = 21; ordinal <= 30; ordinal++) {
+                    await report(ordinal, 'fetching');
+                    await report(ordinal, 'persisting');
+                }
+                expect(heartbeat).toHaveBeenCalledTimes(2);
+                return { checkpoint: { kind: 'profile_fetch_batch', manifest } };
+            };
+
+            await executeAnalysisV2DagJob(claim, {
+                stateStore: dagStore,
+                executors: { profile_fetch: executor },
+                progressReporter: progress,
+            });
+            expect(heartbeat).toHaveBeenCalledTimes(3);
+            expect(heartbeat).toHaveBeenNthCalledWith(3, expect.objectContaining({
+                username: 'candidate.30', currentOrdinal: 30, callPhase: 'persisting',
+                preview: { feedImageUrls: ['https://example.test/30.jpg'] },
+            }));
+            expect(heartbeat.mock.invocationCallOrder[2])
+                .toBeLessThan(vi.mocked(dagStore.checkpointManifest).mock.invocationCallOrder[0]!);
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(heartbeat).toHaveBeenCalledTimes(3);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('serializes writes and drops the buffered preview after a failed stage', async () => {
+        vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+        try {
+            let releaseFirstWrite!: (written: boolean) => void;
+            const persist = vi.fn()
+                .mockImplementationOnce(() => new Promise<boolean>(resolve => { releaseFirstWrite = resolve; }))
+                .mockResolvedValue(true);
+            const heartbeat = createAnalysisV2ProgressHeartbeat(persist);
+            const first = heartbeat.report({ username: 'one', currentOrdinal: 1, callPhase: 'analyzing' });
+            await heartbeat.report({ username: 'two', currentOrdinal: 2, callPhase: 'analyzing' });
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(persist).toHaveBeenCalledOnce();
+            heartbeat.discard();
+            releaseFirstWrite(true);
+            await first;
+            await vi.advanceTimersByTimeAsync(2_000);
+            expect(persist).toHaveBeenCalledOnce();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('surfaces a fenced trailing heartbeat on flush without an extra write', async () => {
+        vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+        try {
+            const error = new Error('ANALYSIS_V2_PROGRESS_FENCE_MISMATCH');
+            const persist = vi.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(error);
+            const heartbeat = createAnalysisV2ProgressHeartbeat(persist);
+            await heartbeat.report({ username: 'one', currentOrdinal: 1, callPhase: 'analyzing' });
+            await heartbeat.report({ username: 'two', currentOrdinal: 2, callPhase: 'analyzing' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            await expect(heartbeat.flush()).rejects.toBe(error);
+            expect(persist).toHaveBeenCalledTimes(2);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     it('accepts one profile-AI preview callback without adding a heartbeat', async () => {
