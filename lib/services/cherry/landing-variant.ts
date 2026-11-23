@@ -43,15 +43,8 @@ export function renderCherryLanding(
     options: { variant: CherryVariant | null; pixelId: string | null },
 ): string {
     const { variant, pixelId } = options;
-    let page = html;
-    if (variant) {
-        // Both ad cohorts use the same single-audience copy. The organic page covers both queries.
-        page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`)
-            .replace('남친맞팔알리미·짝남맞팔알리미', '남친맞팔알리미')
-            .replace('남친이나 짝남의', '남친의')
-            .replace('짝남맞팔알리미로도 쓸 수 있나요?', '다른 사람의 계정도 등록할 수 있나요?');
-        if (variant === 'crush') page = page.replace(crushPattern, (match) => crushTargets.get(match) ?? match);
-    }
+    let page = variant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
+    if (variant) page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`);
     // Only digits reach the inline script, so a malformed env value cannot inject markup.
     if (pixelId && /^\d{5,20}$/.test(pixelId)) {
         page = page.replace('<meta charset="utf-8">', `<meta charset="utf-8">\n    ${metaPixel(pixelId)}`);

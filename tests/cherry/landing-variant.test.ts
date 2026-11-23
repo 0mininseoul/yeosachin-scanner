@@ -39,18 +39,12 @@ describe('cherry landing variant', () => {
 
     it('default output is untouched', () => {
         expect(renderCherryLanding(landing, { variant: null, pixelId: null })).toBe(landing);
-    });
-
-    it.each([['bf', '남친'], ['crush', '짝남']] as const)('keeps the %s ad focused on its audience', (variant, target) => {
-        const html = renderCherryLanding(landing, { variant, pixelId: null });
-        expect(html).toContain(`<html lang="ko" data-variant="${variant}">`);
-        expect(html).toContain(`<title>체리 | 인스타 ${target}맞팔알리미</title>`);
-        expect(html).toContain(`${target}의 맞팔을 어떻게 확인하는지`);
-        expect(html).toContain('다른 사람의 계정도 등록할 수 있나요?');
+        expect(renderCherryLanding(landing, { variant: 'bf', pixelId: null }))
+            .toBe(landing.replace('<html lang="ko">', '<html lang="ko" data-variant="bf">'));
     });
 
     it.each(['', '?v=bf&utm_source=meta', '?v=crush', '?utm_source=chatgpt.com'])(
-        'serves an indexable canonical with the service and answers in the initial HTML: %s',
+        'serves the reservation copy and search metadata in the initial HTML: %s',
         async (query) => {
             const { GET } = await import('@/app/cherry/route');
             const url = 'https://yeosachin.com/cherry';
@@ -60,11 +54,12 @@ describe('cherry landing variant', () => {
             expect(html).toContain(`<link rel="canonical" href="${url}">`);
             const schema = JSON.parse(html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1] ?? '');
             expect(schema.mainEntity).toMatchObject({ '@type': 'Service', name: '체리', url });
-            expect(html).toContain('체리는 매일 팔로워와 팔로잉 수를 확인해요.');
-            if (query === '') {
-                expect(html).toContain('체리 | 인스타 남친맞팔알리미·짝남맞팔알리미');
-                expect(html).toContain('짝남맞팔알리미로도 쓸 수 있나요?');
-            }
+            const target = query === '?v=crush' ? '짝남' : '남친';
+            expect(html).toContain(`<title>체리 · ${target} 맞팔 알리미 | 사전 예약</title>`);
+            expect(html).toContain(`${target}이 맞팔하자마자 누군지 카톡으로 알려드려요.`);
+            expect(html).toContain(`property="og:title" content="${target} 맞팔 알리미 체리 사전예약 (선착순 300명)"`);
+            expect(html.match(/<details>/g)).toHaveLength(5);
+            expect(html).not.toContain('<details open>');
         },
     );
 
