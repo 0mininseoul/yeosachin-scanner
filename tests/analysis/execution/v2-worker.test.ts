@@ -1717,6 +1717,80 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
     });
 
+    it('logs the original executor boundary before terminal cleanup throws in Dev', async () => {
+        vi.stubEnv('DEPLOYMENT_ROLE', 'dev');
+        const initial = baseState();
+        const claim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY, { attemptCount: 2 });
+        const jobStore = store(claim);
+        const write = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        const cleanupError = new Error('temporary cleanup failure');
+        const terminalFailureFinalizer = vi.fn(async () => {
+            expect(write).toHaveBeenCalledOnce();
+            throw cleanupError;
+        });
+        try {
+            await expect(processAnalysisV2TaskDelivery({ ...delivery, jobKey: claim.jobKey }, {
+                store: jobStore,
+                stateStore: stateStore(initial),
+                executors: {
+                    relationships: async () => {
+                        throw new TypeError('secret-fixture-marker');
+                    },
+                },
+                terminalFailureFinalizer,
+            })).rejects.toBe(cleanupError);
+            const [json] = write.mock.calls[0]!;
+            expect(json).not.toContain('secret-fixture-marker');
+            expect(JSON.parse(json)).toMatchObject({
+                event: 'analysis_v2.worker_executor_failed',
+                job_key: claim.jobKey,
+                attempt: 2,
+                phase: 'stage_execute',
+                disposition: 'permanent',
+                error_name: 'TypeError',
+                error_code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            });
+        } finally {
+            write.mockRestore();
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it('keeps the trusted DB or Vertex cause at the last worker attempt without logging raw details', async () => {
+        const write = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        // A rejected delivery can fail before validating its key against the DAG.
+        const claim = {
+            ...bootstrapClaim,
+            jobKey: 'track:profile-ai:batch:private-marker',
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        try {
+            for (const [error, expected] of [
+                [new Error('ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: terminalize failed (57014).'), { database_code: '57014' }],
+                [new Error('AI_RATE_LIMIT_ERROR: secret-fixture-marker'), { status: 429, provider: 'gemini' }],
+            ] as const) {
+                await expect(processAnalysisV2TaskDelivery({ ...delivery, jobKey: claim.jobKey }, {
+                    store: store(claim),
+                    handler: async () => { throw error; },
+                    terminalFailureFinalizer: async () => undefined,
+                    terminalMediaCleanup: async () => undefined,
+                })).resolves.toEqual({ status: 'failed', errorCode: 'JOB_ATTEMPTS_EXHAUSTED' });
+                const [json] = write.mock.calls.at(-1)!;
+                expect(json).not.toContain('secret-fixture-marker');
+                expect(JSON.parse(json)).not.toHaveProperty('job_key');
+                expect(JSON.parse(json)).toMatchObject({
+                    event: 'analysis_v2.worker_executor_failed',
+                    phase: 'handler',
+                    attempt: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+                    disposition: 'transient',
+                    ...expected,
+                });
+            }
+        } finally {
+            write.mockRestore();
+        }
+    });
+
     it('acknowledges a lost stage fence without terminalizing through a stale claim', async () => {
         const jobStore = store(bootstrapClaim);
         const terminalFailureFinalizer = vi.fn(async () => undefined);
