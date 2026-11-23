@@ -29,12 +29,24 @@ const crushPattern = new RegExp(
     'g',
 );
 
+/**
+ * Meta's base pixel code. autoConfig is off so the pixel never reads the form's email and phone
+ * fields on its own (automatic advanced matching must also be off in Events Manager).
+ */
+function metaPixel(pixelId: string): string {
+    return `<script>!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');fbq('set','autoConfig',false,'${pixelId}');fbq('init','${pixelId}');fbq('track','PageView');</script>`;
+}
+
 export function renderCherryLanding(
     html: string,
     options: { variant: CherryVariant | null; pixelId: string | null },
 ): string {
-    const { variant } = options;
-    if (!variant) return html;
-    const copy = variant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
-    return copy.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`);
+    const { variant, pixelId } = options;
+    let page = variant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
+    if (variant) page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`);
+    // Only digits reach the inline script, so a malformed env value cannot inject markup.
+    if (pixelId && /^\d{5,20}$/.test(pixelId)) {
+        page = page.replace('<meta charset="utf-8">', `<meta charset="utf-8">\n    ${metaPixel(pixelId)}`);
+    }
+    return page;
 }

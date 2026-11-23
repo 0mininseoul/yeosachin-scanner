@@ -424,6 +424,8 @@ form.addEventListener('submit', async (event) => {
 
     reservationDone = true;
     window.dispatchEvent(new Event('cherry-reservation-completed'));
+    // Meta pixel (present only when configured): the variant, never the contact details.
+    window.fbq?.('track', 'Lead', { content_name: document.documentElement.dataset.variant ?? 'none' });
     updateDock();
     pass.classList.add('is-registered');
     for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;

@@ -9,7 +9,7 @@ const landing = readFile(path.join(process.cwd(), 'public/cherry/landing.html'),
 export async function GET(request: NextRequest) {
     const html = renderCherryLanding(await landing, {
         variant: parseCherryVariant(request.nextUrl.searchParams.get('v')),
-        pixelId: null,
+        pixelId: process.env.CHERRY_META_PIXEL_ID?.trim() || null,
     });
     return new Response(html, {
         headers: {

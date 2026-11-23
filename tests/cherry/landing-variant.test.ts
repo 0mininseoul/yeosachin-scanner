@@ -46,6 +46,22 @@ describe('cherry landing variant', () => {
         expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
     });
 
+    it('injects pixel with autoConfig off', () => {
+        const html = renderCherryLanding(landing, { variant: null, pixelId: '1234567890' });
+        expect(html).toContain('connect.facebook.net/en_US/fbevents.js');
+        const autoConfig = html.indexOf("fbq('set','autoConfig',false,'1234567890')");
+        expect(autoConfig).toBeGreaterThan(-1);
+        expect(autoConfig).toBeLessThan(html.indexOf("fbq('init','1234567890')"));
+        expect(html).toContain("fbq('track','PageView')");
+        expect(html.indexOf('fbevents.js')).toBeLessThan(html.indexOf('<title>'));
+    });
+
+    it('ignores unsafe pixel ids', () => {
+        for (const pixelId of ['123 456', "1');alert(1);//", '', '12ab', '1234']) {
+            expect(renderCherryLanding(landing, { variant: 'crush', pixelId })).not.toContain('fbevents');
+        }
+    });
+
     it('ships the crush share image', () => {
         expect(readFileSync(path.join(process.cwd(), 'public/cherry/og-crush.jpg')).length).toBeGreaterThan(10_000);
     });
