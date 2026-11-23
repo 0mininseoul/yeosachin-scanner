@@ -46,6 +46,17 @@ const microbatchLineageMigration = readFileSync(
     ),
     'utf8'
 );
+const aiResultSource = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260713173056_add_analysis_v2_ai_result_checkpoint_cache.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+const repairedFeatureLineageUrl = new URL(
+    '../../../supabase/migrations/20261124035000_accept_deterministic_feature_repair_lineage.sql',
+    import.meta.url
+);
 
 function functionDefinition(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -161,6 +172,7 @@ CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
 
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
+    pipeline_version TEXT NOT NULL DEFAULT 'v2',
     target_instagram_id TEXT NOT NULL,
     excluded_instagram_id TEXT,
     policy_versions_snapshot JSONB
@@ -212,7 +224,10 @@ CREATE TABLE public.analysis_v2_ai_attempts (
     job_key TEXT NOT NULL,
     operation_key TEXT NOT NULL,
     stage TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    finish_reason TEXT,
+    terminalized_at TIMESTAMP WITH TIME ZONE,
+    estimated_cost_usd NUMERIC
 );
 CREATE TABLE public.analysis_v2_scheduler_operations (
     request_id UUID NOT NULL,
@@ -220,7 +235,8 @@ CREATE TABLE public.analysis_v2_scheduler_operations (
     operation_key TEXT NOT NULL,
     stage TEXT NOT NULL,
     status TEXT NOT NULL,
-    result_json JSONB
+    result_json JSONB,
+    completed_at TIMESTAMP WITH TIME ZONE
 );
 CREATE TABLE public.analysis_v2_media_artifacts (
     request_id UUID NOT NULL,
@@ -335,11 +351,14 @@ ALTER TABLE public.analysis_v2_candidate_feature_rows
 ${femaleResultTable}
 `;
 
+type CandidatePolicyVersion = 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9'
+    | 'ai-stage-policy-v2.10' | 'ai-stage-policy-v2.11';
+
 interface CandidateOptions {
     includeFemaleBundle?: boolean;
     includeNonFemaleBundle?: boolean;
     includeNonFemaleFeatureCheckpoint?: boolean;
-    policyVersion?: 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10';
+    policyVersion?: CandidatePolicyVersion;
 }
 
 function mediaContext(bundleId: string) {
@@ -393,12 +412,13 @@ function candidateRows(input: {
 }
 
 let db: PGlite;
+let originalCandidateLineageDefinition: string;
 
 async function seedJob(input: {
     jobKey: string;
     track: string;
     kind: string;
-    policyVersion?: 'ai-stage-policy-v2.8' | 'ai-stage-policy-v2.9' | 'ai-stage-policy-v2.10';
+    policyVersion?: CandidatePolicyVersion;
 }): Promise<void> {
     await db.query(
         `INSERT INTO public.analysis_requests (
@@ -498,13 +518,76 @@ async function seedCandidateBatch(options: CandidateOptions = {}): Promise<void>
     if (includeNonFemaleBundle) await insertMediaBundle(NON_FEMALE_BUNDLE_ID);
 }
 
-async function checkpointCandidates(rows: unknown = candidateRows()) {
-    return db.query(
+async function checkpointCandidates(
+    rows: unknown = candidateRows(),
+    client: Pick<PGlite, 'query'> = db,
+) {
+    return client.query(
         `SELECT public.checkpoint_analysis_v2_candidate_features(
             $1, 'track:profile-ai:batch:0', $2, $3, 0, 2, $4::JSONB
          )`,
         [REQUEST_ID, CLAIM_TOKEN, JOB_INPUT_HASH, JSON.stringify(rows)]
     );
+}
+
+async function seedRepairedFeatureBatch() {
+    await seedCandidateBatch({ policyVersion: 'ai-stage-policy-v2.11' });
+    const rows = candidateRows();
+    const feature = rows[0]!;
+    const repairedFeatures = {
+        gender: 'female',
+        genderConfidence: 'high',
+        ownerConsistency: 'same_person',
+        appearanceGrade: 4,
+        exposureScore: 2,
+        businessClassification: 'personal',
+        businessConfidence: 'high',
+        accountContext: 'personal',
+        marriageEvidence: 'none',
+        partnerEvidence: 'none',
+        partnerExclusionContext: 'none',
+        evidenceSelectionIds: {
+            gender: ['selection-1'],
+            appearance: ['selection-1'],
+            exposure: ['selection-1'],
+            business: ['selection-1'],
+            accountContext: ['selection-1'],
+            marriagePartner: [],
+        },
+        oneLineOverview: '여행 사진을 날짜순으로 정리해 기록하고 있습니다.',
+    };
+    feature.featureResultHash = aiContentHash(repairedFeatures);
+    feature.feature!.oneLineOverview = repairedFeatures.oneLineOverview;
+    await db.query(
+        `DELETE FROM public.analysis_v2_ai_result_checkpoints
+         WHERE request_id = $1 AND operation_key = $2`,
+        [REQUEST_ID, FEMALE_FEATURE_OPERATION],
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_ai_attempts (
+            request_id, job_key, operation_key, stage, status, finish_reason,
+            terminalized_at, estimated_cost_usd
+         ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'featureAnalysis', 'response_rejected',
+            'STOP', CURRENT_TIMESTAMP - INTERVAL '2 seconds', 0.123456)`,
+        [REQUEST_ID, FEMALE_FEATURE_OPERATION],
+    );
+    await db.query(
+        `INSERT INTO public.analysis_v2_scheduler_operations (
+            request_id, job_key, operation_key, stage, status, result_json, completed_at
+         ) VALUES ($1, 'track:profile-ai:batch:0', $2, 'featureAnalysis', 'ready', $3::JSONB,
+            CURRENT_TIMESTAMP - INTERVAL '1 second')`,
+        [REQUEST_ID, FEMALE_FEATURE_OPERATION, JSON.stringify({
+            operationKey: FEMALE_FEATURE_OPERATION,
+            resultHash: feature.featureResultHash,
+            source: 'checkpoint',
+            result: {
+                features: repairedFeatures,
+                finalGenderDecision: 'verified_female',
+                analyzedSelectionIds: ['selection-1'],
+            },
+        })],
+    );
+    return rows;
 }
 
 function preFeatureSkipRows(
@@ -663,6 +746,16 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         `);
         if (preFeatureContractMigration) await db.exec(preFeatureContractMigration);
         await db.exec(microbatchLineageMigration);
+        await db.exec(functionDefinition(aiResultSource, 'analysis_v2_valid_ai_result_json'));
+        await db.exec(functionDefinition(aiResultSource, 'analysis_v2_valid_ai_result_envelope'));
+        const original = await db.query<{ definition: string }>(`
+            SELECT pg_catalog.pg_get_functiondef(
+                'public.analysis_v2_checkpoint_candidate_features_complete_v26(uuid,text,uuid,text,integer,integer,jsonb)'
+                    ::pg_catalog.regprocedure
+            ) AS definition
+        `);
+        originalCandidateLineageDefinition = original.rows[0]!.definition;
+        await db.exec(readFileSync(repairedFeatureLineageUrl, 'utf8'));
     }, 30_000);
 
     beforeEach(async () => {
@@ -891,6 +984,95 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         await seedCandidateBatch({ includeNonFemaleFeatureCheckpoint: false });
 
         await expect(checkpointCandidates()).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+    });
+
+    it('checkpoints an exact v2.11 feature repair after the original provider response was rejected', async () => {
+        const rows = await seedRepairedFeatureBatch();
+        const providerEvidence = `
+            SELECT
+                (SELECT to_jsonb(attempt) FROM public.analysis_v2_ai_attempts attempt
+                 WHERE attempt.request_id = $1 AND attempt.operation_key = $2) AS attempt,
+                (SELECT to_jsonb(operation) FROM public.analysis_v2_scheduler_operations operation
+                 WHERE operation.request_id = $1 AND operation.operation_key = $2) AS operation,
+                (SELECT count(*)::integer FROM public.analysis_v2_ai_result_checkpoints checkpoint
+                 WHERE checkpoint.request_id = $1 AND checkpoint.operation_key = $2) AS ai_checkpoints
+        `;
+        const params = [REQUEST_ID, FEMALE_FEATURE_OPERATION];
+        const before = await db.query(providerEvidence, params);
+        expect(before.rows[0]).toMatchObject({
+            attempt: { status: 'response_rejected', finish_reason: 'STOP', estimated_cost_usd: 0.123456 },
+            operation: { status: 'ready' },
+            ai_checkpoints: 0,
+        });
+
+        await expect(db.transaction(async transaction => {
+            await transaction.exec(originalCandidateLineageDefinition);
+            return checkpointCandidates(rows, transaction);
+        })).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+        await expectNoCandidateCheckpointArtifacts();
+
+        const first = await checkpointCandidates(rows);
+        await expect(checkpointCandidates(rows)).resolves.toMatchObject({ rows: first.rows });
+        await expect(db.query(`
+            SELECT terminal_classification, feature_operation_key, feature_result_hash, one_line_overview
+            FROM public.analysis_v2_candidate_feature_rows
+            WHERE request_id = $1 AND candidate_id = 'candidate:female'
+        `, [REQUEST_ID])).resolves.toMatchObject({ rows: [{
+            terminal_classification: 'verified_female',
+            feature_operation_key: FEMALE_FEATURE_OPERATION,
+            feature_result_hash: rows[0]!.featureResultHash,
+            one_line_overview: rows[0]!.feature!.oneLineOverview,
+        }] });
+        await expect(db.query(providerEvidence, params)).resolves.toMatchObject({ rows: before.rows });
+    });
+
+    it.each([
+        ['a scheduler row from a different request', `
+            UPDATE public.analysis_v2_scheduler_operations
+            SET request_id = '33333333-3333-4333-8333-333333333333'
+        `],
+        ['a scheduler row from a different job', `
+            UPDATE public.analysis_v2_scheduler_operations SET job_key = 'track:profile-ai:batch:1'
+        `],
+        ['an envelope from a different operation', `
+            UPDATE public.analysis_v2_scheduler_operations
+            SET result_json = jsonb_set(result_json, '{operationKey}', to_jsonb('feature-analysis:' || repeat('7', 64)))
+        `],
+        ['an incorrect advertised hash', `
+            UPDATE public.analysis_v2_scheduler_operations
+            SET result_json = jsonb_set(result_json, '{resultHash}', to_jsonb(repeat('2', 64)))
+        `],
+        ['modified features under the original hash', `
+            UPDATE public.analysis_v2_scheduler_operations
+            SET result_json = jsonb_set(result_json, '{result,features,exposureScore}', '5'::JSONB)
+        `],
+        ['no rejected provider attempt', `
+            DELETE FROM public.analysis_v2_ai_attempts
+        `],
+        ['a rejection without a STOP finish reason', `
+            UPDATE public.analysis_v2_ai_attempts SET finish_reason = 'MAX_TOKENS'
+        `],
+        ['a rejection without confirmed terminalization', `
+            UPDATE public.analysis_v2_ai_attempts SET terminalized_at = NULL
+        `],
+        ['an audit record terminalized after the scheduler envelope', `
+            UPDATE public.analysis_v2_ai_attempts SET terminalized_at = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+        `],
+        ['an analysis outside the v2.11 repair policy', `
+            UPDATE public.analysis_requests
+            SET policy_versions_snapshot = jsonb_set(
+                policy_versions_snapshot, '{aiStage}', '"ai-stage-policy-v2.10"'::JSONB
+            )
+        `],
+        ['a missing media bundle', `
+            DELETE FROM public.analysis_v2_media_artifacts
+        `],
+    ] as const)('keeps the feature lineage gate closed for %s', async (_reason, mutateFixture) => {
+        const rows = await seedRepairedFeatureBatch();
+        await db.exec(mutateFixture);
+
+        await expect(checkpointCandidates(rows)).rejects.toThrow(/ANALYSIS_V2_RESULT_NOT_READY/);
+        await expectNoCandidateCheckpointArtifacts();
     });
 
     it.each([
