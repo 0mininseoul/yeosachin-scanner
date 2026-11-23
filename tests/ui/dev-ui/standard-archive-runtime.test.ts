@@ -8,7 +8,11 @@ import {
     withVerifiedDevStandardArchive,
 } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
-import { devLiveStandardNeedsArchive, type DevLiveApproval } from '@/lib/services/dev-ui/live-approval';
+import {
+    devLiveStandardNeedsArchive,
+    devLiveStandardReplayConfiguration,
+    type DevLiveApproval,
+} from '@/lib/services/dev-ui/live-approval';
 
 const archive = vi.hoisted(() => ({
     objects: new Map<string, unknown>(),
@@ -127,7 +131,7 @@ describe('Standard Dev archive scope and sealing', () => {
                 ['fresh-profile-v1', [target]],
                 ['relationship-side-v1', [target, 'followers', 0]],
                 ['relationship-side-v1', [target, 'following', 0]],
-                ['formal-target-profile-v1', [target]],
+                ['formal-target-profile-v2', [target]],
                 ['target-evidence-v1', [target]],
                 ['reverse-coverage-v1', [target]],
             ];
@@ -141,6 +145,7 @@ describe('Standard Dev archive scope and sealing', () => {
             const proof = { providerOperationKey: 'sample-operation:123', providerInputHash: 'a'.repeat(64) };
             await captureDevStandardInput('source-profile-proof-v1', [target, 'track:target-evidence:collect'], proof);
             await captureDevStandardInput('source-profile-proof-v1', [target, 'track:profiles:batch:0'], proof);
+            await captureDevStandardInput('preflight-blite-policy-v1', [target], false);
             const targetImage = ['target', 'target', null] as const;
             await captureDevStandardInput('result-image-manifest-v1', [target], {
                 expectedRows: 1,
@@ -201,5 +206,42 @@ describe('Standard Dev archive scope and sealing', () => {
         expect(archive.bindCapture).not.toHaveBeenCalled();
         expect(archive.seal).not.toHaveBeenCalled();
         expect(archive.objects.size).toBe(0);
+    });
+
+    it('requires explicit replay mode, a bound approval and the exact archived scope for each delivery', async () => {
+        const sourceGrantId = standard.id;
+        const replayEnv = {
+            ...env,
+            DEV_LIVE_WORKLOAD: 'paid',
+            DEV_LIVE_STANDARD_COLLECTION_MODE: 'archive_replay',
+            DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED: 'true',
+            DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL: sourceGrantId,
+        };
+        const expiresAt = Date.parse(approvedAt) + 24 * 60 * 60_000;
+        const approval = {
+            ...standard,
+            id: 'd6262e39-f793-4f84-b115-1b38f1876c18',
+            archiveReplay: { ...devLiveStandardReplayConfiguration(replayEnv)!, expiresAt: new Date(expiresAt).toISOString() },
+        };
+        const callback = vi.fn(async () => currentDevStandardArchive()?.mode);
+        const binding = { grantId: sourceGrantId, target, expiresAt };
+        archive.readSeal.mockResolvedValue(binding);
+        await expect(withDevStandardArchiveApproval(approval, callback, replayEnv)).resolves.toBe('replay');
+        expect(currentDevStandardArchive()).toBeNull();
+        callback.mockClear();
+
+        for (const [request, configuration, opened] of [
+            [standard, replayEnv, binding],
+            [approval, env, binding],
+            [approval, { ...replayEnv, DEV_LIVE_STANDARD_ARCHIVE_SLOT: '2'.repeat(32) }, binding],
+            [approval, replayEnv, { ...binding, target: 'different.qa' }],
+            [approval, replayEnv, { ...binding, expiresAt: expiresAt - 1 }],
+        ] as const) {
+            archive.readSeal.mockResolvedValue(opened);
+            await expect(withDevStandardArchiveApproval(request, callback, configuration))
+                .rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        }
+        expect(callback).not.toHaveBeenCalled();
+        expect(archive.bindCapture).not.toHaveBeenCalled();
     });
 });

@@ -925,6 +925,12 @@ describe('B-lite single-collection preflight', () => {
     it('collects one Apify profile, commits its ready snapshot and bounded source, then enqueues', async () => {
         const claimed = claim();
         const store = workerStore(claimed);
+        const capture = vi.fn(async () => undefined);
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('capture failed'); },
+        });
         const collectedProfile = profile({
             latestPosts: [{
                 id: 'post-1',
@@ -990,6 +996,8 @@ describe('B-lite single-collection preflight', () => {
         expect(fullProfile).toHaveBeenCalledTimes(1);
         expect(fallback).not.toHaveBeenCalled();
         expect(projectBliteSource).toHaveBeenCalledWith(collectedProfile);
+        expect(capture).toHaveBeenNthCalledWith(2, 'preflight-blite-policy-v1', ['target.name'], true);
+        expect(capture.mock.invocationCallOrder[1]!).toBeLessThan(finalizeReadyWithSource.mock.invocationCallOrder[0]!);
         expect(finalizeReadyWithSource).toHaveBeenCalledWith(expect.objectContaining({
             expiresAt: authoritativeExpiresAt,
             source: expect.objectContaining({
@@ -1509,8 +1517,10 @@ describe('preflight persistence adapter', () => {
             profile(),
             'test_entitlement'
         ) as ReadyPreflightSnapshot;
+        const archivedBlite = { state: 'failed', reason: 'inference_timeout' } as const;
 
         await store.finalizeReady(claim(), snapshot);
+        await store.finalizeReadyFromArchive!(claim(), snapshot, archivedBlite);
         await store.finalizeBlocked(claim(), 'TARGET_NOT_FOUND');
         await store.blockQueueUnavailable(preflightId, userId);
         await expect(store.setExclusion({
@@ -1522,7 +1532,7 @@ describe('preflight persistence adapter', () => {
             'PREFLIGHT_PERSISTENCE_ERROR: exclusion requires an authenticated scoped client.',
         );
 
-        expect(rpc).toHaveBeenNthCalledWith(1, PREFLIGHT_DATABASE_NAMES.completeRpc, {
+        const readyParams = {
             p_preflight_id: preflightId,
             p_user_id: userId,
             p_claim_token: claimToken,
@@ -1540,20 +1550,25 @@ describe('preflight persistence adapter', () => {
                     detailedMutualLimit: 300,
                 }),
             }),
+        };
+        expect(rpc).toHaveBeenNthCalledWith(1, PREFLIGHT_DATABASE_NAMES.completeRpc, readyParams);
+        expect(rpc).toHaveBeenNthCalledWith(2, 'dev_live_complete_standard_archive_preflight_v1', {
+            ...readyParams,
+            p_blite_outcome: archivedBlite,
         });
-        expect(rpc).toHaveBeenNthCalledWith(2, PREFLIGHT_DATABASE_NAMES.blockRpc, {
+        expect(rpc).toHaveBeenNthCalledWith(3, PREFLIGHT_DATABASE_NAMES.blockRpc, {
             p_preflight_id: preflightId,
             p_user_id: userId,
             p_claim_token: claimToken,
             p_error_code: 'TARGET_NOT_FOUND',
         });
-        expect(rpc).toHaveBeenNthCalledWith(3, PREFLIGHT_DATABASE_NAMES.blockRpc, {
+        expect(rpc).toHaveBeenNthCalledWith(4, PREFLIGHT_DATABASE_NAMES.blockRpc, {
             p_preflight_id: preflightId,
             p_user_id: userId,
             p_claim_token: null,
             p_error_code: 'QUEUE_UNAVAILABLE',
         });
-        expect(rpc).toHaveBeenCalledTimes(3);
+        expect(rpc).toHaveBeenCalledTimes(4);
     });
 
     it('uses the owner-or-claim atomic exclusion RPC for an authenticated owner client', async () => {
@@ -2454,11 +2469,12 @@ describe('preflight worker domain', () => {
                 bio: 'bio https://elsewhere.example/path?token=synthetic-bio-secret',
             }),
         })).resolves.toBe('ready');
-        expect(capture).toHaveBeenCalledExactlyOnceWith('preflight-profile-v1', ['target.name'], {
+        expect(capture).toHaveBeenNthCalledWith(1, 'preflight-profile-v1', ['target.name'], {
             username: 'target.name', fullName: 'Target', bio: 'bio [link]',
             profileImageUrl: archiveMediaUrlAnchor(avatar),
             followersCount: 475, followingCount: 300, isPrivate: false,
         });
+        expect(capture).toHaveBeenNthCalledWith(2, 'preflight-blite-policy-v1', ['target.name'], false);
         expect(JSON.stringify(capture.mock.calls)).not.toContain('synthetic-');
         expect(store.finalizeReady).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
             target: expect.objectContaining({ profileImageUrl: avatar }),
@@ -2504,6 +2520,168 @@ describe('preflight worker domain', () => {
         expect(store.finalizeReady).not.toHaveBeenCalled();
         expect(store.finalizeBlocked).toHaveBeenCalledOnce();
     });
+
+    it('replays a claimed Standard profile using the current catalog and no provider or credit hooks', async () => {
+        const claimed = claim({ analysisEntryChannel: 'standard' });
+        const store = workerStore(claimed);
+        const runs = providerRunStore();
+        const getProfile = vi.fn();
+        const getFallbackProfile = vi.fn();
+        const getFullProfile = vi.fn();
+        const refreshFreePoolCredits = vi.fn();
+        const settleBetaCredit = vi.fn();
+        const load = vi.fn(async (kind: string) => kind === 'preflight-blite-policy-v1' ? false : ({
+            username: 'target.name', fullName: 'Archived Target', bio: 'Archive bio',
+            profileImageUrl: archiveMediaUrlAnchor('https://scontent.cdninstagram.com/avatar.jpg'),
+            followersCount: 475, followingCount: 300, isPrivate: false,
+        }));
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'replay', load, find: vi.fn(), capture: vi.fn(), seal: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        });
+
+        await expect(processPreflight(preflightId, {
+            store, providerRunStore: runs, getProfile, getFallbackProfile, getFullProfile,
+            refreshFreePoolCredits, settleBetaCredit, env: {
+                DEV_LIVE_WORKLOAD: 'preflight', K_SERVICE: 'dev-live-preflight',
+                PREFLIGHT_PROFILE_PROVIDER: 'apify_pool', PRECHECKOUT_BLITE_ENABLED: 'true',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+            },
+        })).resolves.toBe('ready');
+
+        expect(load.mock.calls).toEqual([
+            ['preflight-blite-policy-v1', ['target.name']],
+            ['preflight-profile-v1', ['target.name']],
+        ]);
+        expect(vi.mocked(store.claim).mock.invocationCallOrder[0]!).toBeLessThan(load.mock.invocationCallOrder[0]!);
+        expect(store.finalizeReady).toHaveBeenCalledExactlyOnceWith(claimed, expect.objectContaining({
+            capacityRequiredPlan: 'standard',
+            target: expect.objectContaining({ followersCount: 475, profileImageUrl: null }),
+            pricingVersion: claimed.catalogSnapshot.pricingVersion,
+        }));
+        for (const hook of [
+            getProfile, getFallbackProfile, getFullProfile, refreshFreePoolCredits, settleBetaCredit,
+            runs.load, runs.reserve, runs.reserveFree,
+        ]) expect(hook).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { state: 'complete', dto: {
+            schemaVersion: 1,
+            persona: { headline: '미리보기', summary: '완료한 결과' },
+            signals: [
+                { claim: '신호 하나', category: '성향', confidence: 0.8, band: 'high' },
+                { claim: '신호 둘', category: '성향', confidence: 0.6, band: 'medium' },
+                { claim: '신호 셋', category: '성향', confidence: 0.4, band: 'low' },
+                { claim: '신호 넷', category: '성향', confidence: 0.7, band: 'high' },
+            ],
+            candidateRange: { min: 3, max: 9 },
+            genderRead: { likelyFemale: false, confidence: 0.5, reasons: ['근거 하나', '근거 둘', '근거 셋'] },
+            postCount: 1,
+            evidenceFields: ['post.caption'],
+        } },
+        { state: 'failed', reason: 'inference_timeout' },
+    ])('restores terminal archived B-lite $state without activating or enqueueing the cohort again', async outcome => {
+        const claimed = claim({ analysisEntryChannel: 'standard' });
+        const finalizeReadyFromArchive = vi.fn();
+        const store = { ...workerStore(claimed), finalizeReadyFromArchive };
+        const runs = providerRunStore();
+        const activateBliteCohort = vi.fn();
+        const enqueueBliteInference = vi.fn();
+        const getFallbackProfile = vi.fn();
+        const load = vi.fn(async (kind: string) => {
+            if (kind === 'preflight-blite-policy-v1') return true;
+            if (kind === 'preflight-blite-outcome-v1') return outcome;
+            return {
+                username: 'target.name', fullName: null, bio: null, profileImageUrl: null,
+                followersCount: 475, followingCount: 300, isPrivate: false,
+            };
+        });
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'replay', load, find: vi.fn(), capture: vi.fn(), seal: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        });
+        await expect(processPreflight(preflightId, {
+            store, providerRunStore: runs, getFallbackProfile, activateBliteCohort, enqueueBliteInference,
+            env: {
+                DEV_LIVE_WORKLOAD: 'preflight', K_SERVICE: 'dev-live-preflight',
+                PRECHECKOUT_BLITE_ENABLED: 'true', PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '100',
+            },
+        })).resolves.toBe('ready');
+        expect(finalizeReadyFromArchive).toHaveBeenCalledExactlyOnceWith(
+            claimed, expect.objectContaining({ capacityRequiredPlan: 'standard' }), outcome,
+        );
+        for (const hook of [store.finalizeReady, activateBliteCohort, enqueueBliteInference, getFallbackProfile, runs.load]) {
+            expect(hook).not.toHaveBeenCalled();
+        }
+    });
+
+    it('acknowledges an archived readiness delivery with no claim without B-lite or credit recovery', async () => {
+        const load = vi.fn();
+        const settleBetaCredit = vi.fn();
+        const enqueueBliteInference = vi.fn();
+        const reserveBliteDispatch = vi.fn();
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'replay', load, find: vi.fn(), capture: vi.fn(), seal: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        });
+        await expect(processPreflight(preflightId, {
+            store: { ...workerStore(null), reserveBliteDispatch },
+            settleBetaCredit, enqueueBliteInference,
+        })).resolves.toBe('noop');
+        for (const hook of [load, settleBetaCredit, reserveBliteDispatch, enqueueBliteInference]) {
+            expect(hook).not.toHaveBeenCalled();
+        }
+    });
+
+    it.each(['missing', 'other target', 'B-lite policy mismatch', 'invalid B-lite outcome', 'raw media'] as const)(
+        'blocks %s for archived readiness without opening a provider path', async caseName => {
+            const claimed = claim({ analysisEntryChannel: 'standard' });
+            const store = workerStore(claimed);
+            const runs = providerRunStore();
+            const getFallbackProfile = vi.fn();
+            const activateBliteCohort = vi.fn();
+            const settleBetaCredit = vi.fn();
+            const load = vi.fn(async (kind: string) => {
+                if (kind === 'preflight-blite-policy-v1') return caseName === 'invalid B-lite outcome';
+                if (kind === 'preflight-blite-outcome-v1') return { state: 'pending' };
+                if (caseName === 'missing') throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+                return {
+                    username: caseName === 'other target' ? 'other.name' : 'target.name',
+                    fullName: null, bio: null,
+                    profileImageUrl: caseName === 'raw media' ? 'https://scontent.cdninstagram.com/avatar.jpg' : null,
+                    followersCount: 475, followingCount: 300, isPrivate: false,
+                };
+            });
+            vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+                mode: 'replay', load, find: vi.fn(), capture: vi.fn(), seal: vi.fn(),
+                ready: () => true, beginPreflightCapture: vi.fn(),
+                fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+            });
+
+            await expect(processPreflight(preflightId, {
+                store, providerRunStore: runs, getFallbackProfile, activateBliteCohort, settleBetaCredit,
+                recordPreflightFailure: vi.fn(),
+                env: {
+                    DEV_LIVE_WORKLOAD: 'preflight', K_SERVICE: 'dev-live-preflight',
+                    PRECHECKOUT_BLITE_ENABLED: 'true',
+                    PRECHECKOUT_BLITE_ROLLOUT_PERCENT: caseName.includes('B-lite') ? '100' : '0',
+                },
+            })).resolves.toBe('blocked');
+
+            expect(store.finalizeReady).not.toHaveBeenCalled();
+            expect(store.finalizeBlocked).toHaveBeenCalledExactlyOnceWith(claimed, 'ANALYSIS_FAILED');
+            if (caseName === 'B-lite policy mismatch') {
+                expect(load).toHaveBeenCalledExactlyOnceWith('preflight-blite-policy-v1', ['target.name']);
+            }
+            for (const hook of [getFallbackProfile, activateBliteCohort, settleBetaCredit, runs.load, runs.reserve, runs.reserveFree]) {
+                expect(hook).not.toHaveBeenCalled();
+            }
+        },
+    );
 
     it.each([
         ['missing target', null, 'TARGET_NOT_FOUND', 'TARGET_NOT_FOUND'],

@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { createHash } from 'node:crypto';
+
 import { z } from 'zod';
 import { DEV_LIVE_STANDARD_CAPS } from '@/lib/constants/dev-ui';
 
@@ -31,6 +33,11 @@ const standardApprovalSchema = z.object({
     expiresAt: z.string().datetime().nullable(),
     apifyMaxCents: z.literal(DEV_LIVE_STANDARD_CAPS.apifyMaxCents),
     aiMaxCents: z.union([z.literal(400), z.literal(DEV_LIVE_STANDARD_CAPS.aiMaxCents)]),
+    archiveReplay: z.object({
+        sourceGrantId: devLiveApprovalId,
+        slotHash: z.string().regex(/^[a-f0-9]{64}$/),
+        expiresAt: z.string(),
+    }).strict().optional(),
 }).strict();
 
 type DevLiveApprovalDescriptor = (z.infer<typeof basicApprovalSchema> & { planId: 'basic' })
@@ -62,9 +69,24 @@ export function devLiveStandardCaptureConfigured(
         && z.string().datetime().safeParse(env.DEV_LIVE_STANDARD_ARCHIVE_APPROVAL_NOT_BEFORE).success;
 }
 
+export function devLiveStandardReplayConfiguration(
+    env: Record<string, string | undefined> = process.env,
+): { sourceGrantId: string; slotHash: string } | null {
+    const slot = env.DEV_LIVE_STANDARD_ARCHIVE_SLOT;
+    const source = devLiveApprovalId.safeParse(env.DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL);
+    if (env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'archive_replay'
+        || env.DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED !== 'true'
+        || !slot || !/^[a-f0-9]{32}$/.test(slot) || !source.success) return null;
+    return {
+        sourceGrantId: source.data,
+        slotHash: createHash('sha256').update(`dev-standard-archive-replay:v1\n${slot}`, 'utf8').digest('hex'),
+    };
+}
+
 export function devLiveStandardNeedsArchive(env: Record<string, string | undefined> = process.env): boolean {
     return env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'live_apify'
-        && !devLiveStandardCaptureConfigured(env);
+        && !devLiveStandardCaptureConfigured(env)
+        && !devLiveStandardReplayConfiguration(env);
 }
 
 function activeApproval(approval: DevLiveApprovalDescriptor, prefix: string, now: number): DevLiveApproval | null {

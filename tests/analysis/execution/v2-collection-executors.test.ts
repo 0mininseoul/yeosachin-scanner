@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
 import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ProfileAttemptResult,
     ScrapeRequestOptions,
@@ -56,13 +57,15 @@ import {
     evaluateProfileBatchCompleteness,
 } from '../../../lib/services/analysis/v2-collection-executors';
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
-vi.mock('@/lib/services/dev-ui/standard-archive-runtime', () => ({
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: vi.fn() } }));
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/dev-ui/standard-archive-runtime')>(),
     currentDevStandardArchive: vi.fn(() => null),
 }));
 
 function captureNextInput(invocations = 1) {
-    const capture = vi.fn(async () => undefined);
+    const capture = vi.fn<NonNullable<ReturnType<typeof currentDevStandardArchive>>['capture']>()
+        .mockResolvedValue(undefined);
     for (let index = 0; index < invocations; index += 1) {
         vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
             mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
@@ -1675,7 +1678,7 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('freezes exact zero relationship sides without reserving or starting Actors', async () => {
-        const capture = captureNextInput();
+        const capture = captureNextInput(3);
         const providers = providerStore();
         const getFollowersMock = vi.fn();
         const getFollowingMock = vi.fn();
@@ -1837,7 +1840,7 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('collects 4x150 likers and 6x15 comments from a durable target snapshot, including reels', async () => {
-        const capture = captureNextInput(2);
+        const capture = captureNextInput(3);
         const posts = Array.from({ length: 8 }, (_, index) => post(
             index,
             index === 7 ? 'reel' : 'image'
@@ -1916,11 +1919,15 @@ describe('analysis V2 concrete collection executors', () => {
                 frozenUnresolvedUsernames: [],
             };
         });
+        const archiveRequest = requestContext({
+            accessMode: 'test_entitlement',
+            providerExecutionPolicy: authorizedProviderPolicy,
+            planId: 'standard',
+            detailedMutualLimit: 600,
+        });
+        const archiveState = state({ planId: 'standard' });
         const executor = createAnalysisV2TargetEvidenceExecutor({
-            requestContextStore: contextStore(requestContext({
-                accessMode: 'test_entitlement',
-                providerExecutionPolicy: authorizedProviderPolicy,
-            })),
+            requestContextStore: contextStore(archiveRequest),
             profileCheckpointStore: profileStore.store,
             providerRunStore: providers.value,
             env: authorizedProviderEnv,
@@ -1929,7 +1936,7 @@ describe('analysis V2 concrete collection executors', () => {
             getProfilesBatchV2: getProfilesBatchV2 as unknown as typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2,
         });
 
-        await executor(stageContext('target_evidence', state()));
+        await executor(stageContext('target_evidence', archiveState));
 
         expect(getPostLikers).toHaveBeenCalledWith(
             expect.arrayContaining(['https://www.instagram.com/reel/code_7/']),
@@ -1954,11 +1961,14 @@ describe('analysis V2 concrete collection executors', () => {
             providerOperationKey: profileSource.operationKey,
             providerInputHash: profileSource.providerInputHash,
         });
-        expect(capture).toHaveBeenNthCalledWith(2, 'formal-target-profile-v1', ['target'], expect.objectContaining({
-            profilePicUrl: archiveMediaUrlAnchor(signedAvatar),
-            latestPosts: expect.arrayContaining([expect.objectContaining({
-                shortCode: 'code_7', thumbnailUrl: archiveMediaUrlAnchor(signedThumbnail), caption: 'Caption [link]',
-            })]),
+        expect(capture).toHaveBeenNthCalledWith(2, 'formal-target-profile-v2', ['target'], expect.objectContaining({
+            outcome: expect.objectContaining({ status: 'success', source: 'apify' }),
+            profile: expect.objectContaining({
+                profilePicUrl: archiveMediaUrlAnchor(signedAvatar),
+                latestPosts: expect.arrayContaining([expect.objectContaining({
+                    shortCode: 'code_7', thumbnailUrl: archiveMediaUrlAnchor(signedThumbnail), caption: 'Caption [link]',
+                })]),
+            }),
         }));
         expect(capture).toHaveBeenNthCalledWith(3, 'target-evidence-v1', [
             'target', 'girlfriend', 150, 4, ...getPostLikers.mock.calls[0]![0],
@@ -1990,6 +2000,56 @@ describe('analysis V2 concrete collection executors', () => {
         ]));
         expect(byOperation.get('target-likers')).toBe('quaternary');
         expect(byOperation.get('target-comments')).toBe('tertiary');
+
+        const archived = new Map(capture.mock.calls.map(([kind, identity, value]) => [
+            JSON.stringify([kind, identity]), value,
+        ]));
+        const load = vi.fn(async (kind: string, identity: readonly unknown[]) => (
+            archived.get(JSON.stringify([kind, identity]))
+        ));
+        const replay = {
+            mode: 'replay' as const, capture: vi.fn(), load, seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: (): never => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        };
+        const replayProfileStore = inMemoryProfileStore(null);
+        const replayProviders = providerStore();
+        const reserveNoProvider = vi.fn((): never => { throw new Error('unexpected collection'); });
+        const replayExecutor = createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(archiveRequest),
+            profileCheckpointStore: replayProfileStore.store,
+            providerRunStore: replayProviders.value,
+            env: authorizedProviderEnv,
+            interactionAdapter: { getPostLikers: reserveNoProvider, getPostComments: reserveNoProvider },
+            evidenceStore: { checkpointTargetEvidence } as unknown as AnalysisV2EvidenceStore,
+            getProfilesBatchV2: reserveNoProvider,
+        });
+        const slotRpc = vi.mocked(supabaseAdmin.rpc as unknown as () => Promise<{ error: null; data: string }>);
+        slotRpc.mockClear()
+            .mockResolvedValueOnce({ error: null, data: 'quaternary' })
+            .mockResolvedValueOnce({ error: null, data: 'tertiary' });
+        vi.mocked(currentDevStandardArchive).mockReturnValue(replay);
+        try {
+            await replayExecutor(stageContext('target_evidence', archiveState));
+            const checkpoint = vi.mocked(replayProfileStore.store.checkpointFreshApify).mock.calls[0]![0];
+            expect(checkpoint.operationKey).toBe(profileSource.operationKey);
+            expect(checkpoint.providerInputHash).toBe(profileSource.providerInputHash);
+            expect(supabaseAdmin.rpc).toHaveBeenCalledTimes(2);
+            expect(checkpointTargetEvidence.mock.lastCall?.[0]).toEqual(expect.objectContaining({
+                likerSource: saved.likerSource,
+                commentSource: saved.commentSource,
+                rows: expect.arrayContaining([expect.objectContaining({ content: 'comment 1 [link]' })]),
+            }));
+            archived.delete(JSON.stringify(capture.mock.calls[2]!.slice(0, 2)));
+            await expect(replayExecutor(stageContext('target_evidence', archiveState))).rejects
+                .toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+            expect(reserveNoProvider).not.toHaveBeenCalled();
+            expect(replayProviders.bindAdapterCheckpoint).not.toHaveBeenCalled();
+            expect(replay.capture).not.toHaveBeenCalled();
+        } finally {
+            vi.mocked(currentDevStandardArchive).mockReturnValue(null);
+            slotRpc.mockReset();
+        }
     });
 
     it('collects target interactions through selfhosted_auth without reserving paid runs', async () => {
@@ -3278,7 +3338,7 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('accepts exactly 90 percent candidate coverage with three incomplete failures in 30', async () => {
-        const capture = captureNextInput();
+        const capture = captureNextInput(3);
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const failures = usernames.slice(-3).map(username => incompleteFailure(username));
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);

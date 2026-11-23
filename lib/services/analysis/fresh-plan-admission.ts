@@ -290,6 +290,13 @@ interface ClaimedAnalysisV2FreshAdmission {
     legacyDrain: boolean;
 }
 
+const archivedFreshProfileSchema = z.object({
+    username: z.string().regex(/^[a-z0-9._]{1,30}$/),
+    followersCount: z.number().int().min(0).max(10_000_000),
+    followingCount: z.number().int().min(0).max(10_000_000),
+    isPrivate: z.literal(false),
+}).strict();
+
 export type AnalysisV2FreshProfileFetcher = typeof getSelfHostedAdmissionProfileSummary;
 export type AnalysisV2FreshFallbackProfileFetcher = typeof getApifyProfile;
 export type AnalysisV2FreshAuthenticatedProfileFetcher = NonNullable<
@@ -853,8 +860,7 @@ export async function processAnalysisV2FreshAdmission(
     );
     if (!claim) return 'noop';
 
-    const providerRuns = dependencies.providerRunStore
-        ?? createFreshAdmissionProviderRunStore(client, input.generation);
+    const archive = currentDevStandardArchive();
     const workerStartedAt = Date.now();
     let claimSettled = false;
     const isProviderCapacityPending = (error: unknown): boolean => (
@@ -906,6 +912,26 @@ export async function processAnalysisV2FreshAdmission(
         }, result.failureCount, error);
     };
     try {
+        if (archive?.mode === 'replay') {
+            let profile: z.infer<typeof archivedFreshProfileSchema>;
+            try {
+                if (!archive.ready() || claim.accessMode !== 'test_entitlement'
+                    || claim.analysisEntryChannel !== 'standard' || claim.legacyDrain
+                    || claim.orderScopedCredentialSlot !== null) return archive.fail();
+                const parsed = archivedFreshProfileSchema.safeParse(
+                    await archive.load('fresh-profile-v1', [claim.targetInstagramId])
+                );
+                if (!parsed.success || parsed.data.username !== claim.targetInstagramId) return archive.fail();
+                profile = parsed.data;
+            } catch (error) {
+                return await settleFailure(error);
+            }
+            const outcome = await completeAnalysisV2FreshAdmission(client, claim, profile);
+            claimSettled = true;
+            return outcome;
+        }
+        const providerRuns = dependencies.providerRunStore
+            ?? createFreshAdmissionProviderRunStore(client, input.generation);
         await dependencies.onClaimed?.();
         let betaHold: Awaited<ReturnType<BetaApifyPreflightCoordinator['reuse']>>
             | undefined;
@@ -1104,7 +1130,6 @@ export async function processAnalysisV2FreshAdmission(
                 return await settleFailure(attestationError);
             }
         }
-        const archive = currentDevStandardArchive();
         if (archive?.mode === 'capture') {
             await archive.capture('fresh-profile-v1', [claim.targetInstagramId], {
                 username: claim.targetInstagramId,

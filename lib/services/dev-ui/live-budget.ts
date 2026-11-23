@@ -144,6 +144,8 @@ export function assertDevLiveApifyCollectionAllowed(approval: DevLiveApproval): 
     const archive = currentDevStandardArchive();
     if (approval.planId === 'standard' && (
         devLiveStandardNeedsArchive()
+        || archive?.mode === 'replay'
+        || process.env.DEV_LIVE_STANDARD_COLLECTION_MODE === 'archive_replay'
         || (devLiveStandardCaptureConfigured() && (archive?.mode !== 'capture' || !archive.ready()))
     )) {
         throw new Error(DEV_LIVE_STANDARD_ARCHIVE_REQUIRED);

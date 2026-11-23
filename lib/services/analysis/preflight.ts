@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { beginDevStandardArchivePreflight, currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
+import { archivedBliteOutcomeSchema, type ArchivedBliteOutcome } from '@/lib/services/precheckout/blite-contract';
 import { projectDevStandardArchivePreflightTarget } from './v2-standard-archive-projection';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -189,6 +191,7 @@ export const PREFLIGHT_DATABASE_NAMES = Object.freeze({
     bliteDispatchRecoveryListRpc: 'list_precheckout_blite_dispatch_recovery_v2',
     releaseClaimRpc: 'release_analysis_preflight_claim',
     completeRpc: 'complete_analysis_v2_preflight',
+    completeStandardArchiveRpc: 'dev_live_complete_standard_archive_preflight_v1',
     blockRpc: 'block_analysis_v2_preflight',
     // Kept as a compatibility label for callers that inspect the registry;
     // setExclusion never routes through this legacy exclusion-only RPC.
@@ -594,6 +597,11 @@ export interface PreflightStore {
     }): Promise<boolean>;
     releaseClaim(claim: ClaimedPreflight): Promise<void>;
     finalizeReady(claim: ClaimedPreflight, snapshot: ReadyPreflightSnapshot): Promise<void>;
+    finalizeReadyFromArchive?(
+        claim: ClaimedPreflight,
+        snapshot: ReadyPreflightSnapshot,
+        bliteOutcome: ArchivedBliteOutcome,
+    ): Promise<void>;
     finalizeBlocked(claim: ClaimedPreflight, code: AnalysisV2ErrorCode): Promise<void>;
     blockQueueUnavailable(preflightId: string, userId: string): Promise<void>;
     setExclusion(input: {
@@ -810,6 +818,22 @@ function planCardsSnapshot(
         ReadyPreflightSnapshot['plans'][number],
         'planId' | 'pricingVersion' | 'price'
     >>;
+}
+
+function preflightReadyArguments(claim: ClaimedPreflight, snapshot: ReadyPreflightSnapshot) {
+    return {
+        p_preflight_id: claim.preflightId,
+        p_claim_token: claim.claimToken,
+        p_target_full_name: snapshot.target.fullName,
+        p_target_bio: snapshot.target.bio,
+        p_target_profile_image_url: snapshot.target.profileImageUrl,
+        p_target_followers_count: snapshot.target.followersCount,
+        p_target_following_count: snapshot.target.followingCount,
+        p_target_is_private: snapshot.target.isPrivate,
+        p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
+        p_required_plan_id: snapshot.requiredPlan,
+        p_plan_cards_snapshot: planCardsSnapshot(snapshot),
+    };
 }
 
 function safeRpcCode(error: RpcError): string {
@@ -1580,40 +1604,24 @@ export function createSupabasePreflightStore(
         },
 
         async finalizeReady(claim, snapshot) {
+            const args = preflightReadyArguments(claim, snapshot);
             const { error } = await client.rpc(
                 claim.userId === null
                     ? PREFLIGHT_DATABASE_NAMES.anonymousCompleteRpc
                     : PREFLIGHT_DATABASE_NAMES.completeRpc,
-                claim.userId === null
-                    ? {
-                        p_preflight_id: claim.preflightId,
-                        p_claim_token: claim.claimToken,
-                        p_target_full_name: snapshot.target.fullName,
-                        p_target_bio: snapshot.target.bio,
-                        p_target_profile_image_url: snapshot.target.profileImageUrl,
-                        p_target_followers_count: snapshot.target.followersCount,
-                        p_target_following_count: snapshot.target.followingCount,
-                        p_target_is_private: snapshot.target.isPrivate,
-                        p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
-                        p_required_plan_id: snapshot.requiredPlan,
-                        p_plan_cards_snapshot: planCardsSnapshot(snapshot),
-                    }
-                    : {
-                        p_preflight_id: claim.preflightId,
-                        p_user_id: claim.userId,
-                        p_claim_token: claim.claimToken,
-                        p_target_full_name: snapshot.target.fullName,
-                        p_target_bio: snapshot.target.bio,
-                        p_target_profile_image_url: snapshot.target.profileImageUrl,
-                        p_target_followers_count: snapshot.target.followersCount,
-                        p_target_following_count: snapshot.target.followingCount,
-                        p_target_is_private: snapshot.target.isPrivate,
-                        p_capacity_required_plan_id: snapshot.capacityRequiredPlan,
-                        p_required_plan_id: snapshot.requiredPlan,
-                        p_plan_cards_snapshot: planCardsSnapshot(snapshot),
-                    },
+                claim.userId === null ? args : { ...args, p_user_id: claim.userId },
             );
             if (error) throwRpcError(error, 'ready finalize');
+        },
+
+        async finalizeReadyFromArchive(claim, snapshot, bliteOutcome) {
+            if (claim.userId === null) throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+            const { error } = await client.rpc(PREFLIGHT_DATABASE_NAMES.completeStandardArchiveRpc, {
+                ...preflightReadyArguments(claim, snapshot),
+                p_user_id: claim.userId,
+                p_blite_outcome: bliteOutcome,
+            });
+            if (error) throwRpcError(error, 'ready archive finalize');
         },
 
         async finalizeBlocked(claim, code) {
@@ -1690,7 +1698,7 @@ function safeProfileImageUrl(value: string | undefined): string | null {
     }
 }
 
-function assertProfileCounts(profile: InstagramProfile): void {
+function assertProfileCounts(profile: Pick<InstagramProfile, 'followersCount' | 'followingCount'>): void {
     for (const [field, value] of [
         ['followersCount', profile.followersCount],
         ['followingCount', profile.followingCount],
@@ -1702,7 +1710,8 @@ function assertProfileCounts(profile: InstagramProfile): void {
 }
 
 export function buildReadyPreflightSnapshot(
-    profile: InstagramProfile,
+    profile: Partial<InstagramProfile> & Pick<InstagramProfile,
+        'username' | 'followersCount' | 'followingCount' | 'isPrivate'>,
     accessMode: PlanAccessMode,
     catalogSnapshot: PreflightCatalogSnapshot = currentPreflightCatalogSnapshot()
 ): ReadyPreflightSnapshot | PreflightBusinessBlockedCode {
@@ -2215,7 +2224,9 @@ export async function processPreflight(
         }
     };
     const claim = await store.claim(preflightId, dependencies.dispatchFence);
+    const archive = currentDevStandardArchive();
     if (!claim) {
+        if (archive?.mode === 'replay') return 'noop';
         // A finalized cohort row may be replayed after the original worker lost the
         // enqueue response. The database fence checks persisted cohort/readiness/source;
         // legacy/cohort-off rows return a no-op reservation without reading rollout env.
@@ -2242,6 +2253,12 @@ export async function processPreflight(
     let terminalized = false;
     let existingRun: StoredPreflightProviderRun | null = null;
     let profileCollected = false;
+    const devPreflightWorker = runtime.DEV_LIVE_WORKLOAD === 'preflight' && runtime.K_SERVICE === 'dev-live-preflight';
+    const selectsBliteCohort = () => selectBliteCohort(
+        claim.preflightId,
+        runtime,
+        { signedTestEntitlement: claim.accessMode === 'test_entitlement' && !devPreflightWorker },
+    );
     const baseObservation = {
         preflightId: claim.preflightId,
         userId: claim.userId,
@@ -2288,18 +2305,74 @@ export async function processPreflight(
         return 'blocked';
     };
     try {
+        if (archive?.mode === 'replay') {
+            if (!archive.ready() || claim.userId === null || claim.accessMode !== 'test_entitlement'
+                || claim.analysisEntryChannel !== 'standard' || !claim.targetInputHash) {
+                return archive.fail();
+            }
+            const bliteCohort = selectsBliteCohort();
+            if (await archive.load('preflight-blite-policy-v1', [claim.targetInstagramId]) !== bliteCohort) {
+                return archive.fail();
+            }
+            let bliteOutcome: ArchivedBliteOutcome | undefined;
+            if (bliteCohort) {
+                const parsedOutcome = archivedBliteOutcomeSchema.safeParse(
+                    await archive.load('preflight-blite-outcome-v1', [claim.targetInstagramId])
+                );
+                if (!parsedOutcome.success) return archive.fail();
+                bliteOutcome = parsedOutcome.data;
+            }
+            const parsed = readyPreflightSnapshotSchema.shape.target.safeParse(
+                await archive.load('preflight-profile-v1', [claim.targetInstagramId])
+            );
+            if (!parsed.success || parsed.data.username !== claim.targetInstagramId
+                || (parsed.data.profileImageUrl !== null
+                    && archiveMediaUrlAnchor(parsed.data.profileImageUrl) !== parsed.data.profileImageUrl)) {
+                return archive.fail();
+            }
+            const target = parsed.data;
+            const snapshot = buildReadyPreflightSnapshot({
+                username: target.username,
+                fullName: target.fullName ?? undefined,
+                bio: target.bio ?? undefined,
+                // The opaque archive avatar is only a lookup identity. Do not send it
+                // through the live image proxy; the final result publishes stored images.
+                followersCount: target.followersCount,
+                followingCount: target.followingCount,
+                isPrivate: target.isPrivate,
+            }, claim.accessMode, claim.catalogSnapshot);
+            profileObservation = { followersCount: target.followersCount, followingCount: target.followingCount };
+            profileCollected = true;
+            if (typeof snapshot === 'string') {
+                await store.finalizeBlocked(claim, snapshot);
+                recordTerminalFailure(claim, snapshot);
+                terminalized = true;
+                notifyPreflightObserver(dependencies.observer, {
+                    type: 'completed', outcome: 'blocked', ...baseObservation,
+                    ...profileObservation, errorCode: snapshot,
+                });
+                return 'blocked';
+            }
+            if (bliteOutcome) {
+                if (!store.finalizeReadyFromArchive) return archive.fail();
+                await store.finalizeReadyFromArchive(claim, snapshot, bliteOutcome);
+            } else {
+                await store.finalizeReady(claim, snapshot);
+            }
+            terminalized = true;
+            notifyPreflightObserver(dependencies.observer, {
+                type: 'completed', outcome: 'ready', ...baseObservation,
+                ...profileObservation, requiredPlan: snapshot.requiredPlan,
+            });
+            return 'ready';
+        }
         await beginDevStandardArchivePreflight();
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
         if (profileProvider !== undefined && !useFreeApifyPool) {
             throw new Error('SCRAPING_CONFIG_ERROR: PREFLIGHT_PROFILE_PROVIDER must be apify_pool.');
         }
-        const devPreflightWorker = runtime.DEV_LIVE_WORKLOAD === 'preflight' && runtime.K_SERVICE === 'dev-live-preflight';
-        const bliteCohortSelected = selectBliteCohort(
-            claim.preflightId,
-            runtime,
-            { signedTestEntitlement: claim.accessMode === 'test_entitlement' && !devPreflightWorker },
-        );
+        const bliteCohortSelected = selectsBliteCohort();
         // Hash-complete identity is a prerequisite for B-lite's durable
         // provider lineage. Legacy rows remain valid ordinary preflights, but
         // they must bypass activation immediately rather than consuming the
@@ -2684,7 +2757,6 @@ export async function processPreflight(
             });
             return 'blocked';
         }
-        const archive = currentDevStandardArchive();
         if (archive?.mode === 'capture') {
             await archive.capture(
                 'preflight-profile-v1',
@@ -2702,6 +2774,9 @@ export async function processPreflight(
                 bliteClock.expiresAt,
             );
             const source = (dependencies.projectBliteSource ?? projectPrecheckoutBliteSource)(profile);
+            if (archive?.mode === 'capture') {
+                await archive.capture('preflight-blite-policy-v1', [claim.targetInstagramId], true);
+            }
             let finalized = false;
             try {
                 finalized = await (dependencies.finalizeReadyWithSource
@@ -2727,6 +2802,8 @@ export async function processPreflight(
                     expiresAt,
                 });
             } catch (error) {
+                // A capture cannot switch to ordinary readiness after persisting its cohort policy.
+                if (archive?.mode === 'capture') throw error;
                 const finalizerFailureReason = isBliteSourceFinalizerSchemaCacheMiss(error)
                     ? 'schema_cache_miss'
                     : canFailOpenExpiredBliteFence(error, claim)
@@ -2736,10 +2813,14 @@ export async function processPreflight(
                 bliteObservability?.sourceFinalizerFailed?.(finalizerFailureReason);
                 await store.finalizeReady(claim, snapshot);
             }
+            if (!finalized && archive?.mode === 'capture') return archive.fail();
             if (finalized) {
                 await dispatchBliteInference(claim.preflightId);
             }
         } else {
+            if (archive?.mode === 'capture') {
+                await archive.capture('preflight-blite-policy-v1', [claim.targetInstagramId], false);
+            }
             await store.finalizeReady(claim, snapshot);
         }
         terminalized = true;
@@ -2856,7 +2937,7 @@ export async function processPreflight(
             httpStatus: retryFailure.httpStatus,
         }, claim.workerAttemptCount, error);
     } finally {
-        if (terminalized) {
+        if (terminalized && archive?.mode !== 'replay') {
             await settleTerminalBetaCredit(
                 claim.analysisEntryChannel === 'betatest'
             );

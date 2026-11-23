@@ -1,11 +1,12 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import 'server-only';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import type { ArchivedBliteOutcome, PrecheckoutBliteFailureReason } from './blite-contract';
 import { computePrecheckoutBliteCandidateRange } from './blite-range';
 import { inferPrecheckoutBlite } from './blite-inference';
 import { BLITE_INFERENCE_DEADLINE_MS } from './blite-deadline';
 import {
     precheckoutBliteTerminalStore,
-    type PrecheckoutBliteFailureReason,
     type PrecheckoutBliteClaim,
 } from './blite-store';
 import {
@@ -66,6 +67,17 @@ export async function runPrecheckoutBlite(
         dispatchToken?: string;
     } = {},
 ): Promise<'noop' | 'pending' | 'capacity_pending' | 'complete' | 'failed'> {
+    const archive = currentDevStandardArchive();
+    // Replay uses the atomic preflight writer, which installs only a terminal
+    // archived result. It must never acquire a fresh inference claim.
+    if (archive?.mode === 'replay') return archive.fail();
+    const target = archive?.target;
+    if (archive?.mode === 'capture' && (!target || !archive.ready())) return archive.fail();
+    const captureOutcome = archive?.mode === 'capture' && target
+        ? (outcome: ArchivedBliteOutcome) => (
+            archive.capture('preflight-blite-outcome-v1', [target], outcome)
+        )
+        : undefined;
     const terminalStore = dependencies.terminalStore ?? precheckoutBliteTerminalStore;
     const now = dependencies.now ?? Date.now;
     const claim = await terminalStore.claim({
@@ -78,8 +90,14 @@ export async function runPrecheckoutBlite(
             : { dispatchToken: dependencies.dispatchToken }),
     });
     if (claim.disposition === 'pending') return 'pending';
-    if (claim.disposition === 'complete') return 'complete';
-    if (claim.disposition === 'failed') return 'failed';
+    if (claim.disposition === 'complete') {
+        if (captureOutcome) await captureOutcome({ state: 'complete', dto: claim.dto });
+        return 'complete';
+    }
+    if (claim.disposition === 'failed') {
+        if (captureOutcome) await captureOutcome({ state: 'failed', reason: claim.reason });
+        return 'failed';
+    }
 
     const claimed: Extract<PrecheckoutBliteClaim, { disposition: 'claimed' }> = claim;
     const submittedAtMs = Date.parse(claimed.submittedAt);
@@ -126,7 +144,11 @@ export async function runPrecheckoutBlite(
         return 'failed';
     };
     if (!Number.isFinite(submittedAtMs) || !Number.isFinite(deadlineAtMs) || now() >= deadlineAtMs) {
-        return failInference('inference_timeout');
+        const outcome = await failInference('inference_timeout');
+        if (captureOutcome && outcome === 'failed') {
+            await captureOutcome({ state: 'failed', reason: 'inference_timeout' });
+        }
+        return outcome;
     }
     // Gemini's store uses a monotonic clock (performance.now), while the durable preflight
     // deadline is epoch-based. Convert once at the boundary instead of relying on a unit
@@ -214,8 +236,10 @@ export async function runPrecheckoutBlite(
                 onAttemptTelemetry,
             });
         if (!dto) {
-            const outcome = await failInference(inferenceFailureReason(now(), submittedAtMs));
+            const reason = inferenceFailureReason(now(), submittedAtMs);
+            const outcome = await failInference(reason);
             await releaseGeminiLease();
+            if (captureOutcome && outcome === 'failed') await captureOutcome({ state: 'failed', reason });
             return outcome;
         }
         // Terminal cache commit is the ownership boundary. Release the shared
@@ -231,6 +255,7 @@ export async function runPrecheckoutBlite(
         terminalCommitConfirmed = true;
         emitBestEffort(() => observability.completed());
         await releaseGeminiLease();
+        if (captureOutcome) await captureOutcome({ state: 'complete', dto });
         return 'complete';
     } catch (error) {
         if (await deferCapacity(error)) return 'capacity_pending';

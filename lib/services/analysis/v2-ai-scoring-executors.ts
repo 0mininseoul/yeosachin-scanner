@@ -2185,7 +2185,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     };
                     let preview;
                     if (
-                        item.status === 'success'
+                        currentDevStandardArchive()?.mode !== 'replay'
+                        && item.status === 'success'
                         && item.profile
                         && !item.profile.isPrivate
                     ) {
@@ -2195,10 +2196,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             // Progress presentation must never affect candidate analysis.
                             preview = undefined;
                         }
-                        await context.reportActiveProfile?.(item.username, preview, signal);
-                    } else {
-                        await context.reportActiveProfile?.(item.username, undefined, signal);
                     }
+                    await context.reportActiveProfile?.(item.username, preview, signal);
                     const candidateId = analysisV2CandidateId(item.username);
                     const savedTriage = savedBySlot.get(`${index}:triage`);
                     if (item.status !== 'success' || !item.profile || item.profile.isPrivate) {
