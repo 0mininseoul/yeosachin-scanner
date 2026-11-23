@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { campaignClosesAt } from '@/public/namchin/campaign.mjs';
+import { campaignClosesAt } from '@/public/cherry/campaign.mjs';
 
 const maxBytes = 2048;
 const reservationSchema = z.object({

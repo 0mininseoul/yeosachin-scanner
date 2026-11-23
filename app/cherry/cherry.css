@@ -1,7 +1,7 @@
 /* Cherry product screens. Tokens come from the landing page so both read as one place. */
 @font-face {
   font-family: 'Barlow Condensed';
-  src: url('/namchin/assets/barlow-condensed-bold.woff2') format('woff2');
+  src: url('/cherry/assets/barlow-condensed-bold.woff2') format('woff2');
   font-weight: 700;
   font-display: swap;
   unicode-range: U+002E, U+0030-0039;

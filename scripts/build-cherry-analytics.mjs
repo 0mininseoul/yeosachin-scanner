@@ -19,7 +19,7 @@ define['process.env.NODE_ENV'] = JSON.stringify(development ? 'development' : 'p
 define['process.env'] = '{}';
 await build({
   entryPoints: ['lib/services/cherry-analytics.ts'],
-  outfile: 'public/namchin/analytics.js',
+  outfile: 'public/cherry/analytics.js',
   bundle: true,
   platform: 'browser',
   format: 'iife',

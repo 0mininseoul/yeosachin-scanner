@@ -8,7 +8,7 @@
 .reveal-photo--hidden { clip-path: inset(0 0 0 50%); filter: grayscale(1) blur(13px) brightness(0.74) contrast(1.1); scale: 1.06; }
 .reveal-stage::after { content: ''; position: absolute; inset: 55% 0 0; background: linear-gradient(180deg, transparent, #12060ad9 88%); }
 .reveal-line { position: absolute; z-index: 1; left: 50%; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: #fff; box-shadow: 0 0 22px #ff5f78; }
-.reveal-line::after { content: ''; position: absolute; left: 50%; top: 71%; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: #fff url('/namchin/logo.png') center / 30px no-repeat; box-shadow: 0 10px 24px -8px #000000a6; }
+.reveal-line::after { content: ''; position: absolute; left: 50%; top: 71%; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%; background: #fff url('/cherry/logo.png') center / 30px no-repeat; box-shadow: 0 10px 24px -8px #000000a6; }
 .reveal-id { position: absolute; z-index: 1; bottom: 18px; width: 50%; padding-inline: 16px; color: #fff4f1; }
 .reveal-id b { display: block; font-size: clamp(14px, 4.4vw, 19px); letter-spacing: -0.03em; }
 .reveal-id span { display: block; font-size: 14px; }

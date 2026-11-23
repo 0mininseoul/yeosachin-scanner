@@ -1,12 +1,12 @@
 @font-face {
   font-family: Paperlogy;
-  src: url('/namchin/assets/Paperlogy-4Regular.woff2') format('woff2');
+  src: url('/cherry/assets/Paperlogy-4Regular.woff2') format('woff2');
   font-weight: 400;
   font-display: swap;
 }
 @font-face {
   font-family: Paperlogy;
-  src: url('/namchin/assets/Paperlogy-8ExtraBold.woff2') format('woff2');
+  src: url('/cherry/assets/Paperlogy-8ExtraBold.woff2') format('woff2');
   font-weight: 800;
   font-display: swap;
 }

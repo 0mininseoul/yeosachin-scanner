@@ -106,11 +106,11 @@ const R = {
   typing: [6.7, 7.9],
 };
 
-const HIM = '/namchin/assets/hero/maru-profile.jpg';
+const HIM = '/cherry/assets/hero/maru-profile.jpg';
 
 async function loadPhotos({ photos }) {
   const names = ['profile', ...[1, 2, 3, 4, 5, 6].map((index) => `post-${index}`)];
-  const [her, ...posts] = await Promise.all(names.map((name) => loadPicture(`/namchin/assets/hero/${photos}-${name}.jpg`)));
+  const [her, ...posts] = await Promise.all(names.map((name) => loadPicture(`/cherry/assets/hero/${photos}-${name}.jpg`)));
   return { her, posts };
 }
 

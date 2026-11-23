@@ -1,4 +1,4 @@
-import { campaignClosesAt } from '/namchin/campaign.mjs';
+import { campaignClosesAt } from '/cherry/campaign.mjs';
 
 const parts = ['d', 'h', 'm', 's', 'ms'];
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;

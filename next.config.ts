@@ -8,12 +8,9 @@ import {
 const cloudTasksBuildTrace = ["./node_modules/@google-cloud/tasks/build/**/*"];
 
 const nextConfig: NextConfig = {
-  async redirects() {
-    return ['/namchin', '/namchin/index.html'].map((source) => ({ source, destination: '/cherry', permanent: true }));
-  },
   serverExternalPackages: ["@google-cloud/tasks", "google-auth-library", "google-gax"],
   outputFileTracingIncludes: {
-    "/cherry": ["./public/namchin/index.html"],
+    "/cherry": ["./public/cherry/landing.html"],
     "/api/analysis/start": cloudTasksBuildTrace,
     "/api/analysis/step": cloudTasksBuildTrace,
     "/api/analysis/preflight": cloudTasksBuildTrace,

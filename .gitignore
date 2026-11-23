@@ -2,7 +2,7 @@
 
 # dependencies
 /node_modules
-/public/namchin/analytics.js
+/public/cherry/analytics.js
 /.pnp
 .pnp.*
 .yarn/*

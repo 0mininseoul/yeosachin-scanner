@@ -9,8 +9,13 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
 };
 
 describe('Replay allowlist', () => {
+    it('serves the cherry landing without legacy namchin URLs', () => {
+        const html = readFileSync('public/cherry/landing.html', 'utf8');
+        expect(html).not.toMatch(/(?:href|src|action)=["'][^"']*\/namchin(?:\/|["'])/);
+        expect(html).toContain('action="/api/cherry/reservations"');
+    });
     it('masks contact details mirrored into the cherry invitation', () => {
-        const html = readFileSync('public/namchin/index.html', 'utf8');
+        const html = readFileSync('public/cherry/landing.html', 'utf8');
         const document = new JSDOM(html).window.document;
         const mask = maskFn('text', { defaultMaskLevel: 'light', maskSelector: ['[data-amp-mask]'] });
         for (const selector of ['[data-pass-email]', '[data-pass-phone]']) {

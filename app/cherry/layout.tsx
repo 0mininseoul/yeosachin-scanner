@@ -10,7 +10,7 @@ export const metadata: Metadata = {
     openGraph: null,
     twitter: null,
     manifest: null,
-    icons: { icon: '/namchin/logo.png', apple: '/namchin/logo.png' },
+    icons: { icon: '/cherry/logo.png', apple: '/cherry/logo.png' },
 };
 export const viewport: Viewport = { themeColor: '#fcfaf6', width: 'device-width', initialScale: 1 };
 

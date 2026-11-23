@@ -94,7 +94,7 @@ function pill(ctx, w, h, text, bg, fg) {
 
 export async function mountTrust(container) {
   await waitForFonts();
-  const him = await loadPicture('/namchin/assets/hero/maru-profile.jpg');
+  const him = await loadPicture('/cherry/assets/hero/maru-profile.jpg');
   const renderer = createRenderer(container);
   const scene = new Scene();
   const camera = new PerspectiveCamera(30, 1, 0.1, 100);
