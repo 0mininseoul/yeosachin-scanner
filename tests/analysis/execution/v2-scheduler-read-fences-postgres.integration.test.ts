@@ -10,6 +10,7 @@ const migrations = new URL('../../../supabase/migrations/', import.meta.url);
 const readSql = (file: string) => readFileSync(new URL(file, migrations), 'utf8');
 const scheduler = 'claim_analysis_v2_scheduler_operation';
 const heartbeat = 'checkpoint_analysis_v2_active_profile_heartbeat';
+const vertexDispatch = 'authorize_analysis_v2_vertex_dispatch_v1';
 const schedulerSignature = `${scheduler}(uuid,text,uuid,text,text,uuid,integer)`;
 const heartbeatSignature = `${heartbeat}(uuid,text,uuid,text,timestamptz,integer,text,text,text[],text,integer,text)`;
 const leaseToken = randomUUID();
@@ -49,6 +50,13 @@ function tick(client: Client, jobIndex: number, startedAt: Date, ordinal: number
     return client.query<{ advanced: boolean }>(
         `SELECT public.${heartbeat}($1, $2, $3, $4, $5, 12, 'f***e', NULL, '{}', NULL, $6, 'analyzing') AS advanced`,
         [requestId, batch(jobIndex), leaseToken, inputHash, startedAt, ordinal],
+    );
+}
+
+function authorizeVertex(client: Client, jobIndex: number, token = leaseToken) {
+    return client.query<{ allowed: boolean }>(
+        `SELECT public.${vertexDispatch}($1, $2, $3, $4) AS allowed`,
+        [requestId, batch(jobIndex), token, inputHash],
     );
 }
 
@@ -97,6 +105,9 @@ describe.runIf(process.env.RUN_SCHEDULER_READ_FENCE_POSTGRES_TEST === '1')(
                 );
                 CREATE TABLE public.analysis_v2_ai_result_checkpoints (
                     request_id UUID, job_key TEXT, operation_key TEXT, stage TEXT
+                );
+                CREATE TABLE public.analysis_v2_provider_cleanup_intents (
+                    request_id UUID PRIMARY KEY, completed_at TIMESTAMPTZ
                 );
                 CREATE TABLE public.analysis_v2_active_profile_heartbeats (
                     request_id UUID NOT NULL, job_key TEXT NOT NULL, job_input_hash TEXT NOT NULL,
@@ -260,6 +271,52 @@ describe.runIf(process.env.RUN_SCHEDULER_READ_FENCE_POSTGRES_TEST === '1')(
             }
             await expect(admin.query('SELECT count(*)::int AS claims FROM public.analysis_v2_scheduler_operations WHERE operation_key = $1', [key]))
                 .resolves.toMatchObject({ rows: [{ claims: 0 }] });
+        });
+
+        it('serializes Vertex transport authorization against the failure intent and preserves the attempt ledger', async () => {
+            const signature = `${vertexDispatch}(uuid,text,uuid,text)`;
+            const migration = '20261123210000_fence_failed_analysis_v2_vertex_dispatch.sql';
+            await admin.query(functionSql(migration, 'analysis_v2_vertex_request_admission_open'));
+            await admin.query(functionSql(migration, vertexDispatch));
+            await admin.query(`REVOKE ALL ON FUNCTION public.${signature} FROM PUBLIC;
+                GRANT EXECUTE ON FUNCTION public.${signature} TO service_role;`);
+            await admin.query(`UPDATE public.analysis_pipeline_jobs
+                SET lease_expires_at = clock_timestamp() + INTERVAL '5 minutes' WHERE request_id = $1`, [requestId]);
+
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query('SELECT id FROM public.analysis_requests WHERE id = $1 FOR NO KEY UPDATE', [requestId]);
+                const results = await Promise.all(readers.map(async (reader, index) => {
+                    const accepted: boolean[] = [];
+                    for (let turn = 0; turn < 12; turn++) {
+                        accepted.push((await authorizeVertex(reader, index)).rows[0]!.allowed);
+                    }
+                    return accepted;
+                }));
+                expect(results.flat()).toEqual(Array(96).fill(true));
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            await expect(authorizeVertex(readers[0]!, 0, randomUUID()))
+                .resolves.toMatchObject({ rows: [{ allowed: false }] });
+            const before = await admin.query(`SELECT status, estimated_cost_usd
+                FROM public.analysis_v2_ai_attempts ORDER BY status`);
+
+            await blocker.query('BEGIN');
+            try {
+                // Match the intent writer's request-row lock. No transport lock
+                // spans an external call after database authorization.
+                await blocker.query('SELECT id FROM public.analysis_requests WHERE id = $1 FOR UPDATE', [requestId]);
+                await blocker.query('INSERT INTO public.analysis_v2_provider_cleanup_intents VALUES ($1, NULL)', [requestId]);
+                const pending = Promise.all(readers.map((reader, index) => authorizeVertex(reader, index)));
+                await admin.query('SELECT pg_sleep(0.04)');
+                await blocker.query('COMMIT');
+                expect((await pending).map(result => result.rows[0]?.allowed)).toEqual(Array(8).fill(false));
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            await expect(admin.query(`SELECT status, estimated_cost_usd
+                FROM public.analysis_v2_ai_attempts ORDER BY status`)).resolves.toMatchObject({ rows: before.rows });
         });
     },
 );

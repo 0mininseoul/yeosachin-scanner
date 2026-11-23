@@ -158,11 +158,13 @@ describe('analysis V2 dispatch recovery', () => {
         const dispatch = vi.fn(async () => undefined);
         const providerAdmissions = { scanned: 1, recovered: 1, resolved: 1, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 1 };
         const recoverLeases = vi.fn(async () => providerAdmissions);
+        const recoverOrderAudits = vi.fn(async () => { throw new Error('audit unavailable'); });
 
-        await expect(recoverDevLiveStandard({ store: jobStore, dispatch, recoverLeases })).resolves.toEqual({
+        await expect(recoverDevLiveStandard({ store: jobStore, dispatch, recoverLeases, recoverOrderAudits })).resolves.toEqual({
             scanned: 0, dispatched: 0, taskPresent: 0, lostRace: 0, failed: 0, providerAdmissions,
         });
         expect(recoverLeases).toHaveBeenCalledOnce();
+        expect(recoverOrderAudits).toHaveBeenCalledOnce();
         expect(jobStore.listDispatchable).not.toHaveBeenCalled();
         expect(dispatch).not.toHaveBeenCalled();
     });

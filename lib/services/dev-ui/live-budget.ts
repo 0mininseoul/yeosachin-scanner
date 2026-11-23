@@ -3,6 +3,7 @@ import 'server-only';
 import type { GenerateContentParameters } from '@google/genai';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
+import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
 import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -89,6 +90,11 @@ async function budgetRpc(name: string, args: Record<string, string | number>): P
         throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
     }
     if (!result.error) return result.data;
+    if ((name === 'dev_live_budget_reserve_vertex_attempt_v1' || name === 'dev_live_budget_reserve_v1')
+        && result.error.code === 'P0001'
+        && result.error.message === 'ANALYSIS_V2_VERTEX_DISPATCH_STOPPED') {
+        throw new VertexDispatchAuthorizationError('closed');
+    }
     // Only a structured database response proves this statement did not commit.
     if (name === 'dev_live_budget_reserve_vertex_attempt_v1' && isPostgresStatementTimeout(result.error)) {
         console.warn('Dev Vertex budget reservation rolled back before dispatch', { sqlstate: '57014' });

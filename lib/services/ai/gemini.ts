@@ -1,4 +1,4 @@
-import { VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
+import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
 import {
     ApiError,
@@ -9,6 +9,7 @@ import {
     type Part,
 } from '@google/genai/node';
 import { toJSONSchema, type ZodType } from 'zod';
+import type { DevLiveCostReservation } from '@/lib/services/dev-ui/live-budget';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import {
@@ -1221,24 +1222,25 @@ export async function analyzeWithGemini<T>(
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
                     attemptStartedAt = performance.now();
-                    const window = new VertexDispatchWindow(AI_GEMINI_LEASE_SECONDS * 1_000);
                     let intent: GeminiAttemptStartTelemetry | undefined;
-                    // Stage audit acquires provider leases as well as writing the attempt.
-                    // Check the Dev cap before it can acquire either.
-                    const devReservation = devLiveBudget && devLiveApproval
-                        ? await devLiveBudget.reserveDevLiveVertexAttempt(
-                            devLiveApproval, generationRequest, GOOGLE_CLOUD_LOCATION,
-                            durableDevOperationKey && requestId
-                                ? { requestId, operationKey: durableDevOperationKey, attempt: attemptNumber }
-                                : undefined,
-                        )
-                        : null;
-                    try {
-                        if (abortSignal?.aborted) {
-                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                    let devReservation: DevLiveCostReservation | null = null;
+                    const assertNotAborted = () => {
+                        if (abortSignal?.aborted) throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                    };
+                    const prepareAttempt = async () => {
+                        assertNotAborted();
+                        // Check the Dev cap before stage audit acquires a lease or writes the attempt.
+                        if (devLiveBudget && devLiveApproval) {
+                            devReservation = await devLiveBudget.reserveDevLiveVertexAttempt(
+                                devLiveApproval, generationRequest, GOOGLE_CLOUD_LOCATION,
+                                durableDevOperationKey && requestId
+                                    ? { requestId, operationKey: durableDevOperationKey, attempt: attemptNumber }
+                                    : undefined,
+                            );
                         }
+                        assertNotAborted();
                         if (stage && requestId && stagePolicy && onBeforeAttempt) {
-                            intent = {
+                            const telemetry: GeminiAttemptStartTelemetry = {
                                 requestId,
                                 modelName,
                                 location: GOOGLE_CLOUD_LOCATION,
@@ -1255,10 +1257,11 @@ export async function analyzeWithGemini<T>(
                                 costRoute: resolvedCostRoute,
                             };
                             try {
-                                await onBeforeAttempt(intent);
+                                await onBeforeAttempt(telemetry);
                             } catch (error) {
                                 if (
                                     error instanceof GeminiPreDispatchAdmissionError
+                                    || error instanceof VertexDispatchAuthorizationError
                                     || error instanceof Error
                                         && AI_ADMISSION_SIGNAL_CODES.has(error.message)
                                 ) {
@@ -1266,14 +1269,20 @@ export async function analyzeWithGemini<T>(
                                 }
                                 throw durableAuditFailure('intent', stage, error);
                             }
-                            window.assertCanStart();
+                            intent = telemetry;
                         }
-                        if (abortSignal?.aborted) {
-                            throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+                    };
+                    const window = new VertexDispatchWindow(AI_GEMINI_LEASE_SECONDS * 1_000, prepareAttempt);
+                    try {
+                        // For DAG work, SDK authentication completes before the DB gate
+                        // and reservation. An unavailable gate leaves no attempt to replay.
+                        if (!window.needsAuthorization) {
+                            await prepareAttempt();
+                            if (intent) window.assertCanStart();
                         }
-
+                        assertNotAborted();
                         providerDispatchStarted = true;
-                        const generated = intent
+                        const generated = intent || window.needsAuthorization
                             ? await window.run(() => client.models.generateContent(generationRequest))
                             : await client.models.generateContent(generationRequest);
                         if (devLiveBudget && devReservation) {
@@ -1286,28 +1295,39 @@ export async function analyzeWithGemini<T>(
                         return generated;
                     } catch (error) {
                         // Entering the SDK may only have started authentication.
-                        if (window.rejectedBeforeSend) providerDispatchStarted = false;
-                        if (!providerDispatchStarted && devLiveBudget && devReservation) {
+                        if (window.rejectedBeforeSend || (window.needsAuthorization && !window.hasSent)) {
+                            providerDispatchStarted = false;
+                        }
+                        const unusedReservation = providerDispatchStarted ? null : devReservation;
+                        if (devLiveBudget && unusedReservation) {
                             try {
-                                await devLiveBudget.releaseUnusedDevLiveVertexAttempt(devReservation)
-                                    .catch(() => devLiveBudget.releaseUnusedDevLiveVertexAttempt(devReservation));
+                                await devLiveBudget.releaseUnusedDevLiveVertexAttempt(unusedReservation)
+                                    .catch(() => devLiveBudget.releaseUnusedDevLiveVertexAttempt(unusedReservation));
                             } catch {
                                 devUnusedSettlementFailed = true;
                                 console.error('Dev Vertex unused reservation settlement could not be confirmed.');
                                 throw new Error(devLiveBudget.DEV_LIVE_BUDGET_UNAVAILABLE);
                             }
                         }
-                        if (window.rejectedBeforeSend && intent) {
-                            await emitAttemptTelemetry({
-                                ...intent,
-                                tokenUsage: null,
-                                usageComplete: false,
-                                usageMetadataStatus: 'missing',
-                                latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
-                                estimatedCostUsd: null,
-                                disposition: 'rejected',
-                                finishReason: null,
-                            }, onAttemptTelemetry, undefined, 'pre-dispatch');
+                        if (window.authorizationError) throw window.authorizationError;
+                        if (window.needsAuthorization && !window.hasEnteredFetch) {
+                            // An SDK authentication failure or cancellation before the DB checks
+                            // leaves no Vertex attempt to audit and may be redelivered safely.
+                            throw new VertexDispatchAuthorizationError('unavailable');
+                        }
+                        if (window.rejectedBeforeSend) {
+                            if (intent) {
+                                await emitAttemptTelemetry({
+                                    ...intent,
+                                    tokenUsage: null,
+                                    usageComplete: false,
+                                    usageMetadataStatus: 'missing',
+                                    latencyMs: Math.max(0, Math.round(performance.now() - attemptStartedAt)),
+                                    estimatedCostUsd: null,
+                                    disposition: 'rejected',
+                                    finishReason: null,
+                                }, onAttemptTelemetry, undefined, 'pre-dispatch');
+                            }
                             throw new GeminiPreDispatchAdmissionError();
                         }
                         // Settle only the single Dev call that Vertex explicitly rejected.
@@ -1348,6 +1368,7 @@ export async function analyzeWithGemini<T>(
                     generationError instanceof Error
                     && (
                         generationError instanceof GeminiPreDispatchAdmissionError
+                        || generationError instanceof VertexDispatchAuthorizationError
                         ||
                         generationError.message.startsWith(
                             'AI_ATTEMPT_AUDIT_PERSISTENCE_ERROR:'

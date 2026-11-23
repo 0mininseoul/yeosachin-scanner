@@ -1,4 +1,7 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
+import { withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
+import { supabaseAdmin } from '@/lib/supabase/admin';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import {
     ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
@@ -49,6 +52,7 @@ import {
     isAnalysisV2ProgressNonFenceFailure,
     type AnalysisV2ProgressReporter,
 } from './v2-progress-reporter';
+import { createAnalysisV2ProgressHeartbeat } from './v2-progress-heartbeat';
 import {
     cleanupConfiguredAnalysisV2TerminalMedia,
 } from './v2-media-artifact-store';
@@ -690,7 +694,20 @@ export async function executeAnalysisV2DagJob(
     if (activeProfileStage && activeProfileBatchTotal === null) {
         executionError('ANALYSIS_V2_PROFILE_PROGRESS_TOPOLOGY_MISSING', 'permanent');
     }
-    let lastActiveProfileStartedAtMs = 0;
+    const writeHeartbeat = progressReporter?.heartbeat?.bind(progressReporter);
+    const activeProfileHeartbeat = writeHeartbeat && activeProfileStage && activeProfileBatchTotal !== null
+        ? createAnalysisV2ProgressHeartbeat(signal => invokeProgressOperation({
+            claim,
+            operation: 'heartbeat',
+            reporter: progressReporter,
+            run: () => writeHeartbeat({
+                claim,
+                stage: activeProfileStage,
+                totalCount: activeProfileBatchTotal,
+                ...signal,
+            }),
+        }))
+        : null;
     // Fence an idempotent stage-start checkpoint before entering provider/AI work. This keeps
     // long unresolved executors observable without emitting a duplicate stage event; the
     // completion report below remains responsible for the durable stage transition.
@@ -714,31 +731,19 @@ export async function executeAnalysisV2DagJob(
         ...(aiPolicy ? {} : { loadAiPolicy }),
         riskPolicyVersion,
         handlerDeadlineAtMs,
-        ...(progressReporter?.heartbeat && activeProfileStage ? {
-            reportActiveProfile: async (username: string, preview, signal) => {
-                const startedAtMs = Math.max(
-                    Date.now(),
-                    lastActiveProfileStartedAtMs + 1
-                );
-                lastActiveProfileStartedAtMs = startedAtMs;
-                await invokeProgressOperation({
-                    claim,
-                    operation: 'heartbeat',
-                    reporter: progressReporter,
-                    run: () => progressReporter.heartbeat!({
-                        claim,
-                        stage: activeProfileStage,
-                        username,
-                        startedAt: new Date(startedAtMs).toISOString(),
-                        totalCount: activeProfileBatchTotal!,
-                        currentOrdinal: signal?.currentOrdinal ?? 0,
-                        callPhase: signal?.callPhase ?? 'fetching',
-                        ...(preview === undefined ? {} : { preview }),
-                    }),
-                });
-            },
+        ...(activeProfileHeartbeat ? {
+            reportActiveProfile: (username: string, preview, signal) => activeProfileHeartbeat.report({
+                username,
+                currentOrdinal: signal?.currentOrdinal ?? 0,
+                callPhase: signal?.callPhase ?? 'fetching',
+                ...(preview === undefined ? {} : { preview }),
+            }),
         } : {}),
+    }).catch(error => {
+        activeProfileHeartbeat?.discard();
+        throw error;
     });
+    await activeProfileHeartbeat?.flush();
     assertCheckpointMatchesJob(current.stage, current.job, checkpoint);
     if (checkpoint) await stateStore.checkpointManifest(claim, checkpoint);
 
@@ -1170,9 +1175,21 @@ export async function processAnalysisV2TaskDelivery(
         });
     }
 
+    const activeClaim = claim;
     let successors: readonly AnalysisV2JobSuccessor[];
     try {
-        successors = await handler(claim);
+        successors = await withVertexDispatchAuthorization(async () => {
+            const { data, error } = await retryPostgresAbortedRpc(() => supabaseAdmin.rpc(
+                'authorize_analysis_v2_vertex_dispatch_v1', {
+                    p_request_id: activeClaim.requestId,
+                    p_job_key: activeClaim.jobKey,
+                    p_claim_token: activeClaim.claimToken,
+                    p_job_input_hash: activeClaim.inputHash,
+                },
+            ));
+            if (error || typeof data !== 'boolean') throw new Error('ANALYSIS_V2_VERTEX_DISPATCH_AUTHORIZATION_UNAVAILABLE');
+            return data;
+        }, () => handler(activeClaim));
     } catch (error) {
         // Some durable stages run directly without the per-operation scheduler.
         const continuation = error instanceof DevLiveVertexBudgetReservationPendingError

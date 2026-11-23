@@ -338,6 +338,7 @@ AS $$
 DECLARE
     grant_expiry timestamptz;
     grant_plan text;
+    v_vertex_request_id UUID;
 BEGIN
     IF p_reservation_id IS NULL OR p_provider IS NULL OR p_provider NOT IN ('apify', 'vertex')
         OR p_amount_micros IS NULL OR p_amount_micros NOT BETWEEN 1 AND 5000000 THEN
@@ -348,6 +349,26 @@ BEGIN
     SELECT g.plan_id INTO grant_plan FROM dev_live_budget.grants AS g WHERE g.grant_id = p_grant_id;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'DEV_LIVE_BUDGET_UNAVAILABLE';
+    END IF;
+    -- Resolve the current owner-backed grant through its indexed preflight key.
+    -- Before consumption there is no formal request, so B-lite/fresh admission stays unchanged.
+    -- Acquire the request fence before touching any approval or reservation row.
+    IF p_provider = 'vertex' AND pg_catalog.to_regprocedure(
+        'public.analysis_v2_vertex_request_admission_open(uuid)'
+    ) IS NOT NULL THEN
+        SELECT preflight.consumed_request_id INTO v_vertex_request_id
+        FROM dev_live_budget.owner_starts AS owner_start
+        JOIN public.analysis_preflights AS preflight
+          ON preflight.user_id = owner_start.user_id
+         AND preflight.idempotency_key = CASE grant_plan
+               WHEN 'standard' THEN 'dev-live:owner:standard:'
+               ELSE 'dev-live:owner:'
+             END || p_grant_id::TEXT
+        WHERE owner_start.grant_id = p_grant_id;
+        IF v_vertex_request_id IS NOT NULL
+           AND NOT public.analysis_v2_vertex_request_admission_open(v_vertex_request_id) THEN
+            RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_VERTEX_DISPATCH_STOPPED', ERRCODE = 'P0001';
+        END IF;
     END IF;
     IF grant_plan = 'standard' THEN
         -- Standard grants and their owner binding are issued atomically. Independent
