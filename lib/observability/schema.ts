@@ -37,6 +37,7 @@ export const ALLOWED_FIELD_NAMES = [
     'result_count',
     'error_name',
     'error_code',
+    'database_code',
     'failure_reason',
     'disposition',
     'retryable',
@@ -77,7 +78,14 @@ const TRACE_ID_PATTERN = /^[0-9a-f]{32}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const ROUTE_PATTERN = /^\/[A-Za-z0-9_./:\[\]-]{0,255}$/;
 const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+export function observableAnalysisV2JobKey(value: unknown): string | null {
+    return typeof value === 'string' && OBSERVABLE_JOB_KEY_PATTERN.test(value)
+        ? value
+        : null;
+}
 
 export const OPERATIONAL_EVENT_NAMES = [
     'operational.invalid_event',
@@ -118,6 +126,7 @@ export const OPERATIONAL_EVENT_NAMES = [
     'analysis_v2.worker_completed',
     'analysis_v2.worker_retry',
     'analysis_v2.worker_failed',
+    'analysis_v2.worker_executor_failed',
     'analysis_v2.progress_fail_open',
     'analysis_v2.fresh_admission_enqueued',
     'analysis_v2.request_queued',
@@ -315,6 +324,11 @@ export const OPERATIONAL_PHASES = [
     'dispatch',
     'progress',
     'terminalize',
+    'handler',
+    'dag_load',
+    'policy_load',
+    'stage_execute',
+    'stage_checkpoint',
 ] as const;
 
 export const OPERATIONAL_DISPOSITIONS = [
@@ -392,6 +406,17 @@ const REGISTERED_PHASES = new Set<string>(OPERATIONAL_PHASES);
 const REGISTERED_DISPOSITIONS = new Set<string>(OPERATIONAL_DISPOSITIONS);
 const REGISTERED_QUEUE_NAMES = new Set<string>(OPERATIONAL_QUEUE_NAMES);
 const REGISTERED_WEBHOOK_EVENT_TYPES = new Set<string>(OPERATIONAL_WEBHOOK_EVENT_TYPES);
+const REGISTERED_FAILURE_REASONS = new Set<string>([
+    'provider_terminal_no_profile',
+    'ANALYSIS_V2_AI_PREDISPATCH_REJECTED',
+    'AI_GENERATION_DEADLINE_EXCEEDED',
+    'VERTEX_DISPATCH_TRANSPORT_UNAVAILABLE',
+    'VERTEX_AI_THINKING_LEVEL_UNSUPPORTED',
+    'DEV_LIVE_VERTEX_ATTEMPT_IDENTITY_INVALID',
+    'DEV_STANDARD_EVAL_FEATURE_MISSING',
+    'DEV_STANDARD_EVAL_MEDIA_MISSING',
+    'DEV_STANDARD_EVAL_FEATURE_IDENTITY_CHANGED',
+]);
 const REGISTERED_BETA_APIFY_SLOTS = new Set<string>([
     'primary', 'tertiary', 'quaternary', 'quinary', 'senary', 'septenary',
 ]);
@@ -545,8 +570,10 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeErrorName(value);
         case 'error_code':
             return safeErrorCode(value);
+        case 'database_code':
+            return safeString(value, /^(?:PGRST[0-9]{3}|[0-9][0-9A-Z]{4})$/);
         case 'failure_reason':
-            return safeExactRegistryValue(value, new Set(['provider_terminal_no_profile']));
+            return safeExactRegistryValue(value, REGISTERED_FAILURE_REASONS);
         case 'retryable':
         case 'fallback':
             return typeof value === 'boolean' ? value : undefined;

@@ -1,5 +1,6 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
+import { observableAnalysisV2JobKey, sanitizeOperationalEvent } from '@/lib/observability/schema';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import {
@@ -238,6 +239,9 @@ const PROVIDER_RUN_CLEANUP_DEFER_CODES = new Set([
 ]);
 
 export type AnalysisV2JobFailureDisposition = 'permanent' | 'transient' | 'fence';
+
+type AnalysisV2ExecutionPhase = 'handler' | 'dag_load' | 'policy_load' | 'progress'
+    | 'stage_execute' | 'stage_checkpoint';
 
 export class AnalysisV2JobExecutionError extends Error {
     readonly code: string;
@@ -574,8 +578,10 @@ export async function executeAnalysisV2DagJob(
         progressReporter?: AnalysisV2ProgressReporter | null;
         aiPolicyStore?: AnalysisV2AiPolicyStore;
         handlerDeadlineAtMs?: number;
+        onPhase?: (phase: AnalysisV2ExecutionPhase) => void;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
+    dependencies.onPhase?.('dag_load');
     const stateStore = dependencies.stateStore ?? defaultDagStateStore;
     const executors = dependencies.executors ?? (
         dependencies.stateStore !== undefined
@@ -617,6 +623,7 @@ export async function executeAnalysisV2DagJob(
             if (error instanceof AnalysisV2JobExecutionError) throw error;
             return executionError('ANALYSIS_V2_DAG_PLAN_INVALID', 'permanent');
         }
+        dependencies.onPhase?.('progress');
         await invokeProgressOperation({
             claim,
             operation: 'initialize',
@@ -629,6 +636,7 @@ export async function executeAnalysisV2DagJob(
     const state = await loadDagState(claim, stateStore);
     const current = canonicalPlan(claim, state);
     if (hasPersistedCheckpoint(current.stage, current.job, state)) {
+        dependencies.onPhase?.('progress');
         await invokeProgressOperation({
             claim,
             operation: 'report',
@@ -668,6 +676,7 @@ export async function executeAnalysisV2DagJob(
         }
         return { aiStagePolicyVersion, schedulerCapability };
     };
+    dependencies.onPhase?.('policy_load');
     const aiPolicy = AI_PROVIDER_STAGES.has(current.stage) ? await loadAiPolicy() : null;
     let riskPolicyVersion:
         'risk-policy-v2.3' | 'risk-policy-v2.4' | 'risk-policy-v2.5' | null = null;
@@ -711,6 +720,7 @@ export async function executeAnalysisV2DagJob(
     // Fence an idempotent stage-start checkpoint before entering provider/AI work. This keeps
     // long unresolved executors observable without emitting a duplicate stage event; the
     // completion report below remains responsible for the durable stage transition.
+    dependencies.onPhase?.('progress');
     await invokeProgressOperation({
         claim,
         operation: 'report',
@@ -722,6 +732,7 @@ export async function executeAnalysisV2DagJob(
             includeStageEvent: false,
         }),
     });
+    dependencies.onPhase?.('stage_execute');
     const checkpoint = await executeRegisteredStage(current.stage, executors, {
         claim,
         job: current.job,
@@ -743,7 +754,9 @@ export async function executeAnalysisV2DagJob(
         activeProfileHeartbeat?.discard();
         throw error;
     });
+    dependencies.onPhase?.('progress');
     await activeProfileHeartbeat?.flush();
+    dependencies.onPhase?.('stage_checkpoint');
     assertCheckpointMatchesJob(current.stage, current.job, checkpoint);
     if (checkpoint) await stateStore.checkpointManifest(claim, checkpoint);
 
@@ -756,6 +769,7 @@ export async function executeAnalysisV2DagJob(
         executionError('ANALYSIS_V2_STAGE_CHECKPOINT_NOT_VISIBLE', 'transient');
     }
     if (current.stage !== 'finalize') {
+        dependencies.onPhase?.('progress');
         await invokeProgressOperation({
             claim,
             operation: 'report',
@@ -845,9 +859,12 @@ const TRANSIENT_TRANSPORT_PATTERNS = [
     /\babort(?:ed|error)?\b/i,
 ];
 
+function failureMessageCode(message: string): string | undefined {
+    return message.match(/^([A-Z][A-Z0-9_]{2,63})(?::|\s|\(|$)/)?.[1];
+}
+
 function stableFailureCode(error: Error): string | null {
-    const match = error.message.match(/^([A-Z][A-Z0-9_]{2,63})(?::|\s|\(|$)/);
-    const code = match?.[1];
+    const code = failureMessageCode(error.message);
     return isAnalysisV2WorkerErrorCode(code) ? code : null;
 }
 
@@ -1071,6 +1088,53 @@ export function classifyAnalysisV2JobFailure(error: unknown): AnalysisV2JobExecu
     );
 }
 
+const DATABASE_WORKER_FAILURE_CODES = new Set([
+    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_DAG_STATE_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR',
+    'ANALYSIS_V2_AI_SCORING_STAGE_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR',
+]);
+
+function emitAnalysisV2ExecutorFailure(
+    claim: ClaimedAnalysisV2Job,
+    phase: AnalysisV2ExecutionPhase,
+    failure: AnalysisV2JobExecutionError,
+    error: unknown,
+): void {
+    try {
+        const source = error instanceof Error ? error.message : '';
+        const sourceCode = failureMessageCode(source);
+        const databaseCode = sourceCode && DATABASE_WORKER_FAILURE_CODES.has(sourceCode)
+            ? source.match(/\(((?:PGRST[0-9]{3}|[0-9][0-9A-Z]{4}))\)\.$/)?.[1]
+            : undefined;
+        const vertexRateLimited = sourceCode === 'AI_RATE_LIMIT_ERROR';
+        const { fields } = sanitizeOperationalEvent({
+            event: 'analysis_v2.worker_executor_failed',
+            severity: 'error',
+            fields: {
+                analysis_request_id: claim.requestId,
+                job_key: observableAnalysisV2JobKey(claim.jobKey) ?? undefined,
+                operation: 'worker',
+                phase,
+                attempt: claim.attemptCount,
+                disposition: failure.disposition,
+                retryable: failure.retryable,
+                error_code: failure.code,
+                error_name: error instanceof Error ? error.name : undefined,
+                database_code: databaseCode,
+                failure_reason: sourceCode,
+                ...(vertexRateLimited ? { provider: 'gemini', status: 429 } : {}),
+            },
+        });
+        // Dev disables external telemetry. Write sanitized fields to the worker log.
+        console.error(JSON.stringify(fields));
+    } catch {
+        // Logging must not change failure handling, even if an error accessor throws.
+    }
+}
+
 export async function processAnalysisV2TaskDelivery(
     delivery: AnalysisV2TaskDelivery,
     dependencies: {
@@ -1094,12 +1158,14 @@ export async function processAnalysisV2TaskDelivery(
     } = {}
 ): Promise<AnalysisV2WorkerOutcome> {
     const store = dependencies.store ?? analysisV2JobStore;
+    let phase: AnalysisV2ExecutionPhase = 'handler';
     const handler = dependencies.handler ?? (claim => executeAnalysisV2DagJob(claim, {
         stateStore: dependencies.stateStore,
         executors: dependencies.executors,
         progressReporter: dependencies.progressReporter,
         aiPolicyStore: dependencies.aiPolicyStore,
         handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs,
+        onPhase: next => { phase = next; },
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const terminalFailureFinalizer = dependencies.terminalFailureFinalizer ?? (
@@ -1255,6 +1321,7 @@ export async function processAnalysisV2TaskDelivery(
             }));
         }
         if (!failure.retryable || exhausted) {
+            emitAnalysisV2ExecutorFailure(claim, phase, failure, error);
             const cleanupRetry = await finalizeTerminalFailureOrDeferProviderCleanup(
                 claim,
                 exhausted ? 'JOB_ATTEMPTS_EXHAUSTED' : failure.code,

@@ -52,6 +52,7 @@ import {
     type OperationalRequestContext,
 } from '@/lib/observability/request';
 import { operationalLogger } from '@/lib/observability/server';
+import { observableAnalysisV2JobKey } from '@/lib/observability/schema';
 import {
     assertAnalysisTaskWorkloadRole,
     assertAnalysisWorkerWorkloadRole,
@@ -61,7 +62,6 @@ import {
 // canonical Cloud Run worker, whose independently configured request timeout is 600 seconds.
 export const maxDuration = 300;
 
-const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
 const CAPACITY_WAIT_ERROR_CODES = new Set([
     'ANALYSIS_V2_AI_CAPACITY_PENDING',
     'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
@@ -74,12 +74,6 @@ function safeErrorCode(value: unknown, fallback: string): string {
     return isAnalysisV2WorkerErrorCode(value)
         ? value
         : fallback;
-}
-
-function observableJobKey(value: unknown): string | null {
-    return typeof value === 'string' && OBSERVABLE_JOB_KEY_PATTERN.test(value)
-        ? value
-        : null;
 }
 
 function emitWorkerOutcome(input: {
@@ -211,7 +205,7 @@ async function handlePOST(
         assertAnalysisTaskWorkloadRole(delivery.workloadRole, 'paid');
     } catch {
         const requestId = 'kind' in delivery ? delivery.preflightId : delivery.requestId;
-        const jobKey = 'kind' in delivery ? null : observableJobKey(delivery.jobKey);
+        const jobKey = 'kind' in delivery ? null : observableAnalysisV2JobKey(delivery.jobKey);
         emitWorkerOutcome({
             context,
             event: 'analysis_v2.worker_failed',
@@ -350,7 +344,7 @@ async function handlePOST(
         }
     }
     const paidDelivery = delivery as import('@/lib/services/analysis/v2-job-store').AnalysisV2TaskDelivery;
-    const jobKey = observableJobKey(paidDelivery.jobKey);
+    const jobKey = observableAnalysisV2JobKey(paidDelivery.jobKey);
     const analysisRequestId = paidDelivery.requestId;
     try {
         const outcome = await runWithApproval(() => processAnalysisV2TaskDelivery(paidDelivery, {
