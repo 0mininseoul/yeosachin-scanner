@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <title>체리 메타 A/B 시안 보드</title>
+    <style>
+      body { margin: 0; padding: 32px; background: #f6efeb; font-family: Paperlogy, 'Apple SD Gothic Neo', sans-serif; color: #2a0712; }
+      h1 { margin: 0 0 8px; font-size: 28px; }
+      p { margin: 0 0 24px; color: #6a564b; }
+      .row { display: grid; grid-template-columns: repeat(2, 300px) repeat(2, 200px); gap: 16px; align-items: end; margin-bottom: 36px; }
+      figure { margin: 0; }
+      img { display: block; width: 100%; border-radius: 10px; box-shadow: 0 8px 24px -12px #0006; }
+      figcaption { margin-top: 6px; font-size: 14px; }
+      h2 { margin: 0 0 12px; font-size: 20px; }
+    </style>
+  </head>
+  <body>
+    <h1>체리 메타 A/B 시안</h1>
+    <p>같은 행의 A(남친)와 B(짝남)는 문구만 다릅니다. 4:5는 피드·탐색, 9:16은 스토리·릴스용입니다.</p>
+    <main id="board"></main>
+    <script>
+      const concepts = [['1', 'question', '질문 헤드라인'], ['2', 'alimtalk', '카톡 알림'], ['3', 'reveal', '팔로잉 +1'], ['4', 'chat', '친구 대화']];
+      const cell = (c, slug, v, ratio) => `<figure><img src="out/c${c}-${slug}_${v}_${ratio}.png" alt=""><figcaption>${v === 'bf' ? 'A 남친' : 'B 짝남'} · ${ratio.replace('x', ':')}</figcaption></figure>`;
+      document.getElementById('board').innerHTML = concepts.map(([c, slug, name]) => `
+        <h2>C${c} ${name}</h2>
+        <section class="row">${cell(c, slug, 'bf', '4x5')}${cell(c, slug, 'crush', '4x5')}${cell(c, slug, 'bf', '9x16')}${cell(c, slug, 'crush', '9x16')}</section>`).join('');
+    </script>
+  </body>
+</html>

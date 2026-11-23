@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <title>체리 메타 광고 시안</title>
+    <link rel="stylesheet" href="ad.css">
+    <script src="copy.js"></script>
+  </head>
+  <body>
+    <main class="ad" id="ad"></main>
+    <script>
+      // ?c=1..4 & v=bf|crush & s=feed|story
+      const params = new URLSearchParams(location.search);
+      const concept = Number(params.get('c') ?? 1);
+      const variant = params.get('v') === 'crush' ? 'crush' : 'bf';
+      const size = params.get('s') === 'story' ? 'story' : 'feed';
+      const copy = window.COPY[variant];
+      const shared = window.SHARED;
+      const asset = (path) => `../../../${path}`;
+      const ad = document.getElementById('ad');
+      ad.className = `ad ad--${size} c${concept}`;
+      document.documentElement.dataset.variant = variant;
+
+      const cherry = `<img class="cherry" src="${asset('design/namchin-demand/og/cherry.png')}" alt="">`;
+      const offer = `<p class="offer"><b>${shared.offer}</b><span>${shared.deadline}</span></p>`;
+      const brandRow = `<p class="brand"><img src="${asset('public/cherry/logo.png')}" alt=""><span>${copy.brand}</span></p>`;
+
+      const scenes = {
+        1: () => `
+          ${cherry}
+          ${brandRow}
+          <h1><span class="lead">${copy.c1Lead}</span>${shared.c1Punch.map((line) => `<span class="punch">${line}</span>`).join('')}</h1>
+          ${offer}`,
+        2: () => `
+          <h1><span class="lead">${copy.c2Lead}</span><span class="punch">${shared.c2Punch}</span></h1>
+          <div class="lock">
+            <p class="clock">9:07</p>
+            <p class="date">11월 24일 월요일</p>
+            <article class="push">
+              <header><img src="${asset('public/cherry/assets/kakao-symbol.svg')}" alt=""><span>카카오톡</span><time>지금</time></header>
+              <p class="push-title">체리</p>
+              <p class="push-text">${shared.c2Message}</p>
+              <ul class="push-people">
+                <li><img src="${asset('public/cherry/assets/hero/seoa-profile.jpg')}" alt=""><b>@seoa.ondo_</b></li>
+                <li><img src="${asset('public/cherry/assets/hero/rina-profile.jpg')}" alt=""><b>@rina.wknd_</b></li>
+              </ul>
+            </article>
+          </div>
+          <footer>${brandRow}${offer}</footer>`,
+        3: () => `
+          <div class="count">
+            <p class="count-label">${copy.c3Label}</p>
+            <p class="count-digits"><span>231</span><i></i><b>232</b><em>+1</em></p>
+          </div>
+          <div class="mystery">
+            <div class="mystery-photo"><img src="${asset('public/cherry/assets/hero/seoa-profile.jpg')}" alt=""><span>?</span></div>
+            <p class="mystery-id"><b>@s••••.•••••_</b><span>방금 맞팔</span></p>
+          </div>
+          <h1>${shared.c3Question.map((line) => `<span>${line}</span>`).join('')}</h1>
+          <p class="answer">${shared.c3Answer}</p>
+          <footer>${brandRow}${offer}</footer>`,
+        4: () => `
+          <div class="chat">
+            <div class="msg msg--friend">
+              <span class="avatar">지</span>
+              <div><p class="name">지민</p><p class="bubble">${copy.c4Friend}</p></div>
+            </div>
+            <div class="msg msg--me"><p class="bubble typing"><i></i><i></i><i></i></p></div>
+          </div>
+          ${cherry}
+          <h1>${shared.c4Answer.map((line) => `<span>${line}</span>`).join('')}</h1>
+          <footer>${brandRow}${offer}</footer>`,
+      };
+      ad.innerHTML = scenes[concept]();
+    </script>
+  </body>
+</html>
