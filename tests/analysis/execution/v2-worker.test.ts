@@ -1,5 +1,5 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
 import {
@@ -28,7 +28,11 @@ import {
     AnalysisV2JobLeaseBusyError,
 } from '../../../lib/services/analysis/v2-job-store';
 import { AnalysisV2AiResultRecoveryPendingError } from '../../../lib/services/analysis/v2-ai-result-store';
-import { AnalysisV2SchedulerContinuationError } from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
+import {
+    AnalysisV2SchedulerContinuationError,
+    PROFILE_CONSUMER_READ_TIMEOUT,
+} from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
+import { createAnalysisV2ProfileBatchReadModel } from '../../../lib/services/analysis/v2-ai-scoring-runtime-deps';
 import {
     ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS,
     ANALYSIS_V2_JOB_MAX_ATTEMPTS,
@@ -1809,6 +1813,101 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_AI_CAPACITY_PENDING',
             delay,
         );
+    });
+
+    it('resumes the same profile checkpoint after read timeouts even on the last job attempt', async () => {
+        const producerInputHash = digest('existing-profile-checkpoint');
+        const capturedAt = '2026-11-23T03:00:00.000Z';
+        const username = 'synthetic.profile';
+        const producerJobKey = 'track:profiles:batch:0';
+        const checkpoint = {
+            requestId,
+            jobKey: producerJobKey,
+            requestedUsernames: [username],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [{
+                outcome: {
+                    requestedUsername: username, source: 'apify', status: 'success', failureCategory: null,
+                    httpStatus: null, requestCount: 1, latencyMs: 25, capturedAt,
+                },
+                profile: { username, followersCount: 7, followingCount: 9, postsCount: 0, isPrivate: false, isVerified: false },
+            }],
+            fallbackResults: [],
+            primaryCapturedAt: capturedAt,
+            fallbackCapturedAt: null,
+        };
+        const timeout = {
+            data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' },
+        };
+        const rpc = vi.fn()
+            .mockResolvedValueOnce(timeout)
+            .mockResolvedValueOnce(timeout)
+            .mockResolvedValueOnce({ data: checkpoint, error: null });
+        const reader = createAnalysisV2ProfileBatchReadModel({ rpc });
+        const original: ClaimedAnalysisV2Job = {
+            ...bootstrapClaim, jobKey: 'track:profile-ai:batch:0', track: 'profile_ai', kind: 'ai',
+            inputHash: digest('profile-ai-input'), batch: 0, attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        };
+        let next = original;
+        const jobStore = store(original, {
+            claim: vi.fn(async task => {
+                if (task.generation !== next.generation || task.reservationToken !== next.reservationToken) {
+                    throw new AnalysisV2JobFenceError();
+                }
+                return next;
+            }),
+            continueScheduler: vi.fn(async (claim, code, delay) => {
+                const reserved = await store(claim).continueScheduler(claim, code, delay);
+                const reservationToken = randomUUID();
+                next = { ...claim, generation: reserved.generation, reservationToken, claimToken: randomUUID() };
+                return { ...reserved, reservationToken };
+            }),
+        });
+        const runAi = vi.fn();
+        const terminalFailureFinalizer = vi.fn();
+        const dispatchReservedContinuation = vi.fn();
+        const handler = vi.fn(async (claim: ClaimedAnalysisV2Job) => {
+            const batch = await reader.loadExactBatch({
+                requestId,
+                consumerJobKey: claim.jobKey,
+                consumerClaimToken: claim.claimToken,
+                consumerInputHash: claim.inputHash,
+                producerJobKey,
+                batch: 0,
+                expectedProducerInputHash: producerInputHash,
+                expectedItemCount: 1,
+            });
+            await runAi(batch);
+            return [];
+        });
+        const dependencies = { store: jobStore, handler, terminalFailureFinalizer, dispatchReservedContinuation };
+
+        for (let g = 1; g <= 2; g++) {
+            const current = next;
+            await expect(processAnalysisV2TaskDelivery(current, dependencies)).resolves.toEqual({
+                status: 'continuation', errorCode: PROFILE_CONSUMER_READ_TIMEOUT, pendingRecoveryCount: 0,
+            });
+            await expect(processAnalysisV2TaskDelivery(current, dependencies))
+                .rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+        }
+        expect(runAi).not.toHaveBeenCalled();
+        expect(dispatchReservedContinuation).toHaveBeenCalledTimes(2);
+        expect(dispatchReservedContinuation).toHaveBeenLastCalledWith(
+            expect.objectContaining({ generation: 3, attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS - 1 }), 5,
+        );
+
+        await expect(processAnalysisV2TaskDelivery(next, dependencies))
+            .resolves.toMatchObject({ status: 'completed' });
+        expect(rpc).toHaveBeenCalledTimes(3);
+        expect(rpc.mock.calls[2]).toEqual([
+            rpc.mock.calls[0][0],
+            { ...rpc.mock.calls[0][1], p_consumer_claim_token: next.claimToken },
+        ]);
+        expect(next.claimToken).not.toBe(original.claimToken);
+        expect(runAi).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ requestedUsernames: [username] }));
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(jobStore.completeAndFanout).toHaveBeenCalledOnce();
     });
 
     it('defers a resolver recovery race and resumes after durable recovery settles it', async () => {

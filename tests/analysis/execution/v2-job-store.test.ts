@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
+import { PROFILE_CONSUMER_READ_TIMEOUT } from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -558,6 +559,45 @@ describe('analysis V2 job store', () => {
                 ),
             })
         );
+    });
+
+    it('reuses one continuation token after a confirmed rollback at the profile read retry limit', async () => {
+        const job = { ...claimedJob(), jobKey: 'track:profile-ai:batch:0', attemptCount: 7 };
+        const rpc = vi.fn().mockResolvedValueOnce({
+            data: null,
+            error: { code: '57014', message: 'canceling statement due to statement timeout' },
+        }).mockImplementationOnce(async (_name, parameters) => ({
+            data: [{
+                reserved: true,
+                dispatch_generation: 2,
+                reservation_token: parameters.p_dispatch_token,
+                job_status: 'pending',
+                dispatch_state: 'reserved',
+                task_name: null,
+                attempt_count: 6,
+                request_status: 'processing',
+            }],
+            error: null,
+        }));
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.continueScheduler(job, PROFILE_CONSUMER_READ_TIMEOUT, 5))
+            .resolves.toMatchObject({ generation: 2, attemptCount: 6, status: 'pending' });
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
+    });
+
+    it.each([
+        { code: '57014', message: 'canceling statement due to user request' },
+        { code: 'PGRST000', message: 'Connection to the database was lost' },
+    ])('leaves ambiguous continuation reservations for durable recognition after $code', async error => {
+        const job = { ...claimedJob(), jobKey: 'track:profile-ai:batch:0' };
+        const rpc = vi.fn().mockResolvedValue({ data: null, error });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.continueScheduler(job, PROFILE_CONSUMER_READ_TIMEOUT, 5))
+            .rejects.toThrow('ANALYSIS_V2_JOB_PERSISTENCE_ERROR');
+        expect(rpc).toHaveBeenCalledOnce();
     });
 
     it('completes and fans out camelCase successor contracts atomically', async () => {
