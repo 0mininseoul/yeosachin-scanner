@@ -24,6 +24,7 @@ const nextConfig: NextConfig = {
   // that still point at the old image, which otherwise 404s and renders as a blank card.
   async redirects() {
     return [
+      { source: "/cherry/landing.html", destination: "/cherry", permanent: true },
       { source: "/namchin", destination: "/cherry", permanent: true },
       { source: "/namchin/og.jpg", destination: "/cherry/og.jpg", permanent: true },
     ];

@@ -43,6 +43,25 @@ describe('cherry landing variant', () => {
             .toBe(landing.replace('<html lang="ko">', '<html lang="ko" data-variant="bf">'));
     });
 
+    it.each(['', '?v=bf&utm_source=meta', '?v=crush', '?utm_source=chatgpt.com'])(
+        'serves an indexable canonical with the service and answers in the initial HTML: %s',
+        async (query) => {
+            const { GET } = await import('@/app/cherry/route');
+            const url = 'https://yeosachin.com/cherry';
+            const html = await (await GET(new NextRequest(url + query))).text();
+
+            expect(html).not.toMatch(/noindex/i);
+            expect(html).toContain(`<link rel="canonical" href="${url}">`);
+            const schema = JSON.parse(html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/)?.[1] ?? '');
+            expect(schema.mainEntity).toMatchObject({ '@type': 'Service', name: '체리', url });
+            expect(html).toContain('체리는 매일 팔로워와 팔로잉 수를 확인해요.');
+            if (query === '') {
+                expect(html).toContain('체리 | 인스타 남친맞팔알리미·짝남맞팔알리미');
+                expect(html).toContain('짝남맞팔알리미로도 쓸 수 있나요?');
+            }
+        },
+    );
+
     it('keeps crush with ad params', async () => {
         const { GET } = await import('@/app/cherry/route');
         const response = await GET(new NextRequest('https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=abc'));

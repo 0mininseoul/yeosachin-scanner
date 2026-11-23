@@ -9,6 +9,7 @@ const REQUIRED_DEPLOYMENT_URLS = [
     'https://yeosachin.com/robots.txt',
     'https://yeosachin.com/sitemap.xml',
     'https://yeosachin.com/',
+    'https://yeosachin.com/cherry',
     'https://yeosachin.com/guide/wijang-yeosachin',
     'https://yeosachin.com/terms',
     'https://yeosachin.com/privacy',
