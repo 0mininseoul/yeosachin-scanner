@@ -84,9 +84,10 @@ $fn$;
 REVOKE ALL ON FUNCTION dev_live_budget.standard_archive_source_request(uuid)
     FROM PUBLIC, anon, authenticated, service_role;
 
--- Resolve the original settled run by operation, provider input and run ID from
--- the encrypted worker inputs. Post selection and item coverage remain fenced
--- by the existing checkpoint writers and validated archive identities.
+-- Resolve the original successful run by operation, provider input and run ID
+-- from the encrypted worker inputs. Usage may still be awaiting reconciliation.
+-- Post selection and item coverage remain fenced by the checkpoint writers and
+-- validated archive identities.
 CREATE OR REPLACE FUNCTION dev_live_budget.standard_archive_evidence_source(
     p_request_id uuid, p_job_key text, p_claim_token uuid, p_operation_key text,
     p_input_hash text, p_provider text, p_run_id text, p_credential_slot text
@@ -123,8 +124,6 @@ AS $fn$
       AND provider_run.input_hash = p_input_hash
       AND provider_run.run_id = p_run_id
       AND provider_run.status = 'succeeded'
-      AND provider_run.actual_usage_usd IS NOT NULL
-      AND provider_run.usage_reconciled_at IS NOT NULL
       AND (p_credential_slot IS NULL OR provider_run.credential_slot = p_credential_slot)
       -- Give the request's direct receipt and recovery adoption precedence,
       -- including rejection when either exists with a conflicting identity.
@@ -267,7 +266,7 @@ DECLARE
     v_signature constant text :=
         'public.checkpoint_analysis_v2_profile_fresh_apify_earlybird_v1(uuid,text,uuid,text,text[],jsonb,text,text)';
     v_baseline_hash constant text := 'd574dd70c33a4344d1740b2ec9226a54';
-    v_edited_hash constant text := '94f2b06bdd089a492891e1dd28764262';
+    v_edited_hash constant text := '45df8612098af9e455251bfe95241e7c';
     v_base pg_catalog.pg_proc%ROWTYPE;
     v_source text;
     v_marker constant text := '    SELECT batch.*';
@@ -294,8 +293,6 @@ DECLARE
           AND provider_run.job_key = p_job_key
           AND provider_run.operation_key = p_operation_key
           AND provider_run.input_hash = p_provider_input_hash
-          AND provider_run.actual_usage_usd IS NOT NULL
-          AND provider_run.usage_reconciled_at IS NOT NULL
         FOR SHARE OF provider_run;
         v_uses_archive := FOUND;
     END IF;

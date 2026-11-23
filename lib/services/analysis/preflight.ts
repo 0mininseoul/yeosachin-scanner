@@ -1893,6 +1893,7 @@ export function classifyPreflightError(error: unknown): ClassifiedPreflightError
         || message.startsWith('PREFLIGHT_PROVIDER_RUN_PERSISTENCE_ERROR:')
         || message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
         || message === 'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR'
+        || message === 'DEV_STANDARD_ARCHIVE_STORAGE_RETRY'
     ) {
         return {
             category: 'persistence',

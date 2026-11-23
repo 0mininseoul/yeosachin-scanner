@@ -640,6 +640,38 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
         expect(receipts.rows).toEqual([{ total: 0 }]);
     });
 
+    it('reuses successful archived receipts and preserves unknown usage for later reconciliation', async () => {
+        await seedArchive();
+        await db.query(`
+            UPDATE public.analysis_v2_provider_runs
+            SET actual_usage_usd = NULL, usage_reconciled_at = NULL
+            WHERE request_id = $1
+        `, [sourceRequest]);
+
+        await expect(asService(
+            'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot',
+            evidenceArgs,
+        )).resolves.toMatchObject({ rows: [{ slot: 'secondary' }] });
+        const args = [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, archivedOperation,
+            TARGET_PROVIDER_HASH, 'apify', archivedRunId, 'secondary'];
+        await expect(db.query(`
+            SELECT receipt.actual_usage_usd, receipt.usage_reconciled_at
+            FROM public.analysis_v2_load_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS receipt
+        `, args)).resolves.toMatchObject({
+            rows: [{ actual_usage_usd: null, usage_reconciled_at: null }],
+        });
+        await expect(checkpoint(targetProfile)).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: [TARGET] } }],
+        });
+        const receipts = await db.query(`
+            SELECT count(*) FILTER (WHERE request_id = $1)::int AS destination_receipts,
+                   count(*) FILTER (WHERE request_id = $2 AND status = 'succeeded'
+                        AND actual_usage_usd IS NULL AND usage_reconciled_at IS NULL)::int AS unreconciled_source_receipts
+            FROM public.analysis_v2_provider_runs
+        `, [REQUEST_ID, sourceRequest]);
+        expect(receipts.rows).toEqual([{ destination_receipts: 0, unreconciled_source_receipts: 3 }]);
+    });
+
     it('loads the replay receipt as the original composite, exposes only its slot and fences stale identities', async () => {
         await seedArchive();
         const slot = 'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot';

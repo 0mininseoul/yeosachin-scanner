@@ -3,6 +3,7 @@ import {
     beginDevStandardArchivePreflight,
     captureDevStandardInput,
     currentDevStandardArchive,
+    DevStandardArchiveStorageRetryError,
     sealDevStandardArchive,
     withDevStandardArchiveApproval,
     withVerifiedDevStandardArchive,
@@ -22,7 +23,8 @@ const archive = vi.hoisted(() => ({
     readSeal: vi.fn(),
     verifyMembership: vi.fn(),
 }));
-vi.mock('@/lib/services/dev-ui/standard-archive-store', () => {
+vi.mock('@/lib/services/dev-ui/standard-archive-store', async (importOriginal) => {
+    const original = await importOriginal<typeof import('@/lib/services/dev-ui/standard-archive-store')>();
     const reader = {
         inputKeys(kind: string) {
             const prefix = `${kind}|`;
@@ -35,6 +37,7 @@ vi.mock('@/lib/services/dev-ui/standard-archive-store', () => {
         },
     };
     return {
+        ...original,
         createDevStandardArchiveStore: () => ({
             bindCapture: archive.bindCapture,
             readBinding: archive.readBinding,
@@ -102,6 +105,27 @@ describe('Standard Dev archive scope and sealing', () => {
             return callback();
         }, env)).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
         expect(callback).not.toHaveBeenCalled();
+        expect(currentDevStandardArchive()).toBeNull();
+    });
+
+    it('preserves a transient error on the approval or claim boundary for the same delivery', async () => {
+        const transient = new DevStandardArchiveStorageRetryError();
+        const callback = vi.fn(async () => {
+            await beginDevStandardArchivePreflight();
+            await captureDevStandardInput('preflight-profile-v1', [target], []);
+        });
+        archive.readBinding.mockRejectedValueOnce(transient);
+        await expect(withDevStandardArchiveApproval(standard, callback, env)).rejects.toBe(transient);
+        expect(callback).not.toHaveBeenCalled();
+
+        archive.bindCapture.mockRejectedValueOnce(transient);
+        await expect(withDevStandardArchiveApproval(standard, callback, env)).rejects.toBe(transient);
+        expect(archive.objects.size).toBe(0);
+
+        await withDevStandardArchiveApproval(standard, callback, env);
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(archive.bindCapture).toHaveBeenCalledTimes(2);
+        expect(archive.objects.size).toBe(2);
         expect(currentDevStandardArchive()).toBeNull();
     });
 

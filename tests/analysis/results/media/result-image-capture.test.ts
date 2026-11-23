@@ -228,6 +228,48 @@ describe('captureResultImages', () => {
         expect(incompleteRegistry.sealManifest).not.toHaveBeenCalled();
     });
 
+    it('captures and replays optional image failure without treating it as a missing source', async () => {
+        const optional = source(4);
+        const archived = new Map<string, unknown>();
+        const capture = installArchive('capture', archived);
+        const download = vi.fn(async (): Promise<never> => { throw new Error('synthetic download failure'); });
+        const live = registry();
+        const store = { put: vi.fn(), head: vi.fn() };
+        const settings = {
+            ...CLAIM, orderedManifestHash: MANIFEST_HASH, expectedRows: 1,
+            hmacSecret: HMAC_SECRET, download, store, now: () => NOW,
+        };
+        await captureResultImages({
+            ...settings, registry: live,
+            loadSourcePage: async () => ({ items: [optional], nextAfterOrdinal: null }),
+        });
+        expect(capture.capture).toHaveBeenCalledOnce();
+        expect(capture.capture).toHaveBeenCalledWith('result-image-v1', expect.any(Array), {
+            status: 'capture_failed', failureCode: 'CAPTURE_FAILED',
+        });
+        expect(live.registerOutcome).toHaveBeenCalledWith(expect.objectContaining({
+            outcome: expect.objectContaining({ status: 'capture_failed', isMandatory: false }),
+        }));
+        installArchive('replay', archived);
+        download.mockClear();
+        const replay = registry();
+        const replayImage = { ...optional, sourceUrl: archiveMediaUrlAnchor(optional.sourceUrl!) };
+        await captureResultImages({
+            ...settings, registry: replay,
+            loadSourcePage: async () => ({ items: [replayImage], nextAfterOrdinal: null }),
+        });
+        expect(download).not.toHaveBeenCalled();
+        expect(store.put).not.toHaveBeenCalled();
+        expect(replay.registerOutcome).toHaveBeenCalledWith(expect.objectContaining({
+            outcome: expect.objectContaining({ status: 'capture_failed', failureCode: 'CAPTURE_FAILED' }),
+        }));
+        await expect(captureResultImages({
+            ...settings, registry: registry(),
+            loadSourcePage: async () => ({ items: [{ ...replayImage, sortOrdinal: 2 }], nextAfterOrdinal: null }),
+        })).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(download).not.toHaveBeenCalled();
+    });
+
     it('captures a mixed manifest with at most eight concurrent image buffers', async () => {
         const rows = [
             source(0),

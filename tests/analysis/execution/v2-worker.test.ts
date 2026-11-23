@@ -1602,6 +1602,7 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: existing content mismatch.',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (403).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (409).',
+            'DEV_STANDARD_ARCHIVE_UNAVAILABLE',
         ]) {
             expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
                 disposition: 'permanent',
@@ -1627,6 +1628,7 @@ describe('analysis V2 durable DAG worker', () => {
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (503).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (599).',
             'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (unknown).',
+            'DEV_STANDARD_ARCHIVE_STORAGE_RETRY',
         ]) {
             expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
                 disposition: 'transient',

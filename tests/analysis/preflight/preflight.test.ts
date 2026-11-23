@@ -1162,10 +1162,11 @@ it('classifies an immutable B-lite fence loss as non-retryable persistence', () 
     });
 });
 
-it('classifies rejection checkpoint failure as retryable persistence', () => {
-    expect(classifyPreflightError(
-        new Error('ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR')
-    )).toEqual({
+it.each([
+    'ANALYSIS_V2_PROVIDER_RUN_REJECTION_PERSISTENCE_ERROR',
+    'DEV_STANDARD_ARCHIVE_STORAGE_RETRY',
+])('classifies %s as retryable persistence without an Apify fallback', code => {
+    expect(classifyPreflightError(new Error(code))).toEqual({
         category: 'persistence',
         retryable: true,
         httpStatus: null,

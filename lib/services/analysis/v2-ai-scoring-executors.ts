@@ -1,6 +1,7 @@
 import {
     currentDevStandardArchive,
     DevStandardArchiveError,
+    DevStandardArchiveStorageRetryError,
     sealDevStandardArchive,
 } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { createHash } from 'node:crypto';
@@ -1733,7 +1734,8 @@ async function finalRevenueResolverMedia(input: {
         };
     } catch (error) {
         if (error instanceof AnalysisV2AiResultRecoveryPendingError
-            || error instanceof DevStandardArchiveError) throw error;
+            || error instanceof DevStandardArchiveError
+            || error instanceof DevStandardArchiveStorageRetryError) throw error;
         return null;
     }
 }

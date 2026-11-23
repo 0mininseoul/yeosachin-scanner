@@ -11,7 +11,9 @@ import {
     devLiveStandardReplayConfiguration,
     type DevLiveApproval,
 } from './live-approval';
-import { createDevStandardArchiveStore } from './standard-archive-store';
+import { createDevStandardArchiveStore, DevStandardArchiveStorageRetryError } from './standard-archive-store';
+
+export { DevStandardArchiveStorageRetryError } from './standard-archive-store';
 
 type ArchiveInputIdentity = readonly (string | number | boolean | null)[];
 type ArchiveCoverage = Readonly<{ profileBatches: readonly number[] }>;
@@ -71,7 +73,8 @@ export async function beginDevStandardArchivePreflight(): Promise<void> {
     if (archive?.mode === 'capture') await archive.beginPreflightCapture();
 }
 
-function fail(): never {
+function fail(error?: unknown): never {
+    if (error instanceof DevStandardArchiveStorageRetryError) throw error;
     throw new DevStandardArchiveError();
 }
 
@@ -209,8 +212,8 @@ async function readArchiveInput(
     try {
         const result = await store.readFragment({ kind, inputKey: inputKey(identity) });
         if (result) return result.value;
-    } catch {
-        // The worker must not log object or input identities.
+    } catch (error) {
+        return fail(error);
     }
     return fail();
 }
@@ -248,8 +251,8 @@ export async function withVerifiedDevStandardArchive<T>(
         await verifyCoverage(reader, coverage, target);
         await verifyMediaSelectionMembership(opened);
         if (!(await store.verifySealedMembership())) return fail();
-    } catch {
-        return fail();
+    } catch (error) {
+        return fail(error);
     }
     return workerArchive.run(readonlySession(reader, target), () => operation(coverage));
 }
@@ -271,8 +274,8 @@ export async function withDevStandardArchiveApproval<T>(
         let opened: SealedArchive | null;
         try {
             opened = await storeForEnvironment(env).openSealedArchive();
-        } catch {
-            return fail();
+        } catch (error) {
+            return fail(error);
         }
         if (opened?.binding.grantId !== replay.sourceGrantId
             || opened.binding.target !== approval.targetInstagramId
@@ -302,8 +305,8 @@ export async function withDevStandardArchiveApproval<T>(
                 || binding.expiresAt !== expected.expiresAt) return fail();
             bound = true;
         } else if (role === 'paid') return fail();
-    } catch {
-        return fail();
+    } catch (error) {
+        return fail(error);
     }
     return workerArchive.run({
         mode: 'capture',
@@ -316,8 +319,8 @@ export async function withDevStandardArchiveApproval<T>(
             try {
                 await store.bindCapture(expected);
                 bound = true;
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         async capture(kind, identity, value) {
@@ -331,8 +334,8 @@ export async function withDevStandardArchiveApproval<T>(
                     inputKey: pointer,
                     value: key,
                 });
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         load: (kind, identity) => bound ? readArchiveInput(store, kind, identity) : fail(),
@@ -340,8 +343,8 @@ export async function withDevStandardArchiveApproval<T>(
             if (!bound) return fail();
             try {
                 return await store.readFragment({ kind, inputKey: inputKey(identity) });
-            } catch {
-                return fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         async seal(coverage) {
@@ -354,8 +357,8 @@ export async function withDevStandardArchiveApproval<T>(
                     value: coverage.profileBatches,
                 });
                 await store.seal(verifyMediaSelectionMembership);
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
     }, operation);

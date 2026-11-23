@@ -2948,13 +2948,17 @@ export async function featureAnalysis(
         // schema.  Do not issue an untracked second Gemini call: compose a
         // deterministic, evidence-specific overview and re-run the complete
         // response schema before publication.
-        features = responseSchema.parse({
-            ...(candidate as Record<string, unknown>),
-            oneLineOverview: buildV211EvidenceSpecificOverview({
+        try {
+            const oneLineOverview = buildV211EvidenceSpecificOverview({
                 profileEvidence: input.bio,
                 feedEvidence: input.captions.map(caption => caption.text),
-            }),
-        });
+            });
+            features = responseSchema.parse({ ...(candidate as Record<string, unknown>), oneLineOverview });
+        } catch {
+            // Preserve the typed rejection so the caller can classify this one
+            // profile as unavailable and finish the rest of the batch.
+            throw error;
+        }
     }
     return finalizeFeatureAnalysis(projection, features);
 }
