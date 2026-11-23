@@ -64,3 +64,6 @@ body { background: #111; font-family: Paperlogy, sans-serif; }
 .c .sub b { display: block; color: #fff4f1; font-size: 46px; }
 .c .cherry { position: absolute; left: 50%; bottom: -346px; width: 700px; height: 700px; margin-left: -350px; }
 .c .offer { position: absolute; right: 48px; bottom: 56px; padding: 12px 24px 14px; border-radius: 99px; background: #ffd9dd; color: #4d0c1d; font-size: 27px; font-weight: 800; letter-spacing: -0.03em; }
+
+/* B, crush variant: the longer lead needs its own line. */
+.b.crush h1 { font-size: 80px; }
