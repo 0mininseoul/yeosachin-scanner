@@ -260,6 +260,13 @@ function restartTick(tile) {
   tile.classList.add('is-tick');
 }
 
+// Each digit keeps one text node and only its text changes. Replacing the node every frame made session
+// replays drop removals and stack old numbers in one slot, and made every recording larger.
+const digitText = (root) => Array.from(root.querySelectorAll('strong'), (digit) => {
+  if (digit.childNodes.length !== 1 || digit.firstChild.nodeType !== Node.TEXT_NODE) digit.replaceChildren(document.createTextNode(''));
+  return digit.firstChild;
+});
+
 function startCountdown(clockOffset) {
   const template = document.querySelector('#countdown-template');
   const clocks = Array.from(document.querySelectorAll('[data-countdown]'), (clock) => {
@@ -269,12 +276,12 @@ function startCountdown(clockOffset) {
     for (const animation of clock.getAnimations()) animation.currentTime = document.timeline.currentTime;
     return {
       face: clock.querySelector('[role="timer"]'),
-      digits: clock.querySelectorAll('strong'),
+      digits: digitText(clock),
       tiles: clock.querySelectorAll('.led'),
     };
   });
   // The floating button shows the same LED readout without its own screen-reader label.
-  clocks.push({ face: null, digits: dockTimer.querySelectorAll('strong'), tiles: dockTimer.querySelectorAll('.led') });
+  clocks.push({ face: null, digits: digitText(dockTimer), tiles: dockTimer.querySelectorAll('.led') });
   dock.hidden = false;
   updateDock();
   let previous = [];
@@ -300,7 +307,7 @@ function startCountdown(clockOffset) {
       if (value === previous[index]) continue;
       const formatted = String(value).padStart(index === 4 ? 3 : 2, '0');
       for (const { digits, tiles } of clocks) {
-        digits[index].textContent = formatted;
+        digits[index].data = formatted;
         if (index < 4 && !isFirstFrame && !prefersReducedMotion) restartTick(tiles[index]);
       }
     }
