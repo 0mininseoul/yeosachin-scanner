@@ -39,8 +39,14 @@ describe('cherry landing variant', () => {
 
     it('default output is untouched', () => {
         expect(renderCherryLanding(landing, { variant: null, pixelId: null })).toBe(landing);
-        expect(renderCherryLanding(landing, { variant: 'bf', pixelId: null }))
-            .toBe(landing.replace('<html lang="ko">', '<html lang="ko" data-variant="bf">'));
+    });
+
+    it.each([['bf', '남친'], ['crush', '짝남']] as const)('keeps the %s ad focused on its audience', (variant, target) => {
+        const html = renderCherryLanding(landing, { variant, pixelId: null });
+        expect(html).toContain(`<html lang="ko" data-variant="${variant}">`);
+        expect(html).toContain(`<title>체리 | 인스타 ${target}맞팔알리미</title>`);
+        expect(html).toContain(`${target}의 맞팔을 어떻게 확인하는지`);
+        expect(html).toContain('다른 사람의 계정도 등록할 수 있나요?');
     });
 
     it.each(['', '?v=bf&utm_source=meta', '?v=crush', '?utm_source=chatgpt.com'])(

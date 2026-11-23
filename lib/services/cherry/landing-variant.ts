@@ -13,8 +13,6 @@ export function parseCherryVariant(value: string | null): CherryVariant | null {
  * Specific phrases come before the generic word swaps that would otherwise match inside them.
  */
 export const CRUSH_REPLACEMENTS: readonly (readonly [from: string, to: string])[] = [
-    ['남친맞팔알리미·짝남맞팔알리미', '짝남맞팔알리미'],
-    ['남친이나 짝남의', '짝남의'],
     ['<span>내 남친은 나 몰래</span>', '<span>내 짝남은 내가 모르는 사이</span>'],
     ['내 남친은 나 몰래 누구랑', '내 짝남은 내가 모르는 사이 누구랑'],
     ['<h3>남자친구 비밀번호는 필요 없어요</h3>', '<h3>인스타 아이디 하나면 돼요</h3>'],
@@ -45,8 +43,15 @@ export function renderCherryLanding(
     options: { variant: CherryVariant | null; pixelId: string | null },
 ): string {
     const { variant, pixelId } = options;
-    let page = variant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
-    if (variant) page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`);
+    let page = html;
+    if (variant) {
+        // Both ad cohorts use the same single-audience copy. The organic page covers both queries.
+        page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`)
+            .replace('남친맞팔알리미·짝남맞팔알리미', '남친맞팔알리미')
+            .replace('남친이나 짝남의', '남친의')
+            .replace('짝남맞팔알리미로도 쓸 수 있나요?', '다른 사람의 계정도 등록할 수 있나요?');
+        if (variant === 'crush') page = page.replace(crushPattern, (match) => crushTargets.get(match) ?? match);
+    }
     // Only digits reach the inline script, so a malformed env value cannot inject markup.
     if (pixelId && /^\d{5,20}$/.test(pixelId)) {
         page = page.replace('<meta charset="utf-8">', `<meta charset="utf-8">\n    ${metaPixel(pixelId)}`);
