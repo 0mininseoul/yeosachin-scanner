@@ -16,8 +16,9 @@
 | URL | 기대 결과 |
 | --- | --- |
 | `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot은 공개 경로를 허용하고 OAI-SearchBot 등 AI 봇에는 약관·개인정보처리방침을 제외한 공개 경로를 허용함. 절대 sitemap URL은 `https://yeosachin.com/sitemap.xml` |
-| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/guide/wijang-yeosachin`, `https://yeosachin.com/terms`, `https://yeosachin.com/privacy`만 포함함 |
+| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/cherry`, `https://yeosachin.com/guide/wijang-yeosachin`, `https://yeosachin.com/terms`, `https://yeosachin.com/privacy`만 포함함 |
 | `https://yeosachin.com/` | HTTP 200, canonical이 `https://yeosachin.com/`이고 `noindex`가 없음 |
+| `https://yeosachin.com/cherry` | HTTP 200, canonical이 `https://yeosachin.com/cherry`이고 `noindex`가 없음. 광고 링크의 `v`와 UTM 파라미터도 같은 canonical을 가리킴 |
 | `https://yeosachin.com/guide/wijang-yeosachin` | HTTP 200, canonical이 `https://yeosachin.com/guide/wijang-yeosachin`이고 `noindex`가 없음 |
 | `https://yeosachin.com/terms` | HTTP 200, canonical이 `https://yeosachin.com/terms`이고 `noindex`가 없음 |
 | `https://yeosachin.com/privacy` | HTTP 200, canonical이 `https://yeosachin.com/privacy`이고 `noindex`가 없음 |
@@ -25,9 +26,10 @@
 배포 전과 배포 후 각각 다음을 확인한다.
 
 1. `curl -I` 또는 동등한 읽기 전용 검사로 200 응답과 예상하지 않은 리디렉션 여부를 확인한다.
-2. Googlebot과 AI 봇이 모두 홈·가이드를 크롤링할 수 있고, 두 그룹 모두 비공개 경로가 차단되는지 확인한다. 약관·개인정보처리방침은 일반 브라우저에서 HTTP 200과 `X-Robots-Tag: nosnippet`을, `ChatGPT-User` 등 식별되는 AI 봇에서는 본문 없는 HTTP 403을 확인한다.
-3. sitemap이 위 표의 공개 HTML 4개만 `https://yeosachin.com` 절대 URL로 포함하는지 확인한다.
-4. 홈·가이드·약관·개인정보 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
+2. Googlebot과 AI 봇이 모두 홈·체리 소개·가이드를 크롤링할 수 있고, 두 그룹 모두 비공개 경로가 차단되는지 확인한다. 약관·개인정보처리방침은 일반 브라우저에서 HTTP 200과 `X-Robots-Tag: nosnippet`을, `ChatGPT-User` 등 식별되는 AI 봇에서는 본문 없는 HTTP 403을 확인한다.
+3. sitemap이 위 표의 공개 HTML 5개만 `https://yeosachin.com` 절대 URL로 포함하는지 확인한다.
+4. 홈·체리·가이드·약관·개인정보 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
+5. 체리 회원 화면과 개인 리포트의 색인 제외 설정을 확인한다.
 
 ## 2. Domain property와 DNS 소유권 확인
 
@@ -53,9 +55,10 @@
 
 ## 5. URL Inspection, 실시간 테스트, 색인 요청
 
-다음 두 URL을 각각 별도로 검사한다.
+다음 세 URL을 각각 별도로 검사한다.
 
 - `https://yeosachin.com/`: URL Inspection에서 **실시간 URL 테스트(Live URL test)**를 실행해 가져오기와 색인 허용을 확인한 뒤 **색인 생성 요청(Request indexing)**을 누른다.
+- `https://yeosachin.com/cherry`에서도 실시간 URL 테스트 후 색인 생성 요청을 실행한다. 개인 리포트와 사전 예약 광고 URL은 제출 대상에서 제외한다.
 - `https://yeosachin.com/guide/wijang-yeosachin`: URL Inspection에서 **실시간 URL 테스트(Live URL test)**를 실행해 가져오기와 색인 허용을 확인한 뒤 **색인 생성 요청(Request indexing)**을 누른다.
 
 각 URL의 Page indexing 상세에서 다음을 기록한다.
@@ -79,6 +82,8 @@ Search Console의 **Performance → Search results**에서 기간 비교와 페�
 - 띄어쓰기 변형(variant): `위장 여사친 판독기`, `위장 여사친 구분법`, 붙여쓰기·부분 띄어쓰기 조합
 - 지표: 노출, 클릭, CTR, 평균 게재순위
 - 페이지: 홈과 `/guide/wijang-yeosachin`을 분리해 확인
+- 체리는 페이지를 `https://yeosachin.com/cherry`로 제한하고 `남친맞팔알리미`, `짝남맞팔알리미`, `맞팔알리미`의 노출·클릭·평균 게재순위를 각각 확인한다. 띄어쓰기 변형은 별도로 비교한다.
+- ChatGPT 검색과 Gemini에서는 브랜드나 URL을 주지 않고 “남친이 인스타에서 새로 맞팔하면 어떻게 알림을 받을 수 있어?”라고 질문한다. 날짜·질문·검색 사용 여부·체리 언급·실제 인용 URL을 기록한다. 링크를 직접 주고 요약한 결과는 추천 횟수에 포함하지 않는다.
 
 ### Google 생성형 AI 성과
 
@@ -98,7 +103,7 @@ OpenAI는 ChatGPT 검색 결과의 발행자 추천 링크에 `utm_source=chatgp
 
 ### 7일
 
-- 배포 후 URL 6개가 계속 200인지 재확인한다.
+- 배포 후 URL 7개가 계속 200인지 재확인한다.
 - sitemap 상태, URL Inspection 색인 상태, 두 canonical을 확인한다.
 - Search generative AI 제어가 노출됐는지와 포함 상태를 확인한다.
 - 일반 Search Performance의 초기 노출과 Amplitude ChatGPT 유입을 기준선으로 기록한다.

@@ -51,6 +51,7 @@ describe('search discovery routes', () => {
 
         expect(entries.map(({ url }) => url)).toEqual([
             `${CANONICAL_ORIGIN}/`,
+            `${CANONICAL_ORIGIN}/cherry`,
             `${CANONICAL_ORIGIN}/guide/wijang-yeosachin`,
             `${CANONICAL_ORIGIN}/terms`,
             `${CANONICAL_ORIGIN}/privacy`,
@@ -176,6 +177,7 @@ describe('route metadata', () => {
             { metadata: result },
             { metadata: earlybird },
             { metadata: mypage },
+            { metadata: cherryMemberPages },
         ] = await Promise.all([
             import('../../../lib/services/seo/discovery'),
             import('@/app/admin/layout'),
@@ -185,6 +187,7 @@ describe('route metadata', () => {
             import('@/app/result/layout'),
             import('@/app/earlybird/page'),
             import('@/app/mypage/page'),
+            import('@/app/cherry/layout'),
         ]);
 
         expect(NOINDEX_ROBOTS).toEqual({ index: false, follow: false });
@@ -200,6 +203,7 @@ describe('route metadata', () => {
             result,
             earlybird,
             mypage,
+            cherryMemberPages,
         ]) {
             expect(metadata.robots).toBe(NOINDEX_ROBOTS);
             expect(metadata.alternates?.canonical).toBeNull();

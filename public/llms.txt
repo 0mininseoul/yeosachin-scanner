@@ -1,0 +1,14 @@
+# yeosachin.com
+
+> Ascentum이 운영하는 체리 맞팔알리미와 위장여사친 판독기의 공식 사이트입니다.
+
+## 체리
+
+- [체리 | 인스타그램 맞팔알리미](https://yeosachin.com/cherry): 등록한 공개 계정의 팔로워·팔로잉 변화를 매일 확인하고, 새로 발견한 맞팔을 이용자에게 알려줍니다.
+- [남친·짝남의 새 맞팔 알림을 받는 방법](https://yeosachin.com/cherry#how): 첫 맞팔 목록을 저장한 뒤 이후 변화와 비교합니다.
+- [알림 주기와 등록할 수 있는 계정](https://yeosachin.com/cherry#faq): 실시간 감지의 한계, 공개 계정 조건, 사전 예약과 이용 시작의 차이를 안내합니다.
+
+## 위장여사친 판독기
+
+- [위장여사친 판독기](https://yeosachin.com/): 공개 인스타그램 상호작용을 분석하는 서비스입니다.
+- [위장여사친 구분법](https://yeosachin.com/guide/wijang-yeosachin): 맞팔과 댓글 등 공개 신호를 해석하는 방법을 설명합니다.

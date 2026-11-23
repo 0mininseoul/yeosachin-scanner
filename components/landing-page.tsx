@@ -374,6 +374,9 @@ export default function LandingPage({
             <Link href="/guide/wijang-yeosachin" className="transition-colors hover:text-fg">
               위장여사친 구분법
             </Link>
+            <a href="/cherry" className="transition-colors hover:text-fg">
+              체리 · 인스타 맞팔알리미
+            </a>
             <Link href="/terms" className="transition-colors hover:text-fg">
               이용약관
             </Link>

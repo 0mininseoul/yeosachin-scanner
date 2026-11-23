@@ -3,6 +3,7 @@ import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 
 export const PUBLIC_SITEMAP_URLS = [
     `${CANONICAL_APP_ORIGIN}/`,
+    `${CANONICAL_APP_ORIGIN}/cherry`,
     `${CANONICAL_APP_ORIGIN}/guide/wijang-yeosachin`,
     `${CANONICAL_APP_ORIGIN}/terms`,
     `${CANONICAL_APP_ORIGIN}/privacy`,
