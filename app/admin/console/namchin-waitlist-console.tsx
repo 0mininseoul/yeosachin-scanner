@@ -9,10 +9,12 @@ import { Card, EmptyRow, ErrorNotice } from './console-ui';
 
 type Filter = { query: string; page: number };
 type Roster = {
-    rows: { email: string; phone: string; consentedAt: string }[];
+    rows: { email: string; phone: string; consentedAt: string; variant: 'bf' | 'crush' | null }[];
     count: number;
     hasNext: boolean;
+    variantCounts: { bf: number; crush: number; none: number };
 };
+const VARIANT_LABEL = { bf: 'A 남친', crush: 'B 짝남' } as const;
 const DATE_TIME = new Intl.DateTimeFormat('ko-KR', {
     timeZone: 'Asia/Seoul', dateStyle: 'medium', timeStyle: 'short', hour12: false,
 });
@@ -74,6 +76,7 @@ export function NamchinWaitlistConsole() {
             <Card className="ac-namchin-roster">
                 <div className="ac-tools-bar">
                     <span role="status">{roster ? `${filter.query ? '검색 결과' : '전체 신청'} ${roster.count}건` : ''}</span>
+                    {roster ? <span>메타 A/B 전체: A 남친 {roster.variantCounts.bf}건, B 짝남 {roster.variantCounts.crush}건, 광고 외 {roster.variantCounts.none}건</span> : null}
                     <form className="ac-search" role="search" onSubmit={event => {
                         event.preventDefault();
                         setFilter({ query: search.trim(), page: 1 });
@@ -94,12 +97,14 @@ export function NamchinWaitlistConsole() {
                             <th scope="col">신청 이메일</th>
                             <th scope="col">휴대폰 번호</th>
                             <th scope="col">수신 동의 일시 <span className="ac-namchin-timezone">KST</span></th>
+                            <th scope="col">광고 변형</th>
                         </tr></thead>
                         <tbody>{roster?.rows.length ? roster.rows.map(row => <tr key={row.email}>
                             <td><b>{row.email}</b></td>
                             <td className="ac-tabular">{formatPhone(row.phone)}</td>
                             <td><time dateTime={row.consentedAt}>{DATE_TIME.format(new Date(row.consentedAt))}</time></td>
-                        </tr>) : <EmptyRow colSpan={3}>{current ? (roster ? (filter.query ? '검색 조건에 맞는 예약이 없습니다.' : '아직 접수된 사전 예약이 없습니다.') : '명단을 표시할 수 없습니다.') : '불러오는 중…'}</EmptyRow>}</tbody>
+                            <td>{row.variant ? VARIANT_LABEL[row.variant] : '광고 외'}</td>
+                        </tr>) : <EmptyRow colSpan={4}>{current ? (roster ? (filter.query ? '검색 조건에 맞는 예약이 없습니다.' : '아직 접수된 사전 예약이 없습니다.') : '명단을 표시할 수 없습니다.') : '불러오는 중…'}</EmptyRow>}</tbody>
                     </table>
                 </div>
                 {filter.page > 1 || roster?.hasNext ? <div className="ac-tools-bar" aria-label="명단 페이지">

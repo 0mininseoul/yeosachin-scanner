@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { NextRequest } from 'next/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+const db = vi.hoisted(() => ({ insert: vi.fn(), from: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { from: db.from } }));
+
 import { CRUSH_REPLACEMENTS, parseCherryVariant, renderCherryLanding } from '@/lib/services/cherry/landing-variant';
 
 const landing = readFileSync(path.join(process.cwd(), 'public/cherry/landing.html'), 'utf8');
@@ -64,5 +67,57 @@ describe('cherry landing variant', () => {
 
     it('ships the crush share image', () => {
         expect(readFileSync(path.join(process.cwd(), 'public/cherry/og-crush.jpg')).length).toBeGreaterThan(10_000);
+    });
+});
+
+describe('cherry reservation variant', () => {
+    beforeEach(() => {
+        db.insert.mockReset();
+        db.from.mockReset().mockReturnValue({ insert: db.insert });
+        vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-25T12:00:00+09:00'));
+    });
+    afterEach(() => vi.restoreAllMocks());
+
+    const reserve = async (extra: Record<string, unknown>) => {
+        const { POST } = await import('@/app/api/namchin/reservations/route');
+        return POST(new Request('https://yeosachin.com/api/cherry/reservations', {
+            method: 'POST',
+            headers: { origin: 'https://yeosachin.com', 'content-type': 'application/json' },
+            body: JSON.stringify({ email: 'Me@Example.com', phone: '010-1234-5678', consent: true, privateAck: true, ...extra }),
+        }));
+    };
+
+    it('stores the variant', async () => {
+        db.insert.mockResolvedValue({ error: null });
+        const response = await reserve({ variant: 'crush' });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ received: true });
+        expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678', variant: 'crush' });
+    });
+
+    it('omits variant when absent', async () => {
+        db.insert.mockResolvedValue({ error: null });
+        expect((await reserve({})).status).toBe(200);
+        expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678' });
+    });
+
+    it('rejects unknown variant', async () => {
+        expect((await reserve({ variant: 'x' })).status).toBe(400);
+        expect(db.insert).not.toHaveBeenCalled();
+    });
+
+    it('retries without variant when the column is missing', async () => {
+        db.insert.mockResolvedValueOnce({ error: { code: 'PGRST204' } }).mockResolvedValueOnce({ error: null });
+        const response = await reserve({ variant: 'bf' });
+        expect(response.status).toBe(200);
+        expect(db.insert).toHaveBeenCalledTimes(2);
+        expect(db.insert).toHaveBeenLastCalledWith({ email: 'me@example.com', phone: '+821012345678' });
+    });
+
+    it('keeps the first reservation on duplicate', async () => {
+        db.insert.mockResolvedValue({ error: { code: '23505' } });
+        const response = await reserve({ variant: 'crush' });
+        expect(response.status).toBe(200);
+        expect(db.insert).toHaveBeenCalledTimes(1);
     });
 });

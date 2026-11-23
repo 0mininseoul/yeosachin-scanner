@@ -406,6 +406,7 @@ form.addEventListener('submit', async (event) => {
         phone: fields.get('phone'),
         consent: fields.has('consent'),
         privateAck: fields.has('private_ack'),
+        ...(['bf', 'crush'].includes(document.documentElement.dataset.variant) && { variant: document.documentElement.dataset.variant }),
       }),
       signal: AbortSignal.timeout(8_000),
     });

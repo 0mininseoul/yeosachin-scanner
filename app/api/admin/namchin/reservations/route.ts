@@ -20,7 +20,7 @@ export async function POST(request: Request) {
 
     try {
         let list = supabaseAdmin.from('namchin_launch_reservations')
-            .select('email, phone, consented_at', { count: 'exact' });
+            .select('email, phone, consented_at, variant', { count: 'exact' });
         const digits = /^[+\d\s()-]+$/.test(query) ? query.replace(/\D/g, '') : '';
         if (digits) {
             const phone = digits.startsWith('010') ? `82${digits.slice(1)}` : digits;
@@ -30,13 +30,20 @@ export async function POST(request: Request) {
             list = list.ilike('email', `%${literal}%`);
         }
 
-        const { data, error, count } = await list.order('consented_at', { ascending: false })
-            .order('email').range(start, start + pageSize - 1);
-        if (!error && data && count !== null) {
+        // Whole-table totals per Meta A/B arm, independent of the search filter.
+        const arm = () => supabaseAdmin.from('namchin_launch_reservations').select('email', { count: 'exact', head: true });
+        const [{ data, error, count }, bf, crush, none] = await Promise.all([
+            list.order('consented_at', { ascending: false }).order('email').range(start, start + pageSize - 1),
+            arm().eq('variant', 'bf'),
+            arm().eq('variant', 'crush'),
+            arm().is('variant', null),
+        ]);
+        if (!error && data && count !== null && !bf.error && !crush.error && !none.error) {
             return privateJson({
-                rows: data.map(({ email, phone, consented_at }) => ({ email, phone, consentedAt: consented_at })),
+                rows: data.map(({ email, phone, consented_at, variant }) => ({ email, phone, consentedAt: consented_at, variant })),
                 count,
                 hasNext: start + pageSize < count,
+                variantCounts: { bf: bf.count ?? 0, crush: crush.count ?? 0, none: none.count ?? 0 },
             });
         }
     } catch {
