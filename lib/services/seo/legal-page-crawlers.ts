@@ -3,8 +3,10 @@ export const LEGAL_PAGE_PATHS = ['/privacy', '/terms'];
 const AI_FETCHERS = [
     'GPTBot', 'OAI-SearchBot', 'ChatGPT-User',
     'ClaudeBot', 'Claude-SearchBot', 'Claude-User', 'Claude-Agent',
+    'Google-GeminiNotebook', 'Google-Agent', 'Google-CloudVertexBot',
     'PerplexityBot', 'Perplexity-User',
-    'meta-externalagent', 'meta-externalfetcher', 'CCBot',
+    'MistralAI-User', 'MistralAI-Index', 'MistralAI-Training',
+    'meta-externalagent', 'meta-externalfetcher', 'DuckAssistBot', 'CCBot',
 ];
 
 // Google and Apple publish usage controls separately from their search bots' HTTP identities.
