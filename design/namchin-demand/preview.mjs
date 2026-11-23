@@ -5,30 +5,30 @@ import { extname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { normalizeKoreanMobileNumber } from '../../lib/services/identity/phone-number.ts';
-import { campaignClosesAt } from '../../public/namchin/campaign.mjs';
+import { campaignClosesAt } from '../../public/cherry/campaign.mjs';
 
-const landingRoot = '../../public/namchin/';
-const landingPage = [landingRoot + 'index.html', 'text/html; charset=utf-8'];
+const landingRoot = '../../public/cherry/';
+const landingPage = [landingRoot + 'landing.html', 'text/html; charset=utf-8'];
 const staticFiles = new Map([
   ['/', landingPage],
   ['/cherry', landingPage],
   ['/cherry/', landingPage],
-  ['/namchin/landing.css', [landingRoot + 'landing.css', 'text/css; charset=utf-8']],
-  ['/namchin/landing.js', [landingRoot + 'landing.js', 'text/javascript; charset=utf-8']],
-  ['/namchin/intro.js', [landingRoot + 'intro.js', 'text/javascript; charset=utf-8']],
-  ['/namchin/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
-  ['/namchin/logo.png', [landingRoot + 'logo.png', 'image/png']],
-  ['/namchin/og.jpg', [landingRoot + 'og.jpg', 'image/jpeg']],
+  ['/cherry/landing.css', [landingRoot + 'landing.css', 'text/css; charset=utf-8']],
+  ['/cherry/landing.js', [landingRoot + 'landing.js', 'text/javascript; charset=utf-8']],
+  ['/cherry/intro.js', [landingRoot + 'intro.js', 'text/javascript; charset=utf-8']],
+  ['/cherry/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
+  ['/cherry/logo.png', [landingRoot + 'logo.png', 'image/png']],
+  ['/cherry/og.jpg', [landingRoot + 'og.jpg', 'image/jpeg']],
   ['/og/', ['./og/index.html', 'text/html; charset=utf-8']],
   ...['a', 'b', 'c'].map(name => [`/og/${name}.html`, [`./og/${name}.html`, 'text/html; charset=utf-8']]),
   ...['og', 'board'].map(name => [`/og/${name}.css`, [`./og/${name}.css`, 'text/css; charset=utf-8']]),
   ['/private-concepts/', ['./private-concepts/index.html', 'text/html; charset=utf-8']],
   ...['a', 'b', 'c'].map(name => [`/private-concepts/${name}.html`, [`./private-concepts/${name}.html`, 'text/html; charset=utf-8']]),
   ...['concepts', 'board'].map(name => [`/private-concepts/${name}.css`, [`./private-concepts/${name}.css`, 'text/css; charset=utf-8']]),
-  ['/namchin/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
-  ['/namchin/assets/notification-bell.jpg', [landingRoot + 'assets/notification-bell.jpg', 'image/jpeg']],
+  ['/cherry/assets/kakao-symbol.svg', [landingRoot + 'assets/kakao-symbol.svg', 'image/svg+xml']],
+  ['/cherry/assets/notification-bell.jpg', [landingRoot + 'assets/notification-bell.jpg', 'image/jpeg']],
   ...['barlow-condensed-bold.woff2', 'Paperlogy-4Regular.woff2', 'Paperlogy-8ExtraBold.woff2'].map(name => [
-    `/namchin/assets/${name}`, [landingRoot + `assets/${name}`, 'font/woff2'],
+    `/cherry/assets/${name}`, [landingRoot + `assets/${name}`, 'font/woff2'],
   ]),
   ['/logo-concepts/', ['./logo-concepts/index.html', 'text/html; charset=utf-8']],
   ['/logo-concepts/board.css', ['./logo-concepts/board.css', 'text/css; charset=utf-8']],
@@ -50,8 +50,8 @@ const staticFiles = new Map([
 
 // Directories whose files are served as-is (3D bundles and hero media).
 const staticDirectories = [
-  ['/namchin/3d/', landingRoot + '3d/'],
-  ['/namchin/assets/hero/', landingRoot + 'assets/hero/'],
+  ['/cherry/3d/', landingRoot + '3d/'],
+  ['/cherry/assets/hero/', landingRoot + 'assets/hero/'],
   ['/cherry-logo-concepts/', './cherry-logo-concepts/'],
   ['/og/', './og/'],
 ];
@@ -139,7 +139,7 @@ const server = createServer(async (request, response) => {
   }
   const pathname = request.url?.split('?')[0];
 
-  if (request.method === 'POST' && pathname === '/api/namchin/reservations') {
+  if (request.method === 'POST' && pathname === '/api/cherry/reservations') {
     if (request.headers.origin !== `http://${host}`) return json(response, 403, { error: 'origin' });
     if (request.headers['content-type']?.split(';')[0] !== 'application/json') {
       return json(response, 415, { error: 'content_type' });
@@ -163,7 +163,7 @@ const server = createServer(async (request, response) => {
     }
   }
 
-  if (request.method === 'GET' && pathname === '/api/namchin/reservations') {
+  if (request.method === 'GET' && pathname === '/api/cherry/reservations') {
     const serverTime = Date.now() + clockOffset;
     return json(response, 200, { status: serverTime < campaignClosesAt ? 'open' : 'closed', serverTime });
   }
@@ -172,7 +172,7 @@ const server = createServer(async (request, response) => {
     return json(response, 200, { pageViews, registrations: countRegistrations.get().count });
   }
 
-  if (pathname === '/namchin' || pathname === '/namchin/' || pathname === '/namchin/index.html') {
+  if (pathname === '/cherry/') {
     response.writeHead(308, { ...responseHeaders, Location: '/cherry' + (request.url.includes('?') ? request.url.slice(request.url.indexOf('?')) : '') });
     return response.end();
   }
@@ -199,5 +199,5 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, '127.0.0.1', () => {
   const previewUrl = `http://127.0.0.1:${server.address().port}`;
-  console.log(`미리보기 ${previewUrl}/namchin\n테스트 집계 ${previewUrl}/preview/stats\n테스트 데이터 ${dbPath}`);
+  console.log(`미리보기 ${previewUrl}/cherry\n테스트 집계 ${previewUrl}/preview/stats\n테스트 데이터 ${dbPath}`);
 });

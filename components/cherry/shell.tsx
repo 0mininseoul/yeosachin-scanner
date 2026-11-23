@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 export function CherryBar({ link }: { link?: { href: string; label: string } }) {
     return <header className="ch-bar">
         <Link href="/cherry" className="ch-brand" prefetch={false}>
-            <Image src="/namchin/logo.png" alt="" width={30} height={30} unoptimized />체리
+            <Image src="/cherry/logo.png" alt="" width={30} height={30} unoptimized />체리
         </Link>
         {link ? <Link href={link.href} className="ch-bar-link" prefetch={false}>{link.label}</Link> : null}
     </header>;

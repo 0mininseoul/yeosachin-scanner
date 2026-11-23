@@ -82,7 +82,7 @@ export function CherryServiceConsole() {
     return <div className="ac-app ac-namchin">
         <aside className="ac-side">
             <Link className="ac-brand" href={CHERRY_SERVICE_CONSOLE_PATH}>
-                <Image src="/namchin/logo.png" className="ac-namchin-mark" alt="" width={34} height={34} unoptimized />
+                <Image src="/cherry/logo.png" className="ac-namchin-mark" alt="" width={34} height={34} unoptimized />
                 <span><b>체리</b><small>운영 콘솔</small></span>
             </Link>
             <nav className="ac-nav" aria-label="콘솔 메뉴">

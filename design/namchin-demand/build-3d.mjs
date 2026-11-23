@@ -1,11 +1,11 @@
-// Bundles the landing page's three.js scenes into public/namchin/3d/.
+// Bundles the landing page's three.js scenes into public/cherry/3d/.
 // Run from the repository root after `npm ci`:  node design/namchin-demand/build-3d.mjs
 import { rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const source = fileURLToPath(new URL('./three/', import.meta.url));
-const outdir = fileURLToPath(new URL('../../public/namchin/3d/', import.meta.url));
+const outdir = fileURLToPath(new URL('../../public/cherry/3d/', import.meta.url));
 
 rmSync(outdir, { recursive: true, force: true });
 const result = await build({

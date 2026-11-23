@@ -30,7 +30,7 @@ export function NamchinWaitlistConsole() {
 
     useEffect(() => {
         const controller = new AbortController();
-        fetch('/api/admin/namchin/reservations', {
+        fetch('/api/admin/cherry/reservations', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(filter),
@@ -52,7 +52,7 @@ export function NamchinWaitlistConsole() {
     return <div className="ac-app ac-namchin">
         <aside className="ac-side">
             <Link className="ac-brand" href={NAMCHIN_ADMIN_CONSOLE_PATH}>
-                <Image src="/namchin/logo.png" className="ac-namchin-mark" alt="" width={34} height={34} unoptimized />
+                <Image src="/cherry/logo.png" className="ac-namchin-mark" alt="" width={34} height={34} unoptimized />
                 <span><b>체리</b><small>운영 콘솔</small></span>
             </Link>
             <nav className="ac-nav" aria-label="콘솔 메뉴">
