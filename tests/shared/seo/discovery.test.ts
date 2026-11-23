@@ -14,13 +14,6 @@ const PRIVATE_CRAWL_PATHS = [
     '/result/',
     '/share/',
 ];
-const SEARCH_CRAWLERS = [
-    'Googlebot',
-    'OAI-SearchBot',
-    'GPTBot',
-    'ChatGPT-User',
-    '*',
-];
 
 describe('search discovery routes', () => {
     it('disallows every crawler and publishes no sitemap in Dev', async () => {
@@ -29,15 +22,25 @@ describe('search discovery routes', () => {
         expect(robots()).toEqual({ rules: { userAgent: '*', disallow: '/' } });
     });
 
-    it('publishes one consistent allow/disallow policy for search and AI crawlers', async () => {
+    it('adds the two legal pages only to the AI group and preserves private path exclusions', async () => {
         const { default: robots } = await import('@/app/robots');
 
         expect(robots()).toEqual({
-            rules: {
-                userAgent: SEARCH_CRAWLERS,
-                allow: '/',
-                disallow: PRIVATE_CRAWL_PATHS,
-            },
+            rules: [
+                { userAgent: ['Googlebot', '*'], allow: '/', disallow: PRIVATE_CRAWL_PATHS },
+                {
+                    userAgent: expect.arrayContaining([
+                        'OAI-SearchBot', 'GPTBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-User',
+                        'PerplexityBot', 'Perplexity-User', 'Google-Extended', 'Applebot-Extended',
+                    ]),
+                    allow: '/',
+                    disallow: [
+                        ...PRIVATE_CRAWL_PATHS,
+                        '/privacy$', '/privacy?', '/privacy/$', '/privacy/?',
+                        '/terms$', '/terms?', '/terms/$', '/terms/?',
+                    ],
+                },
+            ],
             sitemap: `${CANONICAL_ORIGIN}/sitemap.xml`,
         });
     });

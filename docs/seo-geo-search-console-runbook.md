@@ -15,7 +15,7 @@
 
 | URL | 기대 결과 |
 | --- | --- |
-| `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot·OAI-SearchBot이 공개 경로를 크롤링하도록 허용하고 절대 sitemap URL `https://yeosachin.com/sitemap.xml`을 선언함 |
+| `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot은 공개 경로를 허용하고 OAI-SearchBot 등 AI 봇에는 약관·개인정보처리방침을 제외한 공개 경로를 허용함. 절대 sitemap URL은 `https://yeosachin.com/sitemap.xml` |
 | `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/guide/wijang-yeosachin`, `https://yeosachin.com/terms`, `https://yeosachin.com/privacy`만 포함함 |
 | `https://yeosachin.com/` | HTTP 200, canonical이 `https://yeosachin.com/`이고 `noindex`가 없음 |
 | `https://yeosachin.com/guide/wijang-yeosachin` | HTTP 200, canonical이 `https://yeosachin.com/guide/wijang-yeosachin`이고 `noindex`가 없음 |
@@ -25,7 +25,7 @@
 배포 전과 배포 후 각각 다음을 확인한다.
 
 1. `curl -I` 또는 동등한 읽기 전용 검사로 200 응답과 예상하지 않은 리디렉션 여부를 확인한다.
-2. robots 정책이 공개 홈·가이드·약관·개인정보 페이지를 허용하고 비공개/인증 경로를 허용하지 않는지 확인한다.
+2. Googlebot과 AI 봇이 모두 홈·가이드를 크롤링할 수 있고, 두 그룹 모두 비공개 경로가 차단되는지 확인한다. 약관·개인정보처리방침은 일반 브라우저에서 HTTP 200과 `X-Robots-Tag: nosnippet`을, `ChatGPT-User` 등 식별되는 AI 봇에서는 본문 없는 HTTP 403을 확인한다.
 3. sitemap이 위 표의 공개 HTML 4개만 `https://yeosachin.com` 절대 URL로 포함하는지 확인한다.
 4. 홈·가이드·약관·개인정보 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
 
