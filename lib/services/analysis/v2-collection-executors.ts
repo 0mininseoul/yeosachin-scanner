@@ -1,5 +1,12 @@
 import { createHash } from 'node:crypto';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import {
+    projectDevStandardArchiveProfile,
+    projectDevStandardArchiveProfileResult,
+    projectDevStandardArchiveRelationship,
+    projectDevStandardArchiveTargetEvidence,
+} from './v2-standard-archive-projection';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ProfileAttemptResult,
@@ -46,6 +53,7 @@ import {
 import { ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY } from './v2-coordinator';
 import {
     analysisV2EvidenceStore,
+    canonicalizeAnalysisV2TargetEvidenceRows,
     createAnalysisV2RelationshipNotApplicableInputHash,
     type AnalysisV2EvidenceStore,
     type AnalysisV2RelationshipRowInput,
@@ -780,6 +788,26 @@ export function createAnalysisV2RelationshipsExecutor(
             throw new Error('ANALYSIS_V2_GIRLFRIEND_EXCLUSION_LEAK');
         }
 
+        const archive = currentDevStandardArchive();
+        if (archive?.mode === 'capture') {
+            for (const side of ['followers', 'following'] as const) {
+                const snapshot = staging[side];
+                await archive.capture(
+                    'relationship-side-v1',
+                    [request.targetUsername, side, snapshot.declaredCount, request.planId],
+                    {
+                        status: snapshot.sourceStatus,
+                        inputHash: snapshot.inputHash,
+                        coverageBps: snapshot.coverageBps,
+                        provider: snapshot.provider,
+                        providerRunId: snapshot.providerRunId,
+                        providerOperationKey: snapshot.providerOperationKey,
+                        rows: snapshot.rows.map(projectDevStandardArchiveRelationship),
+                    },
+                );
+            }
+        }
+
         let detailedPublicUsernames = staging.detailedPublicUsernames;
         let detailedSelectedPublicCount = manifest.detailedPublicCount;
         let notScreenedPublicCount = manifest.unscreenedPublicCount;
@@ -1046,6 +1074,13 @@ async function durableFreshApifyProfiles(input: {
         canonicalInput,
     );
     const providerInputHash = createAnalysisV2ProviderInputHash(canonicalInput);
+    const archive = currentDevStandardArchive();
+    const captureSourceProof = archive?.mode === 'capture'
+        ? () => archive.capture('source-profile-proof-v1', [request.targetUsername, claim.jobKey, ...usernames], {
+            providerOperationKey: operationKey,
+            providerInputHash,
+        })
+        : undefined;
     // Inspect a retained direct-Apify checkpoint before binding a provider row.
     // Both strict and paid Earlybird direct-fresh admissions reject any mixed
     // fallback/repair state before provider work.
@@ -1088,6 +1123,7 @@ async function durableFreshApifyProfiles(input: {
         ) {
             throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_UNPROVEN');
         }
+        if (captureSourceProof) await captureSourceProof();
         return resume;
     }
 
@@ -1125,6 +1161,7 @@ async function durableFreshApifyProfiles(input: {
     if (!stored || !isDirectApifyProfileResume(stored)) {
         throw new Error('FRESH_PROVENANCE_PROFILE_CHECKPOINT_MISSING');
     }
+    if (captureSourceProof) await captureSourceProof();
     return stored;
 }
 
@@ -1613,6 +1650,15 @@ export function createAnalysisV2TargetEvidenceExecutor(
             throw new Error('ANALYSIS_V2_TARGET_POST_IDENTITY_INCOMPLETE');
         }
 
+        const archive = currentDevStandardArchive();
+        if (archive?.mode === 'capture') {
+            await archive.capture(
+                'formal-target-profile-v1',
+                [request.targetUsername],
+                projectDevStandardArchiveProfile(targetProfile),
+            );
+        }
+
         let likerSource: AnalysisV2TargetEvidenceSourceInput;
         let commentSource: AnalysisV2TargetEvidenceSourceInput;
         let likerRows: Awaited<ReturnType<ApifyInteractionAdapter['getPostLikers']>> = [];
@@ -1706,6 +1752,36 @@ export function createAnalysisV2TargetEvidenceExecutor(
             commentSource,
             rows: raw.evidence,
         });
+        if (archive?.mode === 'capture') {
+            // Source references point to the original receipts. Archived input
+            // never carries a credential slot or copies a provider ledger row.
+            const archivedSource = (source: AnalysisV2TargetEvidenceSourceInput) => ({
+                status: source.status,
+                inputHash: source.inputHash,
+                provider: source.status === 'collected' ? source.provider : null,
+                providerRunId: source.status === 'collected' ? source.providerRunId : null,
+                providerOperationKey: source.status === 'collected' ? source.providerOperationKey : null,
+                coverage: source.status === 'collected' ? source.coverage : [],
+            });
+            await archive.capture('target-evidence-v1', [
+                request.targetUsername,
+                request.excludedUsername,
+                TARGET_LIKER_LIMIT,
+                likerPosts.length,
+                ...likerPosts.map(instagramPostUrl),
+                TARGET_COMMENT_LIMIT,
+                commentPosts.length,
+                ...commentPosts.map(instagramPostUrl),
+            ], {
+                likerSource: archivedSource(likerSource),
+                commentSource: archivedSource(commentSource),
+                rows: canonicalizeAnalysisV2TargetEvidenceRows({
+                    rows: raw.evidence,
+                    targetUsername: request.targetUsername,
+                    excludedUsername: request.excludedUsername,
+                }).map(projectDevStandardArchiveTargetEvidence),
+            });
+        }
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'target_evidence' as const,
@@ -1839,6 +1915,14 @@ export function createAnalysisV2ProfileFetchExecutor(
             resume,
         });
         const results = durableTerminalProfileResults(repaired, usernames);
+        const archive = currentDevStandardArchive();
+        if (archive?.mode === 'capture') {
+            await archive.capture(
+                'candidate-profile-batch-v1',
+                [request.targetUsername, context.job.batch, ...usernames],
+                results.map(projectDevStandardArchiveProfileResult),
+            );
+        }
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'profile_fetch_batch' as const,

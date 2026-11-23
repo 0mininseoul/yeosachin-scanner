@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
+import { normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-media-normalization';
 import {
     analysisV2ProfileFetchResumeSchema,
     type AnalysisV2ProfileFetchResume,
@@ -24,6 +27,32 @@ import {
 } from '../../../lib/services/analysis/v2-ai-scoring-runtime-deps';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/dev-ui/standard-archive-runtime')>(),
+    currentDevStandardArchive: vi.fn().mockReturnValue(null),
+}));
+
+function archiveScope(mode: 'capture' | 'replay', stored: Map<string, unknown>) {
+    const fail = (): never => { throw new DevStandardArchiveError(); };
+    const scope = {
+        mode,
+        fail,
+        ready: () => true,
+        beginPreflightCapture: vi.fn(),
+        capture: vi.fn(async (kind, identity, value) => { stored.set(JSON.stringify([kind, identity]), value); }),
+        load: vi.fn(async (kind, identity) => stored.get(JSON.stringify([kind, identity])) ?? fail()),
+        find: vi.fn(async (kind, identity) => {
+            const key = JSON.stringify([kind, identity]);
+            return stored.has(key) ? { value: stored.get(key) } : null;
+        }),
+        seal: vi.fn(async () => undefined),
+    } satisfies NonNullable<ReturnType<typeof currentDevStandardArchive>>;
+    vi.mocked(currentDevStandardArchive).mockReturnValue(scope);
+    return scope;
+}
+
+afterEach(() => vi.mocked(currentDevStandardArchive).mockReturnValue(null));
 
 // gitleaks:allow -- UUID fixture
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
@@ -1061,6 +1090,133 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(result).toEqual({ operationKey: null, results: [] });
         expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(getPostLikers).not.toHaveBeenCalled();
+    });
+});
+
+describe('Dev Standard reverse-like archive', () => {
+    function createCollector() {
+        const bindAdapterCheckpoint = vi.fn(async () => ({ stored: null, checkpoint: {} }));
+        const getPostLikers = vi.fn(async () => [{
+            postUrl: 'https://www.instagram.com/p/POST_B/',
+            id: '1',
+            username: 'synthetic.non_target',
+            profilePicUrl: 'https://cdninstagram.com/other.jpg',
+            isPrivate: false,
+            isVerified: false,
+            totalLikes: 114,
+        }]);
+        const base = reverseLikeContext();
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore: {
+                bindAdapterCheckpoint,
+                load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+            } as unknown as AnalysisV2ProviderRunStore,
+            contextStore: {
+                load: async claim => ({
+                    ...await base.load(),
+                    requestId: claim.requestId,
+                    planId: 'standard',
+                    accessMode: 'test_entitlement',
+                }),
+            },
+            adapter: { getPostLikers, getPostComments: vi.fn() },
+            env: {},
+        });
+        return { collector, bindAdapterCheckpoint, getPostLikers };
+    }
+
+    const archivedInput = {
+        requestId,
+        jobKey: 'track:reverse-likes:collect',
+        claimToken,
+        jobInputHash: consumerInputHash,
+        targetUsername: 'target.account',
+        candidates: [
+            { candidateId: 'candidate:a', postUrl: 'https://instagram.com/p/POST_A/', declaredLikesCount: 0 },
+            { candidateId: 'candidate:b', postUrl: 'https://instagram.com/p/POST_B/', declaredLikesCount: 114 },
+        ],
+        limitPerPost: 100 as const,
+    };
+
+    it('reuses verified per-post status, with no provider reservation or raw liker data', async () => {
+        const stored = new Map<string, unknown>();
+        const capture = archiveScope('capture', stored);
+        const live = createCollector();
+        const original = await live.collector.collect(archivedInput);
+        expect(live.bindAdapterCheckpoint).toHaveBeenCalledOnce();
+        expect(live.getPostLikers).toHaveBeenCalledOnce();
+        expect(original.results).toEqual([
+            { candidateId: 'candidate:a', status: 'not_observed' },
+            { candidateId: 'candidate:b', status: 'not_collected' },
+        ]);
+        expect(capture.capture).toHaveBeenCalledExactlyOnceWith(
+            'reverse-coverage-v1', ['target.account'],
+            { scopeHash: expect.stringMatching(/^[a-f0-9]{64}$/), results: original.results },
+        );
+        expect(JSON.stringify([...stored.values()])).not.toContain('synthetic.non_target');
+
+        archiveScope('replay', stored);
+        const replay = createCollector();
+        const replayed = await replay.collector.collect({
+            ...archivedInput,
+            requestId: '9a9838e0-ad64-453b-8971-cb69a57b7381',
+            candidates: [...archivedInput.candidates].reverse(),
+        });
+        expect(replayed.operationKey).toMatch(/^archive-candidate-likers:[a-f0-9]{64}$/);
+        expect(replayed.results).toEqual([...original.results].reverse());
+        await expect(replay.collector.collect({
+            ...archivedInput,
+            candidates: [{ ...archivedInput.candidates[0]!, postUrl: 'https://instagram.com/p/OTHER/' }],
+        })).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+    });
+
+    it('requires an observed empty scope rather than accepting a missing fragment', async () => {
+        const stored = new Map<string, unknown>();
+        const empty = { ...archivedInput, candidates: [] };
+        const { collector, getPostLikers, bindAdapterCheckpoint } = createCollector();
+        archiveScope('replay', stored);
+        await expect(collector.collect(empty)).rejects.toBeInstanceOf(DevStandardArchiveError);
+        archiveScope('capture', stored);
+        await collector.collect(empty);
+        archiveScope('replay', stored);
+        await expect(collector.collect(empty)).resolves.toEqual({ operationKey: null, results: [] });
+        expect(getPostLikers).not.toHaveBeenCalled();
+        expect(bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+});
+
+describe('Dev Standard AI image archive', () => {
+    it('round-trips JPEG and observed media failures without downloading or downgrading an archive miss', async () => {
+        const stored = new Map<string, unknown>();
+        const jpeg = Buffer.from([0xff, 0xd8, 0x11, 0xff, 0xd9]);
+        const selected = [
+            { selectionId: 'profile:one', imageUrl: 'https://cdninstagram.com/one.jpg?oh=mock-signature', role: 'profile' as const },
+            { selectionId: 'profile:two', imageUrl: 'https://cdninstagram.com/two.jpg', role: 'profile' as const },
+        ];
+        const normalize = vi.fn()
+            .mockResolvedValueOnce(jpeg)
+            .mockRejectedValueOnce(new AnalysisImagePreparationError('decode_failed', 'permanent'));
+        archiveScope('capture', stored);
+        const observed = await normalizeAnalysisV2MediaSelections(selected, normalize);
+        expect(observed.coverage.failures).toEqual([{
+            selectionId: 'profile:two', reason: 'decode_failed', disposition: 'permanent',
+        }]);
+
+        const retryNormalize = vi.fn();
+        await expect(normalizeAnalysisV2MediaSelections(selected, retryNormalize)).resolves.toEqual(observed);
+        expect(retryNormalize).not.toHaveBeenCalled();
+
+        archiveScope('replay', stored);
+        const nextNormalize = vi.fn();
+        await expect(normalizeAnalysisV2MediaSelections(selected.map(item => ({
+            ...item, imageUrl: archiveMediaUrlAnchor(item.imageUrl),
+        })), nextNormalize)).resolves.toEqual(observed);
+        await expect(normalizeAnalysisV2MediaSelections([
+            selected[0]!, { ...selected[1]!, imageUrl: 'https://cdninstagram.com/unrecorded.jpg' },
+        ], nextNormalize)).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(nextNormalize).not.toHaveBeenCalled();
     });
 });
 

@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import sharp from 'sharp';
+import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
 import { SecureImageFetchError } from '../../../../lib/services/media/secure-image-fetch';
 import {
     captureResultImages,
@@ -8,6 +11,32 @@ import {
 import type {
     ResultImageRegistryOutcome,
 } from '../../../../lib/services/media/result-image-registry';
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/dev-ui/standard-archive-runtime')>(),
+    currentDevStandardArchive: vi.fn().mockReturnValue(null),
+}));
+
+function installArchive(mode: 'capture' | 'replay', stored: Map<string, unknown>) {
+    const fail = (): never => { throw new DevStandardArchiveError(); };
+    const scope = {
+        mode,
+        fail,
+        ready: () => true,
+        beginPreflightCapture: vi.fn(),
+        capture: vi.fn(async (kind, identity, value) => { stored.set(JSON.stringify([kind, identity]), value); }),
+        load: vi.fn(async (kind, identity) => stored.get(JSON.stringify([kind, identity])) ?? fail()),
+        find: vi.fn(async (kind, identity) => {
+            const key = JSON.stringify([kind, identity]);
+            return stored.has(key) ? { value: stored.get(key) } : null;
+        }),
+        seal: vi.fn(async () => undefined),
+    } satisfies NonNullable<ReturnType<typeof currentDevStandardArchive>>;
+    vi.mocked(currentDevStandardArchive).mockReturnValue(scope);
+    return scope;
+}
+
+afterEach(() => vi.mocked(currentDevStandardArchive).mockReturnValue(null));
 
 const CLAIM = {
     requestId: '123e4567-e89b-42d3-a456-426614174000',
@@ -113,6 +142,90 @@ describe('captureResultImages', () => {
         expect(store.put).not.toHaveBeenCalled();
         expect(store.head).not.toHaveBeenCalled();
         expect(imageRegistry.sealManifest).toHaveBeenCalledOnce();
+    });
+
+    it('reuses checked WebP and explicit source absence without an external download', async () => {
+        const rows = [
+            source(0, { sourceUrl: 'https://cdninstagram.com/0.jpg?oh=mock-signature' }),
+            source(1, { kind: 'private', candidateLocator: 'candidate:private', sourceUrl: null }),
+        ];
+        const archived = new Map<string, unknown>();
+        const capture = installArchive('capture', archived);
+        const bytes = await sharp({
+            create: { width: 1, height: 1, channels: 3, background: '#123456' },
+        }).webp().toBuffer();
+        const download = vi.fn(async (url: string) => ({
+            bytes: Buffer.from('synthetic source'), contentType: 'image/jpeg', finalUrl: url,
+        }));
+        const normalize = vi.fn(async () => ({
+            bytes, contentType: 'image/webp' as const, width: 1, height: 1, sha256: digest(bytes),
+        }));
+        const input = {
+            ...CLAIM,
+            orderedManifestHash: MANIFEST_HASH,
+            expectedRows: rows.length,
+            loadSourcePage: async () => ({ items: rows, nextAfterOrdinal: null }),
+            hmacSecret: HMAC_SECRET,
+            download,
+            normalize,
+            now: () => NOW,
+        };
+        const makeStore = () => ({
+            put: vi.fn(),
+            head: vi.fn(async ({ expectedByteSize, expectedSha256 }: {
+                expectedByteSize: number; expectedSha256: string;
+            }) => ({ byteSize: expectedByteSize, sha256: expectedSha256 })),
+        });
+
+        await captureResultImages({ ...input, registry: registry(), store: makeStore() });
+        expect(download).toHaveBeenCalledOnce();
+        expect(capture.capture).toHaveBeenCalledWith(
+            'result-image-v1', ['private', 'candidate:private', null], 'source_missing',
+        );
+
+        download.mockClear();
+        normalize.mockClear();
+        // A redelivery can have no durable image-row yet even after the archive write.
+        await captureResultImages({ ...input, registry: registry(), store: makeStore() });
+        expect(download).not.toHaveBeenCalled();
+        expect(normalize).not.toHaveBeenCalled();
+        expect(capture.capture).toHaveBeenCalledTimes(2);
+
+        installArchive('replay', archived);
+        const replayInput = {
+            ...input,
+            loadSourcePage: async () => ({
+                items: rows.map(item => ({
+                    ...item,
+                    sourceUrl: item.sourceUrl === null ? null : archiveMediaUrlAnchor(item.sourceUrl),
+                })),
+                nextAfterOrdinal: null,
+            }),
+        };
+        const nextRegistry = registry();
+        const nextStore = makeStore();
+        await captureResultImages({
+            ...replayInput,
+            requestId: 'aee1957d-ba2b-4c61-a72c-dfaac8d17185',
+            registry: nextRegistry,
+            store: nextStore,
+        });
+        expect(download).not.toHaveBeenCalled();
+        expect(normalize).not.toHaveBeenCalled();
+        expect(nextStore.put).toHaveBeenCalledWith(expect.objectContaining({ bytes, sha256: digest(bytes) }));
+        expect(nextRegistry.registerOutcome).toHaveBeenCalledWith(expect.objectContaining({
+            outcome: expect.objectContaining({ kind: 'private', status: 'source_missing' }),
+        }));
+
+        archived.delete(JSON.stringify(['result-image-v1', ['private', 'candidate:private', null]]));
+        const incompleteRegistry = registry();
+        await expect(captureResultImages({
+            ...replayInput,
+            registry: incompleteRegistry,
+            store: makeStore(),
+        })).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(download).not.toHaveBeenCalled();
+        expect(incompleteRegistry.sealManifest).not.toHaveBeenCalled();
     });
 
     it('captures a mixed manifest with at most eight concurrent image buffers', async () => {

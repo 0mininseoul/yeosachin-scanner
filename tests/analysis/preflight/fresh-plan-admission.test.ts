@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import {
@@ -17,6 +18,10 @@ import type {
     StoredPreflightProviderRun,
 } from '../../../lib/services/analysis/preflight-provider-run';
 import { PREFLIGHT_PROVIDER_DEADLINE_MS } from '../../../lib/services/analysis/preflight-runtime-policy';
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', () => ({
+    currentDevStandardArchive: vi.fn(() => null),
+}));
 
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = '123e4567-e89b-42d3-b456-426614174001';
@@ -435,6 +440,12 @@ describe('durable fresh V2 admission reservation', () => {
 
 describe('durable fresh V2 admission worker', () => {
     it('uses the count-only profile contract and completes the exact claimed generation', async () => {
+        const capture = vi.fn(async () => undefined);
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('capture failed'); },
+        });
         const { client, rpc } = clientWith(async (name) => {
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc) {
                 return {
@@ -448,6 +459,10 @@ describe('durable fresh V2 admission worker', () => {
                 };
             }
             if (name === ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc) {
+                expect(capture).toHaveBeenCalledExactlyOnceWith('fresh-profile-v1', ['target.account'], {
+                    username: 'target.account', followersCount: profile().followersCount,
+                    followingCount: profile().followingCount, isPrivate: false,
+                });
                 return {
                     data: [{ admission_status: 'ready', admission_error_code: null }],
                     error: null,

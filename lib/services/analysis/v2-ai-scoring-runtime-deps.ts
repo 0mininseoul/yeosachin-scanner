@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import {
@@ -20,6 +21,7 @@ import {
     getAnalysisV2PaidCollectionProvider,
 } from '@/lib/services/instagram/config';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
 import {
     AnalysisV2SchedulerContinuationError,
@@ -85,6 +87,14 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROFILE_JOB_PREFIX = 'track:profiles:batch:';
 const PROFILE_AI_JOB_PREFIX = 'track:profile-ai:batch:';
 const REVERSE_LIKE_JOB_KEY = 'track:reverse-likes:collect';
+const ARCHIVE_REVERSE_COVERAGE_KIND = 'reverse-coverage-v1';
+const reverseArchiveSchema = z.object({
+    scopeHash: z.string().regex(SHA256_PATTERN),
+    results: z.array(z.object({
+        candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
+        status: z.enum(['observed', 'not_observed', 'not_collected']),
+    }).strict()).max(MAX_REVERSE_CANDIDATES),
+}).strict();
 const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 export const ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES = Object.freeze({
@@ -421,18 +431,11 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             ) {
                 throw new Error('ANALYSIS_V2_REVERSE_LIKE_SCOPE_MISMATCH');
             }
-            if (rawInput.candidates.length === 0) {
+            const archive = currentDevStandardArchive();
+            if (rawInput.candidates.length === 0 && !archive) {
                 return Object.freeze({ operationKey: null, results: Object.freeze([]) });
             }
             const requestContext = await contextStore.load(claim);
-            const isStrictFreshRequest = isRevenueCostLedgerRequest(requestContext);
-            // This is intentionally after the trusted request context fence and
-            // before parsing inputs, reserving a provider run, or crossing any
-            // provider boundary. Ordinary production/Plus requests never call
-            // this configuration reader or gain fresh-provenance dependencies.
-            if (isStrictFreshRequest) {
-                assertAnalysisV2FreshProvenanceConfiguration(env);
-            }
             const targetUsername = z.string().trim().toLowerCase()
                 .regex(/^[a-z0-9._]{1,30}$/)
                 .parse(rawInput.targetUsername);
@@ -451,6 +454,47 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             ) {
                 throw new Error('ANALYSIS_V2_REVERSE_LIKE_SCOPE_MISMATCH');
             }
+            const inputIdentity = [targetUsername];
+            const scopeHash = archive ? createHash('sha256').update(JSON.stringify([
+                targetUsername,
+                REVERSE_LIKE_LIMIT,
+                [...candidates].sort((left, right) => left.candidateId.localeCompare(right.candidateId))
+                    .map(row => [row.candidateId, row.postUrl, row.declaredLikesCount, row.declaredLikesCountKnown]),
+            ])).digest('hex') : '';
+            if (archive && (
+                requestContext.planId !== 'standard'
+                || requestContext.accessMode !== 'test_entitlement'
+                || requestContext.targetUsername !== targetUsername
+            )) return archive.fail();
+            if (archive?.mode === 'replay') {
+                const parsed = reverseArchiveSchema.safeParse(
+                    await archive.load(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity)
+                );
+                if (!parsed.success || parsed.data.scopeHash !== scopeHash
+                    || parsed.data.results.length !== candidates.length) {
+                    return archive.fail();
+                }
+                const byCandidate = new Map(parsed.data.results.map(row => [row.candidateId, row.status]));
+                const results = candidates.map(row => {
+                    const status = byCandidate.get(row.candidateId);
+                    if (status === undefined || (status === 'not_observed'
+                        && (!row.declaredLikesCountKnown || row.declaredLikesCount > REVERSE_LIKE_LIMIT))) {
+                        return archive.fail();
+                    }
+                    return Object.freeze({ candidateId: row.candidateId, status });
+                });
+                return Object.freeze({
+                    operationKey: candidates.length === 0 ? null : `archive-candidate-likers:${scopeHash}`,
+                    results: Object.freeze(results),
+                });
+            }
+            if (candidates.length === 0) {
+                await archive?.capture(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity, { scopeHash, results: [] });
+                return Object.freeze({ operationKey: null, results: Object.freeze([]) });
+            }
+            const isStrictFreshRequest = isRevenueCostLedgerRequest(requestContext);
+            // Live strict revenue work must still prove its provider configuration.
+            if (isStrictFreshRequest) assertAnalysisV2FreshProvenanceConfiguration(env);
             const apifyCanonicalInput = [
                 'candidate-likers-v3',
                 targetUsername,
@@ -623,26 +667,28 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     throw new Error('ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_EXCEEDED');
                 }
             }
-            return Object.freeze({
-                operationKey,
-                results: Object.freeze(candidates.map(candidate => {
-                    const likerUsernames = Object.freeze([
-                        ...usernamesByCandidate.get(candidate.candidateId)!,
-                    ]);
-                    const targetObserved = likerUsernames.includes(targetUsername);
-                    const globalAbsenceConfirmed = candidate.declaredLikesCountKnown
-                        && candidate.declaredLikesCount <= REVERSE_LIKE_LIMIT
-                        && likerUsernames.length >= candidate.declaredLikesCount;
-                    return Object.freeze({
-                        candidateId: candidate.candidateId,
-                        status: targetObserved
-                            ? 'observed' as const
-                            : globalAbsenceConfirmed
-                                ? 'not_observed' as const
-                                : 'not_collected' as const,
-                    });
-                })),
-            });
+            const results = Object.freeze(candidates.map(candidate => {
+                const likerUsernames = usernamesByCandidate.get(candidate.candidateId)!;
+                const targetObserved = likerUsernames.has(targetUsername);
+                const globalAbsenceConfirmed = candidate.declaredLikesCountKnown
+                    && candidate.declaredLikesCount <= REVERSE_LIKE_LIMIT
+                    && likerUsernames.size >= candidate.declaredLikesCount;
+                return Object.freeze({
+                    candidateId: candidate.candidateId,
+                    status: targetObserved
+                        ? 'observed' as const
+                        : globalAbsenceConfirmed
+                            ? 'not_observed' as const
+                            : 'not_collected' as const,
+                });
+            }));
+            if (archive) {
+                await archive.capture(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity, {
+                    scopeHash,
+                    results: [...results].sort((left, right) => left.candidateId.localeCompare(right.candidateId)),
+                });
+            }
+            return Object.freeze({ operationKey, results });
         },
     };
 }

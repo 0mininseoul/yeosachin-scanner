@@ -15,6 +15,7 @@ const SELECTION_ID_MAX_LENGTH = 240;
 
 export const ANALYSIS_V2_MEDIA_ARTIFACT_MAX_BYTES = 8 * 1024 * 1024;
 export const ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES = 32 * 1024 * 1024;
+export const ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS = 8192;
 export const ANALYSIS_V2_MEDIA_BUNDLE_MAX_ITEMS = Math.max(
     MAX_FEATURE_MEDIA,
     MAX_PARTNER_SAFETY_CONTACT_MEDIA
@@ -92,6 +93,11 @@ export interface AnalysisV2PrivateRetainedMediaObjectClient {
         objectName: string;
         maximumBytes: number;
     }): Promise<Buffer | null>;
+}
+
+/** Enumerates only the fragments of one opaque Dev Standard archive slot. */
+export interface AnalysisV2DevArchiveObjectClient extends AnalysisV2PrivateRetainedMediaObjectClient {
+    listRetained(input: { prefix: string; maximumCount: number }): Promise<string[]>;
 }
 
 export interface AnalysisV2MediaArtifactRegistry {
@@ -518,6 +524,11 @@ interface GoogleCloudStorageObjectMetadata {
     contentType?: unknown;
 }
 
+interface GoogleCloudStorageObjectList {
+    items?: unknown;
+    nextPageToken?: unknown;
+}
+
 interface GoogleCloudStorageRequestOptions {
     url: string;
     method: 'GET' | 'POST' | 'DELETE';
@@ -593,12 +604,16 @@ export function isAnalysisV2DevLiveMediaBucketName(bucketName: string): boolean 
         && DEV_LIVE_MEDIA_BUCKET_PATTERN.test(bucketName);
 }
 
+const DEV_ARCHIVE_FRAGMENT_PREFIX = /^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/fragment\/$/;
+const DEV_ARCHIVE_FRAGMENT_NAME = /^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/fragment\/[a-z][a-z0-9_-]{0,63}\/[a-f0-9]{64}\.bin$/;
+
 function assertRetainedObjectName(objectName: string, bucketName: string): void {
     const source = /^analysis-v2-retained\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName);
-    const devEvaluation = isAnalysisV2DevLiveMediaBucketName(bucketName)
+    const devArtifact = isAnalysisV2DevLiveMediaBucketName(bucketName)
         && objectName.endsWith('.bin')
-        && /^analysis-v2-dev-eval(?:-control)?\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName);
-    if (!source && !devEvaluation) {
+        && (/^analysis-v2-dev-(?:eval(?:-control)?|standard-archive)\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName)
+            || DEV_ARCHIVE_FRAGMENT_NAME.test(objectName));
+    if (!source && !devArtifact) {
         throw new Error(
             'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: object name mismatch.'
         );
@@ -778,7 +793,7 @@ export function deserializeAnalysisV2MediaBundle(
 export function createGoogleCloudPrivateMediaObjectClient(input: {
     bucketName: string;
     requester?: GoogleCloudStorageAuthorizedRequester;
-}): AnalysisV2PrivateMediaObjectClient & AnalysisV2PrivateRetainedMediaObjectClient {
+}): AnalysisV2PrivateMediaObjectClient & AnalysisV2DevArchiveObjectClient {
     const bucketName = input.bucketName.trim();
     if (!BUCKET_PATTERN.test(bucketName) || bucketName.includes('..')) {
         throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_CONFIG_ERROR: invalid bucket.');
@@ -786,9 +801,8 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
     const requester = input.requester ?? new GoogleAuth({
         scopes: ['https://www.googleapis.com/auth/devstorage.read_write'],
     }) as GoogleCloudStorageAuthorizedRequester;
-    const metadataUrl = (objectName: string) =>
-        `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucketName)}`
-        + `/o/${encodedObjectName(objectName)}`;
+    const objectsUrl = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucketName)}/o`;
+    const metadataUrl = (objectName: string) => `${objectsUrl}/${encodedObjectName(objectName)}`;
     const downloadUrl = (objectName: string) =>
         `https://storage.googleapis.com/download/storage/v1/b/${encodeURIComponent(bucketName)}`
         + `/o/${encodedObjectName(objectName)}`;
@@ -1135,6 +1149,65 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
                 );
             }
             return bytes;
+        },
+
+        async listRetained({ prefix, maximumCount }) {
+            if (!isAnalysisV2DevLiveMediaBucketName(bucketName) || !DEV_ARCHIVE_FRAGMENT_PREFIX.test(prefix)
+                || !Number.isSafeInteger(maximumCount) || maximumCount < 1
+                || maximumCount > ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS) {
+                throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: list scope mismatch.');
+            }
+            const signal = AbortSignal.timeout(ANALYSIS_V2_MEDIA_OBJECT_OPERATION_DEADLINE_MS);
+            const names = new Set<string>();
+            const seenTokens = new Set<string>();
+            let pageToken: string | undefined;
+            do {
+                const pageSize = Math.min(1000, maximumCount - names.size + 1);
+                let list: GoogleCloudStorageObjectList;
+                try {
+                    const response = await requester.request<GoogleCloudStorageObjectList>({
+                        url: objectsUrl,
+                        method: 'GET',
+                        params: {
+                            prefix,
+                            fields: 'items(name),nextPageToken',
+                            maxResults: String(pageSize),
+                            ...(pageToken ? { pageToken } : {}),
+                        },
+                        responseType: 'json',
+                        maxContentLength: 512 * 1024,
+                        timeout: 15_000,
+                        signal,
+                        ...retryOptions('GET'),
+                    });
+                    list = response.data;
+                } catch (error) {
+                    throwSafeGcsError(error, 'retained list', 'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR');
+                }
+                if (!isRecord(list)) {
+                    throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list response.');
+                }
+                const items = list.items === undefined ? [] : list.items;
+                if (!Array.isArray(items) || items.length > pageSize) {
+                    throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list size.');
+                }
+                for (const item of items) {
+                    const name = isRecord(item) ? item.name : undefined;
+                    if (typeof name !== 'string' || !name.startsWith(prefix)
+                        || !DEV_ARCHIVE_FRAGMENT_NAME.test(name) || names.has(name) || names.size >= maximumCount) {
+                        throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list object.');
+                    }
+                    names.add(name);
+                }
+                const next = list.nextPageToken;
+                if (next !== undefined && (typeof next !== 'string' || next.length === 0 || next.length > 4096
+                    || items.length === 0 || seenTokens.has(next) || seenTokens.size >= 128)) {
+                    throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list pagination.');
+                }
+                pageToken = next;
+                if (pageToken) seenTokens.add(pageToken);
+            } while (pageToken !== undefined);
+            return [...names];
         },
     };
 }

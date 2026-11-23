@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
+import { withDevStandardArchiveApproval } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { DEV_LIVE_STANDARD_ARCHIVE_REQUIRED, devLiveStandardNeedsArchive } from '@/lib/services/dev-ui/live-approval';
 import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
@@ -251,7 +252,10 @@ async function handlePOST(
             return NextResponse.json({ outcome: 'noop', code: DEV_LIVE_STANDARD_ARCHIVE_REQUIRED });
         }
     }
-    const runWithApproval = <T>(operation: () => T): T => withDevLiveProviderApproval(approval, operation);
+    const runWithApproval = <T>(operation: () => T) => withDevLiveProviderApproval(
+        approval,
+        () => approval ? withDevStandardArchiveApproval(approval, operation) : operation(),
+    );
     const taskContract = analysisV2WorkerTaskContractFromHeader(
         request.headers.get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER),
     );

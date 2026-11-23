@@ -53,8 +53,18 @@ export function devLiveStandardTarget(env: Record<string, string | undefined> = 
     return target.success ? target.data : null;
 }
 
+export function devLiveStandardCaptureConfigured(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    return env.DEV_LIVE_STANDARD_COLLECTION_MODE === 'archive_capture'
+        && typeof env.DEV_LIVE_STANDARD_ARCHIVE_SLOT === 'string'
+        && /^[a-f0-9]{32}$/.test(env.DEV_LIVE_STANDARD_ARCHIVE_SLOT)
+        && z.string().datetime().safeParse(env.DEV_LIVE_STANDARD_ARCHIVE_APPROVAL_NOT_BEFORE).success;
+}
+
 export function devLiveStandardNeedsArchive(env: Record<string, string | undefined> = process.env): boolean {
-    return env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'live_apify';
+    return env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'live_apify'
+        && !devLiveStandardCaptureConfigured(env);
 }
 
 function activeApproval(approval: DevLiveApprovalDescriptor, prefix: string, now: number): DevLiveApproval | null {
