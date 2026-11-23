@@ -1,7 +1,12 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { runPrecheckoutBlite } from '../../../lib/services/precheckout/blite-runner';
 import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', () => ({
+    currentDevStandardArchive: vi.fn(() => null),
+}));
 
 const PREFLIGHT = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const LEASE = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -19,7 +24,7 @@ const dto = {
     candidateRange: { min: 3, max: 9 },
     genderRead: { likelyFemale: false, confidence: 0.5, reasons: ['근거 하나', '근거 둘', '근거 셋'] },
     postCount: 0,
-    evidenceFields: [],
+    evidenceFields: ['post.caption' as const],
 };
 
 const GEMINI_LEASE = {
@@ -124,6 +129,80 @@ describe('runPrecheckoutBlite', () => {
         inferenceOptions.onAttemptTelemetry?.({ disposition: 'success' });
         expect(telemetry.inferenceAttempt).toHaveBeenCalledWith({ disposition: 'success' });
         expect(infer).toHaveBeenCalledTimes(1);
+    });
+
+    it('recovers an archive write error from the completed cache without inferring twice', async () => {
+        const capture = vi.fn(async () => undefined)
+            .mockRejectedValueOnce(new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'));
+        const archive = {
+            mode: 'capture' as const, target: 'target.name', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        };
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce(archive).mockReturnValueOnce(archive);
+        const terminal = {
+            claim: vi.fn()
+                .mockResolvedValueOnce({
+                    disposition: 'claimed', leaseToken: LEASE, source, submittedAt,
+                    deadlineAt: '2026-08-13T00:01:00.000Z', followersCount: 850, followingCount: 900,
+                })
+                .mockResolvedValueOnce({ disposition: 'complete', dto, completedAt: submittedAt }),
+            complete: vi.fn(async () => true),
+            fail: vi.fn(async () => true),
+        };
+        const infer = vi.fn(async () => dto);
+        const leaseStore = sharedGeminiLeaseStore();
+        const options = {
+            terminalStore: terminal, infer, geminiLeaseStore: leaseStore as never, observability: observability(),
+            now: () => Date.parse(submittedAt) + 1_000,
+        };
+
+        await expect(runPrecheckoutBlite(PREFLIGHT, options)).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        await expect(runPrecheckoutBlite(PREFLIGHT, options)).resolves.toBe('complete');
+        const input = ['preflight-blite-outcome-v1', ['target.name'], { state: 'complete', dto }];
+        expect(capture.mock.calls).toEqual([input, input]);
+        expect(terminal.complete).toHaveBeenCalledOnce();
+        expect(leaseStore.release).toHaveBeenCalledOnce();
+        expect(leaseStore.release.mock.invocationCallOrder[0]!).toBeLessThan(capture.mock.invocationCallOrder[0]!);
+        expect(infer).toHaveBeenCalledOnce();
+    });
+
+    it('captures an existing terminal B-lite failure without a lease or an inference call', async () => {
+        const capture = vi.fn(async () => undefined);
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', target: 'target.name', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        });
+        const terminal = {
+            claim: vi.fn(async () => ({ disposition: 'failed' as const, reason: 'inference_timeout' as const, failedAt: submittedAt })),
+            complete: vi.fn(), fail: vi.fn(),
+        };
+        const infer = vi.fn();
+        const leaseStore = sharedGeminiLeaseStore();
+        await expect(runPrecheckoutBlite(PREFLIGHT, {
+            terminalStore: terminal, infer, geminiLeaseStore: leaseStore as never,
+        })).resolves.toBe('failed');
+        expect(capture).toHaveBeenCalledExactlyOnceWith('preflight-blite-outcome-v1', ['target.name'], {
+            state: 'failed', reason: 'inference_timeout',
+        });
+        for (const hook of [leaseStore.acquire, terminal.complete, terminal.fail, infer]) {
+            expect(hook).not.toHaveBeenCalled();
+        }
+    });
+
+    it('rejects an archived B-lite worker delivery before any terminal claim or inference', async () => {
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'replay', target: 'target.name', capture: vi.fn(), load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+        });
+        const terminal = { claim: vi.fn(), complete: vi.fn(), fail: vi.fn() };
+        const infer = vi.fn();
+        await expect(runPrecheckoutBlite(PREFLIGHT, { terminalStore: terminal, infer }))
+            .rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        expect(terminal.claim).not.toHaveBeenCalled();
+        expect(infer).not.toHaveBeenCalled();
     });
 
     it('emits an inference failure only after a null result is durably failed', async () => {

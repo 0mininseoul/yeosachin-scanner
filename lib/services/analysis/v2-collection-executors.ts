@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto';
 import { getAnalysisPlan } from '@/lib/domain/analysis/plan-catalog';
-import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
 import {
     projectDevStandardArchiveProfile,
     projectDevStandardArchiveProfileResult,
     projectDevStandardArchiveRelationship,
     projectDevStandardArchiveTargetEvidence,
 } from './v2-standard-archive-projection';
+import {
+    readDevStandardArchivedProfiles,
+    readDevStandardArchivedRelationship,
+    readDevStandardArchivedTargetEvidence,
+} from './v2-standard-archive-replay';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import type {
     ProfileAttemptResult,
@@ -58,6 +63,7 @@ import {
     type AnalysisV2EvidenceStore,
     type AnalysisV2RelationshipRowInput,
     type AnalysisV2TargetEvidenceSourceInput,
+    type AnalysisV2TargetEvidenceRowInput,
 } from './v2-evidence-store';
 import {
     analysisV2ProfileFetchCheckpointStore,
@@ -577,6 +583,26 @@ export function createAnalysisV2RelationshipsExecutor(
             const declaredCount = side === 'followers'
                 ? request.followersDeclaredCount
                 : request.followingDeclaredCount;
+            if (currentDevStandardArchive()?.mode === 'replay') {
+                if (request.accessMode !== 'test_entitlement' || request.planId !== 'standard') {
+                    throw new DevStandardArchiveError();
+                }
+                const canonical = canonicalApifyRelationshipIdentity({
+                    side, targetUsername: request.targetUsername, declaredCount, planId: request.planId,
+                });
+                const allowedInputHashes = new Set(declaredCount === 0
+                    ? [createAnalysisV2RelationshipNotApplicableInputHash(side)]
+                    : [
+                        createAnalysisV2ProviderInputHash(canonical),
+                        createAnalysisV2ProviderInputHash(relationshipIncompleteReplacementIdentity(canonical)),
+                    ]);
+                const archived = await readDevStandardArchivedRelationship({
+                    target: request.targetUsername, side, declaredCount, allowedInputHashes,
+                });
+                return dependencies.evidenceStore.checkpointRelationshipSide({
+                    ...claim, side, declaredCount, ...archived,
+                });
+            }
             if (declaredCount === 0) {
                 return dependencies.evidenceStore.checkpointRelationshipSide({
                     ...claim,
@@ -1181,6 +1207,24 @@ async function durableProfiles(input: {
         onProfileStart,
         onProfileResolved,
     } = input;
+    if (currentDevStandardArchive()?.mode === 'replay') {
+        if (request.accessMode !== 'test_entitlement' || request.planId !== 'standard') {
+            throw new DevStandardArchiveError();
+        }
+        const batchMatch = claim.jobKey.match(/^track:profiles:batch:([0-9]+)$/);
+        const batch = batchMatch ? Number(batchMatch[1]) : null;
+        const archived = await readDevStandardArchivedProfiles({
+            target: request.targetUsername, jobKey: claim.jobKey, batch, usernames,
+        });
+        return dependencies.profileCheckpointStore.checkpointFreshApify({
+            ...profileIdentity(claim),
+            requestedUsernames: usernames,
+            results: archived.results,
+            operationKey: archived.providerOperationKey,
+            providerInputHash: archived.providerInputHash,
+            freshAdmission: 'paid_earlybird',
+        });
+    }
     const collectionProvider = collectionProviderForRequest(request, dependencies);
     if (
         isRevenueCostLedgerRequest(request)
@@ -1469,6 +1513,15 @@ function targetProfilePosts(profile: AnalysisV2CheckpointProfile): InstagramPost
     return posts as InstagramPost[];
 }
 
+function canonicalTargetInteractionInput(
+    kind: 'likers' | 'comments',
+    targetUsername: string,
+    limitPerPost: number,
+    postUrls: readonly string[],
+): string {
+    return canonicalProviderInput([`target-${kind}-v2`, targetUsername, String(limitPerPost), ...postUrls]);
+}
+
 async function collectedTargetSource(input: {
     dependencies: ResolvedDependencies;
     claim: AnalysisV2CollectionJobClaim;
@@ -1481,12 +1534,9 @@ async function collectedTargetSource(input: {
 }) {
     const limitPerPost = input.kind === 'likers' ? TARGET_LIKER_LIMIT : TARGET_COMMENT_LIMIT;
     const postUrls = input.posts.map(instagramPostUrl);
-    const apifyCanonicalInput = canonicalProviderInput([
-        `target-${input.kind}-v2`,
-        input.targetUsername,
-        String(limitPerPost),
-        ...postUrls,
-    ]);
+    const apifyCanonicalInput = canonicalTargetInteractionInput(
+        input.kind, input.targetUsername, limitPerPost, postUrls,
+    );
     const operation = input.kind === 'likers' ? 'target-likers' : 'target-comments';
     const executeApify = async () => {
         const operationKey = createAnalysisV2ProviderOperationKey(
@@ -1652,24 +1702,50 @@ export function createAnalysisV2TargetEvidenceExecutor(
 
         const archive = currentDevStandardArchive();
         if (archive?.mode === 'capture') {
-            await archive.capture(
-                'formal-target-profile-v1',
-                [request.targetUsername],
-                projectDevStandardArchiveProfile(targetProfile),
+            const storedTarget = finalCheckpointResults(targetResume).find(result =>
+                result.outcome.requestedUsername === request.targetUsername && result.outcome.status === 'success',
             );
+            if (!storedTarget || !('profile' in storedTarget)) return archive.fail();
+            await archive.capture('formal-target-profile-v2', [request.targetUsername], {
+                outcome: storedTarget.outcome,
+                profile: projectDevStandardArchiveProfile(targetProfile),
+            });
         }
 
+        const likerPostUrls = likerPosts.map(instagramPostUrl);
+        const commentPostUrls = commentPosts.map(instagramPostUrl);
+        const archiveEvidenceKey = [
+            request.targetUsername, request.excludedUsername,
+            TARGET_LIKER_LIMIT, likerPostUrls.length, ...likerPostUrls,
+            TARGET_COMMENT_LIMIT, commentPostUrls.length, ...commentPostUrls,
+        ];
+        const noPostsProof = sha256([
+            'analysis-v2-target-not-applicable-v1',
+            request.targetUsername,
+            String(targetProfile.postsCount),
+            lengthPrefixed(JSON.stringify(targetProfile.latestPosts ?? [])),
+        ].join('\n'));
         let likerSource: AnalysisV2TargetEvidenceSourceInput;
         let commentSource: AnalysisV2TargetEvidenceSourceInput;
         let likerRows: Awaited<ReturnType<ApifyInteractionAdapter['getPostLikers']>> = [];
         let commentRows: Awaited<ReturnType<ApifyInteractionAdapter['getPostComments']>> = [];
-        if (posts.length === 0) {
-            const proofHash = sha256([
-                'analysis-v2-target-not-applicable-v1',
-                request.targetUsername,
-                String(targetProfile.postsCount),
-                lengthPrefixed(JSON.stringify(targetProfile.latestPosts ?? [])),
-            ].join('\n'));
+        let archivedEvidence: AnalysisV2TargetEvidenceRowInput[] | undefined;
+        if (archive?.mode === 'replay') {
+            if (request.accessMode !== 'test_entitlement' || request.planId !== 'standard') return archive.fail();
+            const liker = canonicalTargetInteractionInput('likers', request.targetUsername, TARGET_LIKER_LIMIT, likerPostUrls);
+            const commenter = canonicalTargetInteractionInput('comments', request.targetUsername, TARGET_COMMENT_LIMIT, commentPostUrls);
+            const replayed = await readDevStandardArchivedTargetEvidence({
+                claim, key: archiveEvidenceKey,
+                likerHash: posts.length === 0 ? noPostsProof : createAnalysisV2ProviderInputHash(liker),
+                commenterHash: posts.length === 0 ? noPostsProof : createAnalysisV2ProviderInputHash(commenter),
+                likerOperationKey: posts.length === 0 ? null : createAnalysisV2ProviderOperationKey('target-likers', liker),
+                commenterOperationKey: posts.length === 0 ? null : createAnalysisV2ProviderOperationKey('target-comments', commenter),
+            });
+            likerSource = replayed.likerSource;
+            commentSource = replayed.commentSource;
+            archivedEvidence = replayed.rows;
+        } else if (posts.length === 0) {
+            const proofHash = noPostsProof;
             likerSource = { status: 'not_applicable', inputHash: proofHash };
             commentSource = { status: 'not_applicable', inputHash: proofHash };
         } else {
@@ -1750,7 +1826,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
             inputHash,
             likerSource,
             commentSource,
-            rows: raw.evidence,
+            rows: archivedEvidence ?? raw.evidence,
         });
         if (archive?.mode === 'capture') {
             // Source references point to the original receipts. Archived input
@@ -1763,16 +1839,7 @@ export function createAnalysisV2TargetEvidenceExecutor(
                 providerOperationKey: source.status === 'collected' ? source.providerOperationKey : null,
                 coverage: source.status === 'collected' ? source.coverage : [],
             });
-            await archive.capture('target-evidence-v1', [
-                request.targetUsername,
-                request.excludedUsername,
-                TARGET_LIKER_LIMIT,
-                likerPosts.length,
-                ...likerPosts.map(instagramPostUrl),
-                TARGET_COMMENT_LIMIT,
-                commentPosts.length,
-                ...commentPosts.map(instagramPostUrl),
-            ], {
+            await archive.capture('target-evidence-v1', archiveEvidenceKey, {
                 likerSource: archivedSource(likerSource),
                 commentSource: archivedSource(commentSource),
                 rows: canonicalizeAnalysisV2TargetEvidenceRows({
@@ -1907,12 +1974,8 @@ export function createAnalysisV2ProfileFetchExecutor(
             onProfileStart: reportProfileStart,
             onProfileResolved: reportProfileResolved,
         });
-        const repaired = await repairProfileBatch({
-            dependencies,
-            claim,
-            request,
-            usernames,
-            resume,
+        const repaired = currentDevStandardArchive()?.mode === 'replay' ? resume : await repairProfileBatch({
+            dependencies, claim, request, usernames, resume,
         });
         const results = durableTerminalProfileResults(repaired, usernames);
         const archive = currentDevStandardArchive();

@@ -19,6 +19,7 @@ import {
     devLiveApprovalId,
     devLiveOwnerStartEnabled,
     devLiveStandardNeedsArchive,
+    devLiveStandardReplayConfiguration,
     devLiveStandardTarget,
     parseDevLiveOwnerApproval,
     parseDevLiveStandardApproval,
@@ -98,7 +99,8 @@ async function requireLiveWebAccess(user: User): Promise<void> {
     await requireActiveE2eTestRunner(user, DEV_LIVE_RUNNER_PLAN);
 }
 
-type OwnerStartRpc = `dev_live_owner_start${'' | '_lookup' | '_ready'}_v${1 | 2 | 4}`;
+type OwnerStartRpc = `dev_live_owner_start${'' | '_lookup' | '_ready'}_v${1 | 2 | 4}`
+    | 'dev_live_standard_archive_replay_start_v1';
 
 async function ownerStartRpc(name: OwnerStartRpc, args?: Record<string, string>): Promise<unknown> {
     const { data, error } = await supabaseAdmin.rpc(name, args);
@@ -144,11 +146,17 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
         : acknowledgedPlan !== null && acknowledgedPlan !== 'basic') {
         throw new Error('DEV_LIVE_PLAN_CHANGED');
     }
-    const descriptor = await ownerStartRpc(standard ? 'dev_live_owner_start_v4' : 'dev_live_owner_start_v1', {
-        p_user_id: user.id,
-        p_target_instagram_id: input.data.targetInstagramId,
-        p_attempt_id: attempt.data,
-    });
+    const replay = standard ? devLiveStandardReplayConfiguration() : null;
+    const descriptor = await ownerStartRpc(
+        replay ? 'dev_live_standard_archive_replay_start_v1'
+            : standard ? 'dev_live_owner_start_v4' : 'dev_live_owner_start_v1',
+        {
+            p_user_id: user.id,
+            p_target_instagram_id: input.data.targetInstagramId,
+            p_attempt_id: attempt.data,
+            ...(replay ? { p_source_grant_id: replay.sourceGrantId, p_slot_hash: replay.slotHash } : {}),
+        },
+    );
     const approval = standard
         ? parseDevLiveStandardApproval(descriptor, input.data.targetInstagramId)
         : parseDevLiveOwnerApproval(descriptor);

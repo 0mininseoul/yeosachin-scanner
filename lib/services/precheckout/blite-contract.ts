@@ -160,6 +160,29 @@ export const precheckoutBliteV1Schema = z.object({
     evidenceFields: precheckoutBliteEvidenceFieldsSchema,
 }).strict();
 
+export const PRECHECKOUT_BLITE_FAILURE_REASONS = [
+    'source_missing',
+    'source_expired',
+    'source_invalid',
+    'source_insufficient',
+    'dispatch_failed',
+    'inference_timeout',
+    'inference_rate_limited',
+    'inference_provider_failed',
+    'inference_response_invalid',
+    'persistence_failed',
+    'attempts_exhausted',
+] as const;
+
+export const precheckoutBliteFailureReasonSchema = z.enum(PRECHECKOUT_BLITE_FAILURE_REASONS);
+export type PrecheckoutBliteFailureReason = z.infer<typeof precheckoutBliteFailureReasonSchema>;
+
+export const archivedBliteOutcomeSchema = z.discriminatedUnion('state', [
+    z.object({ state: z.literal('complete'), dto: precheckoutBliteV1Schema }).strict(),
+    z.object({ state: z.literal('failed'), reason: precheckoutBliteFailureReasonSchema }).strict(),
+]);
+export type ArchivedBliteOutcome = z.infer<typeof archivedBliteOutcomeSchema>;
+
 export type PrecheckoutBliteV1 = z.infer<typeof precheckoutBliteV1Schema>;
 export type PrecheckoutBliteSignal = z.infer<typeof precheckoutBliteSignalSchema>;
 export type PrecheckoutBliteGenderRead = z.infer<typeof precheckoutBliteGenderReadSchema>;

@@ -28,6 +28,13 @@ const FRAGMENT_NAME_PATTERN = /^([a-z][a-z0-9_-]{0,63})\/([a-f0-9]{64})\.bin$/;
 
 export const DEV_STANDARD_ARCHIVE_MAX_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
+export class DevStandardArchiveStorageRetryError extends Error {
+    constructor() {
+        super('DEV_STANDARD_ARCHIVE_STORAGE_RETRY');
+        this.name = 'DevStandardArchiveStorageRetryError';
+    }
+}
+
 export type DevStandardArchiveBinding = Readonly<{
     grantId: string;
     target: string;
@@ -46,6 +53,17 @@ type SealedManifest = Readonly<{
 
 function invalid(): never {
     throw new Error('DEV_STANDARD_ARCHIVE_STORE_INVALID');
+}
+
+function retainedStorageFailure(error: unknown): Error {
+    // The object client already exhausts a bounded retry policy and erases its
+    // transport cause. Preserve only its sanitized classification at this layer.
+    const retryable = error instanceof Error
+        && /^ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: [a-z ]+ failed \((?:unknown|408|429|5[0-9]{2})\)\.$/
+            .test(error.message);
+    return retryable
+        ? new DevStandardArchiveStorageRetryError()
+        : new Error('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
 }
 
 function hash(data: string | Buffer): string {
@@ -154,8 +172,8 @@ export function createDevStandardArchiveStore(input: {
         let bytes: Buffer | null;
         try {
             bytes = await objects.readRetained({ objectName: ref.objectName, maximumBytes });
-        } catch {
-            throw new Error('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        } catch (error) {
+            throw retainedStorageFailure(error);
         }
         if (bytes === null) return null;
         if (!Buffer.isBuffer(bytes) || bytes.length <= ENVELOPE_BYTES
@@ -200,6 +218,7 @@ export function createDevStandardArchiveStore(input: {
         const ciphertext = Buffer.concat([cipher.update(expected), cipher.final()]);
         const bytes = Buffer.concat([Buffer.from([VERSION]), nonce, cipher.getAuthTag(), ciphertext]);
 
+        let writeFailure: Error | undefined;
         try {
             const result = await objects.createRetained({
                 objectName: ref.objectName,
@@ -208,11 +227,14 @@ export function createDevStandardArchiveStore(input: {
                 contentType: 'application/octet-stream',
             });
             if (result.created === true && /^[1-9][0-9]{0,31}$/.test(result.generation)) return;
-        } catch {
+        } catch (error) {
             // A conditional create can race, or commit before its response is lost.
+            writeFailure = retainedStorageFailure(error);
         }
         const committed = await read(ref, maximumBytes);
-        if (committed === null) throw new Error('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        if (committed === null) {
+            throw writeFailure ?? new Error('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        }
         assertEqual(committed, expected, maximumBytes);
     }
 
@@ -259,8 +281,8 @@ export function createDevStandardArchiveStore(input: {
                 prefix: fragmentPrefix,
                 maximumCount: ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS,
             });
-        } catch {
-            throw new Error('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        } catch (error) {
+            throw retainedStorageFailure(error);
         }
         if (!Array.isArray(names) || names.length === 0
             || names.length > ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS

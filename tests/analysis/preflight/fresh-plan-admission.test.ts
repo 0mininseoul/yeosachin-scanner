@@ -439,6 +439,63 @@ describe('durable fresh V2 admission reservation', () => {
 });
 
 describe('durable fresh V2 admission worker', () => {
+    it.each(['valid', 'missing', 'other target', 'invalid count'] as const)(
+        'handles a %s archived count confirmation before any provider reservation', async caseName => {
+            const load = vi.fn(async () => {
+                if (caseName === 'missing') throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+                return {
+                    username: caseName === 'other target' ? 'other.account' : 'target.account',
+                    followersCount: caseName === 'invalid count' ? 10_000_001 : 620,
+                    followingCount: 710, isPrivate: false,
+                };
+            });
+            vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+                mode: 'replay', load, find: vi.fn(), capture: vi.fn(), seal: vi.fn(),
+                ready: () => true, beginPreflightCapture: vi.fn(),
+                fail: () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); },
+            });
+            const complete = ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.completeRpc;
+            const failure = ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.failureRpc;
+            const claimRpc = ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc;
+            const { client, rpc } = clientWith(async name => {
+                if (name === claimRpc) return { data: [{
+                    claimed: true, admission_status: 'processing', target_instagram_id: 'target.account',
+                    access_mode: 'test_entitlement', analysis_entry_channel: 'standard',
+                }], error: null };
+                if (name === complete) return {
+                    data: [{ admission_status: 'ready', admission_error_code: null }], error: null,
+                };
+                if (name === failure) return { data: [{
+                    admission_status: 'blocked', failure_count: 3,
+                    admission_error_code: 'ANALYSIS_V2_FRESH_PROFILE_UNAVAILABLE',
+                }], error: null };
+                throw new Error(`unexpected RPC ${name}`);
+            });
+            const runs = providerRunStore();
+            const getProfile = vi.fn();
+            const getAuthenticatedProfile = vi.fn();
+            const getFallbackProfile = vi.fn();
+            const onClaimed = vi.fn();
+            await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
+                getProfile, getAuthenticatedProfile, getFallbackProfile, onClaimed,
+                providerRunStore: runs, createClaimToken: () => CLAIM_TOKEN, env: {},
+            })).resolves.toBe(caseName === 'valid' ? 'ready' : 'blocked');
+            expect(load).toHaveBeenCalledExactlyOnceWith('fresh-profile-v1', ['target.account']);
+            expect(rpc.mock.invocationCallOrder[0]!).toBeLessThan(load.mock.invocationCallOrder[0]!);
+            expect(rpc.mock.calls.map(([name]) => name)).toEqual([
+                claimRpc, caseName === 'valid' ? complete : failure,
+            ]);
+            if (caseName === 'valid') expect(rpc).toHaveBeenLastCalledWith(complete, expect.objectContaining({
+                p_claim_token: CLAIM_TOKEN, p_target_instagram_id: 'target.account',
+                p_target_followers_count: 620, p_target_following_count: 710, p_target_is_private: false,
+            }));
+            for (const hook of [
+                getProfile, getAuthenticatedProfile, getFallbackProfile, onClaimed,
+                runs.load, runs.reserve, runs.reserveFree, runs.markReusableProfileSchemaV1,
+            ]) expect(hook).not.toHaveBeenCalled();
+        },
+    );
+
     it('uses the count-only profile contract and completes the exact claimed generation', async () => {
         const capture = vi.fn(async () => undefined);
         vi.mocked(currentDevStandardArchive).mockReturnValueOnce({

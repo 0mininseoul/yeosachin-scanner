@@ -9,6 +9,7 @@ import {
 import {
     createDevStandardArchiveStore,
     DEV_STANDARD_ARCHIVE_MAX_RETENTION_MS,
+    DevStandardArchiveStorageRetryError,
 } from '@/lib/services/dev-ui/standard-archive-store';
 
 const bucketName = 'synthetic-project-dev-live-media';
@@ -96,7 +97,7 @@ describe('Dev Standard private archive store', () => {
         const { store, createRetained, objectsByName } = setup();
         createRetained.mockImplementationOnce(async input => {
             objectsByName.set(input.objectName, Buffer.from(input.bytes));
-            throw new Error('response timeout');
+            throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (unknown).');
         });
         await expect(store.bindCapture(binding)).resolves.toEqual(binding);
         await expect(store.bindCapture(binding)).resolves.toEqual(binding);
@@ -109,6 +110,53 @@ describe('Dev Standard private archive store', () => {
             ...binding,
             target: 'another_target',
         })).rejects.toThrow('DEV_STANDARD_ARCHIVE_STORE_CONFLICT');
+    });
+
+    it.each(['408', '429', '500', '503', 'unknown'])(
+        'marks a retained read failure with status %s as retryable without retaining the transport error',
+        async status => {
+            const { store, options, createRetained } = setup();
+            options.objects.readRetained.mockRejectedValueOnce(new Error(
+                `ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained metadata read failed (${status}).`,
+            ));
+            await expect(store.bindCapture(binding)).rejects.toEqual(
+                new DevStandardArchiveStorageRetryError(),
+            );
+            expect(createRetained).not.toHaveBeenCalled();
+            await expect(store.bindCapture(binding)).resolves.toEqual(binding);
+            expect(createRetained).toHaveBeenCalledOnce();
+        },
+    );
+
+    it('retries a conditional write only after a transient error and a missing readback', async () => {
+        const { store, createRetained } = setup();
+        createRetained.mockRejectedValueOnce(new Error(
+            'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (503).',
+        ));
+        await expect(store.bindCapture(binding)).rejects.toBeInstanceOf(DevStandardArchiveStorageRetryError);
+        await expect(store.readBinding()).resolves.toBeNull();
+        await expect(store.bindCapture(binding)).resolves.toEqual(binding);
+        expect(createRetained.mock.calls[0]![0].objectName).toBe(createRetained.mock.calls[1]![0].objectName);
+    });
+
+    it('keeps permissions and malformed data permanent and retries a transient seal listing', async () => {
+        const { store, options, createRetained } = setup();
+        createRetained.mockRejectedValueOnce(new Error(
+            'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained upload failed (403).',
+        ));
+        await expect(store.bindCapture(binding)).rejects.toThrow('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        await store.bindCapture(binding);
+        await store.writeFragment({ ...identity, value: payload });
+        options.objects.listRetained.mockRejectedValueOnce(new Error(
+            'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: retained list failed (429).',
+        ));
+        await expect(store.seal()).rejects.toBeInstanceOf(DevStandardArchiveStorageRetryError);
+        await expect(store.readSeal()).resolves.toBeNull();
+        options.objects.listRetained.mockRejectedValueOnce(new Error(
+            'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list response.',
+        ));
+        await expect(store.seal()).rejects.toThrow('DEV_STANDARD_ARCHIVE_STORE_UNAVAILABLE');
+        await expect(store.seal()).resolves.toEqual(binding);
     });
 
     it('recognizes identical concurrent fragments and rejects incompatible writes', async () => {

@@ -1529,6 +1529,29 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
+    it('preserves the candidate-level Vertex rejection when no evidence can repair its overview', async () => {
+        const input = { ...featureInput(), bio: '#태그', captions: [] };
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'oneLineOverview', code: 'custom' }], truncated: false },
+            {
+                candidate: featureResponse({ oneLineOverview: '관계의 맥락을 단정하기 어려운 피드입니다.' }),
+                issues: [{ code: 'custom', path: ['oneLineOverview'], message: 'v2.8 public copy must not assert or speculate about a relationship.' }],
+            },
+        );
+        const rejection = new Error(
+            'AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.',
+            { cause: validation },
+        );
+        mocks.analyzeWithGemini.mockRejectedValueOnce(rejection);
+        await expect(featureAnalysis(
+            input,
+            audit('featureAnalysis', input, AI_STAGE_POLICY_V211_VERSION),
+            { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION },
+        )).rejects.toBe(rejection);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
     it('rejects an invalid v2.11 individual-creator overview rather than publishing fallback copy', async () => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,

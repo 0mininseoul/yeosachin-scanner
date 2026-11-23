@@ -2,7 +2,9 @@ import 'server-only';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    precheckoutBliteFailureReasonSchema,
     precheckoutBliteV1Schema,
+    type PrecheckoutBliteFailureReason,
     type PrecheckoutBliteV1,
 } from './blite-contract';
 import {
@@ -68,21 +70,6 @@ export function createPrecheckoutBliteStore(client: RpcClient = supabaseAdmin) {
 
 export const precheckoutBliteStore = createPrecheckoutBliteStore();
 
-export const PRECHECKOUT_BLITE_FAILURE_REASONS = [
-    'source_missing',
-    'source_expired',
-    'source_invalid',
-    'source_insufficient',
-    'dispatch_failed',
-    'inference_timeout',
-    'inference_rate_limited',
-    'inference_provider_failed',
-    'inference_response_invalid',
-    'persistence_failed',
-    'attempts_exhausted',
-] as const;
-
-const failureReasonSchema = z.enum(PRECHECKOUT_BLITE_FAILURE_REASONS);
 const v2ClaimSchema = z.discriminatedUnion('disposition', [
     z.object({
         disposition: z.literal('claimed'),
@@ -101,7 +88,7 @@ const v2ClaimSchema = z.discriminatedUnion('disposition', [
     }).strict(),
     z.object({
         disposition: z.literal('failed'),
-        reason: failureReasonSchema,
+        reason: precheckoutBliteFailureReasonSchema,
         failedAt: timestamp,
     }).strict(),
 ]);
@@ -145,9 +132,9 @@ const terminalInputSchema = z.object({
     leaseToken: uuid,
 }).strict();
 const completeInputSchema = terminalInputSchema.extend({ dto: precheckoutBliteV1Schema }).strict();
-const failInputSchema = terminalInputSchema.extend({ reason: failureReasonSchema }).strict();
+const failInputSchema = terminalInputSchema.extend({ reason: precheckoutBliteFailureReasonSchema }).strict();
 
-export type PrecheckoutBliteFailureReason = z.infer<typeof failureReasonSchema>;
+export { PRECHECKOUT_BLITE_FAILURE_REASONS, type PrecheckoutBliteFailureReason } from './blite-contract';
 export type PrecheckoutBliteClaim = z.infer<typeof v2ClaimSchema>;
 export type PrecheckoutBliteStatus = z.infer<typeof statusSchema>;
 export type { PrecheckoutBliteSourceV1 };

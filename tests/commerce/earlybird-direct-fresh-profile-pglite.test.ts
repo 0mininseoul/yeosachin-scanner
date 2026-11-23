@@ -443,6 +443,40 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
         );
     }
 
+    const sourceGrant = '01000000-0000-4000-8000-000000000001';
+    const sourceRequest = '01000000-0000-4000-8000-000000000002';
+    const sourcePreflight = '01000000-0000-4000-8000-000000000003';
+    const archivedOperation = `target-likers:${'f'.repeat(64)}`;
+    const archivedRunId = 'ArchiveFixtureRun';
+    const evidenceArgs = [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, JOB_HASH, archivedOperation,
+        TARGET_PROVIDER_HASH, archivedRunId];
+    const fence = 'ANALYSIS_V2_PROVIDER_EVIDENCE_SOURCE_INVALID';
+
+    async function seedArchive() {
+        await db.exec(`
+            INSERT INTO dev_live_budget.owner_starts VALUES ('${sourceGrant}','${USER_ID}','${TARGET}');
+            INSERT INTO dev_live_budget.standard_archive_replay_grants
+            VALUES ('${DEV_GRANT_ID}', '${sourceGrant}', repeat('a', 64), now() + interval '1 hour');
+            INSERT INTO public.analysis_requests (
+                id, user_id, status, pipeline_version, target_instagram_id, preflight_id,
+                selected_plan_id_snapshot, plan_access_mode_snapshot, analysis_entry_channel
+            ) VALUES ('${sourceRequest}', '${USER_ID}', 'completed', 'v2', '${TARGET}',
+                '${sourcePreflight}', 'standard', 'test_entitlement', 'standard');
+            INSERT INTO public.analysis_preflights (
+                id, user_id, status, consumed_request_id, target_instagram_id, idempotency_key
+            ) VALUES ('${sourcePreflight}', '${USER_ID}', 'consumed', '${sourceRequest}',
+                '${TARGET}', 'dev-live:owner:standard:${sourceGrant}');
+            UPDATE public.analysis_v2_provider_runs
+            SET request_id = '${sourceRequest}', job_claim_token = '${RETRY_CLAIM_TOKEN}',
+                usage_reconciled_at = now(), actual_usage_usd = 0.1;
+            INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token, logical_provider,
+                actor_id, credential_slot, status, run_id, actual_usage_usd, usage_reconciled_at
+            ) VALUES ('${sourceRequest}', '${TARGET_JOB}', '${archivedOperation}', '${TARGET_PROVIDER_HASH}',
+                '${RETRY_CLAIM_TOKEN}', 'apify', 'actor/likers', 'secondary', 'succeeded', '${archivedRunId}', 0.2, now());
+        `);
+    }
+
     beforeAll(async () => {
         const patch = readFileSync(new URL(
             '../../supabase/dev-ui/live-standard-fresh-profile-checkpoint.sql', import.meta.url,
@@ -483,12 +517,43 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
         `);
         await db.exec(patch);
         await db.exec(patch);
+
+        // The separate replay-grant tests install the grant issuer and reservation trigger.
+        // This fixture exercises the real evidence functions and Dev profile writer.
+        await db.exec(`
+            CREATE TABLE dev_live_budget.standard_archive_replay_grants (
+                grant_id uuid PRIMARY KEY, source_grant_id uuid NOT NULL,
+                slot_hash text NOT NULL, expires_at timestamptz NOT NULL
+            );
+            CREATE TABLE public.analysis_v2_recovery_provider_run_adoptions (
+                request_id uuid, job_key text, operation_key text, destination_input_hash text,
+                source_request_id uuid, source_job_key text, source_operation_key text, source_run_id text
+            );
+            ALTER TABLE public.analysis_v2_provider_runs ADD COLUMN actual_usage_usd numeric;
+        `);
+        const baseline = readFileSync(new URL('../../supabase/dev-ui/production-baseline.sql', import.meta.url), 'utf8');
+        for (const name of ['load', 'valid']) {
+            const start = baseline.indexOf(`CREATE FUNCTION public.analysis_v2_${name}_provider_evidence_source(`);
+            const end = baseline.indexOf('$$;', start);
+            expect(start).toBeGreaterThan(0);
+            expect(end).toBeGreaterThan(start);
+            await db.exec(baseline.slice(start, end + 3));
+            await db.exec(`REVOKE ALL ON FUNCTION public.analysis_v2_${name}_provider_evidence_source(
+                uuid, text, uuid, text, text, text, text, text
+            ) FROM PUBLIC, anon, authenticated, service_role;`);
+        }
+        const archiveEvidence = readFileSync(new URL(
+            '../../supabase/dev-ui/live-standard-archive-evidence.sql', import.meta.url,
+        ), 'utf8');
+        await db.exec(archiveEvidence);
+        await db.exec(archiveEvidence);
     });
 
     beforeEach(async () => {
         const cards = `jsonb_set(jsonb_set('${PLAN_CARDS}'::jsonb, '{basic,selectionState}', '"unavailable"'), '{standard,selectionState}', '"required"')`;
         await db.exec(`
-            TRUNCATE dev_live_budget.owner_starts, dev_live_budget.standard_owner_policy;
+            TRUNCATE dev_live_budget.owner_starts, dev_live_budget.standard_owner_policy,
+                dev_live_budget.standard_archive_replay_grants, public.analysis_v2_recovery_provider_run_adoptions;
             INSERT INTO dev_live_budget.standard_owner_policy VALUES (true);
             INSERT INTO dev_live_budget.owner_starts VALUES ('${DEV_GRANT_ID}','${USER_ID}','${TARGET}');
             DELETE FROM public.earlybird_fulfillments;
@@ -552,6 +617,122 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
         await checkpoint(targetProfile);
         await db.exec("UPDATE public.analysis_v2_provider_runs SET status='running'");
         await expect(loadRetry()).rejects.toThrow('ANALYSIS_V2_PROFILE_RETRY_ADMISSION_PROVIDER_NOT_SUCCEEDED');
+    });
+
+    it('checkpoints archived target and candidate profiles with original provider receipts only', async () => {
+        await seedArchive();
+        const target = await checkpoint(targetProfile);
+        await db.query('UPDATE public.analysis_pipeline_jobs SET lease_token = $1 WHERE job_key = $2',
+            [RETRY_CLAIM_TOKEN, TARGET_JOB]);
+        await expect(checkpoint({ ...targetProfile, claimToken: RETRY_CLAIM_TOKEN }))
+            .resolves.toMatchObject({ rows: target.rows });
+        const candidateProfiles = {
+            jobKey: BATCH_JOB, operationKey: BATCH_OPERATION, providerInputHash: BATCH_PROVIDER_HASH,
+            requestedUsernames: ['candidate_1'], outcomes: [outcome('candidate_1')],
+        };
+        await expect(checkpoint(candidateProfiles)).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: candidateProfiles.requestedUsernames } }],
+        });
+        await expect(checkpoint({ ...candidateProfiles, providerInputHash: JOB_HASH }))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+        const receipts = await db.query('SELECT count(*)::int AS total FROM public.analysis_v2_provider_runs WHERE request_id = $1',
+            [REQUEST_ID]);
+        expect(receipts.rows).toEqual([{ total: 0 }]);
+    });
+
+    it('reuses successful archived receipts and preserves unknown usage for later reconciliation', async () => {
+        await seedArchive();
+        await db.query(`
+            UPDATE public.analysis_v2_provider_runs
+            SET actual_usage_usd = NULL, usage_reconciled_at = NULL
+            WHERE request_id = $1
+        `, [sourceRequest]);
+
+        await expect(asService(
+            'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot',
+            evidenceArgs,
+        )).resolves.toMatchObject({ rows: [{ slot: 'secondary' }] });
+        const args = [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, archivedOperation,
+            TARGET_PROVIDER_HASH, 'apify', archivedRunId, 'secondary'];
+        await expect(db.query(`
+            SELECT receipt.actual_usage_usd, receipt.usage_reconciled_at
+            FROM public.analysis_v2_load_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS receipt
+        `, args)).resolves.toMatchObject({
+            rows: [{ actual_usage_usd: null, usage_reconciled_at: null }],
+        });
+        await expect(checkpoint(targetProfile)).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: [TARGET] } }],
+        });
+        const receipts = await db.query(`
+            SELECT count(*) FILTER (WHERE request_id = $1)::int AS destination_receipts,
+                   count(*) FILTER (WHERE request_id = $2 AND status = 'succeeded'
+                        AND actual_usage_usd IS NULL AND usage_reconciled_at IS NULL)::int AS unreconciled_source_receipts
+            FROM public.analysis_v2_provider_runs
+        `, [REQUEST_ID, sourceRequest]);
+        expect(receipts.rows).toEqual([{ destination_receipts: 0, unreconciled_source_receipts: 3 }]);
+    });
+
+    it('loads the replay receipt as the original composite, exposes only its slot and fences stale identities', async () => {
+        await seedArchive();
+        const slot = 'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot';
+        const args = [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, archivedOperation, TARGET_PROVIDER_HASH, 'apify', archivedRunId, 'secondary'];
+        await expect(asService(slot, evidenceArgs)).resolves.toMatchObject({ rows: [{ slot: 'secondary' }] });
+        const internal = 'FROM public.analysis_v2_load_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS receipt';
+        await expect(db.query(`SELECT receipt.logical_provider, receipt.actual_usage_usd::text AS cost ${internal}`, args))
+            .resolves.toMatchObject({ rows: [{ logical_provider: 'apify', cost: '0.2' }] });
+        await expect(db.query('SELECT public.analysis_v2_valid_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS valid', args))
+            .resolves.toMatchObject({ rows: [{ valid: true }] });
+        await expect(db.query(`SELECT 1 ${internal}`, [...args.slice(0, 7), 'primary']))
+            .rejects.toThrow(fence);
+        await expect(asService(slot, [REQUEST_ID, TARGET_JOB, RETRY_CLAIM_TOKEN, ...evidenceArgs.slice(3)]))
+            .rejects.toThrow(fence);
+        await expect(asService(slot, [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, TARGET_PROVIDER_HASH, ...evidenceArgs.slice(4)]))
+            .rejects.toThrow(fence);
+        await db.exec("UPDATE dev_live_budget.standard_archive_replay_grants SET expires_at = now() - interval '1 second'");
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await expect(checkpoint(targetProfile)).rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
+    });
+
+    it('checks an archived relationship run and rejects cross-target provenance', async () => {
+        await seedArchive();
+        const relationshipJob = 'track:relationships:collect';
+        const relationshipOperation = `relationship-followers:${'e'.repeat(64)}`;
+        await db.query(`
+            INSERT INTO public.analysis_pipeline_jobs (
+                request_id, job_key, track, kind, input_hash, status, lease_token, lease_expires_at
+            ) VALUES ($1, $2, 'relationships', 'collection', $3, 'processing', $4, now() + interval '5 minutes')
+        `, [REQUEST_ID, relationshipJob, JOB_HASH, CLAIM_TOKEN]);
+        await db.query(`
+            UPDATE public.analysis_v2_provider_runs SET job_key = $1, operation_key = $2 WHERE run_id = $3
+        `, [relationshipJob, relationshipOperation, archivedRunId]);
+        const args = [REQUEST_ID, relationshipJob, CLAIM_TOKEN, relationshipOperation,
+            TARGET_PROVIDER_HASH, 'apify', archivedRunId, null];
+        const sql = 'SELECT receipt.credential_slot FROM public.analysis_v2_load_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS receipt';
+        await expect(db.query(sql, args)).resolves.toMatchObject({ rows: [{ credential_slot: 'secondary' }] });
+        await db.query("UPDATE public.analysis_requests SET target_instagram_id = 'different.fixture' WHERE id = $1",
+            [sourceRequest]);
+        await expect(db.query(sql, args)).rejects.toThrow(fence);
+    });
+
+    it('honors a conflicting local run and preserves the existing recovery adoption lookup', async () => {
+        await seedArchive();
+        const internal = 'FROM public.analysis_v2_load_provider_evidence_source($1,$2,$3,$4,$5,$6,$7,$8) AS receipt';
+        const args = [REQUEST_ID, TARGET_JOB, CLAIM_TOKEN, archivedOperation, TARGET_PROVIDER_HASH, 'apify', archivedRunId, 'secondary'];
+        await db.query(`
+            INSERT INTO public.analysis_v2_recovery_provider_run_adoptions VALUES ($1,$2,$3,$4,$5,$2,$3,$6)
+        `, [REQUEST_ID, TARGET_JOB, archivedOperation, TARGET_PROVIDER_HASH, sourceRequest, archivedRunId]);
+        await expect(db.query(`SELECT receipt.credential_slot ${internal}`, args))
+            .resolves.toMatchObject({ rows: [{ credential_slot: 'secondary' }] });
+        const slot = 'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot';
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await db.exec('DELETE FROM public.analysis_v2_recovery_provider_run_adoptions');
+        await db.query(`
+            INSERT INTO public.analysis_v2_provider_runs (
+                request_id, job_key, operation_key, input_hash, job_claim_token, logical_provider,
+                actor_id, credential_slot, status, run_id
+            ) VALUES ($1,$2,$3,$4,$5,'apify','actor/likers','secondary','running','ConflictingFixtureRun')
+        `, [REQUEST_ID, TARGET_JOB, archivedOperation, TARGET_PROVIDER_HASH, CLAIM_TOKEN]);
+        await expect(db.query(`SELECT 1 ${internal}`, args)).rejects.toThrow(fence);
     });
 
     it('uses the same direct checkpoint for a Standard candidate batch', async () => {

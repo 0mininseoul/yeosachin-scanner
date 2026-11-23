@@ -113,6 +113,7 @@ const BEFORE_PAYMENT: Record<string, NodeSpec> = {
         does: [
             '일반 익명 사전 점검은 유효한 프로필 캐시를 재사용합니다. 새로 수집할 때는 잔액과 예약액을 확인해 Apify 무료 계정을 선택합니다.',
             '비공개·없는 계정·형식 오류를 판정하고 팔로워·팔로잉 수로 필요한 플랜을 계산합니다.',
+            '승인된 Dev Standard 재생은 봉인된 대상 프로필과 사전 판독 결과를 사용합니다.',
         ],
         services: 'Apify 무료 계정 풀',
         numbers: [
@@ -279,6 +280,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         does: [
             '검증 대상의 최신 게시물 좋아요 목록에서 대상 계정을 찾습니다.',
             '수집하지 못한 경우는 0점이 아니라 미수집으로 남깁니다.',
+            '승인된 Dev Standard 재생은 관계·프로필·상호작용과 함께 보관된 역방향 좋아요를 사용합니다.',
         ],
         services: 'Apify (상호작용 actor)',
         numbers: [{ label: '대상→후보 좋아요', value: points(W.targetToCandidateLike) }],

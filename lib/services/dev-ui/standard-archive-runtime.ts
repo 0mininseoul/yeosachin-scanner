@@ -4,12 +4,16 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS } from '@/lib/services/analysis/v2-media-artifact-store';
+import { archivedBliteOutcomeSchema } from '@/lib/services/precheckout/blite-contract';
 import {
     devLiveStandardCaptureConfigured,
     devLiveStandardTarget,
+    devLiveStandardReplayConfiguration,
     type DevLiveApproval,
 } from './live-approval';
-import { createDevStandardArchiveStore } from './standard-archive-store';
+import { createDevStandardArchiveStore, DevStandardArchiveStorageRetryError } from './standard-archive-store';
+
+export { DevStandardArchiveStorageRetryError } from './standard-archive-store';
 
 type ArchiveInputIdentity = readonly (string | number | boolean | null)[];
 type ArchiveCoverage = Readonly<{ profileBatches: readonly number[] }>;
@@ -48,6 +52,7 @@ export class DevStandardArchiveError extends Error {
 
 interface DevStandardArchiveSession {
     readonly mode: 'capture' | 'replay';
+    readonly target?: string;
     ready(): boolean;
     beginPreflightCapture(): Promise<void>;
     capture(kind: string, identity: ArchiveInputIdentity, value: unknown): Promise<void>;
@@ -68,7 +73,8 @@ export async function beginDevStandardArchivePreflight(): Promise<void> {
     if (archive?.mode === 'capture') await archive.beginPreflightCapture();
 }
 
-function fail(): never {
+function fail(error?: unknown): never {
+    if (error instanceof DevStandardArchiveStorageRetryError) throw error;
     throw new DevStandardArchiveError();
 }
 
@@ -97,7 +103,8 @@ function coverageKey(kind: string, identity: ArchiveInputIdentity, target: strin
         || kind === PROFILE_PROOF_KIND;
     const single = kind === 'preflight-profile-v1'
         || kind === 'fresh-profile-v1'
-        || kind === 'formal-target-profile-v1'
+        || kind === 'formal-target-profile-v2'
+        || kind === 'preflight-blite-policy-v1'
         || kind === 'target-evidence-v1'
         || kind === 'reverse-coverage-v1'
         || kind === 'result-image-manifest-v1';
@@ -114,7 +121,8 @@ function requiredCoverage(coverage: ArchiveCoverage): ReadonlyArray<readonly [st
         ['fresh-profile-v1'],
         ['relationship-side-v1', 'followers'],
         ['relationship-side-v1', 'following'],
-        ['formal-target-profile-v1'],
+        ['formal-target-profile-v2'],
+        ['preflight-blite-policy-v1'],
         [PROFILE_PROOF_KIND, targetProfileJob],
         ['target-evidence-v1'],
         ['reverse-coverage-v1'],
@@ -126,7 +134,7 @@ function requiredCoverage(coverage: ArchiveCoverage): ReadonlyArray<readonly [st
     ];
 }
 
-async function verifyCoverage(store: ArchiveReader, coverage: ArchiveCoverage): Promise<void> {
+async function verifyCoverage(store: ArchiveReader, coverage: ArchiveCoverage, target: string): Promise<void> {
     await Promise.all(requiredCoverage(coverage).map(async identity => {
         const [kind, ordinal] = identity;
         const pointer = await store.readFragment({
@@ -136,6 +144,15 @@ async function verifyCoverage(store: ArchiveReader, coverage: ArchiveCoverage): 
         if (typeof pointer?.value !== 'string' || !POINTER_HASH.test(pointer.value)) return fail();
         const fragment = await store.readFragment({ kind, inputKey: pointer.value });
         if (!fragment) return fail();
+        if (kind === 'preflight-blite-policy-v1') {
+            if (typeof fragment.value !== 'boolean') return fail();
+            if (fragment.value) {
+                const preview = await store.readFragment({
+                    kind: 'preflight-blite-outcome-v1', inputKey: inputKey([target]),
+                });
+                if (!archivedBliteOutcomeSchema.safeParse(preview?.value).success) return fail();
+            }
+        }
         if (kind === PROFILE_PROOF_KIND && !z.object({
             providerOperationKey: z.string().regex(/^[a-z][a-z0-9:._-]{1,159}$/),
             providerInputHash: z.string().regex(POINTER_HASH),
@@ -195,10 +212,24 @@ async function readArchiveInput(
     try {
         const result = await store.readFragment({ kind, inputKey: inputKey(identity) });
         if (result) return result.value;
-    } catch {
-        // The worker must not log object or input identities.
+    } catch (error) {
+        return fail(error);
     }
     return fail();
+}
+
+function readonlySession(reader: ArchiveReader, target: string): DevStandardArchiveSession {
+    return {
+        mode: 'replay',
+        target,
+        fail,
+        ready: () => true,
+        beginPreflightCapture: async () => fail(),
+        load: (kind, identity) => readArchiveInput(reader, kind, identity),
+        find: async () => fail(),
+        capture: async () => fail(),
+        seal: async () => fail(),
+    };
 }
 
 /** Open a sealed archive for a registered QA target. This grants no Dev analysis admission. */
@@ -217,22 +248,13 @@ export async function withVerifiedDevStandardArchive<T>(
         const summary = await readArchiveInput(reader, COVERAGE_KIND, [target]);
         if (!Array.isArray(summary) || summary.some(batch => !Number.isInteger(batch))) return fail();
         coverage = { profileBatches: summary };
-        await verifyCoverage(reader, coverage);
+        await verifyCoverage(reader, coverage, target);
         await verifyMediaSelectionMembership(opened);
         if (!(await store.verifySealedMembership())) return fail();
-    } catch {
-        return fail();
+    } catch (error) {
+        return fail(error);
     }
-    return workerArchive.run({
-        mode: 'replay',
-        fail,
-        ready: () => true,
-        beginPreflightCapture: async () => fail(),
-        load: (kind, identity) => readArchiveInput(reader, kind, identity),
-        find: async () => fail(),
-        capture: async () => fail(),
-        seal: async () => fail(),
-    }, () => operation(coverage));
+    return workerArchive.run(readonlySession(reader, target), () => operation(coverage));
 }
 
 /** Called within workers after the registered Dev and delivery authorization checks. */
@@ -241,9 +263,26 @@ export async function withDevStandardArchiveApproval<T>(
     operation: () => T,
     env: Record<string, string | undefined> = process.env,
 ): Promise<T> {
-    if (approval.planId !== 'standard' || env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'archive_capture') {
-        return operation();
+    if (approval.planId !== 'standard') return operation();
+    const config = devLiveStandardReplayConfiguration(env);
+    const replay = approval.archiveReplay;
+    if (replay || config) {
+        const expiresAt = replay ? Date.parse(replay.expiresAt) : NaN;
+        if (!replay || !config || !Number.isFinite(expiresAt) || expiresAt <= Date.now()
+            || config.sourceGrantId !== replay.sourceGrantId || config.slotHash !== replay.slotHash
+            || devLiveStandardTarget(env) !== approval.targetInstagramId) return fail();
+        let opened: SealedArchive | null;
+        try {
+            opened = await storeForEnvironment(env).openSealedArchive();
+        } catch (error) {
+            return fail(error);
+        }
+        if (opened?.binding.grantId !== replay.sourceGrantId
+            || opened.binding.target !== approval.targetInstagramId
+            || opened.binding.expiresAt !== expiresAt) return fail();
+        return workerArchive.run(readonlySession(opened, approval.targetInstagramId), operation);
     }
+    if (env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'archive_capture') return operation();
     const role = env.DEV_LIVE_WORKLOAD;
     if ((role !== 'preflight' && role !== 'paid') || !devLiveStandardCaptureConfigured(env)
         || devLiveStandardTarget(env) !== approval.targetInstagramId) return fail();
@@ -259,18 +298,19 @@ export async function withDevStandardArchiveApproval<T>(
     let bound = false;
     try {
         store = storeForEnvironment(env);
-        if (role === 'paid') {
-            const binding = await store.readBinding();
-            if (binding?.grantId !== expected.grantId
+        const binding = await store.readBinding();
+        if (binding) {
+            if (binding.grantId !== expected.grantId
                 || binding.target !== expected.target
                 || binding.expiresAt !== expected.expiresAt) return fail();
             bound = true;
-        }
-    } catch {
-        return fail();
+        } else if (role === 'paid') return fail();
+    } catch (error) {
+        return fail(error);
     }
     return workerArchive.run({
         mode: 'capture',
+        target: approval.targetInstagramId,
         fail,
         ready: () => bound,
         async beginPreflightCapture() {
@@ -279,8 +319,8 @@ export async function withDevStandardArchiveApproval<T>(
             try {
                 await store.bindCapture(expected);
                 bound = true;
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         async capture(kind, identity, value) {
@@ -294,8 +334,8 @@ export async function withDevStandardArchiveApproval<T>(
                     inputKey: pointer,
                     value: key,
                 });
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         load: (kind, identity) => bound ? readArchiveInput(store, kind, identity) : fail(),
@@ -303,22 +343,22 @@ export async function withDevStandardArchiveApproval<T>(
             if (!bound) return fail();
             try {
                 return await store.readFragment({ kind, inputKey: inputKey(identity) });
-            } catch {
-                return fail();
+            } catch (error) {
+                return fail(error);
             }
         },
         async seal(coverage) {
             if (!bound || role !== 'paid') return fail();
             try {
-                await verifyCoverage(store, coverage);
+                await verifyCoverage(store, coverage, approval.targetInstagramId);
                 await store.writeFragment({
                     kind: COVERAGE_KIND,
                     inputKey: inputKey([approval.targetInstagramId]),
                     value: coverage.profileBatches,
                 });
                 await store.seal(verifyMediaSelectionMembership);
-            } catch {
-                fail();
+            } catch (error) {
+                return fail(error);
             }
         },
     }, operation);

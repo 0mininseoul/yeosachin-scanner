@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
+import {
+    currentDevStandardArchive,
+    DevStandardArchiveError,
+    DevStandardArchiveStorageRetryError,
+} from '@/lib/services/dev-ui/standard-archive-runtime';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
 import { canonicalizeImageProxyUrl } from './image-proxy-token';
 import {
@@ -45,6 +49,10 @@ const resultImageArchiveSchema = z.object({
     width: z.number().int().min(1).max(MAX_RESULT_IMAGE_DIMENSION),
     height: z.number().int().min(1).max(MAX_RESULT_IMAGE_DIMENSION),
     sha256: z.string().regex(HASH_PATTERN),
+}).strict();
+const archivedResultImageFailure = z.object({
+    status: z.literal('capture_failed'),
+    failureCode: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
 }).strict();
 
 function restoreArchivedResultImage(value: unknown, fail: () => never): NormalizedResultImage {
@@ -429,6 +437,7 @@ export async function captureResultImages(
 
             const archiveIdentity = archive ? resultImageArchiveIdentity(source) : null;
             let archivedImage: NormalizedResultImage | null = null;
+            let archivedFailureCode: string | null = null;
             if (archive && archiveIdentity) {
                 const recorded = archive.mode === 'replay' || prior?.status === 'ready' || prior?.status === 'source_missing'
                     ? { value: await archive.load(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity) }
@@ -441,10 +450,16 @@ export async function captureResultImages(
                         return archive.fail();
                     }
                 } else if (recorded) {
-                    archivedImage = restoreArchivedResultImage(recorded.value, () => archive.fail());
-                    if (prior?.status === 'ready'
-                        && (prior.sha256 !== archivedImage.sha256 || prior.byteSize !== archivedImage.bytes.length)) {
-                        return archive.fail();
+                    const failure = archivedResultImageFailure.safeParse(recorded.value);
+                    if (failure.success) {
+                        if (prior?.status === 'ready' || mandatory(source, sourceFingerprint)) return archive.fail();
+                        archivedFailureCode = failure.data.failureCode;
+                    } else {
+                        archivedImage = restoreArchivedResultImage(recorded.value, () => archive.fail());
+                        if (prior?.status === 'ready'
+                            && (prior.sha256 !== archivedImage.sha256 || prior.byteSize !== archivedImage.bytes.length)) {
+                            return archive.fail();
+                        }
                     }
                 }
             }
@@ -497,7 +512,7 @@ export async function captureResultImages(
 
             let readyOutcome: ResultImageRegistryOutcome | undefined;
             let lastError: unknown;
-            for (let attempt = 1; attempt <= captureAttempts; attempt++) {
+            for (let attempt = 1; archivedFailureCode === null && attempt <= captureAttempts; attempt++) {
                 try {
                     let normalized = archivedImage;
                     if (normalized === null) {
@@ -570,7 +585,8 @@ export async function captureResultImages(
                     };
                     break;
                 } catch (error) {
-                    if (error instanceof DevStandardArchiveError) throw error;
+                    if (error instanceof DevStandardArchiveError
+                        || error instanceof DevStandardArchiveStorageRetryError) throw error;
                     lastError = error;
                     if (attempt === captureAttempts || !shouldRetry(error)) {
                         break;
@@ -586,13 +602,16 @@ export async function captureResultImages(
             if (lastError instanceof ResultImageCaptureError) {
                 throw lastError;
             }
-            if (archive) {
-                // This run is preparing replayable input. A nonnull source
-                // without durable media cannot be represented as source_missing.
-                return archive.fail();
-            }
             if (prior?.status === 'ready') {
                 throw new ResultImageCaptureError('ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY');
+            }
+            const isMandatory = mandatory(source, sourceFingerprint);
+            const code = archivedFailureCode ?? failureCode(lastError);
+            if (archive?.mode === 'capture' && archiveIdentity && archivedImage === null
+                && archivedFailureCode === null && !isMandatory) {
+                await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity, {
+                    status: 'capture_failed', failureCode: code,
+                });
             }
             if (prior?.status === 'capture_failed') {
                 // SQL accepts an existing failure only verbatim, or promotes it to ready.
@@ -609,8 +628,8 @@ export async function captureResultImages(
                 byteSize: null,
                 capturedAt: null,
                 expiresAt: expiresAt(observedAtMs),
-                failureCode: failureCode(lastError),
-                isMandatory: mandatory(source, sourceFingerprint),
+                failureCode: code,
+                isMandatory,
             };
             await input.registry.registerOutcome({ ...claim, outcome });
         });
