@@ -128,13 +128,15 @@ describe('authentication proxy redirects', () => {
     });
 
     it.each<[string, string, string | null]>([
-        ['/privacy', 'Mozilla/5.0', 'nosnippet'],
-        ['/terms', 'Googlebot/2.1', 'nosnippet'],
-        ['/terms', 'Applebot/0.1', 'nosnippet'],
+        ['/privacy', 'Mozilla/5.0', 'noindex, nosnippet, noarchive'],
+        ['/privacy?notice=1', 'Googlebot/2.1', 'noindex, nosnippet, noarchive'],
+        ['/terms', 'Googlebot/2.1', 'noindex, nosnippet, noarchive'],
+        ['/terms', 'Applebot/0.1', 'noindex, nosnippet, noarchive'],
         ['/', 'GPTBot/1.4', null],
+        ['/cherry', 'Googlebot/2.1', null],
         ['/guide/wijang-yeosachin', 'ChatGPT-User/1.0', null],
         ['/terms-and-conditions', 'ClaudeBot/1.0', null],
-    ])('passes through %s for %s with the expected snippet policy', async (path, agent, tag) => {
+    ])('passes through %s for %s with the expected search directives', async (path, agent, tag) => {
         mockAuthenticatedUser(null);
         const response = await proxy(new NextRequest(`https://yeosachin.com${path}`, {
             headers: { 'User-Agent': agent },

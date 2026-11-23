@@ -45,7 +45,7 @@ describe('search discovery routes', () => {
         });
     });
 
-    it('publishes only the canonical public static pages without ranking hints', async () => {
+    it('publishes only the three indexable public pages without ranking hints', async () => {
         const { default: sitemap } = await import('@/app/sitemap');
         const entries = sitemap();
 
@@ -53,8 +53,6 @@ describe('search discovery routes', () => {
             `${CANONICAL_ORIGIN}/`,
             `${CANONICAL_ORIGIN}/cherry`,
             `${CANONICAL_ORIGIN}/guide/wijang-yeosachin`,
-            `${CANONICAL_ORIGIN}/terms`,
-            `${CANONICAL_ORIGIN}/privacy`,
         ]);
         expect(entries.every(({ lastModified }) => lastModified instanceof Date)).toBe(true);
         expect(entries.every((entry) => !('priority' in entry))).toBe(true);
