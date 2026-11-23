@@ -104,6 +104,45 @@ describe('authentication proxy redirects', () => {
         expect(response.headers.get('location')).toBeNull();
     });
 
+    it.each([
+        ['/privacy', 'GPTBot/1.4', 'GET'],
+        ['/terms', 'Mozilla/5.0 (compatible; ChatGPT-User/1.0; +https://openai.com/bot)', 'HEAD'],
+        ['/terms/?notice=1', 'perplexity-user/1.0', 'GET'],
+        ['/privacy?_rsc=test', 'Claude-User/1.0', 'GET'],
+        ['/privacy', 'Mozilla/5.0 (compatible; Google-GeminiNotebook; +https://developers.google.com)', 'GET'],
+        ['/terms', 'Google-Agent', 'GET'],
+        ['/privacy', 'MistralAI-User/1.0', 'GET'],
+        ['/terms', 'DuckAssistBot/1.0', 'GET'],
+        ['/privacy.rsc', 'OAI-SearchBot/1.4', 'GET'],
+        ['/terms.prefetch.rsc', 'Claude-Agent/1.0', 'GET'],
+        ['/terms.segments/__PAGE__.segment.rsc', 'CCBot/2.0', 'GET'],
+        ['/%70rivacy', 'Claude-SearchBot/1.0', 'GET'],
+    ])('withholds the legal document at %s from %s on %s', async (path, agent, method) => {
+        const response = await proxy(new NextRequest(`https://yeosachin.com${path}`, {
+            method, headers: { 'User-Agent': agent },
+        }));
+        expect(response.status).toBe(403);
+        expect(await response.text()).toBe('');
+        expect(response.headers.get('cache-control')).toContain('no-store');
+        expect(mocks.createServerClient).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, string, string | null]>([
+        ['/privacy', 'Mozilla/5.0', 'nosnippet'],
+        ['/terms', 'Googlebot/2.1', 'nosnippet'],
+        ['/terms', 'Applebot/0.1', 'nosnippet'],
+        ['/', 'GPTBot/1.4', null],
+        ['/guide/wijang-yeosachin', 'ChatGPT-User/1.0', null],
+        ['/terms-and-conditions', 'ClaudeBot/1.0', null],
+    ])('passes through %s for %s with the expected snippet policy', async (path, agent, tag) => {
+        mockAuthenticatedUser(null);
+        const response = await proxy(new NextRequest(`https://yeosachin.com${path}`, {
+            headers: { 'User-Agent': agent },
+        }));
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+        expect(response.headers.get('x-robots-tag')).toBe(tag);
+    });
+
     it('keeps the anonymous preflight page public', async () => {
         mockAuthenticatedUser(null);
 

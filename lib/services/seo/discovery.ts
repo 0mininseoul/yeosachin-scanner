@@ -18,14 +18,6 @@ export const PRIVATE_CRAWL_PATHS = [
     '/share/',
 ] as const;
 
-export const SEARCH_CRAWLERS = [
-    'Googlebot',
-    'OAI-SearchBot',
-    'GPTBot',
-    'ChatGPT-User',
-    '*',
-] as const;
-
 export const NOINDEX_ROBOTS: NonNullable<Metadata['robots']> = {
     index: false,
     follow: false,

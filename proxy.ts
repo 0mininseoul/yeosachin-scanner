@@ -12,6 +12,7 @@ import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/serv
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
 import { ADMIN_CONSOLE_PATH, readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 import { AUTH_REDIRECT_INTENT_COOKIE, readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
+import { isKnownAiFetcher, isLegalPagePath } from '@/lib/services/seo/legal-page-crawlers';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
     'www.yeosachin.com',
@@ -42,6 +43,13 @@ export async function proxy(request: NextRequest) {
         return withDevHeaders(NextResponse.json({
             error: deploymentBoundary === 'invalid' ? 'DEV_UI_DEPLOYMENT_REJECTED' : 'DEV_UI_ROUTE_DISABLED',
         }, { status: deploymentBoundary === 'invalid' ? 503 : 403 }));
+    }
+    const publicLegalPage = deploymentBoundary === 'production' && isLegalPagePath(request.nextUrl.pathname);
+    if (publicLegalPage && isKnownAiFetcher(request.headers.get('user-agent'))) {
+        return new NextResponse(null, {
+            status: 403,
+            headers: { 'Cache-Control': 'private, no-store', Vary: 'User-Agent' },
+        });
     }
     // Keep the old webhook/API endpoints reachable while external providers
     // switch to the canonical domain. Browser navigations are permanently
@@ -237,6 +245,10 @@ export async function proxy(request: NextRequest) {
         return redirectWithAuthCookies(redirectUrl);
     }
 
+    if (publicLegalPage) {
+        supabaseResponse.headers.set('X-Robots-Tag', 'nosnippet');
+        supabaseResponse.headers.append('Vary', 'User-Agent');
+    }
     return withDevHeaders(supabaseResponse);
 }
 
