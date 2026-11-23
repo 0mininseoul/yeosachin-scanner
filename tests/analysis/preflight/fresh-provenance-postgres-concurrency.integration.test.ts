@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Pool, type PoolClient } from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -39,6 +39,8 @@ const dispatchLockMigration = new URL(
     '../../../supabase/migrations/20261122090000_order_analysis_v2_dispatch_lineage_locks.sql',
     import.meta.url,
 );
+const resultLockMigration = '20261123170000_share_analysis_v2_ai_result_parent_locks.sql';
+
 
 function migrationSource(filename: string): string {
     return readFileSync(new URL(`../../../supabase/migrations/${filename}`, import.meta.url), 'utf8');
@@ -49,6 +51,17 @@ function functionDefinition(source: string, name: string): string {
     const end = source.indexOf('\n$$;', start);
     if (start < 0 || end < 0) throw new Error(`FRESH_PROVENANCE_POSTGRES_FUNCTION_MISSING:${name}`);
     return source.slice(start, end + '\n$$;'.length);
+}
+
+function aiTerminalizerStatusPatch(filename: string): string {
+    const source = migrationSource(filename);
+    const reference = source.indexOf(
+        "'public.analysis_v2_terminalize_ai_attempt_internal(uuid,text,uuid,text,smallint,uuid,text,jsonb)'",
+    );
+    const start = source.lastIndexOf('DO $migration$', reference);
+    const end = source.indexOf('\n$migration$;', reference);
+    if (reference < 0 || start < 0 || end < 0) throw new Error('AI_TERMINALIZER_STATUS_PATCH_MISSING');
+    return source.slice(start, end + '\n$migration$;'.length);
 }
 
 const requestId = '11111111-1111-4111-8111-111111111111';
@@ -134,11 +147,12 @@ async function asService<T>(
     client: PoolClient,
     sql: string,
     values: unknown[] = [],
+    statementTimeoutMs = 5_000,
 ): Promise<T> {
     await client.query('BEGIN');
     try {
         await client.query("SET LOCAL lock_timeout = '2s'");
-        await client.query("SET LOCAL statement_timeout = '5s'");
+        await client.query("SELECT pg_catalog.set_config('statement_timeout', $1, true)", [String(statementTimeoutMs)]);
         await client.query('SET LOCAL ROLE service_role');
         const result = await client.query<{ result: T }>(sql, values);
         await client.query('COMMIT');
@@ -551,7 +565,7 @@ describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () =
     let auditOperation: string;
 
     beforeAll(async () => {
-        pool = new Pool({ connectionString: databaseUrl, max: 5 });
+        pool = new Pool({ connectionString: databaseUrl, max: 11 });
         await pool.query(`
             DROP SCHEMA IF EXISTS public CASCADE;
             DROP SCHEMA IF EXISTS extensions CASCADE;
@@ -599,6 +613,8 @@ describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () =
         `);
         await pool.query(migrationSource('20260713170859_add_analysis_v2_ai_attempt_ledger.sql'));
         await pool.query(migrationSource('20260713173056_add_analysis_v2_ai_result_checkpoint_cache.sql'));
+        await pool.query(aiTerminalizerStatusPatch('20260716162523_harden_analysis_v2_ai_unavailable_replay_policy.sql'));
+        await pool.query(aiTerminalizerStatusPatch('20260725010000_add_analysis_v2_gender_resolution_stage.sql'));
         auditOperation = (await pool.query<{ value: string }>(
             'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [identity],
         )).rows[0]!.value;
@@ -705,4 +721,213 @@ describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () =
         `);
         expect(auditRows.rows[0]).toEqual({ attempt_count: 1, cost_usd: '0.001000000000', checkpoint_count: 1 });
     }, 15_000);
+
+    it('allows sibling result commits with shared parents under an eight-connection load', async () => {
+        await pool.query('DELETE FROM public.analysis_v2_ai_result_checkpoints');
+        await pool.query('DELETE FROM public.analysis_v2_ai_attempts');
+
+        const workload = Array.from({ length: 8 }, (_, ordinal) => ({
+            job: `track:profile-ai:batch:${100 + ordinal}`,
+            batch: 100 + ordinal,
+            claim: randomUUID(),
+            attempts: Array.from({ length: 12 }, (_, index) => ({
+                token: randomUUID(),
+                identity: {
+                    ...identity,
+                    input_hash: hash(`result-concurrency:${ordinal}:${index}`),
+                },
+            })),
+        }));
+        type AuditResult = { outcome: string };
+        const deliveries: unknown[][][] = [];
+        const blocker = await pool.connect();
+        const clients = await Promise.all(workload.map(() => pool.connect()));
+        try {
+            for (const { job, batch, claim, attempts } of workload) {
+                await blocker.query(`
+                    INSERT INTO public.analysis_pipeline_jobs (
+                        request_id,job_key,track,kind,batch,input_hash,status,attempt_count,
+                        dispatch_state,dispatch_generation,dispatch_reservation_token,dispatch_task_name,
+                        dispatch_reserved_at,dispatched_at,delivered_at,lease_token,lease_expires_at,
+                        dispatch_workload_role,dispatch_contract_version,claim_workload_role,claim_contract_version,
+                        created_at,updated_at
+                    ) SELECT request_id,$2,track,kind,$3,input_hash,status,attempt_count,
+                        dispatch_state,dispatch_generation,dispatch_reservation_token,dispatch_task_name,
+                        dispatch_reserved_at,dispatched_at,delivered_at,$4,statement_timestamp()+interval '5 minutes',
+                        dispatch_workload_role,dispatch_contract_version,claim_workload_role,claim_contract_version,
+                        created_at,updated_at
+                      FROM public.analysis_pipeline_jobs
+                     WHERE request_id=$1 AND job_key=$5
+                `, [requestId, job, batch, claim, paidJob]);
+                const args: unknown[][] = [];
+                for (const attempt of attempts) {
+                    const { rows } = await blocker.query<{ value: string }>(
+                        'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [attempt.identity],
+                    );
+                    const intent = [requestId, job, claim, rows[0]!.value, attempt.token];
+                    await expect(asService(blocker, reserveSql, [...intent, metadata]))
+                        .resolves.toMatchObject({ created: true });
+                    args.push([...intent, telemetry, attempt.identity, output, output, outputHash]);
+                }
+                deliveries.push(args);
+            }
+
+            async function runWithSharedParents(): Promise<{ outcomes: string[]; elapsedMs: number }> {
+                await blocker.query('BEGIN');
+                try {
+                    await blocker.query(
+                        'SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR SHARE', [preflightId],
+                    );
+                    await blocker.query(
+                        'SELECT 1 FROM public.analysis_requests WHERE id=$1 FOR SHARE', [requestId],
+                    );
+                    const startedAt = performance.now();
+                    const results = await Promise.all(clients.map(async (client, index) => {
+                        const outcomes: string[] = [];
+                        for (const args of deliveries[index]!) {
+                            try {
+                                const result = await asService<AuditResult>(client, auditSql, args, 200);
+                                outcomes.push(result.outcome);
+                            } catch (error) {
+                                outcomes.push((error as { code?: string }).code ?? 'unknown');
+                            }
+                        }
+                        return outcomes;
+                    }));
+                    return { outcomes: results.flat(), elapsedMs: Math.round(performance.now() - startedAt) };
+                } finally {
+                    await blocker.query('ROLLBACK');
+                }
+            }
+
+            const reservationIdentity = { ...identity, input_hash: hash('sibling-reservation-race') };
+            const operationKey = (await blocker.query<{ value: string }>(
+                'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [reservationIdentity],
+            )).rows[0]!.value;
+            const reserveFor = (index: number) => [
+                requestId, workload[index]!.job, workload[index]!.claim, operationKey, randomUUID(), metadata,
+            ];
+
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query('SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR SHARE', [preflightId]);
+                await expect(asService(clients[0]!, reserveSql, reserveFor(0), 200))
+                    .rejects.toMatchObject({ code: '57014' });
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            const original = await runWithSharedParents();
+            expect(original.outcomes).toEqual(Array<string>(96).fill('57014'));
+            const pending = await blocker.query(`
+                SELECT count(*)::int AS reserved FROM public.analysis_v2_ai_attempts WHERE status = 'reserved'
+            `);
+            expect(pending.rows[0]).toEqual({ reserved: 96 });
+            const migration = migrationSource(resultLockMigration);
+            await blocker.query(migration);
+            await blocker.query(migration);
+            const updated = await runWithSharedParents();
+            expect(updated.outcomes).toEqual(Array<string>(96).fill('checkpointed'));
+
+            // Duplicate post-provider delivery is idempotent on both clients.
+            await expect(Promise.all(
+                clients.slice(0, 2).map(client => asService<AuditResult>(client, auditSql, deliveries[0]![0]!)),
+            )).resolves.toEqual([expect.objectContaining({ outcome: 'checkpointed' }),
+                expect.objectContaining({ outcome: 'checkpointed' })]);
+            const accounting = await blocker.query(`
+                SELECT count(*)::int AS attempts,
+                       count(*) FILTER (WHERE status = 'success')::int AS successes,
+                       sum(estimated_cost_usd)::text AS cost_usd,
+                       (SELECT count(*)::int FROM public.analysis_v2_ai_result_checkpoints) AS checkpoints
+                FROM public.analysis_v2_ai_attempts
+            `);
+            expect(accounting.rows[0]).toEqual({
+                attempts: 96, successes: 96, cost_usd: '0.096000000000', checkpoints: 96,
+            });
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query('SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR SHARE', [preflightId]);
+                await blocker.query('SELECT 1 FROM public.analysis_requests WHERE id=$1 FOR SHARE', [requestId]);
+                type Reservation = { created: boolean; reservationToken: string };
+                const collision = await Promise.allSettled(
+                    clients.slice(0, 2).map((client, index) => asService<Reservation>(
+                        client, reserveSql, reserveFor(index), 200,
+                    )),
+                );
+                expect(collision.filter(result => result.status === 'fulfilled')).toEqual([
+                    expect.objectContaining({ value: expect.objectContaining({ created: true }) }),
+                ]);
+                expect(collision.filter(result => result.status === 'rejected')).toEqual([
+                    expect.objectContaining({
+                        reason: expect.objectContaining({ code: 'P0001', message: 'ANALYSIS_V2_AI_ATTEMPT_CONFLICT' }),
+                    }),
+                ]);
+                const winner = collision.findIndex(result => result.status === 'fulfilled');
+                const committed = collision[winner] as PromiseFulfilledResult<Reservation>;
+                await expect(asService(clients[winner]!, reserveSql, reserveFor(winner), 200))
+                    .resolves.toMatchObject({ created: false, reservationToken: committed.value.reservationToken });
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            console.info('AI result sibling load (96 writes, 8 connections, 200ms timeout)', {
+                originalMs: original.elapsedMs,
+                updatedMs: updated.elapsedMs,
+            });
+        } finally {
+            for (const client of clients) client.release();
+            blocker.release();
+        }
+    }, 15_000);
+
+    it('preserves late attempt cost when the request closes while acquiring shared locks', async () => {
+        await pool.query(migrationSource(resultLockMigration));
+        const auditClient = await pool.connect();
+        const closer = await pool.connect();
+        try {
+            const closeToken = randomUUID();
+            const payloadIdentity = { ...identity, input_hash: hash('late-result-after-close') };
+            const { rows } = await auditClient.query<{ value: string }>(
+                'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [payloadIdentity],
+            );
+            const args = [requestId, paidJob, claimToken, rows[0]!.value, closeToken];
+            await expect(asService(auditClient, reserveSql, [...args, metadata]))
+                .resolves.toMatchObject({ created: true });
+            const auditPid = (await auditClient.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+            const closerPid = (await closer.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+
+            await closer.query('BEGIN');
+            await closer.query('SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR UPDATE', [preflightId]);
+            await closer.query("UPDATE public.analysis_requests SET status='failed' WHERE id=$1", [requestId]);
+
+            const finish = asService(auditClient, auditSql, [...args, telemetry, payloadIdentity, output, output, outputHash]);
+            await waitForLockWait(pool, auditPid, closerPid);
+            await closer.query('COMMIT');
+            await expect(finish).resolves.toMatchObject({ outcome: 'fenced' });
+
+            const late = await closer.query(`
+                SELECT attempt.status, attempt.estimated_cost_usd::text AS cost_usd,
+                       EXISTS (
+                           SELECT 1 FROM public.analysis_v2_ai_result_checkpoints AS checkpoint
+                           WHERE checkpoint.request_id = attempt.request_id
+                             AND checkpoint.operation_key = attempt.operation_key
+                       ) AS has_checkpoint
+                FROM public.analysis_v2_ai_attempts AS attempt
+                WHERE attempt.request_id=$1 AND attempt.operation_key=$2
+            `, [requestId, rows[0]!.value]);
+            expect(late.rows[0]).toEqual({ status: 'success', cost_usd: '0.001000000000', has_checkpoint: false });
+
+            // While terminal, a shared preflight lock still serializes the
+            // complete-cost-rollup snapshot as in the old outer transaction.
+            await closer.query('BEGIN');
+            await closer.query('SELECT 1 FROM public.analysis_preflights WHERE id=$1 FOR SHARE', [preflightId]);
+            await expect(asService(
+                auditClient, auditSql, [...args, telemetry, payloadIdentity, output, output, outputHash], 200,
+            )).rejects.toMatchObject({ code: '57014' });
+        } finally {
+            await closer.query('ROLLBACK').catch(() => undefined);
+            await closer.query("UPDATE public.analysis_requests SET status='processing' WHERE id=$1", [requestId]);
+            closer.release();
+            auditClient.release();
+        }
+    }, 15_000);
+
 });

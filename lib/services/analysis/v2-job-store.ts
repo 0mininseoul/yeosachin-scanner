@@ -641,7 +641,7 @@ export function createSupabaseAnalysisV2JobStore(
                 throw new Error('ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid max attempts.');
             }
             const claimToken = randomUUID();
-            const { data, error } = await client.rpc(ANALYSIS_V2_DATABASE_NAMES.claimRpc, {
+            const claimArgs = {
                 p_request_id: identity.requestId,
                 p_job_key: identity.jobKey,
                 p_dispatch_generation: generation,
@@ -651,7 +651,13 @@ export function createSupabaseAnalysisV2JobStore(
                 p_max_attempts: maxAttempts,
                 p_workload_role: 'paid',
                 p_contract_version: 2,
-            });
+            };
+            // A confirmed rollback did not consume an attempt. Keep the claim
+            // token with this delivery while retrying that same statement.
+            const { data, error } = await retryPostgresAbortedRpc(
+                () => client.rpc(ANALYSIS_V2_DATABASE_NAMES.claimRpc, claimArgs),
+                { retryDeadlock: false },
+            );
             if (error) throwRpcError(error, 'claim');
             return claimedFromRow(singleRpcRow(data, 'claim'), {
                 ...identity,

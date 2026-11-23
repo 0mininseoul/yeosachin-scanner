@@ -318,6 +318,34 @@ describe('analysis V2 job store', () => {
         });
     });
 
+    it('retries only a confirmed claim timeout and keeps the same delivery and claim token', async () => {
+        const delivery = reservation(randomUUID());
+        const timeout = { code: '57014', message: 'canceling statement due to statement timeout' };
+        const rpc = vi.fn()
+            .mockResolvedValueOnce({ data: null, error: timeout })
+            .mockResolvedValueOnce({
+                data: [{
+                    claimed: true,
+                    job_status: 'processing',
+                    track: 'coordinator',
+                    job_kind: 'bootstrap',
+                    attempt_count: 1,
+                    input_hash: inputHash,
+                    batch: null,
+                }],
+                error: null,
+            })
+            .mockResolvedValueOnce({ data: null, error: { code: '57014', message: 'user request' } });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        const claim = await store.claim(delivery);
+        expect(claim).toMatchObject({ attemptCount: 1 });
+        expect(rpc.mock.calls[0]).toEqual(rpc.mock.calls[1]);
+        expect(rpc.mock.calls[1][1].p_claim_token).toBe(claim?.claimToken);
+        await expect(store.claim(delivery)).rejects.toThrow('claim failed');
+        expect(rpc).toHaveBeenCalledTimes(3);
+    });
+
     it('rejects false dispatch acknowledgements and non-completed fanout results', async () => {
         const rpc = vi.fn()
             .mockResolvedValueOnce({
