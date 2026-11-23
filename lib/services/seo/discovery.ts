@@ -5,8 +5,6 @@ export const PUBLIC_SITEMAP_URLS = [
     `${CANONICAL_APP_ORIGIN}/`,
     `${CANONICAL_APP_ORIGIN}/cherry`,
     `${CANONICAL_APP_ORIGIN}/guide/wijang-yeosachin`,
-    `${CANONICAL_APP_ORIGIN}/terms`,
-    `${CANONICAL_APP_ORIGIN}/privacy`,
 ] as const;
 
 export const PRIVATE_CRAWL_PATHS = [

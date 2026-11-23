@@ -246,7 +246,7 @@ export async function proxy(request: NextRequest) {
     }
 
     if (publicLegalPage) {
-        supabaseResponse.headers.set('X-Robots-Tag', 'nosnippet');
+        supabaseResponse.headers.set('X-Robots-Tag', 'noindex, nosnippet, noarchive');
         supabaseResponse.headers.append('Vary', 'User-Agent');
     }
     return withDevHeaders(supabaseResponse);

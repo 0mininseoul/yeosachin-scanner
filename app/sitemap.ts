@@ -5,8 +5,6 @@ const LAST_MODIFIED_BY_URL = {
     'https://yeosachin.com/': new Date('2026-07-29T00:00:00.000Z'),
     'https://yeosachin.com/cherry': new Date('2026-11-23T00:00:00.000Z'),
     'https://yeosachin.com/guide/wijang-yeosachin': new Date('2026-07-29T00:00:00.000Z'),
-    'https://yeosachin.com/terms': new Date('2026-07-16T00:00:00.000Z'),
-    'https://yeosachin.com/privacy': new Date('2026-11-23T00:00:00.000Z'),
 } satisfies Record<(typeof PUBLIC_SITEMAP_URLS)[number], Date>;
 
 export default function sitemap(): MetadataRoute.Sitemap {

@@ -5,14 +5,20 @@ const RUNBOOK_URL = new URL(
     '../../../docs/seo-geo-search-console-runbook.md',
     import.meta.url,
 );
-const REQUIRED_DEPLOYMENT_URLS = [
-    'https://yeosachin.com/robots.txt',
-    'https://yeosachin.com/sitemap.xml',
+const INDEXABLE_URLS = [
     'https://yeosachin.com/',
     'https://yeosachin.com/cherry',
     'https://yeosachin.com/guide/wijang-yeosachin',
+] as const;
+const LEGAL_URLS = [
     'https://yeosachin.com/terms',
     'https://yeosachin.com/privacy',
+] as const;
+const REQUIRED_DEPLOYMENT_URLS = [
+    'https://yeosachin.com/robots.txt',
+    'https://yeosachin.com/sitemap.xml',
+    ...INDEXABLE_URLS,
+    ...LEGAL_URLS,
 ] as const;
 
 function readRunbook(): string {
@@ -152,10 +158,9 @@ function deploymentTableIssues(section: string): string[] {
             if (!/(정확히|exactly)[^\n]*(공개|public)|(공개|public)[^\n]*(정확히|exactly)/i.test(expected)) {
                 issues.push(`${url}:exact-public-urls`);
             }
-            for (const canonicalUrl of REQUIRED_DEPLOYMENT_URLS.slice(2)) {
-                if (!expected.includes(canonicalUrl)) {
-                    issues.push(`${url}:canonical:${canonicalUrl}`);
-                }
+            const listedUrls = [...expected.matchAll(/`(https:\/\/[^\x60]+)`/g)].map(match => match[1]);
+            if (listedUrls.sort().join(' ') !== [...INDEXABLE_URLS].sort().join(' ')) {
+                issues.push(`${url}:canonical-urls`);
             }
             continue;
         }
@@ -163,7 +168,11 @@ function deploymentTableIssues(section: string): string[] {
         if (!expected.includes(url) || !/canonical/i.test(expected)) {
             issues.push(`${url}:self-canonical`);
         }
-        if (!/noindex[^\n]*(없|아님|미설정|제거)/i.test(expected)) {
+        if (LEGAL_URLS.some(legalUrl => legalUrl === url)) {
+            if (!expected.includes('X-Robots-Tag: noindex, nosnippet, noarchive')) {
+                issues.push(`${url}:noindex`);
+            }
+        } else if (!/noindex[^\n]*(없|아님|미설정|제거)/i.test(expected)) {
             issues.push(`${url}:indexable`);
         }
     }

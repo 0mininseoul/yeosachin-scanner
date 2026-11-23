@@ -16,18 +16,18 @@
 | URL | 기대 결과 |
 | --- | --- |
 | `https://yeosachin.com/robots.txt` | HTTP 200, Googlebot은 공개 경로를 허용하고 OAI-SearchBot 등 AI 봇에는 약관·개인정보처리방침을 제외한 공개 경로를 허용함. 절대 sitemap URL은 `https://yeosachin.com/sitemap.xml` |
-| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/cherry`, `https://yeosachin.com/guide/wijang-yeosachin`, `https://yeosachin.com/terms`, `https://yeosachin.com/privacy`만 포함함 |
+| `https://yeosachin.com/sitemap.xml` | HTTP 200, 유효한 XML이며 정확히 공개 canonical URL `https://yeosachin.com/`, `https://yeosachin.com/cherry`, `https://yeosachin.com/guide/wijang-yeosachin`만 포함함 |
 | `https://yeosachin.com/` | HTTP 200, canonical이 `https://yeosachin.com/`이고 `noindex`가 없음 |
 | `https://yeosachin.com/cherry` | HTTP 200, canonical이 `https://yeosachin.com/cherry`이고 `noindex`가 없음. 광고 링크의 `v`와 UTM 파라미터도 같은 canonical을 가리킴 |
 | `https://yeosachin.com/guide/wijang-yeosachin` | HTTP 200, canonical이 `https://yeosachin.com/guide/wijang-yeosachin`이고 `noindex`가 없음 |
-| `https://yeosachin.com/terms` | HTTP 200, canonical이 `https://yeosachin.com/terms`이고 `noindex`가 없음 |
-| `https://yeosachin.com/privacy` | HTTP 200, canonical이 `https://yeosachin.com/privacy`이고 `noindex`가 없음 |
+| `https://yeosachin.com/terms` | HTTP 200, canonical이 `https://yeosachin.com/terms`이고 응답 헤더는 `X-Robots-Tag: noindex, nosnippet, noarchive` |
+| `https://yeosachin.com/privacy` | HTTP 200, canonical이 `https://yeosachin.com/privacy`이고 응답 헤더는 `X-Robots-Tag: noindex, nosnippet, noarchive` |
 
 배포 전과 배포 후 각각 다음을 확인한다.
 
 1. `curl -I` 또는 동등한 읽기 전용 검사로 200 응답과 예상하지 않은 리디렉션 여부를 확인한다.
-2. Googlebot과 AI 봇이 모두 홈·체리 소개·가이드를 크롤링할 수 있고, 두 그룹 모두 비공개 경로가 차단되는지 확인한다. 약관·개인정보처리방침은 일반 브라우저에서 HTTP 200과 `X-Robots-Tag: nosnippet`을, `ChatGPT-User` 등 식별되는 AI 봇에서는 본문 없는 HTTP 403을 확인한다.
-3. sitemap이 위 표의 공개 HTML 5개만 `https://yeosachin.com` 절대 URL로 포함하는지 확인한다.
+2. Googlebot과 AI 봇이 모두 홈·체리 소개·가이드를 크롤링할 수 있고, 두 그룹 모두 비공개 경로가 차단되는지 확인한다. 약관·개인정보처리방침은 일반 브라우저와 Googlebot에서 표에 적힌 색인 제외 헤더를, `ChatGPT-User` 등 식별되는 AI 봇에서는 본문 없는 HTTP 403을 확인한다.
+3. sitemap에는 홈·체리 소개·가이드의 절대 URL 3개만 있는지 확인한다.
 4. 홈·체리·가이드·약관·개인정보 HTML의 `rel="canonical"`이 위 표의 자기 참조 URL과 일치하는지 확인한다.
 5. 체리 회원 화면과 개인 리포트의 색인 제외 설정을 확인한다.
 
@@ -130,7 +130,7 @@ OpenAI는 ChatGPT 검색 결과의 발행자 추천 링크에 `utm_source=chatgp
 
 ### 색인되지 않을 때
 
-색인되지 않음 또는 미등록 상태면 먼저 HTTP 상태, robots, `noindex`, sitemap 포함, 내부 링크, 렌더링된 canonical을 확인한다. URL Inspection 실시간 테스트가 성공하면 색인 생성을 한 번 요청하고 최소 7일 관찰한다. 반복 요청은 처리 우선순위를 보장하지 않는다.
+홈·체리 소개·가이드가 색인되지 않음 또는 미등록 상태면 먼저 HTTP 상태, robots, `noindex`, sitemap 포함, 내부 링크, 렌더링된 canonical을 확인한다. URL Inspection 실시간 테스트가 성공하면 색인 생성을 한 번 요청하고 최소 7일 관찰한다. 약관·개인정보처리방침은 색인 제외가 정상이다. 반복 요청은 처리 우선순위를 보장하지 않는다.
 
 ### canonical 불일치(canonical mismatch)
 
