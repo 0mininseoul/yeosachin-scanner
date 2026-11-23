@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
+import { DEV_LIVE_STANDARD_ARCHIVE_REQUIRED, devLiveStandardNeedsArchive } from '@/lib/services/dev-ui/live-approval';
 import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import { isAnalysisV2WorkerAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
@@ -251,6 +252,9 @@ async function handlePOST(
         }
         if (!approval) {
             return NextResponse.json({ code: 'DEV_LIVE_APPROVAL_REQUIRED' }, { status: 403 });
+        }
+        if (approval.planId === 'standard' && devLiveStandardNeedsArchive()) {
+            return NextResponse.json({ outcome: 'noop', code: DEV_LIVE_STANDARD_ARCHIVE_REQUIRED });
         }
     }
     const runWithApproval = <T>(operation: () => T): T => withDevLiveProviderApproval(approval, operation);

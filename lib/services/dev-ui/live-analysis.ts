@@ -14,9 +14,11 @@ import {
     DEV_LIVE_OWNER_START_ATTEMPT,
     DEV_LIVE_PREFLIGHT_KEY_PREFIX,
     DEV_LIVE_RUNNER_PLAN,
+    DEV_LIVE_STANDARD_ARCHIVE_REQUIRED,
     DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX,
     devLiveApprovalId,
     devLiveOwnerStartEnabled,
+    devLiveStandardNeedsArchive,
     devLiveStandardTarget,
     parseDevLiveOwnerApproval,
     parseDevLiveStandardApproval,
@@ -135,6 +137,7 @@ async function issueOwnerApproval(user: User, request: Request): Promise<DevLive
     const input = preflightRequestV1Schema.safeParse(body);
     if (!input.success) return null;
     const standard = devLiveStandardTarget() === input.data.targetInstagramId;
+    if (standard && devLiveStandardNeedsArchive()) throw new Error(DEV_LIVE_STANDARD_ARCHIVE_REQUIRED);
     const acknowledgedPlan = request.headers.get(devLivePlanHeader);
     if (standard
         ? acknowledgedPlan !== DEV_LIVE_STANDARD_START_PLAN
@@ -186,8 +189,17 @@ export function withDevLiveApproval(
                 }
             }
             if (!approval) return closed();
+            if (approval.planId === 'standard' && devLiveStandardNeedsArchive()) {
+                throw new Error(DEV_LIVE_STANDARD_ARCHIVE_REQUIRED);
+            }
             await assertDevLiveBudgetAvailable(approval);
         } catch (error) {
+            if (error instanceof Error && error.message === DEV_LIVE_STANDARD_ARCHIVE_REQUIRED) {
+                return devUiJson({
+                    code: DEV_LIVE_STANDARD_ARCHIVE_REQUIRED,
+                    error: '저장 수집본을 확인한 뒤 Standard 테스트를 시작할 수 있습니다.',
+                }, 409);
+            }
             if (error instanceof Error && error.message === 'DEV_LIVE_PLAN_CHANGED') {
                 return devUiJson({
                     code: 'DEV_LIVE_PLAN_CHANGED',
@@ -236,12 +248,14 @@ export function handleDevLiveAvailability(request: Request): Promise<NextRespons
             if (devLiveOwnerStartEnabled()) {
                 const available = await ownerStartRpc('dev_live_owner_start_ready_v1', { p_user_id: user.id }) === true;
                 const target = available ? devLiveStandardTarget() : null;
-                const standardReady = target && await ownerStartRpc('dev_live_owner_start_ready_v4', {
+                const standardArchiveRequired = Boolean(target) && devLiveStandardNeedsArchive();
+                const standardReady = target && !standardArchiveRequired && await ownerStartRpc('dev_live_owner_start_ready_v4', {
                     p_user_id: user.id, p_target_instagram_id: target,
                 }).catch(() => false) === true;
                 return devUiJson({
                     available, recentPreflightId,
                     ...(target ? { standardTarget: target, standardAvailable: standardReady === true } : {}),
+                    ...(standardArchiveRequired ? { standardArchiveRequired } : {}),
                 });
             }
             const approval = readDevLiveApproval();

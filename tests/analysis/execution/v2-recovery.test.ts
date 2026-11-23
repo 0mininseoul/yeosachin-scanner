@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     AnalysisV2JobFenceError,
     type AnalysisV2DispatchableJob,
@@ -112,7 +112,10 @@ function providerRecovery() {
 }
 
 describe('analysis V2 dispatch recovery', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
     it('uses the Dev Standard scan and only rearms a delivery confirmed missing', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         const missing = job('track:profile-ai:batch:0', 'delivered');
         const present = job('track:profile-ai:batch:1', 'delivered');
         const unknown = job('track:profile-ai:batch:2', 'delivered');
@@ -138,6 +141,7 @@ describe('analysis V2 dispatch recovery', () => {
     });
 
     it('still checks delivery when the separate lease recovery is unavailable', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         const jobStore = store([job('track:profile-ai:batch:0', 'pending')]);
         const dispatch = vi.fn(async () => undefined);
         const recoverLeases = vi.fn(async () => { throw new Error('lease RPC unavailable'); });
@@ -146,6 +150,21 @@ describe('analysis V2 dispatch recovery', () => {
             scanned: 1, dispatched: 1, taskPresent: 0, lostRace: 0, failed: 1, providerAdmissions: null,
         });
         expect(dispatch).toHaveBeenCalledOnce();
+    });
+
+    it('recovers expired leases without scanning or redelivering saved-collection Standard jobs', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
+        const jobStore = store([job('track:profile-ai:batch:0', 'pending')]);
+        const dispatch = vi.fn(async () => undefined);
+        const providerAdmissions = { scanned: 1, recovered: 1, resolved: 1, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 1 };
+        const recoverLeases = vi.fn(async () => providerAdmissions);
+
+        await expect(recoverDevLiveStandard({ store: jobStore, dispatch, recoverLeases })).resolves.toEqual({
+            scanned: 0, dispatched: 0, taskPresent: 0, lostRace: 0, failed: 0, providerAdmissions,
+        });
+        expect(recoverLeases).toHaveBeenCalledOnce();
+        expect(jobStore.listDispatchable).not.toHaveBeenCalled();
+        expect(dispatch).not.toHaveBeenCalled();
     });
 
     it('dispatches pending/reserved jobs and preserves task identities that still exist', async () => {

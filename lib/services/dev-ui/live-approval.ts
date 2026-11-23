@@ -9,6 +9,7 @@ export const DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX = 'dev-live:owner:standard:'
 export const DEV_LIVE_OWNER_START_ATTEMPT = 'x-dev-live-attempt-id';
 export const DEV_LIVE_OWNER_CAPS = Object.freeze({ apifyMaxCents: 500, aiMaxCents: 200 });
 export const DEV_LIVE_RUNNER_PLAN = 'basic' as const;
+export const DEV_LIVE_STANDARD_ARCHIVE_REQUIRED = 'DEV_LIVE_STANDARD_ARCHIVE_REQUIRED';
 export type DevLivePlan = 'basic' | 'standard';
 
 const instagramIdSchema = z.string().regex(/^[a-z0-9._]{1,30}$/);
@@ -50,6 +51,10 @@ export function devLiveStandardTarget(env: Record<string, string | undefined> = 
     if (!devLiveOwnerStartEnabled(env)) return null;
     const target = instagramIdSchema.safeParse(env.DEV_LIVE_STANDARD_TARGET);
     return target.success ? target.data : null;
+}
+
+export function devLiveStandardNeedsArchive(env: Record<string, string | undefined> = process.env): boolean {
+    return env.DEV_LIVE_STANDARD_COLLECTION_MODE !== 'live_apify';
 }
 
 function activeApproval(approval: DevLiveApprovalDescriptor, prefix: string, now: number): DevLiveApproval | null {

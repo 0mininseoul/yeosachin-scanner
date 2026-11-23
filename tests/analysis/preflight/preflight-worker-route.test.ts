@@ -178,6 +178,23 @@ describe('preflight worker route', () => {
         expect(approvalScope.getStore()).toBeUndefined();
     });
 
+    it('acknowledges saved-collection Standard deliveries before credit lookup or B-lite', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue({ planId: 'standard' });
+        for (const task of [ordinaryTask, {
+            preflightId, workloadRole: 'preflight', kind: 'precheckout_blite',
+            dispatchGeneration: 1, dispatchToken,
+        }]) {
+            const response = await POST(request(task));
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({ outcome: 'noop', code: 'DEV_LIVE_STANDARD_ARCHIVE_REQUIRED' });
+        }
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.runBlite).not.toHaveBeenCalled();
+        expect(mocks.refreshBetaCredit).not.toHaveBeenCalled();
+    });
+
     it('skips credit lookup when a Dev approval expires before fallback', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
         mocks.getApprovedDevLiveDelivery.mockResolvedValue(approvedGrant);

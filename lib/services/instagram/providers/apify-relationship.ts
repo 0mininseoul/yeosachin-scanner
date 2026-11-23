@@ -431,6 +431,7 @@ export async function startOrResumeApifyActor(
         || process.env.K_SERVICE?.startsWith('dev-live-') || isDevUiDeploymentContext()
         ? await import('@/lib/services/dev-ui/live-budget') : null;
     const devApproval = devLiveBudget?.requireDevLiveProviderApproval();
+    if (devLiveBudget && devApproval) devLiveBudget.assertDevLiveApifyCollectionAllowed(devApproval);
     if (resumeRunId && devLiveBudget && devApproval) {
         await devLiveBudget.assertDevLiveBudgetAvailable(devApproval);
     }

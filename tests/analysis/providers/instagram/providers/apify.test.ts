@@ -6,6 +6,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: devBudget.rpc } }
 
 const devBudget = vi.hoisted(() => ({
     require: vi.fn(),
+    assertCollectionAllowed: vi.fn(),
     reserve: vi.fn(),
     check: vi.fn(),
     rpc: vi.fn(),
@@ -13,6 +14,7 @@ const devBudget = vi.hoisted(() => ({
 
 vi.mock('@/lib/services/dev-ui/live-budget', () => ({
     requireDevLiveProviderApproval: devBudget.require,
+    assertDevLiveApifyCollectionAllowed: devBudget.assertCollectionAllowed,
     reserveDevLiveApifyStart: devBudget.reserve,
     assertDevLiveBudgetAvailable: devBudget.check,
 }));
@@ -116,6 +118,37 @@ function mockClient(
 }
 
 describe('Dev live Apify budget', () => {
+    it('blocks a Standard Actor start before budget reservation without live collection configuration', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
+        try {
+            const budget = await vi.importActual<typeof import('@/lib/services/dev-ui/live-budget')>(
+                '@/lib/services/dev-ui/live-budget',
+            );
+            devBudget.require.mockReturnValue({ planId: 'standard' });
+            devBudget.assertCollectionAllowed.mockImplementation(budget.assertDevLiveApifyCollectionAllowed);
+            devBudget.reserve.mockClear();
+            const { client, call, waitForFinish } = mockClient([]);
+            const onBeforeRunStart = vi.fn();
+            const start = (resumeRunId?: string) => startOrResumeApifyActor(
+                client, APIFY_RELATIONSHIP_ACTOR_ID, { Account: ['target'] }, {
+                    logicalProvider: 'apify', credentialSlot: 'secondary', timeoutSecs: 300,
+                    maxItems: 1, maxTotalChargeUsd: 0.003,
+                },
+                { onBeforeRunStart, resumeRunId, credentialSlot: 'secondary', maxChargeUsd: 0.003, recordUsage: vi.fn() },
+            );
+            await expect(start()).rejects.toThrow('DEV_LIVE_STANDARD_ARCHIVE_REQUIRED');
+            await expect(start('RunAbcd1234567890')).rejects.toThrow('DEV_LIVE_STANDARD_ARCHIVE_REQUIRED');
+            expect(onBeforeRunStart).not.toHaveBeenCalled();
+            expect(devBudget.reserve).not.toHaveBeenCalled();
+            expect(call).not.toHaveBeenCalled();
+            expect(waitForFinish).not.toHaveBeenCalled();
+        } finally {
+            devBudget.assertCollectionAllowed.mockReset();
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('reserves the execution ceiling and never sends a refused Actor start', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         try {
