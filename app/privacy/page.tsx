@@ -32,7 +32,7 @@ export const metadata: Metadata = {
  * ⚠️ 법률 문서: 표현/항목 변경은 사업자(사용자) 확인 후 진행할 것.
  */
 
-const UPDATED = '2026년 7월 19일';
+const UPDATED = '2026년 11월 24일';
 
 function H({ children }: { children: React.ReactNode }) {
     return <h2 className="mt-9 text-[15px] font-bold text-fg">{children}</h2>;
