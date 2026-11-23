@@ -118,7 +118,8 @@ type PropertyName =
     | 'source'
     | 'stage'
     | 'status'
-    | 'term';
+    | 'term'
+    | 'variant';
 
 type PropertyValidator = (value: unknown) => AnalyticsScalar | undefined;
 
@@ -300,13 +301,14 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
         'refunded',
     ]),
     term: enumValidator(['detector']),
+    variant: enumValidator(['bf', 'crush']),
 };
 
 const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
-    [CHERRY_EVENTS.VIEWED]: [],
-    [CHERRY_EVENTS.CTA_CLICKED]: [],
-    [CHERRY_EVENTS.RESERVATION_SUBMITTED]: [],
-    [CHERRY_EVENTS.RESERVATION_COMPLETED]: [],
+    [CHERRY_EVENTS.VIEWED]: ['variant'],
+    [CHERRY_EVENTS.CTA_CLICKED]: ['variant'],
+    [CHERRY_EVENTS.RESERVATION_SUBMITTED]: ['variant'],
+    [CHERRY_EVENTS.RESERVATION_COMPLETED]: ['variant'],
     [EVENTS.LANDING_VIEWED]: ['source', 'medium', 'campaign', 'content', 'term'],
     [EVENTS.TARGET_SUBMITTED]: ['stage', 'source'],
     [EVENTS.AUTH_STARTED]: ['provider'],

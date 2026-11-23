@@ -17,6 +17,22 @@ describe('cherry analytics identity', () => {
         vi.resetModules();
         vi.clearAllMocks();
         mocks.init.mockResolvedValue(true);
+        delete document.documentElement.dataset.variant;
+    });
+
+    it('tags cherry events with the landing variant', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: { name: 'AuthSessionMissingError' } });
+        document.documentElement.dataset.variant = 'crush';
+        await import('@/lib/services/cherry-analytics');
+        expect(mocks.track).toHaveBeenCalledWith('cherry_viewed', { variant: 'crush' });
+        window.dispatchEvent(new Event('cherry-reservation-completed'));
+        expect(mocks.track).toHaveBeenLastCalledWith('completed', { variant: 'crush' });
+    });
+
+    it('sends cherry events without a variant when the visitor has none', async () => {
+        mocks.getUser.mockResolvedValue({ data: { user: null }, error: { name: 'AuthSessionMissingError' } });
+        await import('@/lib/services/cherry-analytics');
+        expect(mocks.track).toHaveBeenCalledWith('cherry_viewed', undefined);
     });
 
     it('does not reset identity after repeated transient authentication errors', async () => {

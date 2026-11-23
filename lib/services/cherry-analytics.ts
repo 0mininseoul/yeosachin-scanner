@@ -22,13 +22,17 @@ void (async () => {
         // Tracking is best-effort and must not affect reservations.
     }
 })();
-trackEvent(CHERRY_EVENTS.VIEWED);
+// The Meta A/B arm the server rendered (?v=bf|crush); absent for visitors without one.
+const variant = document.documentElement.dataset.variant;
+const properties = variant ? { variant } : undefined;
+
+trackEvent(CHERRY_EVENTS.VIEWED, properties);
 
 document.addEventListener('click', event => {
     const target = event.target;
     if (target instanceof Element && target.closest('a[href="#waitlist"]')) {
-        trackEvent(CHERRY_EVENTS.CTA_CLICKED);
+        trackEvent(CHERRY_EVENTS.CTA_CLICKED, properties);
     }
 });
-window.addEventListener('cherry-reservation-submitted', () => trackEvent(CHERRY_EVENTS.RESERVATION_SUBMITTED));
-window.addEventListener('cherry-reservation-completed', () => trackEvent(CHERRY_EVENTS.RESERVATION_COMPLETED));
+window.addEventListener('cherry-reservation-submitted', () => trackEvent(CHERRY_EVENTS.RESERVATION_SUBMITTED, properties));
+window.addEventListener('cherry-reservation-completed', () => trackEvent(CHERRY_EVENTS.RESERVATION_COMPLETED, properties));

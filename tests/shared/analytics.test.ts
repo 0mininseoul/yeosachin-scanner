@@ -245,6 +245,23 @@ describe('Amplitude analytics adapter', () => {
         );
     });
 
+    it('keeps only the bf and crush cherry variant', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude(null);
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.CHERRY_EVENTS.VIEWED, { variant: 'crush' });
+        analytics.trackEvent(analytics.CHERRY_EVENTS.RESERVATION_COMPLETED, { variant: 'bf' });
+        analytics.trackEvent(analytics.CHERRY_EVENTS.CTA_CLICKED, { variant: 'x' });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['cherry_viewed', { variant: 'crush' }],
+            ['cherry_reservation_completed', { variant: 'bf' }],
+            ['cherry_cta_clicked', {}],
+        ]);
+    });
+
     it('deduplicates one B-lite event per preflight across repeated calls', async () => {
         enableBrowser();
         const analytics = await loadAnalytics();
