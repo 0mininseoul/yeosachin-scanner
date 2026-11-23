@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getAnalysisV2PaidCollectionProvider } from '@/lib/services/instagram/config';
 import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
@@ -1102,6 +1103,15 @@ export async function processAnalysisV2FreshAdmission(
             } catch (attestationError) {
                 return await settleFailure(attestationError);
             }
+        }
+        const archive = currentDevStandardArchive();
+        if (archive?.mode === 'capture') {
+            await archive.capture('fresh-profile-v1', [claim.targetInstagramId], {
+                username: claim.targetInstagramId,
+                followersCount: profile.followersCount,
+                followingCount: profile.followingCount,
+                isPrivate: false,
+            });
         }
         const outcome = await completeAnalysisV2FreshAdmission(client, claim, profile);
         claimSettled = true;

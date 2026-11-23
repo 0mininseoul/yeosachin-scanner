@@ -11,6 +11,7 @@ import { isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supab
 import {
     DEV_LIVE_STANDARD_ARCHIVE_REQUIRED,
     devLiveOwnerStartEnabled,
+    devLiveStandardCaptureConfigured,
     devLiveStandardNeedsArchive,
     readDevLiveApproval,
     type DevLiveApproval,
@@ -18,6 +19,7 @@ import {
 import { DevLiveVertexBudgetReservationPendingError } from './live-budget-signals';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
 import { estimateDevLiveVertexReservation } from './live-vertex-reservation';
+import { currentDevStandardArchive } from './standard-archive-runtime';
 
 export const DEV_LIVE_BUDGET_UNAVAILABLE = 'DEV_LIVE_BUDGET_UNAVAILABLE';
 export const DEV_LIVE_BUDGET_EXCEEDED = 'DEV_LIVE_BUDGET_EXCEEDED';
@@ -139,7 +141,11 @@ async function reserve(approval: DevLiveApproval, provider: Provider, capUsd: nu
 }
 
 export function assertDevLiveApifyCollectionAllowed(approval: DevLiveApproval): void {
-    if (approval.planId === 'standard' && devLiveStandardNeedsArchive()) {
+    const archive = currentDevStandardArchive();
+    if (approval.planId === 'standard' && (
+        devLiveStandardNeedsArchive()
+        || (devLiveStandardCaptureConfigured() && (archive?.mode !== 'capture' || !archive.ready()))
+    )) {
         throw new Error(DEV_LIVE_STANDARD_ARCHIVE_REQUIRED);
     }
 }

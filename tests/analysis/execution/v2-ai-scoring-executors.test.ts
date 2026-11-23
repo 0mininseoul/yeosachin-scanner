@@ -3,7 +3,12 @@ import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-u
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+    currentDevStandardArchive,
+    DevStandardArchiveError,
+    sealDevStandardArchive,
+} from '@/lib/services/dev-ui/standard-archive-runtime';
 import {
     ACCOUNT_CONTEXT_SOFT_MULTIPLIERS,
     FEATURED_RISK_LIMITS,
@@ -92,6 +97,17 @@ import {
 } from '../../../lib/services/analysis/v2-candidate-scoring';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal => ({
+    ...await importOriginal<typeof import('@/lib/services/dev-ui/standard-archive-runtime')>(),
+    currentDevStandardArchive: vi.fn().mockReturnValue(null),
+    sealDevStandardArchive: vi.fn().mockResolvedValue(undefined),
+}));
+
+afterEach(() => {
+    vi.mocked(currentDevStandardArchive).mockReturnValue(null);
+    vi.mocked(sealDevStandardArchive).mockReset().mockResolvedValue(undefined);
+});
 
 describe('analysis V2 profile AI scheduler concurrency', () => {
     it('opens six candidate pipelines only for the exact persisted scheduler-v1 policy', () => {
@@ -5327,6 +5343,44 @@ describe('V2 retained result image finalization', () => {
 
         expect(loadProfileAiOutcomes).not.toHaveBeenCalled();
         expect(deps.resultStore.finalize).not.toHaveBeenCalled();
+    });
+
+    it('requires sealed archive coverage before publishing a Dev capture result', async () => {
+        const deps = dependencies(memory());
+        const fail = (): never => { throw new DevStandardArchiveError(); };
+        const capture = vi.fn();
+        vi.mocked(currentDevStandardArchive).mockReturnValue({
+            mode: 'capture', capture, fail, load: vi.fn(), find: vi.fn(), seal: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+        });
+        const imageCapture = vi.fn();
+        deps.resultImages = { capture: imageCapture };
+        vi.mocked(deps.resultStore.loadStageSnapshot).mockResolvedValue({
+            requestId: REQUEST_ID,
+            profileClassifications: [],
+            preliminaryScores: [],
+            reverseLikes: [],
+            partnerSafety: [],
+            finalScores: [],
+            privateNames: [],
+            narratives: [],
+        } as unknown as AnalysisV2ResultStageSnapshot);
+        vi.mocked(sealDevStandardArchive).mockRejectedValueOnce(new DevStandardArchiveError());
+        const finalize = createAnalysisV2AiScoringExecutorRegistry(deps).finalize!;
+        const job = context('finalize', { jobKey: 'coordinator:finalize' });
+
+        await expect(finalize(job)).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(imageCapture).toHaveBeenCalledOnce();
+        expect(capture).toHaveBeenCalledWith('result-image-manifest-v1', ['target.account'],
+            expect.objectContaining({
+                expectedRows: 1,
+                imageInputs: [['target', 'target', expect.stringMatching(/^[a-f0-9]{64}$/)]],
+            }));
+        expect(sealDevStandardArchive).toHaveBeenCalledWith({ profileBatches: [0] });
+        expect(deps.resultStore.finalize).not.toHaveBeenCalled();
+
+        await finalize(job);
+        expect(deps.resultStore.finalize).toHaveBeenCalledOnce();
     });
 
     it('captures target, ranked women, and name-ranked private images before finalization', async () => {

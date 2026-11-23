@@ -324,6 +324,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         does: [
             '총평과 비공개 이름 결과가 모두 모이면 결과를 저장합니다.',
             '결과 화면용 이미지를 R2에 보관하고 주문 감사 번들을 대기열에 넣습니다.',
+            '수집본 보관을 켠 Dev Standard는 필수 입력을 확인해 비공개 수집본을 봉인합니다.',
         ],
         services: 'Cloudflare R2',
         numbers: [{ label: '최대 시도', value: `${n(ANALYSIS_V2_FINALIZER_MAX_ATTEMPTS)}회` }],

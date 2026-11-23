@@ -1,3 +1,8 @@
+import {
+    currentDevStandardArchive,
+    DevStandardArchiveError,
+    sealDevStandardArchive,
+} from '@/lib/services/dev-ui/standard-archive-runtime';
 import { createHash } from 'node:crypto';
 import {
     MAX_RECENT_POSTS,
@@ -21,6 +26,7 @@ import {
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
+    resultImageArchiveIdentity,
     resultImageOrderedManifestHash,
     type ResultImageCaptureSource,
 } from '@/lib/services/media/result-image-capture';
@@ -1325,7 +1331,10 @@ function validateReverseLikeCollection(
         }
         return;
     }
-    if (!/^candidate-likers:[a-f0-9]{64}$/.test(collected.operationKey ?? '')) {
+    const operationKeyPattern = currentDevStandardArchive()?.mode === 'replay'
+        ? /^archive-candidate-likers:[a-f0-9]{64}$/
+        : /^candidate-likers:[a-f0-9]{64}$/;
+    if (!operationKeyPattern.test(collected.operationKey ?? '')) {
         throw new Error('ANALYSIS_V2_REVERSE_LIKE_OPERATION_MISSING');
     }
     const requested = new Set(inputs.map(row => row.candidateId));
@@ -1723,7 +1732,8 @@ async function finalRevenueResolverMedia(input: {
                 : null,
         };
     } catch (error) {
-        if (error instanceof AnalysisV2AiResultRecoveryPendingError) throw error;
+        if (error instanceof AnalysisV2AiResultRecoveryPendingError
+            || error instanceof DevStandardArchiveError) throw error;
         return null;
     }
 }
@@ -3642,6 +3652,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
         },
 
         async finalize(context) {
+            const archive = currentDevStandardArchive();
+            if (archive && !dependencies.resultImages) return archive.fail();
             const target = await dependencies.targetProfiles.loadTargetProfile(
                 checkpointClaim(context)
             );
@@ -3674,11 +3686,22 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     orderedManifestHash,
                     expectedRows: sources.length,
                 };
+                if (archive?.mode === 'capture') {
+                    await archive.capture('result-image-manifest-v1', [normalizeUsername(target.username)], {
+                        orderedManifestHash,
+                        expectedRows: sources.length,
+                        imageCount: sources.filter(source => source.sourceUrl !== null).length,
+                        imageInputs: sources.map(resultImageArchiveIdentity),
+                    });
+                }
             }
             // This is deliberately the last durable gate before resultStore.finalize:
             // a strict cohort that fails coverage is manual-review only and must
             // never emit analysis_completed.
             await enforceRevenueFinalQualityGate(dependencies, context);
+            await sealDevStandardArchive({
+                profileBatches: context.state.relationships?.profileBatches.map(batch => batch.batch) ?? [],
+            });
             await dependencies.resultStore.finalize({
                 ...checkpointClaim(context),
                 targetProfileImageUrl: target.profilePicUrl ?? null,

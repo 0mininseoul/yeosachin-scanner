@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
 import { canonicalizeImageProxyUrl } from './image-proxy-token';
 import {
+    MAX_RESULT_IMAGE_BYTES,
+    MAX_RESULT_IMAGE_DIMENSION,
     normalizeResultImage,
     ResultImageNormalizationError,
     type NormalizedResultImage,
@@ -33,6 +38,29 @@ export const RESULT_IMAGE_RETENTION_MS = 30 * 86_400_000;
 const RETENTION_MS = RESULT_IMAGE_RETENTION_MS;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const CANDIDATE_LOCATOR_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+const RESULT_IMAGE_ARCHIVE_KIND = 'result-image-v1';
+const resultImageArchiveSchema = z.object({
+    webp: z.string().min(16).max(Math.ceil(MAX_RESULT_IMAGE_BYTES / 3) * 4),
+    width: z.number().int().min(1).max(MAX_RESULT_IMAGE_DIMENSION),
+    height: z.number().int().min(1).max(MAX_RESULT_IMAGE_DIMENSION),
+    sha256: z.string().regex(HASH_PATTERN),
+}).strict();
+
+function restoreArchivedResultImage(value: unknown, fail: () => never): NormalizedResultImage {
+    const parsed = resultImageArchiveSchema.safeParse(value);
+    if (!parsed.success) return fail();
+    const { webp, width, height, sha256 } = parsed.data;
+    const bytes = Buffer.from(webp, 'base64');
+    if (
+        bytes.length < 12 || bytes.length > MAX_RESULT_IMAGE_BYTES
+        || bytes.toString('base64') !== webp
+        || bytes.toString('ascii', 0, 4) !== 'RIFF'
+        || bytes.toString('ascii', 8, 12) !== 'WEBP'
+        || createHash('sha256').update(bytes).digest('hex') !== sha256
+    ) return fail();
+    return { bytes, contentType: 'image/webp', width, height, sha256 };
+}
 
 export type ResultImageCaptureSource = {
     kind: 'target' | 'female' | 'private';
@@ -119,6 +147,16 @@ export function resultImageSourceFingerprint(
     return sourceUrl === null
         ? null
         : sha256(canonicalSourceUrl(sourceUrl));
+}
+
+export function resultImageArchiveIdentity(
+    source: ResultImageCaptureSource
+): readonly [ResultImageCaptureSource['kind'], string, string | null] {
+    return [
+        source.kind,
+        source.candidateLocator,
+        source.sourceUrl === null ? null : resultImageSourceFingerprint(archiveMediaUrlAnchor(source.sourceUrl)),
+    ];
 }
 
 export function resultImageOrderedManifestHash(
@@ -287,6 +325,7 @@ export async function captureResultImages(
         );
     }
 
+    const archive = currentDevStandardArchive();
     const now = input.now ?? Date.now;
     const download = input.download ?? downloadSecureImage;
     const normalize = input.normalize ?? normalizeResultImage;
@@ -388,6 +427,28 @@ export async function captureResultImages(
                 );
             }
 
+            const archiveIdentity = archive ? resultImageArchiveIdentity(source) : null;
+            let archivedImage: NormalizedResultImage | null = null;
+            if (archive && archiveIdentity) {
+                const recorded = archive.mode === 'replay' || prior?.status === 'ready' || prior?.status === 'source_missing'
+                    ? { value: await archive.load(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity) }
+                    : await archive.find(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity);
+                if (canonicalUrl === null) {
+                    // Keep explicit absent URLs distinct from absent archive entries.
+                    if (!recorded) {
+                        await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity, 'source_missing');
+                    } else if (recorded.value !== 'source_missing') {
+                        return archive.fail();
+                    }
+                } else if (recorded) {
+                    archivedImage = restoreArchivedResultImage(recorded.value, () => archive.fail());
+                    if (prior?.status === 'ready'
+                        && (prior.sha256 !== archivedImage.sha256 || prior.byteSize !== archivedImage.bytes.length)) {
+                        return archive.fail();
+                    }
+                }
+            }
+
             if (prior?.status === 'source_missing' && canonicalUrl === null) {
                 return;
             }
@@ -438,13 +499,27 @@ export async function captureResultImages(
             let lastError: unknown;
             for (let attempt = 1; attempt <= captureAttempts; attempt++) {
                 try {
-                    const downloaded = await download(canonicalUrl, {
-                        allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-                        maxBytes: SOURCE_DOWNLOAD_MAX_BYTES,
-                        timeoutMs: SOURCE_DOWNLOAD_TIMEOUT_MS,
-                        maxRedirects: 3,
-                    });
-                    const normalized = await normalize(downloaded.bytes);
+                    let normalized = archivedImage;
+                    if (normalized === null) {
+                        const downloaded = await download(canonicalUrl, {
+                            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+                            maxBytes: SOURCE_DOWNLOAD_MAX_BYTES,
+                            timeoutMs: SOURCE_DOWNLOAD_TIMEOUT_MS,
+                            maxRedirects: 3,
+                        });
+                        normalized = await normalize(downloaded.bytes);
+                        if (archive?.mode === 'capture' && archiveIdentity) {
+                            const value = {
+                                webp: normalized.bytes.toString('base64'),
+                                width: normalized.width,
+                                height: normalized.height,
+                                sha256: normalized.sha256,
+                            };
+                            restoreArchivedResultImage(value, () => archive.fail());
+                            await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity, value);
+                            archivedImage = normalized;
+                        }
+                    }
                     const objectKey = resultImageObjectKey({
                         requestId: claim.requestId,
                         kind: source.kind,
@@ -495,6 +570,7 @@ export async function captureResultImages(
                     };
                     break;
                 } catch (error) {
+                    if (error instanceof DevStandardArchiveError) throw error;
                     lastError = error;
                     if (attempt === captureAttempts || !shouldRetry(error)) {
                         break;
@@ -509,6 +585,11 @@ export async function captureResultImages(
             }
             if (lastError instanceof ResultImageCaptureError) {
                 throw lastError;
+            }
+            if (archive) {
+                // This run is preparing replayable input. A nonnull source
+                // without durable media cannot be represented as source_missing.
+                return archive.fail();
             }
             if (prior?.status === 'ready') {
                 throw new ResultImageCaptureError('ANALYSIS_V2_RESULT_IMAGE_MANIFEST_NOT_READY');

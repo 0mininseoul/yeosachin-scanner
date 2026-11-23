@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
+import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import type {
     ProfileAttemptResult,
     ScrapeRequestOptions,
@@ -55,6 +57,21 @@ import {
 } from '../../../lib/services/analysis/v2-collection-executors';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', () => ({
+    currentDevStandardArchive: vi.fn(() => null),
+}));
+
+function captureNextInput(invocations = 1) {
+    const capture = vi.fn(async () => undefined);
+    for (let index = 0; index < invocations; index += 1) {
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('capture failed'); },
+        });
+    }
+    return capture;
+}
 
 // gitleaks:allow -- deterministic UUID fixture
 const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
@@ -1658,6 +1675,7 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('freezes exact zero relationship sides without reserving or starting Actors', async () => {
+        const capture = captureNextInput();
         const providers = providerStore();
         const getFollowersMock = vi.fn();
         const getFollowingMock = vi.fn();
@@ -1689,6 +1707,8 @@ describe('analysis V2 concrete collection executors', () => {
                 excludedUsername: 'girlfriend',
                 detailedPublicUsernames: [],
                 privateMutualUsernames: [],
+                followers: { declaredCount: 0, sourceStatus: 'not_applicable', inputHash, coverageBps: 10_000, rows: [], provider: null, providerRunId: null, providerOperationKey: null },
+                following: { declaredCount: 0, sourceStatus: 'not_applicable', inputHash: resultHash, coverageBps: 10_000, rows: [], provider: null, providerRunId: null, providerOperationKey: null },
             })),
         } as unknown as AnalysisV2EvidenceStore;
         const executor = createAnalysisV2RelationshipsExecutor({
@@ -1717,6 +1737,16 @@ describe('analysis V2 concrete collection executors', () => {
         expect(sources[0]?.inputHash).toMatch(/^[0-9a-f]{64}$/);
         expect(sources[0]?.inputHash).not.toBe(sources[1]?.inputHash);
         expect(JSON.stringify(sources)).not.toMatch(/provider|operation|runId/i);
+        expect(capture.mock.calls).toEqual([
+            ['relationship-side-v1', ['target', 'followers', 0, 'basic'], {
+                status: 'not_applicable', inputHash, coverageBps: 10_000, rows: [],
+                provider: null, providerRunId: null, providerOperationKey: null,
+            }],
+            ['relationship-side-v1', ['target', 'following', 0, 'basic'], {
+                status: 'not_applicable', inputHash: resultHash, coverageBps: 10_000, rows: [],
+                provider: null, providerRunId: null, providerOperationKey: null,
+            }],
+        ]);
         expect(result.checkpoint.manifest).toMatchObject({
             detectedMutualCount: 0,
             profileBatches: [],
@@ -1807,11 +1837,18 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('collects 4x150 likers and 6x15 comments from a durable target snapshot, including reels', async () => {
+        const capture = captureNextInput(2);
         const posts = Array.from({ length: 8 }, (_, index) => post(
             index,
             index === 7 ? 'reel' : 'image'
         ));
         const target = profile('target', posts);
+        const signedAvatar = 'https://images.example/synthetic-avatar-secret/target.jpg?sig=synthetic-query-secret';
+        const signedThumbnail = 'https://images.example/synthetic-thumbnail-secret/7.jpg?sig=synthetic-thumbnail-query';
+        target.profilePicUrl = signedAvatar;
+        target.externalUrl = 'https://elsewhere.example/?token=synthetic-external-secret';
+        posts[7]!.thumbnailUrl = signedThumbnail;
+        posts[7]!.caption = 'Caption https://elsewhere.example/?token=synthetic-caption-secret';
         const profileStore = inMemoryProfileStore(null);
         const providers = providerStore();
         const getPostLikers = vi.fn(async (
@@ -1841,7 +1878,9 @@ describe('analysis V2 concrete collection executors', () => {
             return urls.map((url, index) => ({
                 postUrl: url,
                 id: `comment-${index}`,
-                text: `comment ${index}`,
+                text: index === 1
+                    ? 'comment 1 elsewhere.example/?token=synthetic-comment-secret'
+                    : `comment ${index}`,
                 ownerUsername: `commenter_${index}`,
                 timestamp: capturedAt,
             }));
@@ -1908,6 +1947,43 @@ describe('analysis V2 concrete collection executors', () => {
         expect(saved.likerSource.coverage).toHaveLength(4);
         expect(saved.commentSource.coverage).toHaveLength(6);
         expect(saved.rows.some(row => row.content === 'comment 0')).toBe(true);
+        const profileSource = vi.mocked(profileStore.store.checkpointFreshApify).mock.calls[0]![0];
+        expect(capture).toHaveBeenNthCalledWith(1, 'source-profile-proof-v1', [
+            'target', 'track:target-evidence:collect', 'target',
+        ], {
+            providerOperationKey: profileSource.operationKey,
+            providerInputHash: profileSource.providerInputHash,
+        });
+        expect(capture).toHaveBeenNthCalledWith(2, 'formal-target-profile-v1', ['target'], expect.objectContaining({
+            profilePicUrl: archiveMediaUrlAnchor(signedAvatar),
+            latestPosts: expect.arrayContaining([expect.objectContaining({
+                shortCode: 'code_7', thumbnailUrl: archiveMediaUrlAnchor(signedThumbnail), caption: 'Caption [link]',
+            })]),
+        }));
+        expect(capture).toHaveBeenNthCalledWith(3, 'target-evidence-v1', [
+            'target', 'girlfriend', 150, 4, ...getPostLikers.mock.calls[0]![0],
+            15, 6, ...getPostComments.mock.calls[0]![0],
+        ], {
+            likerSource: {
+                status: 'collected', inputHash: saved.likerSource.inputHash, coverage: saved.likerSource.coverage,
+                provider: saved.likerSource.provider, providerRunId: saved.likerSource.providerRunId,
+                providerOperationKey: saved.likerSource.providerOperationKey,
+            },
+            commentSource: {
+                status: 'collected', inputHash: saved.commentSource.inputHash, coverage: saved.commentSource.coverage,
+                provider: saved.commentSource.provider, providerRunId: saved.commentSource.providerRunId,
+                providerOperationKey: saved.commentSource.providerOperationKey,
+            },
+            rows: expect.arrayContaining([
+                expect.objectContaining({ content: 'comment 0' }),
+                expect.objectContaining({ content: 'comment 1 [link]' }),
+            ]),
+        });
+        const serialized = JSON.stringify(capture.mock.calls);
+        expect(serialized).not.toContain('synthetic-');
+        expect(serialized).not.toContain('externalUrl');
+        expect(serialized).not.toContain('providerCredentialSlot');
+        expect(profileSource.results[0]?.profile?.profilePicUrl).toBe(signedAvatar);
         const byOperation = new Map(providers.bindAdapterCheckpoint.mock.calls.map(([call]) => [
             call.operationKey.split(':', 1)[0],
             call.credentialSlot,
@@ -3202,6 +3278,7 @@ describe('analysis V2 concrete collection executors', () => {
     });
 
     it('accepts exactly 90 percent candidate coverage with three incomplete failures in 30', async () => {
+        const capture = captureNextInput();
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const failures = usernames.slice(-3).map(username => incompleteFailure(username));
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
@@ -3220,6 +3297,14 @@ describe('analysis V2 concrete collection executors', () => {
         ))).resolves.toMatchObject({
             checkpoint: { manifest: { itemCount: 30 } },
         });
+        expect(capture).toHaveBeenCalledExactlyOnceWith(
+            'candidate-profile-batch-v1', ['target', 0, ...usernames], [
+                ...usernames.slice(0, -3).map(username => expect.objectContaining({
+                    outcome: expect.objectContaining({ requestedUsername: username, status: 'success' }),
+                })),
+                ...failures,
+            ],
+        );
     });
 
     it('accepts the rounded 90 percent boundary with two incomplete failures in 27', async () => {

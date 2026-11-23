@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
+import { beginDevStandardArchivePreflight, currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import type { ProviderCallContext } from '@/lib/services/instagram/providers/types';
 import { APIFY_PROFILE_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
@@ -39,6 +41,11 @@ import { PREFLIGHT_PROVIDER_DEADLINE_MS } from '../../../lib/services/analysis/p
 import type { BetaApifyPreflightCoordinator } from '../../../lib/services/analysis/beta-apify-preflight-coordinator';
 import { projectPrecheckoutBliteSource } from '@/lib/services/precheckout/blite-source';
 import { PreflightTaskEnqueueError } from '../../../lib/services/analysis/preflight-tasks';
+
+vi.mock('@/lib/services/dev-ui/standard-archive-runtime', () => ({
+    currentDevStandardArchive: vi.fn(() => null),
+    beginDevStandardArchivePreflight: vi.fn(async () => undefined),
+}));
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -2427,6 +2434,75 @@ describe('preflight worker domain', () => {
             })
         );
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('captures the approved target snapshot before completing readiness', async () => {
+        const store = workerStore();
+        const capture = vi.fn(async () => undefined);
+        const avatar = 'https://scontent.cdninstagram.com/synthetic-path-secret/avatar.jpg?sig=synthetic-query-secret';
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('capture failed'); },
+        });
+        await expect(processPreflight(preflightId, {
+            store,
+            providerRunStore: providerRunStore(),
+            getProfile: async () => profile({
+                followersCount: 475,
+                profilePicUrl: avatar,
+                bio: 'bio https://elsewhere.example/path?token=synthetic-bio-secret',
+            }),
+        })).resolves.toBe('ready');
+        expect(capture).toHaveBeenCalledExactlyOnceWith('preflight-profile-v1', ['target.name'], {
+            username: 'target.name', fullName: 'Target', bio: 'bio [link]',
+            profileImageUrl: archiveMediaUrlAnchor(avatar),
+            followersCount: 475, followingCount: 300, isPrivate: false,
+        });
+        expect(JSON.stringify(capture.mock.calls)).not.toContain('synthetic-');
+        expect(store.finalizeReady).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+            target: expect.objectContaining({ profileImageUrl: avatar }),
+        }));
+        expect(capture.mock.invocationCallOrder[0]).toBeLessThan(
+            vi.mocked(store.finalizeReady).mock.invocationCallOrder[0]!
+        );
+    });
+
+    it('ties archive binding to the current preflight claim before collection', async () => {
+        const store = workerStore();
+        const getProfile = vi.fn(async () => profile());
+        const getFallbackProfile = vi.fn();
+        vi.mocked(beginDevStandardArchivePreflight).mockImplementationOnce(async () => {
+            expect(store.claim).toHaveBeenCalledOnce();
+            throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        });
+        await expect(processPreflight(preflightId, {
+            store, getProfile, getFallbackProfile, providerRunStore: providerRunStore(),
+        })).resolves.toBe('blocked');
+        expect(getProfile).not.toHaveBeenCalled();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+    });
+
+    it('blocks readiness on archive capture failure without another provider call', async () => {
+        const store = workerStore();
+        const getProfile = vi.fn(async () => profile());
+        const getFallbackProfile = vi.fn();
+        const capture = vi.fn(async () => { throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE'); });
+        vi.mocked(currentDevStandardArchive).mockReturnValueOnce({
+            mode: 'capture', capture, load: vi.fn(), seal: vi.fn(), find: vi.fn(),
+            ready: () => true, beginPreflightCapture: vi.fn(),
+            fail: () => { throw new Error('capture failed'); },
+        });
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile,
+            getFallbackProfile,
+            providerRunStore: providerRunStore(),
+        })).resolves.toBe('blocked');
+        expect(getProfile).toHaveBeenCalledOnce();
+        expect(getFallbackProfile).not.toHaveBeenCalled();
+        expect(store.finalizeReady).not.toHaveBeenCalled();
+        expect(store.finalizeBlocked).toHaveBeenCalledOnce();
     });
 
     it.each([

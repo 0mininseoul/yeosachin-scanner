@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
+import { withDevStandardArchiveApproval } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { DEV_LIVE_STANDARD_ARCHIVE_REQUIRED, devLiveStandardNeedsArchive } from '@/lib/services/dev-ui/live-approval';
 import { requireDevLiveProviderApproval, withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import {
@@ -339,7 +340,10 @@ async function handlePOST(
             return NextResponse.json({ outcome: 'noop', code: DEV_LIVE_STANDARD_ARCHIVE_REQUIRED });
         }
     }
-    const runWithApproval = <T>(operation: () => T): T => withDevLiveProviderApproval(approval, operation);
+    const runWithApproval = <T>(operation: () => T) => withDevLiveProviderApproval(
+        approval,
+        () => approval ? withDevStandardArchiveApproval(approval, operation) : operation(),
+    );
     const betaCreditCoordinator = createBetaApifyPreflightCoordinator({
         store: createBetaApifyCreditPoolStore(supabaseAdmin),
         clientForSlot: createServerBetaApifyCreditClientFactory(),

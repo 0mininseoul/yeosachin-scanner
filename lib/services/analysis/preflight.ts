@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { beginDevStandardArchivePreflight, currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { projectDevStandardArchivePreflightTarget } from './v2-standard-archive-projection';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
@@ -2286,6 +2288,7 @@ export async function processPreflight(
         return 'blocked';
     };
     try {
+        await beginDevStandardArchivePreflight();
         const isBetatest = claim.analysisEntryChannel === 'betatest';
         const isAnonymousPreflight = claim.userId === null;
         if (profileProvider !== undefined && !useFreeApifyPool) {
@@ -2680,6 +2683,14 @@ export async function processPreflight(
                 errorCode: snapshot,
             });
             return 'blocked';
+        }
+        const archive = currentDevStandardArchive();
+        if (archive?.mode === 'capture') {
+            await archive.capture(
+                'preflight-profile-v1',
+                [claim.targetInstagramId],
+                projectDevStandardArchivePreflightTarget(snapshot.target),
+            );
         }
         if (bliteClock !== null) {
             if (!bliteProviderRun?.runId) {
