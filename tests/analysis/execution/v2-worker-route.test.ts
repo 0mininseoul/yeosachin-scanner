@@ -174,6 +174,20 @@ describe('analysis V2 worker route', () => {
         expect(approvalScope.getStore()).toBeUndefined();
     });
 
+    it('acknowledges saved-collection Standard deliveries before claiming or processing jobs', async () => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
+        mocks.getApprovedDevLiveDelivery.mockResolvedValue({ planId: 'standard' });
+        for (const task of [freshAdmissionPayload, { ...payload, workloadRole: 'paid' }]) {
+            const response = await POST(request(task));
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({ outcome: 'noop', code: 'DEV_LIVE_STANDARD_ARCHIVE_REQUIRED' });
+        }
+        expect(mocks.processFresh).not.toHaveBeenCalled();
+        expect(mocks.process).not.toHaveBeenCalled();
+        expect(mocks.settleBlockedFresh).not.toHaveBeenCalled();
+    });
+
     it('authenticates OIDC and processes only a strict task payload', async () => {
         vi.spyOn(performance, 'now').mockReturnValue(12_345);
         expect(maxDuration).toBe(300);

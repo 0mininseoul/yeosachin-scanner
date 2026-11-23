@@ -7,7 +7,13 @@ import registry from '@/config/dev-ui-deployment.json';
 import { browserDeploymentEnvironment, deploymentEnvironment } from '@/lib/constants/dev-ui';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
-import { devLiveOwnerStartEnabled, readDevLiveApproval, type DevLiveApproval } from './live-approval';
+import {
+    DEV_LIVE_STANDARD_ARCHIVE_REQUIRED,
+    devLiveOwnerStartEnabled,
+    devLiveStandardNeedsArchive,
+    readDevLiveApproval,
+    type DevLiveApproval,
+} from './live-approval';
 import { DevLiveVertexBudgetReservationPendingError } from './live-budget-signals';
 import { devLiveWorkerRequestBoundary } from './live-runtime';
 import { estimateDevLiveVertexReservation } from './live-vertex-reservation';
@@ -124,6 +130,12 @@ async function reserve(approval: DevLiveApproval, provider: Provider, capUsd: nu
     if (reserved === false) throw new Error(DEV_LIVE_BUDGET_EXCEEDED);
     if (reserved !== true) throw new Error(DEV_LIVE_BUDGET_UNAVAILABLE);
     return { grantId: approval.id, reservationId };
+}
+
+export function assertDevLiveApifyCollectionAllowed(approval: DevLiveApproval): void {
+    if (approval.planId === 'standard' && devLiveStandardNeedsArchive()) {
+        throw new Error(DEV_LIVE_STANDARD_ARCHIVE_REQUIRED);
+    }
 }
 
 export async function reserveDevLiveApifyStart(approval: DevLiveApproval, actorId: string, capUsd: number): Promise<void> {

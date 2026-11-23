@@ -35,6 +35,7 @@ import { recoverQueuedAnalysisScoreAudits } from './score-audit';
 import { recoverQueuedAnalysisOrderAudits } from './order-audit-bundle';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { operationalLogger } from '@/lib/observability/server';
+import { devLiveStandardNeedsArchive } from '@/lib/services/dev-ui/live-approval';
 import {
     archiveSettledBetaApifyCredit,
     recoverBetaApifyCredit,
@@ -279,7 +280,8 @@ export async function recoverDevLiveStandard(
     }
 
     const store = dependencies.store ?? analysisV2JobStore;
-    const jobs = await store.listDispatchable({ limit: ANALYSIS_V2_RECOVERY_MAX_JOBS, scope: 'dev-live-standard' });
+    const jobs = devLiveStandardNeedsArchive() ? []
+        : await store.listDispatchable({ limit: ANALYSIS_V2_RECOVERY_MAX_JOBS, scope: 'dev-live-standard' });
     const dispatch = await recoverDispatchableJobs(
         jobs, store, dependencies.lookup ?? lookupAnalysisV2Task,
         dependencies.dispatch ?? dispatchAnalysisV2Job, ANALYSIS_V2_RECOVERY_CONCURRENCY,

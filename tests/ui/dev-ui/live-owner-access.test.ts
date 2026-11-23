@@ -45,6 +45,7 @@ beforeEach(() => {
     vi.setSystemTime(new Date('2026-11-19T01:10:00Z'));
     vi.stubEnv('DEV_LIVE_ANALYSIS_ARMED', 'true');
     vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+    vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
     vi.stubEnv('DEV_LIVE_STANDARD_TARGET', undefined);
     mocks.owner = true;
     mocks.rpc.mockResolvedValue({ data: approval, error: null });
@@ -104,6 +105,7 @@ describe('owner-start live Dev approval', () => {
     });
 
     it('only grants Standard to the configured target and pins the plan and caps', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
         mocks.rpc.mockResolvedValue({ data: durableStandardApproval, error: null });
         const handler = vi.fn(async () => NextResponse.json({}, { status: 202 }));
@@ -129,6 +131,7 @@ describe('owner-start live Dev approval', () => {
     });
 
     it('continues a bound $4 Standard preflight using its original grant', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
         const query = { select: () => query, eq: () => query,
             maybeSingle: async () => ({ data: standardPreflight }) };
@@ -145,6 +148,7 @@ describe('owner-start live Dev approval', () => {
     });
 
     it('allows an aged durable Standard delivery while a finite Standard approval expires', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
         vi.setSystemTime(new Date('2026-11-20T01:10:00Z'));
         const query = (data: unknown) => ({
@@ -162,6 +166,7 @@ describe('owner-start live Dev approval', () => {
     });
 
     it('reports Standard readiness without issuing a grant', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
         const query = { select: () => query, eq: () => query, like: () => query,
             order: () => query, limit: () => query, maybeSingle: async () => ({ data: null }) };
@@ -178,6 +183,7 @@ describe('owner-start live Dev approval', () => {
     });
 
     it('reads the persisted plan without issuing a grant and rejects a mismatched paid delivery', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'live_apify');
         vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
         const query = (data: unknown) => ({
             select: () => query(data), eq: () => query(data), maybeSingle: async () => ({ data }),
@@ -194,5 +200,33 @@ describe('owner-start live Dev approval', () => {
         expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_lookup_v2', {
             p_grant_id: id, p_user_id: 'synthetic-owner', p_target_instagram_id: approval.targetInstagramId,
         });
+    });
+
+    it('requires saved collection by default before issuing a Standard grant or continuing preflight', async () => {
+        vi.stubEnv('DEV_LIVE_STANDARD_TARGET', approval.targetInstagramId);
+        const query = { select: () => query, eq: () => query, like: () => query,
+            order: () => query, limit: () => query, maybeSingle: async () => ({ data: standardPreflight }) };
+        mocks.from.mockReturnValue(query);
+        const handler = vi.fn();
+        for (const plan of ['standard:1800', 'basic', undefined]) {
+            const response = await withDevLiveApproval(start(host, plan), handler);
+            expect(response.status).toBe(409);
+            expect((await response.json()).code).toBe('DEV_LIVE_STANDARD_ARCHIVE_REQUIRED');
+        }
+        expect(mocks.rpc).not.toHaveBeenCalled();
+
+        mocks.rpc.mockResolvedValue({ data: durableStandardApproval, error: null });
+        const continued = await withDevLiveApproval(start(host, 'standard:1800'), handler, id);
+        expect(continued.status).toBe(409);
+        expect(handler).not.toHaveBeenCalled();
+        expect(mocks.budget).not.toHaveBeenCalled();
+        expect(mocks.rpc.mock.calls.map(([name]) => name)).toEqual(['dev_live_owner_start_lookup_v2']);
+
+        mocks.rpc.mockClear().mockResolvedValue({ data: true, error: null });
+        const availability = await handleDevLiveAvailability(new Request(host + '/api/dev-ui/live/availability'));
+        expect(await availability.json()).toMatchObject({
+            available: true, standardAvailable: false, standardArchiveRequired: true,
+        });
+        expect(mocks.rpc).toHaveBeenCalledExactlyOnceWith('dev_live_owner_start_ready_v1', { p_user_id: 'synthetic-owner' });
     });
 });

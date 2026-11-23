@@ -78,7 +78,7 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
     const router = useRouter();
     const [available, setAvailable] = useState<boolean | null>(null);
     const [recentPreflightId, setRecentPreflightId] = useState('');
-    const [standard, setStandard] = useState<{ target: string; available: boolean } | null>(null);
+    const [standard, setStandard] = useState<{ target: string; available: boolean; archiveRequired: boolean } | null>(null);
     const [target, setTarget] = useState('');
     const routePreflightId = uuid.test(initialPreflightId) ? initialPreflightId.toLowerCase() : '';
     const [acceptedPreflightId, setAcceptedPreflightId] = useState('');
@@ -149,7 +149,11 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                 if (controller.signal.aborted) return;
                 setAvailable(payload.available === true);
                 if (payload.available === true && typeof payload.standardTarget === 'string' && payload.standardTarget.trim()) {
-                    setStandard({ target: payload.standardTarget.trim().toLowerCase(), available: payload.standardAvailable === true });
+                    setStandard({
+                        target: payload.standardTarget.trim().toLowerCase(),
+                        available: payload.standardAvailable === true,
+                        archiveRequired: payload.standardArchiveRequired === true,
+                    });
                 }
                 if (typeof payload.recentPreflightId === 'string' && uuid.test(payload.recentPreflightId)) {
                     setRecentPreflightId(payload.recentPreflightId);
@@ -341,7 +345,9 @@ export function DevLiveAnalysis({ initialPreflightId }: { initialPreflightId: st
                             <span className="font-semibold text-amber">공개 계정</span>만 판독 가능합니다.
                         </p>
                         {standardTarget && <p data-amp-mask className="mt-3 text-sm text-fg-dim">Standard 대상은 @{standardTarget}입니다.</p>}
-                        {!canStartPlan && <p role="status" className="mt-3 text-sm text-fg-dim">현재 Standard 사전 점검을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>}
+                        {!canStartPlan && <p role="status" className="mt-3 text-sm text-fg-dim">{standard?.archiveRequired
+                            ? '저장 수집본을 확인한 뒤 Standard 테스트를 시작할 수 있습니다.'
+                            : '현재 Standard 사전 점검을 시작할 수 없습니다. 잠시 후 다시 시도해 주세요.'}</p>}
                         {displayedPlanId && <p className="mt-3 text-sm text-fg-dim">{displayedPlanId === 'standard'
                             ? `공개 테스트 계정을 Standard로 판독합니다. 사전 점검부터 분석 1회에 Apify 최대 $${standardApifyUsd}, Vertex 최대 $${standardVertexUsd}로 총 $${standardApifyUsd + standardVertexUsd}까지 사용합니다.`
                             : '공개 테스트 계정을 Basic으로 판독합니다. 사전 점검부터 1회 최대 $7의 분석 예산을 사용합니다.'}</p>}
