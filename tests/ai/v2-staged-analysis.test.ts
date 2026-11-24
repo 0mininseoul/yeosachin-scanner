@@ -3201,6 +3201,27 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
+    it.each([
+        '역방향 좋아요·태그. “반가워”. 표본 밖 미확인.',
+        '역방향 댓글. “반가워”. 표본 밖 미확인. 추가 문장입니다.',
+        '김준호님→박민지님 좋아요·댓글. “반가워”. 표본 밖 미확인.',
+    ])('rejects unsupported observations in compact copy (%s)', async reverse => {
+        const input = narrativeInput();
+        input.interactions.candidateToTargetTag = observed('tag:forward');
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string, _images: string[], options: { schema: { parse(value: unknown): unknown } },
+        ) => options.schema.parse({ lines: [{
+            text: '박민지님의 여행과 일상 기록은 꽤 차분하게 이어지는 피드입니다.',
+            evidenceRefs: ['profile:bio'],
+        }, {
+            text: '박민지님→김준호님 좋아요·댓글·태그. ' + reverse,
+            evidenceRefs: ['like:candidate-to-target', 'like:target-to-candidate', 'comment:1', 'tag:forward', 'coverage:target-interactions'],
+        }] }));
+        await expect(highRiskNarrative(input, audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION), {
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+        })).rejects.toThrow('AI_GENERATION_RESPONSE_REJECTED_ERROR');
+    });
+
     it.each([false, true])('repairs omitted v2.11 directions without additional spend (long names %s)', async longNames => {
         const input = narrativeInput();
         if (longNames) {

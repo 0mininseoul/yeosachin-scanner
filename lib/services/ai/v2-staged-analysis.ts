@@ -3515,22 +3515,60 @@ function escapesRegex(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+function v211InteractionCopy(
+    input: ParsedHighRiskNarrativeInput,
+    subjects: { target: string; candidate: string },
+    commentTerm: string | undefined,
+) {
+    // Keep each actor's observations in one sentence. Repeating both names for
+    // every signal can push the repair past the public 180-character limit.
+    const directions: Array<{ actor: string; receiver: string; signals: string }> = [];
+    function addDirection(actor: string, receiver: string, observations: ReadonlyArray<
+        readonly [z.infer<typeof interactionObservationSchema>, string]
+    >) {
+        const signals = observations.filter(([observation]) => observed(observation)).map(([, signal]) => signal);
+        if (signals.length) directions.push({ actor, receiver, signals: signals.join('·') });
+    }
+    addDirection(subjects.candidate, subjects.target, [
+        [input.interactions.candidateToTargetLike, '좋아요'],
+        [input.interactions.candidateToTargetComment, '댓글'],
+        [input.interactions.candidateToTargetTag, '태그'],
+        [input.interactions.candidateToTargetMention, '멘션'],
+    ]);
+    addDirection(subjects.target, subjects.candidate, [
+        [input.interactions.targetToCandidateLike, '좋아요'],
+        [input.interactions.targetToCandidateTag, '태그'],
+        [input.interactions.targetToCandidateMention, '멘션'],
+    ]);
+    // Keep comment content in its own sentence.  Besides reading naturally, the full-stop
+    // boundaries are part of the validator's actor -> receiver -> interaction grammar: without
+    // them, a target->candidate clause could be falsely inferred by crossing a prior clause.
+    const commentSuffix = commentTerm ? ` 실제 댓글에는 “${commentTerm}” 표현이 남았습니다.` : '';
+    const candidateTitle = subjects.candidate.endsWith('님') ? subjects.candidate : subjects.candidate + '님';
+    const targetTitle = subjects.target.endsWith('님') ? subjects.target : subjects.target + '님';
+    const sentences = directions.map(({ actor, receiver, signals }) =>
+        `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${signals} 기록이 있습니다.`
+    );
+    let second = sentences.length > 0
+        ? `${sentences.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
+        : `${candidateTitle}과 ${targetTitle}의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
+    const compact = directions.map(({ actor, receiver, signals }) => `${actor}→${receiver} ${signals}.`);
+    const quote = commentTerm ? ` “${commentTerm}”.` : '';
+    const suffix = `${quote} 표본 밖 미확인.`;
+    const explicit = compact.join(' ') + suffix;
+    const reverse = directions.length === 2 ? `${compact[0]} 역방향 ${directions[1].signals}.${suffix}` : null;
+    if (directions.length > 0 && second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
+        second = explicit.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH && reverse ? reverse : explicit;
+    }
+    return { second, explicit, reverse };
+}
+
 function containsNamedInteractionDirection(
     line: string,
     actor: string,
     receiver: string,
     interaction: '좋아요' | '댓글' | '태그' | '멘션',
 ): boolean {
-    // The compact two-way form names both endpoints once. Its second sentence
-    // explicitly reverses that pair and can contain only observed signal labels.
-    const signal = '(?:좋아요|댓글|태그|멘션)';
-    const signalList = `${signal}(?:·${signal})*`;
-    const reverse = new RegExp(
-        `^${escapesRegex(receiver)}→${escapesRegex(actor)} ${signalList}\\. 역방향 (${signalList})\\.`
-        + '(?: “[가-힣a-z]{2,12}”\\.)? 표본 밖 미확인\\.$',
-        'u',
-    ).exec(line);
-    if (reverse?.[1].split('·').includes(interaction)) return true;
     return new RegExp(
         `${escapesRegex(actor)}[^.]{0,80}${escapesRegex(receiver)}[^.]{0,80}${interaction}`,
         'u',
@@ -3634,6 +3672,21 @@ function narrativeResponseSchemaFor(
         });
         if (v211Subjects) {
             const [first, second] = texts;
+            let namedDirectionsText = second;
+            const usesCompactDirections = second.startsWith(v211Subjects.candidate + '→')
+                || second.startsWith(v211Subjects.target + '→')
+                || (second.includes('→') && second.includes('역방향'));
+            if (usesCompactDirections) {
+                // Interpret a shorthand only after verifying its complete observed directions,
+                // comment quotation and coverage caveat against the same formatter as the writer.
+                const expected = v211InteractionCopy(input, v211Subjects, commentTerms[0]);
+                if (second === expected.reverse || second === expected.explicit) {
+                    namedDirectionsText = expected.explicit;
+                } else {
+                    context.addIssue({ code: 'custom', path: ['lines', 1, 'text'],
+                        message: 'Compact narrative directions do not match the observed interactions.' });
+                }
+            }
             if (!hasV211NarrativeSubjects(texts, v211Subjects)) {
                 context.addIssue({
                     code: 'custom',
@@ -3644,7 +3697,7 @@ function narrativeResponseSchemaFor(
             if (
                 observed(input.interactions.candidateToTargetLike)
                 && !containsNamedInteractionDirection(
-                    second,
+                    namedDirectionsText,
                     v211Subjects.candidate,
                     v211Subjects.target,
                     '좋아요',
@@ -3659,7 +3712,7 @@ function narrativeResponseSchemaFor(
             if (
                 observed(input.interactions.targetToCandidateLike)
                 && !containsNamedInteractionDirection(
-                    second,
+                    namedDirectionsText,
                     v211Subjects.target,
                     v211Subjects.candidate,
                     '좋아요')
@@ -3673,7 +3726,7 @@ function narrativeResponseSchemaFor(
             if (
                 observed(input.interactions.candidateToTargetComment)
                 && !containsNamedInteractionDirection(
-                    second,
+                    namedDirectionsText,
                     v211Subjects.candidate,
                     v211Subjects.target,
                     '댓글',
@@ -3687,7 +3740,7 @@ function narrativeResponseSchemaFor(
             }
             if (
                 containsNamedInteractionDirection(
-                    second,
+                    namedDirectionsText,
                     v211Subjects.target,
                     v211Subjects.candidate,
                     '댓글',
@@ -3734,7 +3787,7 @@ function narrativeResponseSchemaFor(
             ];
             for (const [observation, actor, receiver, interaction, label] of namedDirections) {
                 if (observed(observation) && !containsNamedInteractionDirection(
-                    second, actor, receiver, interaction,
+                    namedDirectionsText, actor, receiver, interaction,
                 )) {
                     context.addIssue({
                         code: 'custom',
@@ -3928,49 +3981,9 @@ function deterministicV211NarrativeRepair(
             : `${candidateTitle}의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
     }
 
-    // Keep each actor's observations in one sentence. Repeating both names for
-    // every signal can push the repair past the public 180-character limit.
-    const directions: Array<{ actor: string; receiver: string; signals: string }> = [];
-    function addDirection(actor: string, receiver: string, observations: ReadonlyArray<
-        readonly [z.infer<typeof interactionObservationSchema>, string]
-    >) {
-        const signals = observations.filter(([observation]) => observed(observation)).map(([, signal]) => signal);
-        if (signals.length) directions.push({ actor, receiver, signals: signals.join('·') });
-    }
-    addDirection(subjects.candidate, subjects.target, [
-        [input.interactions.candidateToTargetLike, '좋아요'],
-        [input.interactions.candidateToTargetComment, '댓글'],
-        [input.interactions.candidateToTargetTag, '태그'],
-        [input.interactions.candidateToTargetMention, '멘션'],
-    ]);
-    addDirection(subjects.target, subjects.candidate, [
-        [input.interactions.targetToCandidateLike, '좋아요'],
-        [input.interactions.targetToCandidateTag, '태그'],
-        [input.interactions.targetToCandidateMention, '멘션'],
-    ]);
-    const commentTerm = sanitized.comments[0]
-        ? extractSafePublicCommentTerms(sanitized.comments[0].text)
-            .find(term => !REDACTION_COMMENT_TERMS.has(term))
-        : null;
-    // Keep comment content in its own sentence.  Besides reading naturally, the full-stop
-    // boundaries are part of the validator's actor -> receiver -> interaction grammar: without
-    // them, a target->candidate clause could be falsely inferred by crossing a prior clause.
-    const commentSuffix = commentTerm ? ` 실제 댓글에는 “${commentTerm}” 표현이 남았습니다.` : '';
-    const targetTitle = subjects.target.endsWith('님') ? subjects.target : subjects.target + '님';
-    const sentences = directions.map(({ actor, receiver, signals }) =>
-        `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${signals} 기록이 있습니다.`
-    );
-    let second = sentences.length > 0
-        ? `${sentences.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
-        : `${candidateTitle}과 ${targetTitle}의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
-    if (sentences.length > 0 && second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
-        const compact = directions.map(({ actor, receiver, signals }) => `${actor}→${receiver} ${signals}.`);
-        const quote = commentTerm ? ` “${commentTerm}”.` : '';
-        second = `${compact.join(' ')}${quote} 표본 밖 미확인.`;
-        if (second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH && directions.length === 2) {
-            second = `${compact[0]} 역방향 ${directions[1].signals}.${quote} 표본 밖 미확인.`;
-        }
-    }
+    const commentTerm = sanitized.comments.flatMap(comment => extractSafePublicCommentTerms(comment.text))
+        .find(term => !REDACTION_COMMENT_TERMS.has(term));
+    const { second } = v211InteractionCopy(input, subjects, commentTerm);
 
     return {
         lines: [
