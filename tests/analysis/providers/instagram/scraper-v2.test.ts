@@ -474,7 +474,12 @@ describe('getProfilesBatchV2', () => {
         expect(snapshots[0].attempt).toBe('primary');
     });
 
-    it('preserves provider quota exhaustion instead of sealing synthetic fallback outcomes', async () => {
+    it.each([
+        APIFY_PROVIDER_QUOTA_ERROR_CODE,
+        'ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR',
+        'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH',
+        'ANALYSIS_V2_PROVIDER_RUN_TERMINAL_CONFLICT',
+    ])('preserves %s without sealing synthetic fallback outcomes', async code => {
         const snapshots: ProfilesBatchV2AttemptSnapshot[] = [];
         __setProvidersForTest({}, {
             selfhosted: provider({
@@ -486,7 +491,7 @@ describe('getProfilesBatchV2', () => {
                 name: 'apify',
                 paid: true,
                 getProfilesBatch: vi.fn().mockRejectedValue(
-                    new Error(APIFY_PROVIDER_QUOTA_ERROR_CODE)
+                    new Error(code)
                 ),
             }),
         });
@@ -494,7 +499,7 @@ describe('getProfilesBatchV2', () => {
         await expect(getProfilesBatchV2(['alice'], {
             providerRun: durablePaidStart(),
             persistAttemptOutcomes: async snapshot => { snapshots.push(snapshot); },
-        })).rejects.toThrow(APIFY_PROVIDER_QUOTA_ERROR_CODE);
+        })).rejects.toThrow(code);
 
         expect(snapshots).toHaveLength(1);
         expect(snapshots[0].attempt).toBe('primary');

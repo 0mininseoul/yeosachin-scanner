@@ -1252,13 +1252,17 @@ describe('analysis V2 provider run store', () => {
         ]);
     });
 
-    it('resumes a terminal run so a lost response can rebuild output without another Actor start', async () => {
+    it('retries only the receipt write after a statement timeout on a previously succeeded Actor', async () => {
         const { rpc, client } = clientWithRpc();
         rpc
             .mockResolvedValueOnce({ data: storedRow('succeeded'), error: null })
             .mockResolvedValueOnce({
                 data: reservationResponse(false, storedRow('succeeded')),
                 error: null,
+            })
+            .mockResolvedValueOnce({
+                data: null,
+                error: { code: '57014', message: 'canceling statement due to statement timeout' },
             })
             .mockResolvedValueOnce({ data: storedRow('succeeded'), error: null });
         const store = createAnalysisV2ProviderRunStore(client);
@@ -1274,6 +1278,8 @@ describe('analysis V2 provider run store', () => {
             status: 'succeeded',
             usageTotalUsd: null,
         });
+        expect(rpc).toHaveBeenCalledTimes(4);
+        expect(rpc.mock.calls[3]).toEqual(rpc.mock.calls[2]);
         expect(rpc).toHaveBeenLastCalledWith(
             ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
             expect.objectContaining({ p_actual_usage_usd: null })
