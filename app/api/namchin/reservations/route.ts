@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { campaignClosesAt } from '@/public/cherry/campaign.mjs';
+import { parseReservationSource } from '@/public/cherry/reservation-source.mjs';
 
 const maxBytes = 2048;
 const reservationSchema = z.object({
@@ -12,6 +13,7 @@ const reservationSchema = z.object({
     privateAck: z.literal(true),
     // Meta A/B arm from the landing URL (?v=); absent for visitors who did not come from a test ad.
     variant: z.enum(['bf', 'crush']).optional(),
+    source: z.unknown().transform(parseReservationSource),
 }).strict();
 
 function reply(body: object, status = 200) {
@@ -57,12 +59,13 @@ export async function POST(request: Request) {
     if (!phone) return reply({ error: 'invalid_registration' }, 400);
     if (Date.now() >= campaignClosesAt) return reply({ status: 'closed' }, 410);
 
-    const { email, variant } = parsed.data;
+    const { email, variant, source } = parsed.data;
+    const attribution = source ? { source } : variant ? { variant } : {};
     const reservations = () => supabaseAdmin.from('namchin_launch_reservations');
     try {
-        let { error } = await reservations().insert(variant ? { email, phone, variant } : { email, phone });
-        // Tracking must never cost a reservation: retry without the variant if its column is missing.
-        if (variant && (error?.code === 'PGRST204' || error?.code === '42703')) {
+        let { error } = await reservations().insert({ email, phone, ...attribution });
+        // Tracking must never cost a reservation: retry if its column has not been deployed yet.
+        if ((source || variant) && (error?.code === 'PGRST204' || error?.code === '42703')) {
             ({ error } = await reservations().insert({ email, phone }));
         }
         // Keep the original consent and make retries indistinguishable from new submissions.

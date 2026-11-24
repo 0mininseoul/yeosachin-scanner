@@ -18,6 +18,8 @@ describe('cherry analytics identity', () => {
         vi.clearAllMocks();
         mocks.init.mockResolvedValue(true);
         delete document.documentElement.dataset.variant;
+        document.documentElement.removeAttribute('data-organic-concept');
+        window.history.replaceState(null, '', '/cherry');
     });
 
     it('tags cherry events with the landing variant', async () => {
@@ -29,8 +31,10 @@ describe('cherry analytics identity', () => {
         expect(mocks.track).toHaveBeenLastCalledWith('completed', { variant: 'crush' });
     });
 
-    it('sends cherry events without a variant when the visitor has none', async () => {
+    it('does not tag organic crush views as an ad variant', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: { name: 'AuthSessionMissingError' } });
+        document.documentElement.dataset.variant = 'crush';
+        document.documentElement.setAttribute('data-organic-concept', '');
         await import('@/lib/services/cherry-analytics');
         expect(mocks.track).toHaveBeenCalledWith('cherry_viewed', undefined);
     });

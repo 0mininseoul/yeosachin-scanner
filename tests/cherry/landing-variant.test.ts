@@ -68,9 +68,19 @@ describe('cherry landing variant', () => {
         const response = await GET(new NextRequest('https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=abc'));
         const html = await response.text();
         expect(html).toContain('data-variant="crush"');
+        expect(html).not.toContain('data-organic-concept');
         expect(html).toContain('<span>내 짝남은 내가 모르는 사이</span>');
         expect(response.headers.get('Cache-Control')).toBe('public, s-maxage=300, stale-while-revalidate=3600');
         expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    });
+
+    it.each(['concept=crush', 'v=crush'])('renders %s with a recognized UTM as an organic crush landing', async (concept) => {
+        const { GET } = await import('@/app/cherry/route');
+        const response = await GET(new NextRequest(`https://yeosachin.com/cherry?${concept}&utm_source=threads`));
+        const html = await response.text();
+        expect(html).toContain('data-variant="crush"');
+        expect(html).toContain('<span>내 짝남은 내가 모르는 사이</span>');
+        expect(html).toContain('data-organic-concept');
     });
 
     it('injects pixel with autoConfig off', () => {
@@ -138,6 +148,24 @@ describe('cherry reservation variant', () => {
         expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678' });
     });
 
+    it.each(['threads', 'everytime', 'x'])('stores %s as the reservation source', async (source) => {
+        db.insert.mockResolvedValue({ error: null });
+        expect((await reserve({ source })).status).toBe(200);
+        expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678', source });
+    });
+
+    it('ignores unknown attribution without rejecting the reservation', async () => {
+        db.insert.mockResolvedValue({ error: null });
+        expect((await reserve({ source: 'https://example.com/private' })).status).toBe(200);
+        expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678' });
+    });
+
+    it('still accepts a tagged reservation when the source column is missing', async () => {
+        db.insert.mockResolvedValueOnce({ error: { code: 'PGRST204' } }).mockResolvedValueOnce({ error: null });
+        expect((await reserve({ source: 'threads' })).status).toBe(200);
+        expect(db.insert).toHaveBeenLastCalledWith({ email: 'me@example.com', phone: '+821012345678' });
+    });
+
     it('rejects unknown variant', async () => {
         expect((await reserve({ variant: 'x' })).status).toBe(400);
         expect(db.insert).not.toHaveBeenCalled();
@@ -159,13 +187,17 @@ describe('cherry reservation variant', () => {
     });
 });
 
-describe('cherry admin roster before the variant migration', () => {
-    // A PostgREST builder stand-in: resolves to an undefined-column error whenever the query touches `variant`.
-    const builder = (columns: string) => {
+describe('cherry admin roster schema compatibility', () => {
+    const builder = (columns: string, schema: 'initial' | 'variant' | 'source') => {
         let touchesVariant = columns.includes('variant');
-        const result = () => touchesVariant
+        const touchesSource = columns.includes('source');
+        const result = () => (touchesVariant && schema === 'initial') || (touchesSource && schema !== 'source')
             ? { data: null, count: null, error: { code: '42703' } }
-            : { data: [{ email: 'a@b.co', phone: '+821012345678', consented_at: '2026-11-24T00:00:00Z' }], count: 1, error: null };
+            : { data: [{
+                email: 'a@b.co', phone: '+821012345678', consented_at: '2026-11-24T00:00:00Z',
+                ...(touchesVariant && { variant: schema === 'variant' ? 'bf' : null }),
+                ...(touchesSource && { source: 'everytime' }),
+            }], count: 1, error: null };
         const query: Record<string, unknown> = {
             eq: (column: string) => { touchesVariant ||= column === 'variant'; return query; },
             is: (column: string) => { touchesVariant ||= column === 'variant'; return query; },
@@ -175,17 +207,33 @@ describe('cherry admin roster before the variant migration', () => {
         return query;
     };
 
-    it('still lists reservations when the variant column is missing', async () => {
-        db.from.mockReset().mockReturnValue({ select: (columns: string) => builder(columns) });
+    const fetchRoster = async (schema: 'initial' | 'variant' | 'source') => {
+        db.from.mockReset().mockReturnValue({ select: (columns: string) => builder(columns, schema) });
         const { POST } = await import('@/app/api/admin/namchin/reservations/route');
-        const response = await POST(new Request('https://yeosachin.com/api/admin/cherry/reservations', {
+        return POST(new Request('https://yeosachin.com/api/admin/cherry/reservations', {
             method: 'POST',
             headers: { origin: 'https://yeosachin.com', 'content-type': 'application/json' },
             body: JSON.stringify({ query: '', page: 1 }),
         }));
+    };
+
+    it('returns the recorded channel on the reservation row', async () => {
+        const response = await fetchRoster('source');
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ rows: [{ source: 'everytime', variant: null }] });
+    });
+
+    it('still returns ad variants when the source column is missing', async () => {
+        const response = await fetchRoster('variant');
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ rows: [{ source: null, variant: 'bf' }] });
+    });
+
+    it('still lists reservations when the variant column is missing', async () => {
+        const response = await fetchRoster('initial');
         expect(response.status).toBe(200);
         expect(await response.json()).toEqual({
-            rows: [{ email: 'a@b.co', phone: '+821012345678', consentedAt: '2026-11-24T00:00:00Z', variant: null }],
+            rows: [{ email: 'a@b.co', phone: '+821012345678', consentedAt: '2026-11-24T00:00:00Z', variant: null, source: null }],
             count: 1,
             hasNext: false,
             variantCounts: null,

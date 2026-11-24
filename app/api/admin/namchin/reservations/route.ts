@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { privateJson, requireConsoleOperator } from '@/lib/services/admin/operator-route';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { parseReservationSource } from '@/public/cherry/reservation-source.mjs';
 
 const pageSize = 100;
 const requestSchema = z.object({
@@ -33,20 +34,29 @@ export async function POST(request: Request) {
         };
         // Whole-table totals per Meta A/B arm, independent of the search filter.
         const arm = () => supabaseAdmin.from('namchin_launch_reservations').select('email', { count: 'exact', head: true });
-        const [withVariant, bf, crush, none] = await Promise.all([
-            listPage('email, phone, consented_at, variant'),
+        const [withSource, bf, crush, none] = await Promise.all([
+            listPage('email, phone, consented_at, variant, source'),
             arm().eq('variant', 'bf'),
             arm().eq('variant', 'crush'),
             arm().is('variant', null),
         ]);
-        // Until the variant migration is applied, keep the roster working without the A/B columns.
-        const { data, error, count } = withVariant.error?.code === '42703'
-            ? await listPage('email, phone, consented_at')
-            : withVariant;
+        // The roster also works before either attribution migration is applied.
+        let roster = withSource;
+        if (roster.error?.code === '42703') roster = await listPage('email, phone, consented_at, variant');
+        if (roster.error?.code === '42703') roster = await listPage('email, phone, consented_at');
+        const { data, error, count } = roster;
         if (!error && data && count !== null) {
-            const rows = data as unknown as { email: string; phone: string; consented_at: string; variant?: 'bf' | 'crush' | null }[];
+            const rows = data as unknown as {
+                email: string;
+                phone: string;
+                consented_at: string;
+                variant?: 'bf' | 'crush' | null;
+                source?: string | null;
+            }[];
             return privateJson({
-                rows: rows.map(({ email, phone, consented_at, variant }) => ({ email, phone, consentedAt: consented_at, variant: variant ?? null })),
+                rows: rows.map(({ email, phone, consented_at, variant, source }) => ({
+                    email, phone, consentedAt: consented_at, variant: variant ?? null, source: parseReservationSource(source) ?? null,
+                })),
                 count,
                 hasNext: start + pageSize < count,
                 variantCounts: bf.error || crush.error || none.error

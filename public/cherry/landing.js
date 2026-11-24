@@ -1,4 +1,5 @@
 import { campaignClosesAt } from './campaign.mjs';
+import { parseReservationSource, sourceFromReferrer } from './reservation-source.mjs';
 
 const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -208,8 +209,28 @@ const passEmail = pass.querySelector('[data-pass-email]');
 const passPhone = pass.querySelector('[data-pass-phone]');
 const dock = document.querySelector('[data-dock]');
 const dockTimer = document.querySelector('[data-dock-timer]');
+const completionKey = 'cherry:pre-reservation:2026-11:completed';
+const sourceKey = 'cherry:pre-reservation:2026-11:source';
+const adVariant = document.documentElement.hasAttribute('data-organic-concept')
+  ? undefined
+  : document.documentElement.dataset.variant;
 let reservationsClosed = false;
 let reservationDone = false;
+
+function getReservationSource() {
+  const params = new URLSearchParams(window.location.search);
+  const taggedSource = parseReservationSource(params.get('utm_source'));
+  if (!taggedSource && (adVariant || params.has('utm_source'))) return undefined;
+
+  const source = taggedSource ?? sourceFromReferrer(document.referrer);
+  try {
+    if (source) window.sessionStorage.setItem(sourceKey, source);
+    else return parseReservationSource(window.sessionStorage.getItem(sourceKey));
+  } catch {
+    // Storage may be unavailable in in-app or private browsers.
+  }
+  return source;
+}
 
 // Floating reservation button: visible after the hero buttons scroll away, hidden near the form.
 const dockState = { heroVisible: true, waitlistVisible: false };
@@ -239,14 +260,31 @@ function closeReservations() {
   form.hidden = true;
   for (const item of document.querySelectorAll('[data-while-open]')) item.hidden = true;
   for (const badge of document.querySelectorAll('[data-reservation-badge]')) badge.textContent = '사전 예약 마감';
-  for (const cta of document.querySelectorAll('[data-reservation-cta]')) cta.textContent = '마감 안내 보기';
+  if (!reservationDone) {
+    for (const cta of document.querySelectorAll('[data-reservation-cta]')) cta.textContent = '마감 안내 보기';
+    waitlistTitle.textContent = '이번 초대는\n마감됐어요.';
+  }
   closedCopy.textContent = '11월 30일 사전 예약 기간이 끝났어요.';
-  if (!reservationDone) waitlistTitle.textContent = '이번 초대는\n마감됐어요.';
   updateDock();
   if (success.hidden) {
     closedPanel.hidden = false;
     if (focusWasInForm) closedTitle.focus();
   }
+}
+
+function showReservationSuccess({ restored = false } = {}) {
+  reservationDone = true;
+  submit.disabled = true;
+  updateDock();
+  pass.classList.add('is-registered');
+  if (restored) pass.querySelector('.pass-owner').hidden = true;
+  for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;
+  for (const cta of document.querySelectorAll('[data-reservation-cta]')) cta.textContent = '예약 완료 확인';
+  waitlistTitle.textContent = '초대장 등록을\n마쳤어요.';
+  form.hidden = true;
+  closedPanel.hidden = true;
+  success.hidden = false;
+  if (!restored) successTitle.focus();
 }
 
 function showError(message) {
@@ -339,9 +377,15 @@ async function initializeReservationForm() {
     // Fall back to the device clock when the status request is unavailable.
   }
   startCountdown(clockOffset);
-  submit.disabled = reservationsClosed;
+  submit.disabled = reservationsClosed || reservationDone;
 }
 
+const reservationSource = getReservationSource();
+try {
+  if (window.localStorage.getItem(completionKey) === '1') showReservationSuccess({ restored: true });
+} catch {
+  // The form still works when the browser restricts local storage.
+}
 void initializeReservationForm();
 
 // Format Korean mobile numbers as they are typed (010-1234-5678) without moving a mid-text caret.
@@ -413,7 +457,7 @@ form.addEventListener('submit', async (event) => {
         phone: fields.get('phone'),
         consent: fields.has('consent'),
         privateAck: fields.has('private_ack'),
-        ...(['bf', 'crush'].includes(document.documentElement.dataset.variant) && { variant: document.documentElement.dataset.variant }),
+        ...(reservationSource ? { source: reservationSource } : adVariant ? { variant: adVariant } : {}),
       }),
       signal: AbortSignal.timeout(8_000),
     });
@@ -425,27 +469,24 @@ form.addEventListener('submit', async (event) => {
       showError('이메일, 국내 휴대폰 번호와 체크박스 두 개를 확인해 주세요.');
       return;
     }
-    if (!response.ok) {
+    if (!response.ok || (await response.json()).received !== true) {
       showError('등록을 완료하지 못했어요. 입력 내용을 확인하고 다시 시도해 주세요.');
       return;
     }
 
-    reservationDone = true;
+    try {
+      window.localStorage.setItem(completionKey, '1');
+    } catch {
+      // A successful reservation still shows confirmation without storage.
+    }
+    showReservationSuccess();
     window.dispatchEvent(new Event('cherry-reservation-completed'));
-    // Meta pixel (present only when configured): the variant, never the contact details.
-    window.fbq?.('track', 'Lead', { content_name: document.documentElement.dataset.variant ?? 'none' });
-    updateDock();
-    pass.classList.add('is-registered');
-    for (const item of document.querySelectorAll('[data-until-registered]')) item.hidden = true;
-    waitlistTitle.textContent = '초대장 등록을\n마쳤어요.';
-    form.hidden = true;
-    closedPanel.hidden = true;
-    success.hidden = false;
-    successTitle.focus();
+    // Send only the ad arm to the Meta pixel, when configured.
+    window.fbq?.('track', 'Lead', { content_name: reservationSource ? 'none' : adVariant ?? 'none' });
   } catch {
     showError('서버에 연결할 수 없어요. 잠시 후 다시 시도해 주세요.');
   } finally {
-    submit.disabled = reservationsClosed;
+    submit.disabled = reservationsClosed || reservationDone;
     form.removeAttribute('aria-busy');
   }
 });

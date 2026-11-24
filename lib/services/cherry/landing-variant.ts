@@ -40,11 +40,15 @@ function metaPixel(pixelId: string): string {
 
 export function renderCherryLanding(
     html: string,
-    options: { variant: CherryVariant | null; pixelId: string | null },
+    options: { variant: CherryVariant | null; concept?: CherryVariant | null; pixelId: string | null },
 ): string {
-    const { variant, pixelId } = options;
-    let page = variant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
-    if (variant) page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${variant}">`);
+    const { variant, concept = null, pixelId } = options;
+    const pageVariant = variant ?? concept;
+    let page = pageVariant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
+    if (pageVariant) {
+        const organicAttribute = variant ? '' : ' data-organic-concept';
+        page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${pageVariant}"${organicAttribute}>`);
+    }
     // Only digits reach the inline script, so a malformed env value cannot inject markup.
     if (pixelId && /^\d{5,20}$/.test(pixelId)) {
         page = page.replace('<meta charset="utf-8">', `<meta charset="utf-8">\n    ${metaPixel(pixelId)}`);
