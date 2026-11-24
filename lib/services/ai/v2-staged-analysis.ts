@@ -3899,43 +3899,47 @@ function deterministicV211NarrativeRepair(
                 : []),
         ],
     };
+    const candidateTitle = subjects.candidate.endsWith('님') ? subjects.candidate : subjects.candidate + '님';
     let first: string;
     try {
-        first = `${subjects.candidate}님의 ${buildV211EvidenceSpecificOverview(styleEvidence)}`;
+        first = `${candidateTitle}의 ${buildV211EvidenceSpecificOverview(styleEvidence)}`;
     } catch {
         // The input schema permits image-only evidence.  The subject and the
         // supplied media reference still make this a grounded, deterministic
         // sentence without inventing a textual fact.
-        first = `${subjects.candidate}님의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
+        first = `${candidateTitle}의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
     }
     if (input.appearance.isReliable) {
         first = `${first} 예쁘게 보이는 이미지라도 이미지 인상만으로 관계를 판단할 수는 없습니다.`;
     }
     if (first.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
         first = input.appearance.isReliable
-            ? `${subjects.candidate}님의 공개 장면은 차분한 기록입니다. 예쁘게 보이는 이미지라도 이미지 인상만으로 관계를 판단할 수는 없습니다.`
-            : `${subjects.candidate}님의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
+            ? `${candidateTitle}의 공개 장면은 차분한 기록입니다. 예쁘게 보이는 이미지라도 이미지 인상만으로 관계를 판단할 수는 없습니다.`
+            : `${candidateTitle}의 공개 장면은 제공된 범위에서 차분한 기록으로 남아 있습니다.`;
     }
 
+    // Keep each actor's observations in one sentence. Repeating both names for
+    // every signal can push the repair past the public 180-character limit.
     const directionClauses: string[] = [];
-    const addDirection = (
-        observation: z.infer<typeof interactionObservationSchema>,
-        actor: string,
-        receiver: string,
-        interaction: '좋아요' | '댓글' | '태그' | '멘션',
-    ) => {
-        if (observation.status !== 'observed') return;
-        directionClauses.push(
-            `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${interaction} 방향이 확인됩니다.`,
+    function addDirection(actor: string, receiver: string, observations: ReadonlyArray<
+        readonly [z.infer<typeof interactionObservationSchema>, string]
+    >) {
+        const signals = observations.filter(([observation]) => observed(observation)).map(([, signal]) => signal);
+        if (signals.length) directionClauses.push(
+            `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${signals.join('·')} 기록이 있습니다.`,
         );
-    };
-    addDirection(input.interactions.candidateToTargetLike, subjects.candidate, subjects.target, '좋아요');
-    addDirection(input.interactions.targetToCandidateLike, subjects.target, subjects.candidate, '좋아요');
-    addDirection(input.interactions.candidateToTargetComment, subjects.candidate, subjects.target, '댓글');
-    addDirection(input.interactions.candidateToTargetTag, subjects.candidate, subjects.target, '태그');
-    addDirection(input.interactions.targetToCandidateTag, subjects.target, subjects.candidate, '태그');
-    addDirection(input.interactions.candidateToTargetMention, subjects.candidate, subjects.target, '멘션');
-    addDirection(input.interactions.targetToCandidateMention, subjects.target, subjects.candidate, '멘션');
+    }
+    addDirection(subjects.candidate, subjects.target, [
+        [input.interactions.candidateToTargetLike, '좋아요'],
+        [input.interactions.candidateToTargetComment, '댓글'],
+        [input.interactions.candidateToTargetTag, '태그'],
+        [input.interactions.candidateToTargetMention, '멘션'],
+    ]);
+    addDirection(subjects.target, subjects.candidate, [
+        [input.interactions.targetToCandidateLike, '좋아요'],
+        [input.interactions.targetToCandidateTag, '태그'],
+        [input.interactions.targetToCandidateMention, '멘션'],
+    ]);
     const commentTerm = sanitized.comments[0]
         ? extractSafePublicCommentTerms(sanitized.comments[0].text)
             .find(term => !REDACTION_COMMENT_TERMS.has(term))
@@ -3946,7 +3950,7 @@ function deterministicV211NarrativeRepair(
     const commentSuffix = commentTerm ? ` 실제 댓글에는 “${commentTerm}” 표현이 남았습니다.` : '';
     const second = directionClauses.length > 0
         ? `${directionClauses.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
-        : `${subjects.candidate}님과 ${subjects.target}님의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
+        : `${candidateTitle}과 ${subjects.target.endsWith('님') ? subjects.target : subjects.target + '님'}의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
 
     return {
         lines: [
