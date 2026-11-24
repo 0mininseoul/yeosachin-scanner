@@ -413,7 +413,8 @@ it.each(['first', 'second', 'timeout', 'terminal receipt timeout'])(
             };
             while (runtime.queue.length) {
                 if (++steps > 24) throw new Error('Unexpected repeated task delivery');
-                const delivery = parseAnalysisV2TaskPayload(runtime.queue.shift());
+                const payload = runtime.queue.shift()!;
+                const delivery = parseAnalysisV2TaskPayload(payload);
                 const outcome = await withDevLiveProviderApproval(approval, () =>
                     processAnalysisV2TaskDelivery(delivery, worker),
                 );
@@ -428,7 +429,7 @@ it.each(['first', 'second', 'timeout', 'terminal receipt timeout'])(
                         [delivery.requestId, delivery.jobKey],
                     );
                     expect(telemetry.rows).toHaveLength(0);
-                    runtime.queue.unshift(delivery); // Cloud Tasks retries the same delivery.
+                    runtime.queue.unshift(payload); // Cloud Tasks retries the same delivery.
                     continue;
                 }
                 if (outcome.status === 'continuation' && scenario === 'timeout') {
