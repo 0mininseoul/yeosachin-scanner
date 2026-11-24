@@ -1,3 +1,4 @@
+import { v211CopySubjectName } from '@/lib/services/analysis/public-copy-quality';
 import { z } from 'zod';
 import {
     analysisResultSummaryV1Schema,
@@ -203,6 +204,22 @@ function sharedFemaleRow(
     row: AnalysisResultPageV1['femaleAccounts'][number],
     shareToken: string
 ) {
+    // A named owner narrative includes the canonical candidate subject in
+    // both lines. Do not republish it on the masked share, even if its names
+    // contain no digits and the generic public-copy checks would pass.
+    let highRiskNarrative = null;
+    if (row.highRiskNarrative) {
+        const subject = v211CopySubjectName(row.fullName, row.instagramId).normalize('NFKC').toLowerCase();
+        const handle = row.instagramId.toLowerCase();
+        const identifiesCandidate = row.highRiskNarrative.some(line => {
+            const normalized = line.normalize('NFKC').toLowerCase();
+            return normalized.includes(subject) || normalized.includes(handle);
+        });
+        if (!identifiesCandidate) {
+            const narrative = femaleResultRowV1Schema.shape.highRiskNarrative.safeParse(row.highRiskNarrative);
+            if (narrative.success) highRiskNarrative = narrative.data;
+        }
+    }
     return {
         accountKey: createV2SharedAccountKey(
             shareToken,
@@ -218,7 +235,7 @@ function sharedFemaleRow(
         recentMutualRank: row.recentMutualRank,
         analysisDepth: row.analysisDepth,
         oneLineOverview: row.oneLineOverview,
-        highRiskNarrative: row.highRiskNarrative,
+        highRiskNarrative,
     };
 }
 

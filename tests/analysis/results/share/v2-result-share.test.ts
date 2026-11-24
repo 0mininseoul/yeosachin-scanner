@@ -181,6 +181,26 @@ describe('V2 shared result service', () => {
         });
     });
 
+    it('keeps named owner narratives out of shared results even without digits', async () => {
+        const ownerPage = page();
+        const ownerRow = ownerPage.femaleAccounts[0]!;
+        ownerRow.fullName = '가상후보';
+        ownerRow.highRiskNarrative = [
+            '가상후보님의 공개 피드는 사진으로 일상을 소개합니다.',
+            '가상후보님이 예시대상님에게 남긴 댓글은 확인했지만 수집 범위에 한계가 있습니다.',
+        ];
+        const service = createV2ShareResultService({
+            createStore: () => ({ loadPage: async () => ownerPage }),
+        });
+
+        const shared = await service.loadPage({ requestId, ownerUserId: userId, shareToken: token });
+
+        expect(shared?.femaleAccounts[0]?.highRiskNarrative).toBeNull();
+        expect(JSON.stringify(shared?.femaleAccounts)).not.toContain('가상후보');
+        expect(JSON.stringify(shared?.femaleAccounts)).not.toContain('예시대상');
+        expect(ownerRow.highRiskNarrative).not.toBeNull();
+    });
+
     it('does not let owner fields override generated shared identity fields', async () => {
         const ownerPage = page();
         Object.assign(ownerPage.femaleAccounts[0], {

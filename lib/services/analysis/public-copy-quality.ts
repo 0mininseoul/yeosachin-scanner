@@ -163,7 +163,7 @@ function normalizedFullName(value: string | null | undefined): string | null {
     return normalized && !genericRoleLabel(normalized) ? normalized : null;
 }
 
-function subjectName(fullName: string | null | undefined, username: string): string {
+export function v211CopySubjectName(fullName: string | null | undefined, username: string): string {
     const canonicalFullName = normalizedFullName(fullName);
     if (canonicalFullName) {
         return canonicalFullName.endsWith('님') ? canonicalFullName : `${canonicalFullName}님`;
@@ -178,8 +178,8 @@ export function v211CopySubjectNames(input: V211CopySubjects | undefined): {
     candidate: string;
 } {
     if (!input) throw new Error('CONCIERGE_COPY_SUBJECT_REQUIRED');
-    const target = subjectName(input.targetFullName, input.targetUsername);
-    const candidate = subjectName(input.candidateFullName, input.candidateUsername);
+    const target = v211CopySubjectName(input.targetFullName, input.targetUsername);
+    const candidate = v211CopySubjectName(input.candidateFullName, input.candidateUsername);
     if (target === candidate) throw new Error('CONCIERGE_COPY_SUBJECT_CONFLICT');
     return { target, candidate };
 }
@@ -190,6 +190,16 @@ function subjectParticle(name: string): string {
 
 function genericRoleLabel(value: string): boolean {
     return /(?:대상\s*계정|후보\s*계정)/u.test(value);
+}
+
+export function hasV211NarrativeSubjects(
+    [first, second]: readonly [string, string],
+    subjects: { target: string; candidate: string },
+): boolean {
+    return !genericRoleLabel(first + second)
+        && first.includes(subjects.candidate)
+        && second.includes(subjects.candidate)
+        && second.includes(subjects.target);
 }
 
 export function parseV211NarrativeWithSubjects(
