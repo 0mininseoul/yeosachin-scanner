@@ -186,8 +186,10 @@ BEGIN
          AND admission.operation_key = 'gemini:' || lease.operation_key || ':attempt:' || lease.attempt::text
          AND admission.credential_slot = 'gemini-' || lease.slot::text
          AND admission.provider_fence = lease.fence AND admission.claim_token = lease.lease_claim_token
+         AND admission.job_claim_token = attempt.job_claim_token
         WHERE lease.request_id = v_request AND lease.stage = 'genderResolution'
-          AND lease.state IN ('leased', 'quarantined') AND lease.expires_at <= v_now
+          -- Quarantine has already ended this generation's right to renew.
+          AND lease.state = 'quarantined' AND lease.expires_at <= v_now
           AND admission.workload_role = 'paid' AND admission.logical_provider = 'gemini'
           AND admission.expires_at <= v_now
           AND attempt.stage = 'genderResolution' AND attempt.status = 'reserved'
@@ -322,6 +324,29 @@ BEGIN
             ORDER BY job.job_key
             FOR SHARE OF job SKIP LOCKED
         ) AS locked;
+
+        -- A worker may disappear before moving its expired resolver slot to
+        -- quarantine. Do that with the normal job-before-slot lock order.
+        -- The separate cutoff RPC handles these rows on the next pass.
+        WITH expired_resolver AS (
+            SELECT lease.slot
+            FROM public.analysis_v2_gemini_leases AS lease
+            JOIN public.analysis_pipeline_jobs AS job
+              ON job.request_id = lease.request_id AND job.job_key = lease.job_key
+            JOIN public.analysis_v2_ai_attempts AS attempt
+              ON attempt.request_id = lease.request_id AND attempt.job_key = lease.job_key
+             AND attempt.operation_key = lease.operation_key AND attempt.attempt = lease.attempt
+            WHERE NOT v_closed AND lease.request_id = v_request
+              AND lease.job_key = ANY(v_locked_jobs)
+              AND lease.stage = 'genderResolution' AND lease.state = 'leased' AND lease.expires_at <= v_now
+              AND attempt.stage = 'genderResolution' AND attempt.status = 'reserved'
+              AND job.lease_token IS DISTINCT FROM attempt.job_claim_token
+            FOR UPDATE OF lease SKIP LOCKED
+        )
+        UPDATE public.analysis_v2_gemini_leases AS lease
+        SET state = 'quarantined', quarantined_at = v_now, updated_at = v_now
+        FROM expired_resolver
+        WHERE lease.slot = expired_resolver.slot AND lease.state = 'leased' AND lease.expires_at <= v_now;
 
         -- Same clearing semantics as the scheduler reaper, narrowed to this
         -- request and a terminal attempt or a proven pre-start owner loss.

@@ -2409,7 +2409,7 @@ describe('provider admission migration PGlite contract', () => {
         await db.exec('BEGIN');
         try {
             const { request } = await seedDevApprovedStandard();
-            const seed = async (slot: number, guard: 'expired' | 'active' | 'checkpoint' | 'foreign') => {
+            const seed = async (slot: number, guard: 'expired' | 'active' | 'checkpoint' | 'foreign' | 'leased') => {
                 const requestId = guard === 'foreign' ? randomUUID() : request;
                 const jobKey = `track:profile-ai:batch:${slot}`;
                 const operation = `gender-resolution:${String(slot).repeat(64)}`;
@@ -2430,9 +2430,9 @@ describe('provider admission migration PGlite contract', () => {
                     VALUES ($1,$2,$3,1,'reserved','genderResolution',$4,$5)
                 `, [requestId, jobKey, operation, jobClaimToken, randomUUID()]);
                 await db.query(`
-                    UPDATE public.analysis_v2_gemini_leases SET stage='genderResolution', state='quarantined',
+                    UPDATE public.analysis_v2_gemini_leases SET stage='genderResolution', state=$2,
                         expires_at=clock_timestamp()-interval '1 second' WHERE slot=$1
-                `, [slot]);
+                `, [slot, guard === 'leased' ? 'leased' : 'quarantined']);
                 await db.query(`
                     UPDATE public.analysis_provider_admission_leases SET expires_at=clock_timestamp()-interval '1 second'
                     WHERE admission_id=$1
@@ -2452,6 +2452,7 @@ describe('provider admission migration PGlite contract', () => {
             await seed(2, 'active');
             await seed(3, 'checkpoint');
             await seed(4, 'foreign');
+            await seed(5, 'leased');
 
             const dispatchState = () => db.query(`
                 SELECT
@@ -2471,13 +2472,18 @@ describe('provider admission migration PGlite contract', () => {
             `)).rows).toEqual([
                 { job_key: 'track:profile-ai:batch:1', status: 'cutoff', usage_metadata_status: 'missing',
                     usage_complete: false, estimated_cost_usd: null },
-                ...[2, 3, 4].map(slot => ({
+                ...[2, 3, 4, 5].map(slot => ({
                     job_key: `track:profile-ai:batch:${slot}`, status: 'reserved', usage_metadata_status: null,
                     usage_complete: null, estimated_cost_usd: null,
                 })),
             ]);
             expect((await db.query('SELECT state FROM public.analysis_v2_gemini_leases WHERE slot=1')).rows)
                 .toEqual([{ state: 'quarantined' }]);
+            await asService('SELECT public.recover_dev_live_standard_provider_admissions_v1(16)');
+            expect((await db.query('SELECT state FROM public.analysis_v2_gemini_leases WHERE slot=5')).rows)
+                .toEqual([{ state: 'quarantined' }]);
+            expect((await recover()).rows).toEqual([{ recovered: 1 }]);
+            expect((await recover()).rows).toEqual([{ recovered: 0 }]);
             expect((await db.query(`
                 SELECT has_function_privilege('anon','public.recover_dev_live_standard_resolver_cutoffs_v1()','EXECUTE') AS anon,
                     has_function_privilege('authenticated','public.recover_dev_live_standard_resolver_cutoffs_v1()','EXECUTE') AS authenticated
