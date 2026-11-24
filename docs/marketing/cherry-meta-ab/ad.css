@@ -131,3 +131,9 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .ad--story.c4 .bubble { font-size: 62px; }
 .ad--story.c4 .cherry { width: 460px; top: calc(var(--top) + 440px); }
 .ad--story.c4 h1 { font-size: 100px; bottom: calc(var(--bottom) + 210px); }
+
+/* Optical left alignment: Paperlogy's side bearing grows with size, so large lines sat ~10px inside
+   the logo and chip edges. Pull text ink back onto the same left edge as the boxes. */
+.c1 .lead, .c1 .punch, .c2 .lead, .c2 .punch, .c4 h1 span { margin-left: -0.06em; }
+.c1 .offer span, footer .brand span { margin-left: -0.04em; }
+.c4 .name { margin-left: -0.04em; }

@@ -72,6 +72,8 @@
           <footer>${brandRow}${offer}</footer>`,
       };
       ad.innerHTML = scenes[concept]();
+      // ?guide=1 draws the left content edge, for alignment checks only.
+      if (params.get('guide')) ad.insertAdjacentHTML('beforeend', '<i style="position:absolute;top:0;bottom:0;left:80px;width:2px;background:#00a2ff;z-index:9"></i>');
     </script>
   </body>
 </html>
