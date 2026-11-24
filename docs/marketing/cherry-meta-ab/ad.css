@@ -151,3 +151,11 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .c2 .push-people b { font-size: 36px; }
 .ad--story.c2 .lock { top: calc(var(--top) + 400px); }
 .ad--story.c2 .push { margin-top: 0; }
+
+/* C2 v3 headline: "남친(짝남)이 딴 여자랑 맞팔하면 / 바로 알려드려요", set larger as the hook. */
+.c2 .lead { font-size: 84px; line-height: 1.16; color: var(--cream); }
+.c2 .punch { font-size: 132px; line-height: 1.08; letter-spacing: -0.065em; color: var(--pink); }
+.c2 .lock { top: calc(var(--top) + 370px); }
+.ad--story.c2 .lead { font-size: 88px; }
+.ad--story.c2 .punch { font-size: 138px; }
+.ad--story.c2 .lock { top: calc(var(--top) + 480px); }
