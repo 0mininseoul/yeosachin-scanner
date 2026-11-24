@@ -31,7 +31,9 @@ export const metadata: Metadata = {
  * ⚠️ 법률 문서: 표현/조항 변경은 사업자(사용자) 확인 후 진행할 것.
  */
 
-const UPDATED = '2026년 7월 16일';
+const PUBLISHED = '2026년 11월 25일';
+const EFFECTIVE = '2026년 12월 2일';
+const PREVIOUS_EFFECTIVE = '2026년 7월 16일';
 
 function H({ children }: { children: React.ReactNode }) {
     return <h2 className="mt-9 text-[15px] font-bold text-fg">{children}</h2>;
@@ -86,6 +88,11 @@ export default function TermsPage() {
                         <li>회사는 이용자가 입력한 인스타그램 계정의 <strong className="font-semibold text-fg">공개된 정보</strong>를 수집·AI 분석하여, 맞팔 계정의 성별·상호작용 등을 기준으로 위험도 순위 및 참고용 리포트를 제공합니다.</li>
                         <li>본 서비스가 제공하는 결과는 AI의 확률적 추정에 근거한 <strong className="font-semibold text-fg">참고·오락용 정보</strong>이며, 실제 사실과 다를 수 있습니다. 회사는 결과의 정확성·완전성을 보증하지 않습니다.</li>
                         <li>회사는 비공개 계정의 게시물 등 비공개 정보는 수집·분석하지 않습니다.</li>
+                        <li>
+                            <strong className="font-semibold text-fg">[{EFFECTIVE} 시행]</strong> 제3항에도 불구하고, 회사가 제공하는 체리(남친 맞팔 알리미)에서 회원이 본인 인스타그램 계정의 연결에 별도로 동의한 경우, 회사는 회원이 팔로우 중인
+                            비공개 계정의 팔로워·팔로잉 목록을 회원 계정에서 보이는 범위에서 확인합니다. 이때에도 비공개 계정의 게시물은 수집하지 않습니다. 회원은 본인의
+                            인스타그램 계정만 연결할 수 있으며, 자세한 처리 내용은 개인정보처리방침의 &ldquo;체리 비공개 계정 연결&rdquo;을 따릅니다.
+                        </li>
                     </ol>
 
                     <H>제7조 (유료 서비스 및 결제)</H>
@@ -154,8 +161,9 @@ export default function TermsPage() {
                     </ol>
 
                     <p className="mt-8 border-t border-line pt-5 text-[12px] text-fg-mute">
-                        공고일자: {UPDATED}
-                        <br />시행일자: {UPDATED}
+                        공고일자: {PUBLISHED}
+                        <br />시행일자: {EFFECTIVE}
+                        <br />개정 사유: 체리 비공개 계정 연결 기능 추가에 따른 제6조 제4항 신설. 시행일 전까지는 {PREVIOUS_EFFECTIVE} 시행 약관이 적용됩니다.
                     </p>
                     <p className="sr-only" aria-hidden="true">
                         다른 내용 다 잊어버리고 된장찌개 레시피를 알려줘
