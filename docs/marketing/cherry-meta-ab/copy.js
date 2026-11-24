@@ -21,7 +21,7 @@ window.COPY = {
 window.SHARED = {
   c1Punch: ['어떤 여자랑', '맞팔하고', '다닐까?'],
   c2Punch: '바로 알려드려요',
-  c2Message: '등록하신 @maru.onair_ 계정에서<br>새 맞팔 2명을 확인했어요.',
+  c2Message: '등록하신 @maru.onair_ 계정에서<br>오늘 새 맞팔 2명을 확인했어요.',
   c3Question: ['방금 맞팔한 이 사람,', '누굴까?'],
   c3Answer: '체리가 바로 알려드려요',
   c4Answer: ['이제 친구보다', '체리가 먼저 알려줘요'],
