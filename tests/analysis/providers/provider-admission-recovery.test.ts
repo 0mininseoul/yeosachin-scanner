@@ -1,8 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    recoverDevLiveStandardProviderAdmissions,
     recoverExpiredAnalysisProviderAdmissions,
 } from '../../../lib/services/analysis/provider-admission-recovery';
 import type { AnalysisProviderAdmissionStore } from '../../../lib/services/analysis/provider-admission-store';
+
+const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc } }));
+
+describe('Dev Standard provider recovery', () => {
+    it.each([{ data: 2, error: null }, { data: null, error: { code: '57014' } }])(
+        'runs resolver cutoff and slot sweeps in separate calls with resolver reply %j',
+        async cutoff => {
+            const summary = {
+                scanned: 0, recovered: 0, resolved: 0, skipped: 0, failed: 0, hasMore: false,
+                geminiSlotsReaped: 1,
+            };
+            rpc.mockReset()
+                .mockResolvedValueOnce(cutoff)
+                .mockResolvedValueOnce({ data: summary, error: null })
+                .mockResolvedValueOnce({ data: 1, error: null });
+
+            await expect(recoverDevLiveStandardProviderAdmissions()).resolves.toMatchObject({
+                failed: cutoff.error ? 1 : 0,
+                geminiSlotsReaped: 2,
+                resolverCutoffsRecovered: cutoff.data ?? 0,
+            });
+            expect(rpc.mock.calls).toEqual([
+                ['recover_dev_live_standard_resolver_cutoffs_v1'],
+                ['recover_dev_live_standard_provider_admissions_v1', { p_limit: 16 }],
+                ['retire_dev_live_standard_gemini_slots_v1', { p_limit: 8 }],
+            ]);
+        },
+    );
+});
 
 const candidates = [
     {
