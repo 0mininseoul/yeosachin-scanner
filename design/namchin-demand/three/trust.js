@@ -107,7 +107,7 @@ export async function mountTrust(container) {
 
   const source = plane({
     width: 1.6, height: 2.0, pixels: 640,
-    draw: (ctx, w, h) => nodeCard(ctx, w, h, { title: TARGET.full, lines: ['공개 프로필', '아무것도 몰라요'], accent: '#5b8a4a', picture: him }),
+    draw: (ctx, w, h) => nodeCard(ctx, w, h, { title: TARGET.full, lines: ['인스타 프로필', '아무것도 몰라요'], accent: '#5b8a4a', picture: him }),
   });
   const target = plane({
     width: 1.6, height: 2.0, pixels: 640,
