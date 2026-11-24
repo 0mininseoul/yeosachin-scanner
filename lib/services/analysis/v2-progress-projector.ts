@@ -193,6 +193,9 @@ export function projectAnalysisV2Progress(input: {
         + (input.state.primaryJoin ? 1 : 0)
         + (input.state.screening ? 1 : 0)
         + (input.state.partnerSafety ? 1 : 0);
+    // Durable track totals cannot decrease once bootstrap has published the plan
+    // capacity. Express the frozen topology's completed fraction in those same units.
+    const relationshipUnits = getAnalysisV2ConservativeProfileBatchCount(input.state.planId) * 2 + 4;
     const interactionDone = (input.state.targetEvidence ? 1 : 0)
         + (input.state.reverseLikes ? 1 : 0);
     const finalizationDone = (input.state.privateNameBatches?.length ?? 0)
@@ -204,8 +207,8 @@ export function projectAnalysisV2Progress(input: {
             relationshipAi: track({
                 id: 'relationshipAi',
                 activeStage: input.activeStage,
-                done: relationshipDone,
-                total: totals.relationshipAi,
+                done: Math.floor(relationshipDone * relationshipUnits / totals.relationshipAi),
+                total: relationshipUnits,
                 completed: completedRelationshipTrack(input.state),
             }),
             interactions: track({

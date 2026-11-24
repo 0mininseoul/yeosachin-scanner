@@ -128,7 +128,8 @@ describe('analysis V2 progress projector', () => {
                 }],
             }),
         });
-        expect(projected.tracks.relationshipAi.done).toBe(3);
+        // Three of six real work items occupy half of Basic's 24 durable units.
+        expect(projected.tracks.relationshipAi).toMatchObject({done: 12, total: 24});
         expect(projected.event).toEqual({
             state: 'confirmed',
             eventCode: 'PROFILE_SCREENED',
@@ -173,8 +174,8 @@ describe('analysis V2 progress projector', () => {
         expect(projected.tracks.relationshipAi).toEqual({
             state: 'completed',
             stageCode: 'RELATIONSHIP_AI_COMPLETE',
-            done: 4,
-            total: 4,
+            done: 24,
+            total: 24,
         });
     });
 

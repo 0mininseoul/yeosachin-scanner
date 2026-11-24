@@ -175,7 +175,7 @@ describe('analysis V2 progress reporter', () => {
             eventCode: 'RELATIONSHIP_PROGRESS',
             aggregateCount: 42,
         });
-        expect(payload.tracks.relationshipAi.done).toBe(1);
+        expect(payload.tracks.relationshipAi).toMatchObject({ done: 3, total: 24 });
         expect(JSON.stringify(payload)).not.toContain('instagram');
     });
 
@@ -230,7 +230,7 @@ describe('analysis V2 progress reporter', () => {
             [AnalysisV2ProgressCheckpointInput],
         ])[1][0];
         expect(reloadState).toHaveBeenCalledOnce();
-        expect(retryInput.tracks.relationshipAi.done).toBe(3);
+        expect(retryInput.tracks.relationshipAi).toMatchObject({ done: 12, total: 24 });
         expect(retryInput.tracks.relationshipAi.stageCode)
             .toBe('PUBLIC_PROFILES_COLLECTING');
     });
