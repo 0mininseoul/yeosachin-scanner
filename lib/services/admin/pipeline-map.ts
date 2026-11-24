@@ -221,7 +221,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: '자체 크롤러 · Apify',
         numbers: [{ label: '배치 크기', value: people(ANALYSIS_V2_PROFILE_BATCH_LIMIT) }],
-        failure: '배치 단위로 재시도합니다.',
+        failure: 'Apify 종료 기록 저장이 시간 초과되면 같은 기록을 한 번 다시 저장합니다. 재전달되면 기존 실행에서 이어갑니다.',
         code: ['lib/services/analysis/v2-collection-executors.ts', 'lib/services/analysis/profile-cache.ts'],
     },
     profile_ai: {

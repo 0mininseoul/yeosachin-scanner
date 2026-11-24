@@ -257,7 +257,7 @@ afterEach(() => {
     vi.clearAllMocks();
 });
 
-it.each(['first', 'second', 'timeout'])(
+it.each(['first', 'second', 'timeout', 'terminal receipt timeout'])(
     'publishes one Dev Standard request from a fresh database (%s)',
     async (scenario) => {
         configure();
@@ -269,6 +269,7 @@ it.each(['first', 'second', 'timeout'])(
             runtime.user = user;
             const client = localDatabaseClient(db);
             let timeouts = 0;
+            const receiptCalls: Record<string, unknown>[] = [];
             const producerHashes: string[] = [];
             const sqlErrors: string[] = [];
             runtime.admin.rpc.mockImplementation(async (n, a) => {
@@ -284,6 +285,15 @@ it.each(['first', 'second', 'timeout'])(
                             error: { code: '57014', message: 'canceling statement due to statement timeout' },
                         };
                     }
+                }
+                if (scenario === 'terminal receipt timeout' &&
+                    n === 'checkpoint_analysis_v2_provider_run_terminal' &&
+                    a.p_job_key === 'track:profiles:batch:0') {
+                    receiptCalls.push({ ...a });
+                    if (receiptCalls.length <= 2) return {
+                        data: null,
+                        error: { code: '57014', message: 'canceling statement due to statement timeout' },
+                    };
                 }
                 const out = await client.rpc(n, a);
                 if (out.error && !out.error.message.includes('FENCE'))
@@ -391,6 +401,7 @@ it.each(['first', 'second', 'timeout'])(
                 ).rows[0];
             let steps = 0;
             let continued = 0;
+            let receiptRedeliveries = 0;
             const modelCallsBefore = runtime.model.mock.calls.length;
             const stateStore = createSupabaseAnalysisV2DagStateStore();
             const worker = {
@@ -406,6 +417,20 @@ it.each(['first', 'second', 'timeout'])(
                 const outcome = await withDevLiveProviderApproval(approval, () =>
                     processAnalysisV2TaskDelivery(delivery, worker),
                 );
+                if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
+                    expect(outcome.errorCode).toBe('ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR');
+                    expect(receiptRedeliveries).toBe(0);
+                    receiptRedeliveries++;
+                    expect(receiptCalls).toHaveLength(2);
+                    expect(receiptCalls[1]).toEqual(receiptCalls[0]);
+                    const telemetry = await db.query(
+                        'SELECT 1 FROM analysis_v2_profile_fetch_telemetry WHERE request_id=$1 AND job_key=$2',
+                        [delivery.requestId, delivery.jobKey],
+                    );
+                    expect(telemetry.rows).toHaveLength(0);
+                    runtime.queue.unshift(delivery); // Cloud Tasks retries the same delivery.
+                    continue;
+                }
                 if (outcome.status === 'continuation' && scenario === 'timeout') {
                     expect(outcome.errorCode).toBe('ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT');
                     expect(outcome.pendingRecoveryCount).toBe(0);
@@ -437,6 +462,15 @@ it.each(['first', 'second', 'timeout'])(
                 expect(await totals()).toEqual(before);
             }
             expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
+            expect(receiptRedeliveries).toBe(scenario === 'terminal receipt timeout' ? 1 : 0);
+            if (receiptRedeliveries) {
+                expect(receiptCalls).toHaveLength(3);
+                expect(receiptCalls[2].p_claim_token).not.toBe(receiptCalls[0].p_claim_token);
+                expect(receiptCalls[2]).toEqual({
+                    ...receiptCalls[0],
+                    p_claim_token: receiptCalls[2].p_claim_token,
+                });
+            }
             expect(producerHashes.length).toBeGreaterThanOrEqual(1 + continued);
             expect(producerHashes[0]).toMatch(/^[a-f0-9]{64}$/);
             expect(new Set(producerHashes).size).toBe(1);
@@ -454,7 +488,7 @@ it.each(['first', 'second', 'timeout'])(
             expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
             expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
             expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
-            expect(steps).toBe(12 + continued);
+            expect(steps).toBe(12 + continued + receiptRedeliveries);
             expect(apify.starts).toHaveLength(9);
             expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);
             expect(await totals()).toMatchObject({

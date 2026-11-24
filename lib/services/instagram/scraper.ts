@@ -36,7 +36,7 @@ import {
     type ScraperConfig,
 } from './config';
 import { apifyProvider } from './providers/apify';
-import { APIFY_PROVIDER_QUOTA_ERROR_CODE } from './providers/apify-relationship';
+import { APIFY_PROVIDER_QUOTA_ERROR_CODE, isApifyProviderLifecycleError } from './providers/apify-relationship';
 import { coderXProvider } from './providers/coderx';
 import { flashApiProvider } from './providers/flashapi';
 import { rapidApiProvider } from './providers/rapidapi';
@@ -546,10 +546,7 @@ async function runProfileOutcomeAttempt(
     requestedUsernames: readonly string[],
     fallback: boolean,
     options: ScrapeRequestOptions
-): Promise<{
-    results: readonly ProfileAttemptResult[];
-    paidRunBarrierError?: Error;
-}> {
+): Promise<readonly ProfileAttemptResult[]> {
     const startedAt = Date.now();
     try {
         const results = await runAttempt(
@@ -577,36 +574,23 @@ async function runProfileOutcomeAttempt(
             options,
             value => value.filter(result => result.outcome.status === 'success').length
         );
-        return {
-            results: immutableAttemptResults(
-                validateProfileAttemptResults(requestedUsernames, source, results)
-            ),
-        };
+        return immutableAttemptResults(validateProfileAttemptResults(requestedUsernames, source, results));
     } catch (error) {
-        if (
-            error instanceof Error
-            && error.message.startsWith('SCRAPING_CONFIG_ERROR:')
-        ) {
-            throw error;
-        }
-        const paidRunBarrierError = error instanceof Error && (
-            error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
+        // A run or checkpoint error belongs to the job. Saving it for every username
+        // would seal the fallback or fresh batch before its dataset has been read.
+        if (error instanceof Error && (
+            (source === 'apify' && isApifyProviderLifecycleError(error))
+            || error.message === APIFY_PROVIDER_QUOTA_ERROR_CODE
             || [
+                'SCRAPING_CONFIG_ERROR:',
                 'SCRAPING_AMBIGUOUS_START_ERROR:',
                 'SCRAPING_RUN_CHECKPOINT_ERROR:',
                 'SCRAPING_RUN_PENDING_ERROR:',
                 'ANALYSIS_PERSISTENCE_ERROR:',
                 'ANALYSIS_V2_PROGRESS_',
             ].some(prefix => error.message.startsWith(prefix))
-        )
-            ? error
-            : undefined;
-        return {
-            results: immutableAttemptResults(
-                allFailedProfileAttempts(requestedUsernames, source, error, startedAt)
-            ),
-            ...(paidRunBarrierError ? { paidRunBarrierError } : {}),
-        };
+        )) throw error;
+        return immutableAttemptResults(allFailedProfileAttempts(requestedUsernames, source, error, startedAt));
     }
 }
 
@@ -898,7 +882,7 @@ export async function getProfilesBatchV2(
                 'FRESH_PROVENANCE_CONFIG_ERROR: direct Apify profile collection requires one durable live provider checkpoint.'
             );
         }
-        const directAttempt = await runProfileOutcomeAttempt(
+        const results = await runProfileOutcomeAttempt(
             fallback,
             'apify',
             requestedUsernames,
@@ -911,30 +895,29 @@ export async function getProfilesBatchV2(
                 providerRun: options.providerRun,
             }
         );
-        if (directAttempt.paidRunBarrierError) throw directAttempt.paidRunBarrierError;
         await persistProfileAttempt(options, Object.freeze({
             attempt: 'fresh_apify',
             source: 'apify' as const,
             requestedUsernames,
-            results: directAttempt.results,
+            results,
         }));
         candidateFailureEvents += emitV2CandidateFailures(
-            directAttempt.results,
+            results,
             MAX_BATCH_EXCEPTION_EVENTS - candidateFailureEvents,
         );
         const frozenUnresolvedUsernames = Object.freeze(
             summarizeProfileFetchOutcomes(
                 requestedUsernames,
-                directAttempt.results.map(result => result.outcome)
+                results.map(result => result.outcome)
             ).unresolvedUsernames
         );
-        const profiles = directAttempt.results.flatMap(result => (
+        const profiles = results.flatMap(result => (
             'profile' in result ? [result.profile] : []
         ));
         return Object.freeze({
-            results: directAttempt.results,
+            results,
             profiles: Object.freeze(profiles),
-            primaryResults: directAttempt.results,
+            primaryResults: results,
             fallbackResults: Object.freeze([]),
             frozenUnresolvedUsernames,
         });
@@ -994,7 +977,7 @@ export async function getProfilesBatchV2(
         }
         frozenUnresolvedUsernames = Object.freeze(supplied);
     } else {
-        const primaryAttempt = await runProfileOutcomeAttempt(
+        primaryResults = await runProfileOutcomeAttempt(
             primary,
             'selfhosted',
             requestedUsernames,
@@ -1007,8 +990,6 @@ export async function getProfilesBatchV2(
                 selfHostedAuthIdentity: options.selfHostedAuthIdentity,
             }
         );
-        if (primaryAttempt.paidRunBarrierError) throw primaryAttempt.paidRunBarrierError;
-        primaryResults = primaryAttempt.results;
         await persistProfileAttempt(options, Object.freeze({
             attempt: 'primary',
             source: 'selfhosted',
@@ -1044,7 +1025,7 @@ export async function getProfilesBatchV2(
                 'SCRAPING_CONFIG_ERROR: V2 paid fallback requires a durable provider-run checkpoint.'
             );
         }
-        const fallbackAttempt = await runProfileOutcomeAttempt(
+        fallbackResults = await runProfileOutcomeAttempt(
             fallback,
             'apify',
             frozenUnresolvedUsernames,
@@ -1057,11 +1038,6 @@ export async function getProfilesBatchV2(
                 providerRun: options.providerRun,
             }
         );
-        fallbackResults = fallbackAttempt.results;
-        // A run/checkpoint barrier is not a terminal per-username provider outcome. Persisting
-        // synthetic failures here would seal the frozen fallback set and make a same-run retry
-        // conflict when the Actor later succeeds.
-        if (fallbackAttempt.paidRunBarrierError) throw fallbackAttempt.paidRunBarrierError;
         await persistProfileAttempt(options, Object.freeze({
             attempt: 'fallback',
             source: 'apify',
