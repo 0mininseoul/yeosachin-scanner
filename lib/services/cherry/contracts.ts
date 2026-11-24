@@ -48,7 +48,7 @@ export type CherryConsentId = typeof CHERRY_CONSENTS[number]['id'];
  * Asked only for a private target, after Kakao login; the checkout consents above stay as they are for public targets.
  * Not shown yet: the connection flow ships later (launch plan, private accounts). Bump the version when a sentence changes.
  */
-export const CHERRY_PRIVATE_CONNECTION_CONSENT_VERSION = 'cherry-private-2026-11-v1';
+export const CHERRY_PRIVATE_CONNECTION_CONSENT_VERSION = 'cherry-private-2026-11-v2';
 
 export const CHERRY_PRIVATE_CONNECTION_CONSENTS = [
     {
@@ -58,7 +58,7 @@ export const CHERRY_PRIVATE_CONNECTION_CONSENTS = [
             '목적: 내가 팔로우 중인 비공개 계정의 새 맞팔을 확인하려고 내 인스타그램 계정으로 로그인해요.',
             '수집 항목: 내 인스타그램 아이디·비밀번호, 로그인 세션, 등록한 비공개 계정의 팔로워·팔로잉 목록, 내 계정으로 조회한 기록. 2단계 인증 비밀키는 받지 않고, 로그인 확인용 인증번호는 저장하지 않아요.',
             '이용 범위: 등록한 비공개 계정 1개의 프로필과 팔로워·팔로잉 목록만 읽어요. 내 계정으로 팔로우·좋아요·메시지·스토리 열람을 하지 않고, 비공개 계정의 게시물은 수집하지 않아요.',
-            '보관: 비밀번호와 로그인 세션은 암호화 보관소(Vault)에 암호화해 보관하고, 서비스 운영자도 볼 수 없어요.',
+            '보관: 입력한 비밀번호와 로그인 세션은 암호화 보관소(Vault)로 바로 들어가요. 비밀번호는 인스타그램에 로그인할 때만, 로그인 세션은 매일 목록을 확인할 때만 풀려요. 운영자 화면과 기록에는 나오지 않고, 풀 때마다 그 기록이 남아요.',
             '보유 기간: 연결을 해제하거나 이용 기간이 끝나거나 탈퇴하면 바로 삭제하고 인스타그램에서 로그아웃해요. 확인한 목록은 이용 종료 30일 뒤에 삭제해요.',
             '동의하지 않을 수 있어요. 동의하지 않으면 비공개 계정은 등록할 수 없고, 공개 계정은 그대로 이용할 수 있어요.',
         ],
