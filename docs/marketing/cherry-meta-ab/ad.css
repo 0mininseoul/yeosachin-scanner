@@ -137,3 +137,17 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .c1 .lead, .c1 .punch, .c2 .lead, .c2 .punch, .c4 h1 span { margin-left: -0.06em; }
 .c1 .offer span, footer .brand span { margin-left: -0.04em; }
 .c4 .name { margin-left: -0.04em; }
+
+/* C2 v2: the alert card is the hero. No lock-screen clock or date. */
+.c2 .lock { top: calc(var(--top) + 330px); }
+.c2 .push { margin-top: 0; padding: 44px 48px 48px; border-radius: 52px; }
+.c2 .push header { font-size: 32px; gap: 16px; }
+.c2 .push header img { width: 56px; height: 56px; }
+.c2 .push-title { margin-top: 22px; font-size: 48px; }
+.c2 .push-text { margin-top: 10px; font-size: 44px; line-height: 1.4; }
+.c2 .push-people { gap: 20px; margin-top: 34px; }
+.c2 .push-people li { padding: 12px 28px 12px 12px; }
+.c2 .push-people img { width: 84px; height: 84px; }
+.c2 .push-people b { font-size: 36px; }
+.ad--story.c2 .lock { top: calc(var(--top) + 400px); }
+.ad--story.c2 .push { margin-top: 0; }
