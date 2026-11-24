@@ -204,16 +204,16 @@ function sharedFemaleRow(
     row: AnalysisResultPageV1['femaleAccounts'][number],
     shareToken: string
 ) {
-    // A named owner narrative includes the canonical candidate subject in
-    // both lines. Do not republish it on the masked share, even if its names
-    // contain no digits and the generic public-copy checks would pass.
+    // The owner narrative can name the candidate. The shared narrative still
+    // uses the generic contract and excludes both display names and handles.
     let highRiskNarrative = null;
     if (row.highRiskNarrative) {
-        const subject = v211CopySubjectName(row.fullName, row.instagramId).normalize('NFKC').toLowerCase();
-        const handle = row.instagramId.toLowerCase();
+        const identifiers = [row.instagramId, row.fullName, v211CopySubjectName(row.fullName, row.instagramId)]
+            .map(value => value?.normalize('NFKC').trim().toLowerCase())
+            .filter((value): value is string => Boolean(value));
         const identifiesCandidate = row.highRiskNarrative.some(line => {
             const normalized = line.normalize('NFKC').toLowerCase();
-            return normalized.includes(subject) || normalized.includes(handle);
+            return identifiers.some(identifier => normalized.includes(identifier));
         });
         if (!identifiesCandidate) {
             const narrative = femaleResultRowV1Schema.shape.highRiskNarrative.safeParse(row.highRiskNarrative);
