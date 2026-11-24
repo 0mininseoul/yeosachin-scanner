@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { NextResponse } from 'next/server';
 import { handleDevUiResultRead, shouldHandleDevUiRequest } from '@/lib/services/dev-ui/routes';
 import { isDevLiveAnalysisRequest, withDevLiveRead } from '@/lib/services/dev-ui/live-analysis';
-import { analysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
+import { analysisResultPageV1Schema, storedAnalysisResultPageV1Schema } from '@/lib/contracts/analysis-v2';
 import {
     RESULT_PAGE_SIZE_DEFAULT,
     RESULT_PAGE_SIZE_MAX,
@@ -174,7 +174,7 @@ async function handleGET(
             return json({ error: 'Analysis result not found.' }, 404);
         }
 
-        const response = json(analysisResultPageV1Schema.parse(result), 200);
+        const response = json(storedAnalysisResultPageV1Schema.parse(result), 200);
         if (
             !verifiedDevUser
             && !url.searchParams.has('femaleCursor')

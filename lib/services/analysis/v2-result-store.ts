@@ -3,7 +3,9 @@ import 'server-only';
 import { z } from 'zod';
 import {
     ANALYSIS_V2_SCHEMA_VERSION,
-    analysisResultPageV1Schema,
+    storedAnalysisResultPageV1Schema,
+    storedFemaleResultRowV1Schema,
+    storedRiskNarrativeLinesV1Schema,
     analysisResultSummaryV1Schema,
     femaleResultRowV1Schema,
     privateResultRowV1Schema,
@@ -38,6 +40,12 @@ import {
     refreshBetaApifyCreditSnapshots,
     settleBetaApifyRequestCredit,
 } from './beta-apify-credit-settlement-runtime';
+import {
+    hasV211NarrativeSubjects,
+    parseV211NarrativeWithSubjects,
+    v211CopySubjectNames,
+    type V211CopySubjects,
+} from './public-copy-quality';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -383,6 +391,7 @@ export interface AnalysisV2ResultStore {
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointNarratives(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2NarrativeRow[];
+        v211SubjectsByCandidate?: ReadonlyMap<string, V211CopySubjects>;
     }): Promise<AnalysisV2ResultCheckpointManifest>;
     checkpointRevenueResolverOutcomes(input: AnalysisV2ResultJobClaim & {
         rows: readonly AnalysisV2RevenueResolverOutcomePatch[];
@@ -850,7 +859,7 @@ const privateNameRowSchema = z.object({
 
 const narrativeRowSchema = z.object({
     candidateId: candidateIdSchema,
-    lines: femaleResultRowV1Schema.shape.highRiskNarrative.unwrap(),
+    lines: storedRiskNarrativeLinesV1Schema,
     source: z.enum(['checkpoint', 'safe_fallback', 'not_applicable']),
     operationKey: operationKeySchema.regex(/^high-risk-narrative:/).nullable(),
     aiResultHash: hashSchema.nullable(),
@@ -928,7 +937,7 @@ const rawSummarySchema = z.object({
     }
 });
 const { profileImage: femaleImageShape, ...femaleWithoutImageShape } =
-    femaleResultRowV1Schema.shape;
+    storedFemaleResultRowV1Schema.shape;
 void femaleImageShape;
 const rawFemaleResultRowSchema = z.object({
     ...femaleWithoutImageShape,
@@ -1215,7 +1224,7 @@ function publicFemaleEnvelope(
     return Object.freeze({
         candidateId: entry.candidateId,
         sortOrdinal: entry.sortOrdinal,
-        row: femaleResultRowV1Schema.parse({
+        row: storedFemaleResultRowV1Schema.parse({
             ...row,
             profileImage: publicImagePath(profileImageUrl, signer, {
                 requestId,
@@ -1335,7 +1344,7 @@ export function paginateAnalysisV2FinalizedSnapshot(input: {
         cursor: input.privateCursor,
         pageSize,
     });
-    return analysisResultPageV1Schema.parse({
+    return storedAnalysisResultPageV1Schema.parse({
         schemaVersion: ANALYSIS_V2_SCHEMA_VERSION,
         requestId: input.snapshot.requestId,
         summary: input.snapshot.summary,
@@ -1507,6 +1516,21 @@ export function createSupabaseAnalysisV2ResultStore(
             const rows = uniqueSortedRows(input.rows, narrativeRowSchema);
             if (rows.length > 3) {
                 throw new Error('ANALYSIS_V2_RESULT_VALIDATION_ERROR: too many narratives.');
+            }
+            for (const row of rows) {
+                if (input.v211SubjectsByCandidate && row.source === 'checkpoint') {
+                    const source = input.v211SubjectsByCandidate.get(row.candidateId);
+                    if (!source) {
+                        throw new Error('ANALYSIS_V2_RESULT_VALIDATION_ERROR: missing narrative subjects.');
+                    }
+                    const subjects = v211CopySubjectNames(source);
+                    if (!hasV211NarrativeSubjects(row.lines, subjects)
+                        || !parseV211NarrativeWithSubjects([...row.lines], subjects)) {
+                        throw new Error('ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid narrative subjects.');
+                    }
+                } else {
+                    femaleResultRowV1Schema.shape.highRiskNarrative.unwrap().parse(row.lines);
+                }
             }
             return checkpoint(
                 ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointNarrativeRpc,

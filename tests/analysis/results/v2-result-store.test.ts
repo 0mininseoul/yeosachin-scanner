@@ -903,6 +903,59 @@ describe('analysis V2 result finalization and loading', () => {
             .rejects.toThrow('invalid result snapshot');
     });
 
+    it('persists and reads v2.11 narratives with exact subjects without allowing other metrics', async () => {
+        const jobKey = 'track:narratives:batch:0';
+        const lines = [
+            'sample2 이름으로 공개 일상이 차분히 정리되어 있습니다.',
+            'sample2가 target7에게 남긴 댓글을 확인했지만 수집 범위 밖의 관계까지 알 수는 없습니다.',
+        ] as const;
+        const snapshot = rawSnapshot(1);
+        Object.assign(snapshot.femaleAccounts[0]!.row, {
+            instagramId: 'sample2',
+            displayScore: 8.2,
+            riskBand: 'high_risk',
+            featuredRank: 1,
+            analysisDepth: 'narrative',
+            highRiskNarrative: lines,
+        });
+        // Preflight and the paid target lookup can have different display names.
+        Object.assign(snapshot.summary, { targetFullName: '이전 표시 이름' });
+        const fake = rpcClient(
+            { data: manifest(jobKey, null), error: null },
+            { data: snapshot, error: null },
+        );
+        const store = createSupabaseAnalysisV2ResultStore(fake.client, {
+            imageProxySigner: () => '/api/image-proxy?signed=1',
+        });
+        const row = {
+            candidateId: 'candidate-1',
+            lines,
+            source: 'checkpoint',
+            operationKey: `high-risk-narrative:${hashA}`,
+            aiResultHash: hashB,
+        } as const;
+        const v211SubjectsByCandidate = new Map([['candidate-1', {
+            targetUsername: 'target7',
+            candidateUsername: 'sample2',
+        }]]);
+        const input = { ...claim(jobKey), rows: [row], v211SubjectsByCandidate };
+
+        await expect(store.checkpointNarratives({ ...input, v211SubjectsByCandidate: undefined })).rejects.toThrow();
+        await expect(store.checkpointNarratives({
+            ...input,
+            rows: [{ ...row, lines: [lines[0], lines[1] + ' 댓글 5회도 확인했습니다.'] }],
+        })).rejects.toThrow('invalid narrative subjects');
+        expect(fake.rpc).not.toHaveBeenCalled();
+
+        await store.checkpointNarratives(input);
+        expect(fake.rpc.mock.calls[0]).toEqual([
+            ANALYSIS_V2_RESULT_DATABASE_NAMES.checkpointNarrativeRpc,
+            expect.objectContaining({ p_rows: [row] }),
+        ]);
+        const result = await store.loadPage({ requestId, userId, pageSize: 2 });
+        expect(result?.femaleAccounts[0]?.highRiskNarrative).toEqual(lines);
+    });
+
     it('paginates both result lists without duplicates and rejects a cross-list cursor', async () => {
         const fake = rpcClient({ data: rawSnapshot(3), error: null });
         const store = createSupabaseAnalysisV2ResultStore(fake.client, {

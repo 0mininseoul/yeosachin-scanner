@@ -24,6 +24,8 @@ import {
 import {
     containsDefinitiveRelationshipAccusation,
     containsExposedInteractionMetric,
+    hasPublicRiskCoverageCaveat,
+    hasPublicRiskInteractionReference,
     parseSafePublicRiskNarrative,
 } from '@/lib/services/analysis/narrative-privacy';
 
@@ -93,7 +95,7 @@ const FORBIDDEN_PUBLIC_COPY_PATTERNS = [
     /@/u,
 ] as const;
 
-function publicCopySchema(maxLength: number) {
+function publicCopyFormatSchema(maxLength: number) {
     return z.string()
         .trim()
         .min(1)
@@ -105,14 +107,28 @@ function publicCopySchema(maxLength: number) {
             'Public analysis copy contains an identifier or URL.'
         )
         .refine(
-            value => !containsExposedInteractionMetric(value),
-            'Public analysis copy contains an exposed interaction metric.'
-        )
-        .refine(
             value => !containsDefinitiveRelationshipAccusation(value),
             'Public analysis copy contains a factual relationship accusation.'
         );
 }
+
+function publicCopySchema(maxLength: number) {
+    return publicCopyFormatSchema(maxLength).refine(
+        value => !containsExposedInteractionMetric(value),
+        'Public analysis copy contains an exposed interaction metric.'
+    );
+}
+
+// These lines come from the fenced narrative writer. The writer has the exact
+// model subjects needed for the metric check; older result summaries may not.
+export const storedRiskNarrativeLinesV1Schema = z.tuple([
+    publicCopyFormatSchema(180),
+    publicCopyFormatSchema(180),
+]).refine(lines => (
+    lines[0] !== lines[1]
+    && hasPublicRiskInteractionReference(lines[1])
+    && hasPublicRiskCoverageCaveat(lines[1])
+), { message: 'High-risk narrative does not satisfy the stored two-line format.' });
 
 function resultCursorSchema(list: 'public' | 'private') {
     return z.string().min(1).max(1_024).superRefine((value, context) => {
@@ -915,6 +931,10 @@ export const femaleResultRowV1Schema = z.object({
     }
 });
 
+export const storedFemaleResultRowV1Schema = femaleResultRowV1Schema.safeExtend({
+    highRiskNarrative: storedRiskNarrativeLinesV1Schema.nullable(),
+});
+
 export const privateResultRowV1Schema = z.object({
     instagramId: usernameSchema,
     fullName: z.string().max(200).nullable(),
@@ -946,6 +966,10 @@ export const analysisResultPageV1Schema = z.object({
             usernames.add(row.instagramId);
         });
     }
+});
+
+export const storedAnalysisResultPageV1Schema = analysisResultPageV1Schema.safeExtend({
+    femaleAccounts: z.array(storedFemaleResultRowV1Schema).max(RESULT_PAGE_SIZE_MAX),
 });
 
 export type AnalysisResultSummaryV1 = z.infer<typeof analysisResultSummaryV1Schema>;

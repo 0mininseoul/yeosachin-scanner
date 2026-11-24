@@ -1,3 +1,4 @@
+import { v211CopySubjectName } from '@/lib/services/analysis/public-copy-quality';
 import { z } from 'zod';
 import {
     analysisResultSummaryV1Schema,
@@ -203,6 +204,22 @@ function sharedFemaleRow(
     row: AnalysisResultPageV1['femaleAccounts'][number],
     shareToken: string
 ) {
+    // The owner narrative can name the candidate. The shared narrative still
+    // uses the generic contract and excludes both display names and handles.
+    let highRiskNarrative = null;
+    if (row.highRiskNarrative) {
+        const identifiers = [row.instagramId, row.fullName, v211CopySubjectName(row.fullName, row.instagramId)]
+            .map(value => value?.normalize('NFKC').trim().toLowerCase())
+            .filter((value): value is string => Boolean(value));
+        const identifiesCandidate = row.highRiskNarrative.some(line => {
+            const normalized = line.normalize('NFKC').toLowerCase();
+            return identifiers.some(identifier => normalized.includes(identifier));
+        });
+        if (!identifiesCandidate) {
+            const narrative = femaleResultRowV1Schema.shape.highRiskNarrative.safeParse(row.highRiskNarrative);
+            if (narrative.success) highRiskNarrative = narrative.data;
+        }
+    }
     return {
         accountKey: createV2SharedAccountKey(
             shareToken,
@@ -218,7 +235,7 @@ function sharedFemaleRow(
         recentMutualRank: row.recentMutualRank,
         analysisDepth: row.analysisDepth,
         oneLineOverview: row.oneLineOverview,
-        highRiskNarrative: row.highRiskNarrative,
+        highRiskNarrative,
     };
 }
 

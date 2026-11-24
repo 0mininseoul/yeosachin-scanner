@@ -55,6 +55,7 @@ import {
 } from '@/lib/services/analysis/v2-ai-fallback-policy';
 import {
     buildV211EvidenceSpecificOverview,
+    hasV211NarrativeSubjects,
     parseV211NarrativeWithSubjects,
     v211CopySubjectNames,
 } from '@/lib/services/analysis/public-copy-quality';
@@ -3623,12 +3624,7 @@ function narrativeResponseSchemaFor(
         });
         if (v211Subjects) {
             const [first, second] = texts;
-            if (
-                /(?:대상\s*계정|후보\s*계정)/u.test(first + second)
-                || !first.includes(v211Subjects.candidate)
-                || !second.includes(v211Subjects.candidate)
-                || !second.includes(v211Subjects.target)
-            ) {
+            if (!hasV211NarrativeSubjects(texts, v211Subjects)) {
                 context.addIssue({
                     code: 'custom',
                     path: ['lines'],

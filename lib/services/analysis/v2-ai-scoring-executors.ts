@@ -1,3 +1,4 @@
+import type { V211CopySubjects } from './public-copy-quality';
 import {
     currentDevStandardArchive,
     DevStandardArchiveError,
@@ -3568,6 +3569,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             }
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));
+            const fence = aiJobFence(context);
+            const v211SubjectsByCandidate = policySupports(fence.aiStagePolicyVersion, 'genderSummaryQualityV211')
+                ? new Map<string, V211CopySubjects>()
+                : undefined;
             const rows = await runBounded(
                 finalScores.narrativeCandidateIds,
                 narrativeConcurrency,
@@ -3610,7 +3615,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             ...(selected?.postId ? { postId: selected.postId } : {}),
                         };
                     });
-                    const analyzed = await dependencies.ai.narrative(narrativeInput({
+                    const input = narrativeInput({
                         targetUsername: target.username,
                         targetFullName: target.fullName ?? null,
                         outcome,
@@ -3619,7 +3624,12 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         targetEvidence,
                         targetPosts: target.latestPosts ?? [],
                         reverse: reverseById.get(candidateId),
-                    }), aiJobFence(context));
+                    });
+                    v211SubjectsByCandidate?.set(candidateId, {
+                        ...input.forbiddenIdentifiers,
+                        ...input.publicSubjects,
+                    });
+                    const analyzed = await dependencies.ai.narrative(input, fence);
                     return {
                         candidateId,
                         lines: analyzed.result.lines,
@@ -3634,6 +3644,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const publicCheckpoint = await dependencies.resultStore.checkpointNarratives({
                 ...checkpointClaim(context),
                 rows,
+                v211SubjectsByCandidate,
             });
             assertCheckpointCount(publicCheckpoint, rows.length, 'NARRATIVE');
             const stored = await dependencies.stageStore.checkpointNarratives({
