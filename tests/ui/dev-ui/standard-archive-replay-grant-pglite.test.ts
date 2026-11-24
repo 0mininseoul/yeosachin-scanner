@@ -64,17 +64,24 @@ describe('Dev sealed Standard replay grant', () => {
             CREATE TABLE public.analysis_preflights(
                 id uuid PRIMARY KEY, user_id uuid, target_instagram_id text, idempotency_key text UNIQUE,
                 consumed_request_id uuid, status text, admission_status text, access_mode text, analysis_entry_channel text,
-                admission_selected_plan_id text, beta_entry_provenance text, admission_entitlement_jti_hash text
+                admission_selected_plan_id text, beta_entry_provenance text, admission_entitlement_jti_hash text,
+                consumed_at timestamptz DEFAULT now(), pii_scrubbed_at timestamptz,
+                target_full_name text, target_bio text, target_profile_image_url text,
+                exclusion_decision text DEFAULT 'skip', excluded_instagram_id text, updated_at timestamptz
             );
             CREATE TABLE public.analysis_requests(
                 id uuid PRIMARY KEY, preflight_id uuid, user_id uuid, target_instagram_id text, status text,
                 pipeline_version text, analysis_entry_channel text, plan_access_mode_snapshot text,
-                selected_plan_id_snapshot text, test_entitlement_jti_hash text
+                selected_plan_id_snapshot text, test_entitlement_jti_hash text, completed_at timestamptz DEFAULT now(),
+                exclusion_decision_snapshot text DEFAULT 'skip', excluded_instagram_id text
             );
             CREATE TABLE public.analysis_v2_test_entitlement_consumptions(
                 preflight_id uuid, request_id uuid, user_id uuid, selected_plan_id text, entitlement_jti_hash text PRIMARY KEY
             );
         `);
+        const baseline = await readFile(new URL('../../../supabase/dev-ui/production-baseline.sql', import.meta.url), 'utf8');
+        const scrub = baseline.indexOf('CREATE FUNCTION public.analysis_v2_scrub_terminal_request_pii(');
+        await db.exec(baseline.slice(scrub, baseline.indexOf('$$;', scrub) + 3));
         await install('live-owner-start');
         await install('live-owner-start-standard');
         await install('live-standard-archive-replay');
@@ -149,6 +156,42 @@ describe('Dev sealed Standard replay grant', () => {
         expect((await db.query('SELECT 1 FROM dev_live_budget.owner_starts WHERE attempt_id = $1', [attempt])).rows).toHaveLength(0);
     });
 
+    it('accepts only the exact completed source after the terminal privacy scrub', async () => {
+        const source = await start();
+        const request = await consume(source);
+        await db.query('SELECT public.analysis_v2_scrub_terminal_request_pii($1, clock_timestamp())', [request]);
+        const sourceRow = async () => (await db.query<{ preflight_target: string }>(`
+            SELECT request.target_instagram_id AS request_target, preflight.target_instagram_id AS preflight_target,
+                   preflight.pii_scrubbed_at IS NOT NULL AS scrubbed
+            FROM public.analysis_requests AS request
+            JOIN public.analysis_preflights AS preflight ON preflight.id = request.preflight_id
+            WHERE request.id = $1
+        `, [request])).rows[0];
+        const scrubbed = await sourceRow();
+        const retainedRequest = 'retained.' + request.replaceAll('-', '').slice(0, 20);
+        expect(scrubbed).toEqual({
+            request_target: retainedRequest, preflight_target: expect.stringMatching(/^retained\.[a-f0-9]{20}$/),
+            scrubbed: true,
+        });
+        const grant = await replay(source.id);
+        expect(grant).toHaveProperty('archiveReplay.sourceGrantId', source.id);
+        expect(await sourceRow()).toEqual(scrubbed);
+
+        await db.query('UPDATE public.analysis_requests SET target_instagram_id=$1 WHERE id=$2', [target, request]);
+        await expect(replay(source.id)).rejects.toThrow('DEV_STANDARD_ARCHIVE_REPLAY_UNAVAILABLE');
+        await db.query('UPDATE public.analysis_requests SET target_instagram_id=$1 WHERE id=$2', [retainedRequest, request]);
+        await db.query('UPDATE public.analysis_preflights SET target_instagram_id=$1 WHERE consumed_request_id=$2',
+            [retainedRequest, request]);
+        await expect(replay(source.id)).rejects.toThrow('DEV_STANDARD_ARCHIVE_REPLAY_UNAVAILABLE');
+        await db.query('UPDATE public.analysis_preflights SET target_instagram_id=$1 WHERE consumed_request_id=$2',
+            [scrubbed.preflight_target, request]);
+        await db.query("UPDATE public.analysis_requests SET completed_at=clock_timestamp()+interval '1 hour' WHERE id=$1",
+            [request]);
+        await expect(replay(source.id)).rejects.toThrow('DEV_STANDARD_ARCHIVE_REPLAY_UNAVAILABLE');
+        await expect(replay(source.id, randomUUID(), slotHash, owner, 'different_fixture'))
+            .rejects.toThrow('DEV_LIVE_OWNER_START_DENIED');
+    });
+
     it('keeps an expired binding visible, rejects new spend, and permits settlement of a pending receipt', async () => {
         const source = await start();
         const grant = await start();
@@ -173,8 +216,11 @@ describe('Dev sealed Standard replay grant', () => {
             expect((await db.query(`
                 SELECT has_function_privilege($1,'public.dev_live_standard_archive_replay_start_v1(uuid,text,uuid,uuid,text)','EXECUTE') AS start,
                     has_function_privilege($1,'public.dev_live_standard_archive_replay_lookup_v1(uuid)','EXECUTE') AS lookup,
-                    has_table_privilege($1,'dev_live_budget.standard_archive_replay_grants','SELECT,INSERT,UPDATE,DELETE') AS direct
-            `, [role])).rows).toEqual([{ start: role === 'service_role', lookup: role === 'service_role', direct: false }]);
+                    has_table_privilege($1,'dev_live_budget.standard_archive_replay_grants','SELECT,INSERT,UPDATE,DELETE') AS direct,
+                    has_function_privilege($1,'dev_live_budget.standard_archive_source_target_matches_v1(public.analysis_preflights,public.analysis_requests,uuid,text)','EXECUTE') AS source_match
+            `, [role])).rows).toEqual([{
+                start: role === 'service_role', lookup: role === 'service_role', direct: false, source_match: false,
+            }]);
         }
     });
 });
