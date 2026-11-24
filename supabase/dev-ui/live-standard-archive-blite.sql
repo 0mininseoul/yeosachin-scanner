@@ -10,6 +10,7 @@ BEGIN
        OR pg_catalog.to_regclass('dev_ui.runs') IS NULL
        OR pg_catalog.to_regclass('dev_live_budget.standard_archive_replay_grants') IS NULL
        OR pg_catalog.to_regprocedure('public.dev_live_standard_archive_replay_lookup_v1(uuid)') IS NULL
+       OR pg_catalog.to_regprocedure('dev_live_budget.standard_archive_source_target_matches_v1(public.analysis_preflights,public.analysis_requests,uuid,text)') IS NULL
        OR pg_catalog.to_regprocedure('public.activate_precheckout_blite_cohort_v1(uuid,uuid)') IS NULL
        OR pg_catalog.to_regprocedure('public.complete_analysis_v2_preflight(uuid,uuid,uuid,text,text,text,integer,integer,boolean,text,text,jsonb)') IS NULL
        OR pg_catalog.to_regprocedure('public.precheckout_blite_v1_dto_is_valid(jsonb)') IS NULL THEN
@@ -63,15 +64,18 @@ BEGIN
     IF NOT FOUND OR NOT EXISTS (
         SELECT FROM dev_live_budget.standard_archive_replay_grants AS binding
         JOIN public.analysis_preflights AS source
-          ON source.user_id = parent.user_id AND source.target_instagram_id = parent.target_instagram_id
+          ON source.user_id = parent.user_id
          AND source.idempotency_key = 'dev-live:owner:standard:' || binding.source_grant_id::text
         JOIN public.analysis_requests AS request
           ON request.id = source.consumed_request_id AND request.preflight_id = source.id
-         AND request.user_id = source.user_id AND request.target_instagram_id = source.target_instagram_id
+         AND request.user_id = source.user_id
         WHERE parent.idempotency_key = 'dev-live:owner:standard:' || binding.grant_id::text
           AND binding.expires_at > pg_catalog.clock_timestamp()
           AND public.dev_live_owner_start_lookup_v2(binding.grant_id, parent.user_id, parent.target_instagram_id) IS NOT NULL
           AND public.dev_live_owner_start_lookup_v2(binding.source_grant_id, parent.user_id, parent.target_instagram_id) IS NOT NULL
+          AND dev_live_budget.standard_archive_source_target_matches_v1(
+              source, request, binding.source_grant_id, parent.target_instagram_id
+          )
           AND source.status = 'consumed' AND source.precheckout_blite_cohort
           AND source.access_mode = 'test_entitlement' AND source.analysis_entry_channel = 'standard'
           AND source.beta_entry_provenance IS NULL

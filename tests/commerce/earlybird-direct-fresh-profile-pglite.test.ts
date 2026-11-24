@@ -363,11 +363,14 @@ beforeAll(async () => {
     await db.exec(bootstrap);
     await db.exec(migration);
     await db.exec(retryAdmissionMigration);
+    const dag = readFileSync(new URL('20260713183106_add_analysis_v2_dag_state_checkpoints.sql', migrationDirectory), 'utf8');
+    await db.exec(dag.slice(0, dag.indexOf('CREATE TABLE public.analysis_v2_dag_stage_manifests')));
 });
 
 beforeEach(async () => {
     await db.exec(`
-        TRUNCATE public.analysis_v2_profile_fetch_telemetry,
+        TRUNCATE public.analysis_v2_dag_scopes,
+            public.analysis_v2_profile_fetch_telemetry,
             public.analysis_v2_profile_fetch_outcomes,
             public.analysis_v2_profile_fetch_batches,
             public.analysis_v2_provider_runs,
@@ -508,6 +511,11 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
                 ADD COLUMN admission_entitlement_jti_hash text,
                 ADD COLUMN admission_refreshed_at timestamptz,
                 ADD COLUMN consumed_at timestamptz,
+                ADD COLUMN pii_scrubbed_at timestamptz,
+                ADD COLUMN target_full_name text,
+                ADD COLUMN target_bio text,
+                ADD COLUMN target_profile_image_url text,
+                ADD COLUMN updated_at timestamptz,
                 ADD COLUMN admission_plan_cards_snapshot jsonb;
             ALTER TABLE public.analysis_v2_test_entitlement_consumptions
                 ADD COLUMN entitlement_jti_hash text,
@@ -530,6 +538,7 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
                 source_request_id uuid, source_job_key text, source_operation_key text, source_run_id text
             );
             ALTER TABLE public.analysis_v2_provider_runs ADD COLUMN actual_usage_usd numeric;
+            ALTER TABLE public.analysis_requests ADD COLUMN completed_at timestamptz;
         `);
         const baseline = readFileSync(new URL('../../supabase/dev-ui/production-baseline.sql', import.meta.url), 'utf8');
         for (const name of ['load', 'valid']) {
@@ -542,6 +551,18 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
                 uuid, text, uuid, text, text, text, text, text
             ) FROM PUBLIC, anon, authenticated, service_role;`);
         }
+        for (const name of ['analysis_v2_scrub_terminal_request_pii', 'analysis_v2_dag_hash_json']) {
+            const start = baseline.indexOf(`CREATE FUNCTION public.${name}(`);
+            const end = baseline.indexOf('$$;', start);
+            expect(start).toBeGreaterThan(0);
+            expect(end).toBeGreaterThan(start);
+            await db.exec(baseline.slice(start, end + 3));
+        }
+        const replay = readFileSync(new URL('../../supabase/dev-ui/live-standard-archive-replay.sql', import.meta.url), 'utf8');
+        await db.exec(replay.slice(
+            replay.indexOf('CREATE OR REPLACE FUNCTION dev_live_budget.standard_archive_source_target_matches_v1('),
+            replay.indexOf('CREATE OR REPLACE FUNCTION public.dev_live_standard_archive_replay_start_v1('),
+        ));
         const archiveEvidence = readFileSync(new URL(
             '../../supabase/dev-ui/live-standard-archive-evidence.sql', import.meta.url,
         ), 'utf8');
@@ -712,6 +733,78 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
         await db.query("UPDATE public.analysis_requests SET target_instagram_id = 'different.fixture' WHERE id = $1",
             [sourceRequest]);
         await expect(db.query(sql, args)).rejects.toThrow(fence);
+    });
+
+    it('reuses completed scrubbed receipts only for the original exclusion and consumption', async () => {
+        await seedArchive();
+        const excluded = 'excluded_fixture';
+        const sourceHash = createHash('sha256')
+            .update(`analysis-test-entitlement-jti-v1\ndev-live-${sourceGrant}`)
+            .digest('hex');
+        await db.query(`
+            UPDATE public.analysis_preflights SET exclusion_decision='exclude', excluded_instagram_id=$1
+            WHERE id IN ($2,$3)
+        `, [excluded, sourcePreflight, PREFLIGHT_ID]);
+        await db.query(`
+            UPDATE public.analysis_preflights SET consumed_at=clock_timestamp(), admission_entitlement_jti_hash=$2
+            WHERE id=$1
+        `, [sourcePreflight, sourceHash]);
+        await db.query(`
+            UPDATE public.analysis_requests SET completed_at=clock_timestamp(), test_entitlement_jti_hash=$2
+            WHERE id=$1
+        `, [sourceRequest, sourceHash]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_test_entitlement_consumptions
+                (request_id,preflight_id,user_id,selected_plan_id,entitlement_jti_hash)
+            VALUES ($1,$2,$3,'standard',$4)
+        `, [sourceRequest, sourcePreflight, USER_ID, sourceHash]);
+        await db.query(`
+            UPDATE public.analysis_requests SET exclusion_decision_snapshot='exclude', excluded_instagram_id=$1
+            WHERE id IN ($2,$3)
+        `, [excluded, sourceRequest, REQUEST_ID]);
+        await db.query(`
+            INSERT INTO public.analysis_v2_dag_scopes
+                (request_id,request_snapshot_hash,plan_id,plan_snapshot_hash,
+                 exclusion_decision_hash,excluded_count,initialized_by_job_key,initialized_by_input_hash)
+            SELECT id,repeat('a',64),'standard',repeat('b',64),
+                public.analysis_v2_dag_hash_json(jsonb_build_object(
+                    'domain','analysis-v2-exclusion-decision-v1','requestId',id,
+                    'decision',exclusion_decision_snapshot,'excludedInstagramId',excluded_instagram_id
+                )),1,'coordinator:bootstrap',repeat('c',64)
+            FROM public.analysis_requests WHERE id=$1
+        `, [sourceRequest]);
+        await db.query('SELECT public.analysis_v2_scrub_terminal_request_pii($1, clock_timestamp())', [sourceRequest]);
+
+        const slot = 'SELECT public.dev_live_standard_archive_evidence_slot_v1($1,$2,$3,$4,$5,$6,$7) AS slot';
+        await expect(asService(slot, evidenceArgs)).resolves.toMatchObject({ rows: [{ slot: 'secondary' }] });
+        await expect(checkpoint(targetProfile)).resolves.toMatchObject({
+            rows: [{ snapshot: { requestedUsernames: [TARGET] } }],
+        });
+        expect((await db.query(`
+            SELECT exclusion_decision_snapshot AS decision, excluded_instagram_id AS excluded,
+                   target_instagram_id LIKE 'retained.%' AS scrubbed
+            FROM public.analysis_requests WHERE id=$1
+        `, [sourceRequest])).rows).toEqual([{ decision: 'skip', excluded: null, scrubbed: true }]);
+        expect((await db.query('SELECT count(*)::int AS total FROM public.analysis_v2_provider_runs WHERE request_id=$1',
+            [REQUEST_ID])).rows).toEqual([{ total: 0 }]);
+
+        await db.query("UPDATE public.analysis_requests SET exclusion_decision_snapshot='skip', excluded_instagram_id=NULL WHERE id=$1",
+            [REQUEST_ID]);
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await db.query("UPDATE public.analysis_requests SET exclusion_decision_snapshot='exclude', excluded_instagram_id=$2 WHERE id=$1",
+            [REQUEST_ID, 'unrelated_fixture']);
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await db.query('UPDATE public.analysis_requests SET excluded_instagram_id=$2 WHERE id=$1', [REQUEST_ID, excluded]);
+        await db.query("UPDATE public.analysis_v2_test_entitlement_consumptions SET entitlement_jti_hash=repeat('d',64) WHERE request_id=$1",
+            [sourceRequest]);
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await db.query('UPDATE public.analysis_v2_test_entitlement_consumptions SET entitlement_jti_hash=$2 WHERE request_id=$1',
+            [sourceRequest, sourceHash]);
+        await db.query("UPDATE public.analysis_v2_dag_scopes SET exclusion_decision_hash=repeat('d',64) WHERE request_id=$1",
+            [sourceRequest]);
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
+        await db.query('DELETE FROM public.analysis_v2_dag_scopes WHERE request_id=$1', [sourceRequest]);
+        await expect(asService(slot, evidenceArgs)).rejects.toThrow(fence);
     });
 
     it('honors a conflicting local run and preserves the existing recovery adoption lookup', async () => {
