@@ -26,6 +26,7 @@ import {
     AI_STAGE_POLICY_LATEST_VERSION,
     AI_STAGE_POLICY_V210_VERSION,
     AI_STAGE_POLICY_V211_VERSION,
+    AI_STAGE_POLICY_V212_VERSION,
     AI_STAGE_POLICY_V29_VERSION,
     AI_STAGE_POLICY_VERSION,
 } from '@/lib/services/ai/stage-policy';
@@ -4449,7 +4450,11 @@ describe('V2 AI and scoring executors', () => {
             .toBe(memoryState.final!.candidates[0].risk.preScore + 5);
     });
 
-    it('reuses the exact private bundle for narrative grounding and never redownloads Instagram media', async () => {
+    it.each([
+        { version: AI_STAGE_POLICY_V210_VERSION, named: false },
+        { version: AI_STAGE_POLICY_V211_VERSION, named: true },
+        { version: AI_STAGE_POLICY_V212_VERSION, named: true },
+    ])('reuses exact narrative media and passes the subjects allowed by $version', async ({ version, named }) => {
         const memoryState = memory();
         const candidate = completeCarouselOutcome('woman.one');
         candidate.profile = {
@@ -4531,7 +4536,7 @@ describe('V2 AI and scoring executors', () => {
             normalizedJpeg: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
         })));
         const registry = createAnalysisV2AiScoringExecutorRegistry(deps);
-        await registry.narrative!(context('narrative'));
+        await registry.narrative!(context('narrative', { aiStagePolicyVersion: version }));
 
         expect(normalizeMedia).not.toHaveBeenCalled();
         expect(deps.mediaStore.loadBundle).toHaveBeenCalledWith(expect.objectContaining({
@@ -4540,6 +4545,12 @@ describe('V2 AI and scoring executors', () => {
         }));
         const narrativeInput = narrative.mock.calls[0]![0];
         expect(narrative).toHaveBeenCalledOnce();
+        const checkpointedSubjects = vi.mocked(deps.resultStore.checkpointNarratives)
+            .mock.calls[0]![0].v211SubjectsByCandidate;
+        expect(checkpointedSubjects).toEqual(named ? new Map([[candidate.candidateId, {
+            ...narrativeInput.forbiddenIdentifiers,
+            ...narrativeInput.publicSubjects,
+        }]]) : undefined);
         expect(narrativeInput.interactions.comments[0].text).toBe(actualComment);
         expect(narrativeInput.interactions.candidateToTargetTag.status).toBe('observed');
         expect(narrativeInput.interactions.targetToCandidateMention.status).toBe('observed');

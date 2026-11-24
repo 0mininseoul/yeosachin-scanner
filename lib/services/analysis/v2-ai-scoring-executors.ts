@@ -3570,7 +3570,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             const outcomeById = new Map(outcomes.map(row => [row.candidateId, row]));
             const reverseById = new Map(reverse.rows.map(row => [row.candidateId, row]));
             const fence = aiJobFence(context);
-            const v211SubjectsByCandidate = fence.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
+            const v211SubjectsByCandidate = policySupports(fence.aiStagePolicyVersion, 'genderSummaryQualityV211')
                 ? new Map<string, V211CopySubjects>()
                 : undefined;
             const rows = await runBounded(
