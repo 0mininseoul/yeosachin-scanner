@@ -84,8 +84,11 @@ async function budgetRpc(name: string, args: Record<string, string | number>): P
     let result;
     try {
         const execute = () => supabaseAdmin.rpc(name, args);
-        // Only replay the pre-dispatch reservation, using the ID already in args.
-        result = name === 'dev_live_budget_reserve_v1'
+        // Keep the same reservation ID and amount after a confirmed rollback.
+        // Retrying settlement here never re-enters the Vertex call.
+        const retryOnStatementTimeout = name === 'dev_live_budget_reserve_v1'
+            || name === 'dev_live_budget_settle_vertex_v1';
+        result = retryOnStatementTimeout
             ? await retryPostgresAbortedRpc(execute, { retryDeadlock: false })
             : await execute();
     } catch {

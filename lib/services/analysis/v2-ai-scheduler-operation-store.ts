@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { AnalysisV2SchedulerContinuationError } from './v2-ai-scheduler-continuation';
 import type {
     AnalysisV2SchedulerOperationStore,
     AnalysisV2SchedulerStage,
@@ -180,6 +181,9 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_lease_seconds: OPERATION_LEASE_SECONDS,
                 },
             ));
+            if (isPostgresStatementTimeout(error)) {
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            }
             if (error) {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '
@@ -236,6 +240,10 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_result_json: value,
                 },
             ));
+            if (isPostgresStatementTimeout(error)) {
+                // Leave the operation fenced for recovery from the durable attempt records.
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING', 5);
+            }
             if (error || data !== true) {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '
@@ -262,6 +270,9 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
                     p_reason: operation.reason,
                 },
             ));
+            if (isPostgresStatementTimeout(error)) {
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            }
             if (error || typeof data !== 'string') {
                 throw new Error(
                     'ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: '

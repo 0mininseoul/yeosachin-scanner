@@ -1,8 +1,8 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
-import { withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
+import { VertexDispatchAuthorizationError, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
 import { observableAnalysisV2JobKey, sanitizeOperationalEvent } from '@/lib/observability/schema';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresLockTimeout, isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import {
     ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
@@ -1253,13 +1253,17 @@ export async function processAnalysisV2TaskDelivery(
                     p_claim_token: activeClaim.claimToken,
                     p_job_input_hash: activeClaim.inputHash,
                 },
-            ));
+            ), { retryLockTimeout: true });
+            if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
+                throw new VertexDispatchAuthorizationError('db_contention');
+            }
             if (error || typeof data !== 'boolean') throw new Error('ANALYSIS_V2_VERTEX_DISPATCH_AUTHORIZATION_UNAVAILABLE');
             return data;
         }, () => handler(activeClaim));
     } catch (error) {
         // Some durable stages run directly without the per-operation scheduler.
         const continuation = error instanceof DevLiveVertexBudgetReservationPendingError
+            || (error instanceof VertexDispatchAuthorizationError && error.reason === 'db_contention')
             ? new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5)
             : error;
         if (continuation instanceof AnalysisV2SchedulerContinuationError) {

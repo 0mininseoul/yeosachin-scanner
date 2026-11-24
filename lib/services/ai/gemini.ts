@@ -448,6 +448,8 @@ export interface AnalyzeWithGeminiOptions<T> {
         telemetry: GeminiAttemptTelemetry,
         parsedResult?: T
     ) => void | Promise<void>;
+    /** Private rejection details for a stage's audited deterministic repair. Never logged. */
+    onRejectedResponseTelemetry?: (telemetry: GeminiAttemptTelemetry, error: Error) => void | Promise<void>;
 }
 
 interface TokenLogMetadata {
@@ -949,6 +951,7 @@ export async function analyzeWithGemini<T>(
         budgetRoute,
         onBeforeAttempt,
         onAttemptTelemetry,
+        onRejectedResponseTelemetry,
         schema,
     } = options;
     if (stage !== undefined && !isAiStageName(stage)) {
@@ -1469,11 +1472,11 @@ export async function analyzeWithGemini<T>(
                 });
                 budgetSettled = true;
             }
-            await emitAttemptTelemetry(
-                attemptTelemetry,
-                onAttemptTelemetry,
-                completionError ? undefined : parsed
-            );
+            const rejectedResponse = completionError;
+            const terminalHook = rejectedResponse && onRejectedResponseTelemetry
+                ? (telemetry: GeminiAttemptTelemetry) => onRejectedResponseTelemetry(telemetry, rejectedResponse)
+                : onAttemptTelemetry;
+            await emitAttemptTelemetry(attemptTelemetry, terminalHook, completionError ? undefined : parsed);
             if (abortSignal?.aborted) {
                 throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
             }

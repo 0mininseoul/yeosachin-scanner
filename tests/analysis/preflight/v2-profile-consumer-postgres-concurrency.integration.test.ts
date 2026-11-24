@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from 'pg';
@@ -21,6 +21,15 @@ const workers = 8;
 const readsPerWorker = 12;
 const producerKey = (index: number) => 'track:profiles:batch:' + index;
 const consumerKey = (index: number) => 'track:profile-ai:batch:' + index;
+const reverseLikesKey = 'track:reverse-likes:collect';
+const scoringStageSql = readFileSync(new URL(
+    '../../../supabase/migrations/20260713202201_add_analysis_v2_ai_scoring_stage_state.sql',
+    import.meta.url,
+), 'utf8');
+const scoringReadSql = readFileSync(new URL(
+    '../../../supabase/migrations/20261124163001_read_analysis_v2_scoring_checkpoints_without_write_locks.sql',
+    import.meta.url,
+), 'utf8');
 
 // Requires local PostgreSQL binaries. Starts a private Unix-socket-only cluster.
 describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
@@ -45,6 +54,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
             locker = new Client(options);
             await Promise.all([control.connect(), locker.connect()]);
             await control.query(profileConsumerFixtureSql);
+            await control.query(scoringStageSql);
             await control.query(originalProfileConsumerSql);
             await control.query(
                 `INSERT INTO public.analysis_requests(id, pipeline_version, status)
@@ -87,7 +97,31 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
                  ) VALUES ($1, $2, $3, $4)`,
                 [requestId, consumerKey(0), consumerHash, replacementClaim],
             );
+            await control.query(
+                `INSERT INTO public.analysis_pipeline_jobs(
+                     request_id, job_key, status, input_hash, track, kind,
+                     lease_token, lease_expires_at
+                 ) VALUES ($1, $2, 'processing', $3, 'reverse_likes', 'collect',
+                           $4, clock_timestamp() + interval '10 minutes')`,
+                [requestId, reverseLikesKey, consumerHash, claimToken],
+            );
+            await control.query(
+                `INSERT INTO public.analysis_v2_candidate_feature_manifests (
+                     request_id, producer_job_key, producer_input_hash, producer_claim_token
+                 ) VALUES ($1, $2, $3, $4)`,
+                [requestId, reverseLikesKey, consumerHash, replacementClaim],
+            );
+            await control.query(
+                `INSERT INTO public.analysis_v2_ai_scoring_stage_checkpoints (
+                     request_id, stage_kind, batch_key, producer_job_key, producer_input_hash,
+                     producer_claim_token, item_count, result_hash, payload
+                 ) VALUES
+                     ($1, 'screening', -1, 'coordinator:candidate-screening', $2, $3, 1, $2, '{"fixture":true}'),
+                     ($1, 'profile_ai_batch', 0, 'track:profile-ai:batch:0', $2, $3, 1, $2, '{"fixture":true}')`,
+                [requestId, producerHash, claimToken],
+            );
             await control.query(profileConsumerReadSql);
+            await control.query(scoringReadSql);
             readers = Array.from({ length: workers }, () => new Client({ ...options, statement_timeout: 200 }));
             await Promise.all(readers.map(async reader => {
                 await reader.connect();
@@ -153,7 +187,7 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
                 const afterLocked = await load();
                 expect(afterLocked).toMatchObject({ completed: count, timeouts: 0 });
                 expect((await read(0)).rows[0].snapshot).toEqual(baseline);
-                expect((await control.query('SELECT producer_claim_token = $1 AS unchanged FROM public.analysis_v2_candidate_feature_manifests', [replacementClaim])).rows).toEqual([{ unchanged: true }]);
+                expect((await control.query('SELECT producer_claim_token = $1 AS unchanged FROM public.analysis_v2_candidate_feature_manifests WHERE producer_job_key = $2', [replacementClaim, consumerKey(0)])).rows).toEqual([{ unchanged: true }]);
                 console.info('Profile checkpoint read load', { workers, readsPerWorker, before, beforeLocked, afterLocked });
             } finally {
                 await locker.query('ROLLBACK');
@@ -163,8 +197,51 @@ describe.runIf(process.env.RUN_PROFILE_CONSUMER_POSTGRES_TEST === '1')(
                 'SELECT public.analysis_v2_assert_result_job_fence($1,$2,$3,$4)',
                 [requestId, consumerKey(0), claimToken, consumerHash],
             );
-            expect((await control.query('SELECT producer_claim_token = $1 AS rebound FROM public.analysis_v2_candidate_feature_manifests', [claimToken])).rows).toEqual([{ rebound: true }]);
+            expect((await control.query('SELECT producer_claim_token = $1 AS rebound FROM public.analysis_v2_candidate_feature_manifests WHERE producer_job_key = $2', [claimToken, consumerKey(0)])).rows).toEqual([{ rebound: true }]);
         }, 15_000);
+
+        it('reads late scoring checkpoints under parent contention without transferring a producer manifest', async () => {
+            const values = [requestId, reverseLikesKey, claimToken, consumerHash];
+            const screeningSql = 'SELECT public.load_analysis_v2_ai_scoring_stage($1,$2,$3,$4,\'screening\') AS snapshot';
+            const batchesSql = 'SELECT public.load_analysis_v2_profile_ai_stage_batches($1,$2,$3,$4) AS snapshot';
+            const writerSql = 'SELECT public.analysis_v2_assert_result_job_fence($1,$2,$3,$4)';
+            await locker.query('BEGIN');
+            try {
+                await locker.query('SELECT id FROM public.analysis_requests WHERE id = $1 FOR UPDATE', [requestId]);
+                const results = await Promise.allSettled(readers.map((reader, index) =>
+                    reader.query(index % 2 === 0 ? screeningSql : batchesSql, values),
+                ));
+                expect(results.map(result => result.status === 'rejected' ? result.reason.code : null))
+                    .toEqual(Array(workers).fill(null));
+                for (const [index, result] of results.entries()) {
+                    if (result.status !== 'fulfilled') throw result.reason;
+                    expect(result.value.rows[0].snapshot).toEqual(index % 2 === 0
+                        ? expect.objectContaining({ stageKind: 'screening', payload: { fixture: true } })
+                        : [expect.objectContaining({ stageKind: 'profile_ai_batch', payload: { fixture: true } })]);
+                }
+                await control.query('SET statement_timeout = 200');
+                await expect(control.query(writerSql, values)).rejects.toMatchObject({ code: '57014' });
+            } finally {
+                await control.query('RESET statement_timeout');
+                await locker.query('ROLLBACK');
+            }
+            const manifestSql = `SELECT producer_claim_token = $1 AS matched
+                                 FROM public.analysis_v2_candidate_feature_manifests
+                                 WHERE request_id = $2 AND producer_job_key = $3`;
+            expect((await control.query(manifestSql, [replacementClaim, requestId, reverseLikesKey])).rows)
+                .toEqual([{ matched: true }]);
+            await control.query(writerSql, values);
+            expect((await control.query(manifestSql, [claimToken, requestId, reverseLikesKey])).rows)
+                .toEqual([{ matched: true }]);
+            const staleValues = [requestId, reverseLikesKey, replacementClaim, consumerHash];
+            await expect(readers[0].query(screeningSql, staleValues))
+                .rejects.toMatchObject({ message: 'ANALYSIS_V2_RESULT_FENCE_MISMATCH' });
+            await expect(readers[0].query(batchesSql, staleValues))
+                .rejects.toMatchObject({ message: 'ANALYSIS_V2_RESULT_FENCE_MISMATCH' });
+            await expect(readers[0].query(
+                'SELECT public.load_analysis_v2_ai_scoring_stage($1,$2,$3,$4,\'narrative\')', values,
+            )).rejects.toMatchObject({ message: 'ANALYSIS_V2_AI_SCORING_STAGE_FENCE_MISMATCH' });
+        });
 
         it('admits only one live retry generation while the common request row is locked', async () => {
             const values = [requestId, consumerKey(1)];

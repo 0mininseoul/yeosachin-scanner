@@ -12,6 +12,7 @@ import {
 } from '@/lib/services/ai/gemini-generation-policy';
 import {
     aiStagePolicySupports,
+    AI_STAGE_POLICY_V211_VERSION,
     AI_STAGE_POLICY_VERSION,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
@@ -49,6 +50,7 @@ export const ANALYSIS_V2_AI_RESULT_DATABASE_NAMES = Object.freeze({
     requestTable: 'analysis_v2_ai_result_checkpoints',
     globalCacheTable: 'analysis_v2_ai_global_result_cache',
     terminalizeSuccessRpc: 'terminalize_analysis_v2_ai_attempt_with_result',
+    terminalizeNarrativeRepairRpc: 'terminalize_analysis_v2_repaired_narrative',
     checkpointGlobalHitRpc: 'checkpoint_analysis_v2_ai_global_cache_hit',
     loadRequestRpc: 'load_analysis_v2_ai_result_checkpoint',
     purgeRequestRpc: 'purge_analysis_v2_ai_result_checkpoints',
@@ -208,7 +210,7 @@ const rawCheckpointSchema = z.object({
     inputHash: z.string().regex(SHA256_PATTERN),
     mediaSnapshotHash: z.string().regex(SHA256_PATTERN),
     cacheScope: cacheScopeSchema,
-    source: z.enum(['generated', 'global_cache']),
+    source: z.enum(['generated', 'global_cache', 'deterministic_repair']),
     attempt: z.number().int().min(1).max(4).nullable(),
     reservationToken: z.string().regex(UUID_PATTERN).nullable(),
     result: z.unknown(),
@@ -289,7 +291,7 @@ export interface AnalysisV2AiResultTerminalInput<T> {
 export interface AnalysisV2AiResultCheckpoint<T> extends AnalysisV2AiResultIdentity {
     requestId: string;
     jobKey: string;
-    source: 'generated' | 'global_cache';
+    source: 'generated' | 'global_cache' | 'deterministic_repair';
     attempt: number | null;
     reservationToken: string | null;
     result: T;
@@ -320,6 +322,10 @@ export interface AnalysisV2AiResultSupabaseClient {
 
 export interface AnalysisV2AiResultStore {
     terminalizeSuccess<T>(
+        input: AnalysisV2AiResultTerminalInput<T>,
+        resultSchema: z.ZodType<T>
+    ): Promise<AnalysisV2AiResultCheckpoint<T>>;
+    terminalizeNarrativeRepair<T>(
         input: AnalysisV2AiResultTerminalInput<T>,
         resultSchema: z.ZodType<T>
     ): Promise<AnalysisV2AiResultCheckpoint<T>>;
@@ -365,10 +371,11 @@ export interface AnalysisV2AiAuditAdapter<T> {
     prepare(): Promise<AnalysisV2AiPreparedResult<T>>;
     /** Reserve the paid generation attempt before the Gemini SDK call. */
     onBeforeAttempt(telemetry: GeminiAttemptStartTelemetry): Promise<void>;
-    /** Atomically stores a successful parsed result, or terminalizes a non-success attempt. */
+    /** Atomically stores an accepted result while retaining the original provider disposition. */
     onAttemptTelemetry(
         telemetry: GeminiAttemptTelemetry,
-        parsedResult?: unknown
+        parsedResult?: unknown,
+        repairedNarrative?: unknown
     ): Promise<void>;
     /** Resolver-only durable cutoff fence. Implementations must not await provider completion. */
     cutoff?(): Promise<void>;
@@ -776,7 +783,10 @@ function parseCheckpoint<T>(
         }
     } else {
         if (
-            checkpoint.attempt === null
+            (checkpoint.source === 'deterministic_repair' && (
+                checkpoint.stage !== 'highRiskNarrative' || checkpoint.cacheScope !== 'request'
+            ))
+            || checkpoint.attempt === null
             || checkpoint.reservationToken === null
             || checkpoint.usageMetadataStatus === null
             || checkpoint.usageComplete === null
@@ -836,79 +846,99 @@ function throwRpcError(error: RpcError, operation: string): never {
 export function createAnalysisV2AiResultStore(
     client: AnalysisV2AiResultSupabaseClient = supabaseAdmin
 ): AnalysisV2AiResultStore {
-    return {
-        async terminalizeSuccess(input, resultSchema) {
-            const canonicalResult = validatedResult(input.result, resultSchema);
-            const resultEnvelope = canonicalResultEnvelope(canonicalResult);
-            const parsed = terminalInputSchema.safeParse({
-                ...input,
-                resultIdentity: assertComputedIdentity(input.resultIdentity),
-                result: canonicalResult,
-            });
-            if (!parsed.success) {
-                throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid terminal result.');
+    async function terminalizeResult<T>(
+        input: AnalysisV2AiResultTerminalInput<T>,
+        resultSchema: z.ZodType<T>,
+        source: 'generated' | 'deterministic_repair'
+    ): Promise<AnalysisV2AiResultCheckpoint<T>> {
+        const operation = source === 'deterministic_repair' ? 'narrative repair terminalization' : 'success terminalization';
+        const canonicalResult = validatedResult(input.result, resultSchema);
+        const resultEnvelope = canonicalResultEnvelope(canonicalResult);
+        const parsed = terminalInputSchema.safeParse({
+            ...input,
+            resultIdentity: assertComputedIdentity(input.resultIdentity),
+            result: canonicalResult,
+        });
+        if (!parsed.success) {
+            throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid terminal result.');
+        }
+        const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
+            source === 'deterministic_repair'
+                ? ANALYSIS_V2_AI_RESULT_DATABASE_NAMES.terminalizeNarrativeRepairRpc
+                : ANALYSIS_V2_AI_RESULT_DATABASE_NAMES.terminalizeSuccessRpc,
+            {
+                p_request_id: parsed.data.requestId.toLowerCase(),
+                p_job_key: parsed.data.jobKey,
+                p_claim_token: parsed.data.claimToken.toLowerCase(),
+                p_operation_key: parsed.data.resultIdentity.operationKey,
+                p_attempt: parsed.data.attempt,
+                p_reservation_token: parsed.data.reservationToken.toLowerCase(),
+                p_telemetry: telemetryPayload(parsed.data),
+                p_result_identity: identityPayload(parsed.data.resultIdentity),
+                p_result: resultEnvelope.canonicalResult,
+                p_result_canonical: resultEnvelope.canonicalResultJson,
+                p_result_hash: resultEnvelope.resultHash,
             }
-            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
-                ANALYSIS_V2_AI_RESULT_DATABASE_NAMES.terminalizeSuccessRpc,
-                {
-                    p_request_id: parsed.data.requestId.toLowerCase(),
-                    p_job_key: parsed.data.jobKey,
-                    p_claim_token: parsed.data.claimToken.toLowerCase(),
-                    p_operation_key: parsed.data.resultIdentity.operationKey,
-                    p_attempt: parsed.data.attempt,
-                    p_reservation_token: parsed.data.reservationToken.toLowerCase(),
-                    p_telemetry: telemetryPayload(parsed.data),
-                    p_result_identity: identityPayload(parsed.data.resultIdentity),
-                    p_result: resultEnvelope.canonicalResult,
-                    p_result_canonical: resultEnvelope.canonicalResultJson,
-                    p_result_hash: resultEnvelope.resultHash,
-                }
-            ));
-            if (error) throwRpcError(error, 'success terminalization');
-            const fenced = terminalizedFenceEnvelopeSchema.safeParse(data);
-            if (fenced.success) {
-                if (
-                    fenced.data.requestId !== parsed.data.requestId.toLowerCase()
-                    || fenced.data.operationKey !== parsed.data.resultIdentity.operationKey
-                    || fenced.data.attempt !== parsed.data.attempt
-                    || fenced.data.reservationToken
-                        !== parsed.data.reservationToken.toLowerCase()
-                ) {
-                    throw new Error(
-                        'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid fenced terminalization.'
-                    );
-                }
-                throw new AnalysisV2AiResultFenceError(true);
-            }
-            const terminalized = terminalizedCheckpointEnvelopeSchema.safeParse(data);
-            if (!terminalized.success) {
-                throw new Error(
-                    'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid success terminalization response.'
-                );
-            }
-            const checkpoint = parseCheckpoint(terminalized.data.checkpoint, {
-                requestId: parsed.data.requestId,
-                jobKey: parsed.data.jobKey,
-                resultIdentity: parsed.data.resultIdentity,
-            }, resultSchema, 'success terminalization');
+        ));
+        if (error) throwRpcError(error, operation);
+        const fenced = terminalizedFenceEnvelopeSchema.safeParse(data);
+        if (fenced.success) {
             if (
-                checkpoint.source !== 'generated'
-                || checkpoint.attempt !== parsed.data.attempt
-                || checkpoint.reservationToken !== parsed.data.reservationToken.toLowerCase()
-                || checkpoint.usageMetadataStatus !== parsed.data.usageMetadataStatus
-                || checkpoint.usageComplete !== parsed.data.usageComplete
-                || !sameTokenUsage(checkpoint.tokenUsage, parsed.data.tokenUsage)
-                || checkpoint.latencyMs !== parsed.data.latencyMs
-                || checkpoint.estimatedCostUsd !== parsed.data.estimatedCostUsd
-                || checkpoint.finishReason !== parsed.data.finishReason
-                || checkpoint.resultHash !== resultEnvelope.resultHash
-                || !sameJson(checkpoint.result, canonicalResult)
+                fenced.data.requestId !== parsed.data.requestId.toLowerCase()
+                || fenced.data.operationKey !== parsed.data.resultIdentity.operationKey
+                || fenced.data.attempt !== parsed.data.attempt
+                || fenced.data.reservationToken
+                    !== parsed.data.reservationToken.toLowerCase()
             ) {
                 throw new Error(
-                    'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: terminal result mismatch.'
+                    'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid fenced terminalization.'
                 );
             }
-            return checkpoint;
+            throw new AnalysisV2AiResultFenceError(true);
+        }
+        const terminalized = terminalizedCheckpointEnvelopeSchema.safeParse(data);
+        if (!terminalized.success) {
+            throw new Error(
+                `ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid ${operation} response.`
+            );
+        }
+        const checkpoint = parseCheckpoint(terminalized.data.checkpoint, {
+            requestId: parsed.data.requestId,
+            jobKey: parsed.data.jobKey,
+            resultIdentity: parsed.data.resultIdentity,
+        }, resultSchema, operation);
+        if (
+            checkpoint.source !== source
+            || checkpoint.attempt !== parsed.data.attempt
+            || checkpoint.reservationToken !== parsed.data.reservationToken.toLowerCase()
+            || checkpoint.usageMetadataStatus !== parsed.data.usageMetadataStatus
+            || checkpoint.usageComplete !== parsed.data.usageComplete
+            || !sameTokenUsage(checkpoint.tokenUsage, parsed.data.tokenUsage)
+            || checkpoint.latencyMs !== parsed.data.latencyMs
+            || checkpoint.estimatedCostUsd !== parsed.data.estimatedCostUsd
+            || checkpoint.finishReason !== parsed.data.finishReason
+            || checkpoint.resultHash !== resultEnvelope.resultHash
+            || !sameJson(checkpoint.result, canonicalResult)
+        ) {
+            throw new Error(
+                'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: terminal result mismatch.'
+            );
+        }
+        return checkpoint;
+    }
+
+    return {
+        async terminalizeSuccess(input, resultSchema) {
+            return terminalizeResult(input, resultSchema, 'generated');
+        },
+
+        async terminalizeNarrativeRepair(input, resultSchema) {
+            if (input.jobKey !== 'track:narratives:batch:0'
+                || input.resultIdentity.stage !== 'highRiskNarrative'
+                || input.resultIdentity.cacheScope !== 'request') {
+                throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid narrative repair.');
+            }
+            return terminalizeResult(input, resultSchema, 'deterministic_repair');
         },
 
         async checkpointGlobalHit(input, resultSchema) {
@@ -1357,7 +1387,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
             }
         },
 
-        async onAttemptTelemetry(telemetry, parsedResult) {
+        async onAttemptTelemetry(telemetry, parsedResult, repairedNarrative) {
             assertAuditTelemetryIdentity(telemetry, {
                 requestId: request.data.requestId,
                 resultIdentity,
@@ -1397,13 +1427,25 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 estimatedCostUsd: telemetry.estimatedCostUsd,
             };
 
-            if (telemetry.disposition === 'success') {
-                if (parsedResult === undefined || telemetry.finishReason !== 'STOP') {
+            const isNarrativeRepair = repairedNarrative !== undefined;
+            if (isNarrativeRepair && (
+                telemetry.disposition !== 'response_rejected'
+                || parsedResult !== undefined
+                || aiStagePolicyVersion !== AI_STAGE_POLICY_V211_VERSION
+                || resultIdentity.stage !== 'highRiskNarrative'
+                || request.data.jobKey !== 'track:narratives:batch:0'
+                || options.disableResultCheckpoint
+            )) {
+                throw new Error('ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: invalid narrative repair.');
+            }
+            if (telemetry.disposition === 'success' || isNarrativeRepair) {
+                const result = isNarrativeRepair ? repairedNarrative : parsedResult;
+                if (result === undefined || telemetry.finishReason !== 'STOP') {
                     throw new Error(
                         'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: successful result is missing.'
                     );
                 }
-                const strictResult = validatedResult(parsedResult, options.resultSchema);
+                const strictResult = validatedResult(result, options.resultSchema);
                 try {
                     if (options.disableResultCheckpoint) {
                         await attemptStore.terminalize({
@@ -1431,6 +1473,12 @@ export function createAnalysisV2AiAuditAdapter<T>(
                             estimatedCostUsd: telemetry.estimatedCostUsd,
                             finishReason: 'STOP',
                         });
+                    } else if (isNarrativeRepair) {
+                        await resultStore!.terminalizeNarrativeRepair<T>({
+                            ...shared,
+                            finishReason: 'STOP',
+                            result: strictResult,
+                        }, options.resultSchema);
                     } else {
                         await resultStore!.terminalizeSuccess<T>({
                             ...shared,

@@ -1236,7 +1236,8 @@ export interface StagedAiAuditContext {
     /** Must durably persist the PII-free attempt event before resolving. */
     onAttemptTelemetry: (
         telemetry: GeminiAttemptTelemetry,
-        parsedResult?: unknown
+        parsedResult?: unknown,
+        repairedNarrative?: unknown
     ) => void | Promise<void>;
     /** Replay-only in-memory telemetry; durable adapters may omit this sink. */
     onTelemetry?: (telemetry: GeminiRequestTelemetry) => void | Promise<void>;
@@ -3985,6 +3986,41 @@ export function createHighRiskNarrativeResultIdentity(
     );
 }
 
+function repairEligibleV211Narrative(
+    error: Error,
+    responseSchema: z.ZodType<z.infer<typeof highRiskNarrativeModelResponseSchema>>,
+    input: ParsedHighRiskNarrativeInput,
+    media: readonly NormalizedAiMediaSelection[],
+    sanitized: SanitizedNarrativeEvidence,
+) {
+    if (!(error instanceof GeminiResponseValidationError)) return undefined;
+    const repair = error.repairContext;
+    const candidate = repair?.candidate;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)
+        || !Array.isArray((candidate as { lines?: unknown }).lines)) return undefined;
+    const lines = (candidate as { lines: Array<{ text?: unknown }> }).lines;
+    const contractIssue = lines.length === 2
+        && lines.every(line => typeof line?.text === 'string')
+        && repair?.issues.some(issue => (
+            issue.code === 'custom'
+            && issue.path.length === 1
+            && issue.path[0] === 'lines'
+            && issue.message === 'Narrative violates the public two-line contract.'
+        ));
+    const textIssue = repair?.issues.some(issue => (
+        issue.code === 'custom'
+        && issue.path.length === 3
+        && issue.path[0] === 'lines'
+        && (issue.path[1] === 0 || issue.path[1] === 1)
+        && issue.path[2] === 'text'
+    ));
+    if (!contractIssue && !textIssue) return undefined;
+    return parseRepairedHighRiskNarrative(
+        responseSchema,
+        deterministicV211NarrativeRepair(input, media, sanitized),
+    );
+}
+
 export async function highRiskNarrative(
     rawInput: HighRiskNarrativeInput,
     rawAuditContext: StagedAiAuditContext,
@@ -4021,7 +4057,9 @@ export async function highRiskNarrative(
         policyVersion,
         validationMode,
     );
-    let response: z.infer<typeof highRiskNarrativeModelResponseSchema>;
+    type NarrativeResponse = z.infer<typeof highRiskNarrativeModelResponseSchema>;
+    let response: NarrativeResponse;
+    let auditedRejection: { repair?: NarrativeResponse; repairError?: unknown } | undefined;
     try {
         const prepared = await prepareStagedResult(audit, responseSchema);
         response = prepared.cached ?? responseSchema.parse(await analyzeWithGemini(
@@ -4036,6 +4074,23 @@ export async function highRiskNarrative(
                     startingAttempt: prepared.startingAttempt,
                     onBeforeAttempt: audit.onBeforeAttempt,
                     onAttemptTelemetry: audit.onAttemptTelemetry,
+                    ...(policyVersion === AI_STAGE_POLICY_V211_VERSION ? {
+                        onRejectedResponseTelemetry: async (telemetry: GeminiAttemptTelemetry, rejection: Error) => {
+                            const outcome: NonNullable<typeof auditedRejection> = {};
+                            if (telemetry.finishReason === 'STOP') {
+                                try {
+                                    outcome.repair = repairEligibleV211Narrative(
+                                        rejection, responseSchema, input, media, sanitized,
+                                    );
+                                } catch (error) {
+                                    outcome.repairError = error;
+                                }
+                            }
+                            if (outcome.repair) await audit.onAttemptTelemetry(telemetry, undefined, outcome.repair);
+                            else await audit.onAttemptTelemetry(telemetry);
+                            auditedRejection = outcome;
+                        },
+                    } : {}),
                     ...costRouteGenerationOptions(costRoute),
                     ...stagedTelemetryOptions(audit, costRoute),
                 }
@@ -4045,48 +4100,14 @@ export async function highRiskNarrative(
             ? error.cause
             : null;
         if (validation) emitHighRiskNarrativeValidationDiagnostic(validation);
-        const repair = validation?.repairContext;
-        const contractIssue = repair?.issues.find(issue => (
-            issue.code === 'custom'
-            && issue.path.length === 1
-            && issue.path[0] === 'lines'
-            && issue.message === 'Narrative violates the public two-line contract.'
-        ));
-        const textIssues = repair?.issues.filter(issue => (
-            issue.code === 'custom'
-            && issue.path.length === 3
-            && issue.path[0] === 'lines'
-            && (issue.path[1] === 0 || issue.path[1] === 1)
-            && issue.path[2] === 'text'
-        )) ?? [];
-        if (
-            policyVersion === AI_STAGE_POLICY_V211_VERSION
-            && contractIssue
-            && repair?.candidate
-            && typeof repair.candidate === 'object'
-            && !Array.isArray(repair.candidate)
-            && Array.isArray((repair.candidate as { lines?: unknown }).lines)
-            && (repair.candidate as { lines: unknown[] }).lines.length === 2
-            && (repair.candidate as { lines: Array<{ text?: unknown }> }).lines.every(
-                line => typeof line?.text === 'string',
-            )
-        ) {
-            response = parseRepairedHighRiskNarrative(
-                responseSchema,
-                deterministicV211NarrativeRepair(input, media, sanitized),
-            );
-        } else if (
-            policyVersion === AI_STAGE_POLICY_V211_VERSION
-            && textIssues.length > 0
-            && repair?.candidate
-            && typeof repair.candidate === 'object'
-            && !Array.isArray(repair.candidate)
-            && Array.isArray((repair.candidate as { lines?: unknown }).lines)
-        ) {
-            response = parseRepairedHighRiskNarrative(
-                responseSchema,
-                deterministicV211NarrativeRepair(input, media, sanitized),
-            );
+        if (auditedRejection?.repairError) throw auditedRejection.repairError;
+        const repaired = auditedRejection
+            ? auditedRejection.repair
+            : (validation && policyVersion === AI_STAGE_POLICY_V211_VERSION
+                ? repairEligibleV211Narrative(validation, responseSchema, input, media, sanitized)
+                : undefined);
+        if (repaired) {
+            response = repaired;
         } else {
             if (
                 !isAnalysisV2AiDeterministicFallbackError(error)

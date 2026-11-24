@@ -1,4 +1,5 @@
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
+import { VertexDispatchWindow } from '@/lib/services/ai/vertex-dispatch-window';
 import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { AI_STAGE_POLICY_LATEST_VERSION } from '@/lib/services/ai/stage-policy';
@@ -46,7 +47,8 @@ import {
     type AnalysisV2StageExecutorRegistry,
 } from '../../../lib/services/analysis/v2-worker';
 
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+const { dispatchFenceRpc } = vi.hoisted(() => ({ dispatchFenceRpc: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: dispatchFenceRpc } }));
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const reservationToken = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow -- UUID fixture
@@ -1975,6 +1977,39 @@ describe('analysis V2 durable DAG worker', () => {
         expect(dispatchReservedContinuation).toHaveBeenCalledOnce();
         expect(jobStore.deferAiCapacity).not.toHaveBeenCalled();
         expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['57014', 'canceling statement due to statement timeout'],
+        ['55P03', 'canceling statement due to lock timeout'],
+    ])('continues the same job after two confirmed Vertex wire fence rollbacks (%s)', async (code, message) => {
+        dispatchFenceRpc.mockReset().mockResolvedValue({ data: null, error: { code, message } });
+        const claimed = { ...bootstrapClaim, attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS };
+        const jobStore = store(claimed);
+        const prepareAttempt = vi.fn();
+        const markSent = vi.fn();
+        const terminalFailureFinalizer = vi.fn();
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            terminalFailureFinalizer,
+            analysisLifecycleEventEmitter: vi.fn(),
+            dispatchReservedContinuation: vi.fn().mockResolvedValue('enqueued'),
+            handler: async () => {
+                const window = new VertexDispatchWindow(10_000, prepareAttempt);
+                await window.prepareFetch();
+                markSent();
+                return [];
+            },
+        })).resolves.toEqual({
+            status: 'continuation', errorCode: 'ANALYSIS_V2_AI_CAPACITY_PENDING', pendingRecoveryCount: 0,
+        });
+        expect(dispatchFenceRpc).toHaveBeenCalledTimes(2);
+        expect(dispatchFenceRpc.mock.calls[0]).toEqual(dispatchFenceRpc.mock.calls[1]);
+        expect(jobStore.continueScheduler).toHaveBeenCalledWith(claimed, 'ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+        expect(prepareAttempt).not.toHaveBeenCalled();
+        expect(markSent).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
     });
 
     it.each([
