@@ -3358,6 +3358,41 @@ describe('V2 staged AI services', () => {
         expect(JSON.stringify(diagnostics)).not.toContain('김준호');
     });
 
+    it('persists a valid deterministic repair with the original rejected attempt and reuses it on delivery', async () => {
+        const input = narrativeInput();
+        const hooks = audit('highRiskNarrative', input, AI_STAGE_POLICY_V211_VERSION);
+        const validation = new GeminiResponseValidationError(
+            'schema rejected',
+            { category: 'schema_validation', issues: [{ path: 'lines', code: 'custom' }], truncated: false },
+            {
+                candidate: { lines: [{ text: '검증에 실패한 첫 문장' }, { text: '검증에 실패한 둘째 문장' }] },
+                issues: [{
+                    code: 'custom',
+                    path: ['lines'],
+                    message: 'Narrative violates the public two-line contract.',
+                }],
+            },
+        );
+        const telemetry = { disposition: 'response_rejected', finishReason: 'STOP', attempt: 1 };
+        mocks.analyzeWithGemini.mockImplementationOnce(async (_prompt, _media, options) => {
+            await options.onRejectedResponseTelemetry?.(telemetry, validation);
+            throw new Error('AI_GENERATION_RESPONSE_REJECTED_ERROR: generated response failed strict validation.', {
+                cause: validation,
+            });
+        });
+        const options = { aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION } as const;
+        const result = await highRiskNarrative(input, hooks, options);
+        const envelope = {
+            lines: result.lines.map((text, index) => ({ text, evidenceRefs: result.evidenceRefs[index] })),
+        };
+        expect(hooks.onAttemptTelemetry).toHaveBeenCalledExactlyOnceWith(telemetry, undefined, envelope);
+        expect(JSON.stringify(envelope)).not.toContain('검증에 실패한');
+
+        vi.mocked(hooks.prepare).mockResolvedValueOnce({ result: envelope, source: 'request', startingAttempt: 1 });
+        expect(await highRiskNarrative(input, hooks, options)).toEqual(result);
+        expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
+    });
+
     it('does not repair an unrelated custom issue at the narrative lines path', async () => {
         const input = narrativeInput();
         const candidate = { lines: [{

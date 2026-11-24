@@ -11,10 +11,10 @@ export function withVertexDispatchAuthorization<T>(
 }
 
 export class VertexDispatchAuthorizationError extends Error {
-    constructor(readonly reason: 'closed' | 'unavailable') {
+    constructor(readonly reason: 'closed' | 'unavailable' | 'db_contention') {
         super(reason === 'closed'
             ? 'ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH'
-            : 'ANALYSIS_V2_AI_ATTEMPT_NOT_READY');
+            : reason === 'db_contention' ? 'ANALYSIS_V2_AI_CAPACITY_PENDING' : 'ANALYSIS_V2_AI_ATTEMPT_NOT_READY');
         this.name = 'VertexDispatchAuthorizationError';
     }
 }
@@ -75,8 +75,9 @@ export class VertexDispatchWindow {
             let allowed: boolean;
             try {
                 allowed = await this.authorize();
-            } catch {
-                this.rejectAuthorization('unavailable');
+            } catch (error) {
+                this.rejectAuthorization(error instanceof VertexDispatchAuthorizationError
+                    && error.reason === 'db_contention' ? 'db_contention' : 'unavailable');
             }
             this.assertCanStart();
             if (!allowed) this.rejectAuthorization('closed');

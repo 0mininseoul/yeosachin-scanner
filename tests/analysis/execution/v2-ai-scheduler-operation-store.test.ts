@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { AnalysisV2SchedulerContinuationError } from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
 import {
     ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES,
     createAnalysisV2SchedulerOperationStore,
@@ -85,6 +86,53 @@ describe('analysis V2 scheduler operation store', () => {
         expect(rpc).toHaveBeenCalledTimes(4);
         expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
         expect(rpc.mock.calls[3]).toEqual(rpc.mock.calls[2]);
+    });
+
+    it.each([
+        ['claim', 'ANALYSIS_V2_AI_CAPACITY_PENDING'],
+        ['commit', 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'],
+        ['defer', 'ANALYSIS_V2_AI_CAPACITY_PENDING'],
+    ] as const)('continues the job after two confirmed timeouts in scheduler %s', async (step, reason) => {
+        const timeout = { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+        const rpc = vi.fn();
+        if (step !== 'claim') {
+            rpc.mockResolvedValueOnce({
+                data: {
+                    decision: 'execute',
+                    operation_claim_token: operationClaimToken,
+                    recovery_only: false,
+                    result_json: null,
+                    not_before_at: null,
+                },
+                error: null,
+            });
+        }
+        rpc.mockResolvedValueOnce(timeout).mockResolvedValueOnce(timeout);
+        const store = storeWith(rpc);
+        const operation = { key: operationKey, stage: 'genderTriage' as const };
+        if (step !== 'claim') await store.claim(operation);
+        rpc.mockClear();
+        const pending = step === 'claim' ? store.claim(operation)
+            : step === 'commit' ? store.commitReady({
+                ...operation, claimToken: operationClaimToken, value: { value: 'female' },
+            }) : store.defer!({
+                ...operation, claimToken: operationClaimToken, reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            });
+
+        await expect(pending).rejects.toBeInstanceOf(AnalysisV2SchedulerContinuationError);
+        await expect(pending).rejects.toMatchObject({ reason, delaySeconds: 5 });
+        expect(rpc).toHaveBeenCalledTimes(2);
+        expect(rpc.mock.calls[0]).toEqual([
+            ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES[`${step}Rpc`],
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_job_claim_token: jobClaimToken,
+                p_operation_key: operationKey,
+                p_operation_claim_token: operationClaimToken,
+                ...(step === 'commit' ? { p_result_json: { value: 'female' } } : {}),
+            }),
+        ]);
+        expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
     });
 
     it('preserves ambiguous scheduler failures without replaying the RPC', async () => {

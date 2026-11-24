@@ -419,7 +419,7 @@ function createSchedulerMicrobatch(
                 return;
             }
             const continuation = schedulerContinuationReason(error);
-            const rejected = continuation
+            const rejected = continuation && !(error instanceof AnalysisV2SchedulerContinuationError)
                 ? new AnalysisV2SchedulerContinuationError(continuation)
                 : error;
             plans.forEach(plan => plan.reject(rejected));

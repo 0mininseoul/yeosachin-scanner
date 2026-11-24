@@ -284,13 +284,14 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
     });
 
-    it.each(['unused', '429', 'post-send timeout'] as const)('preserves the distinct Dev reservation disposition for %s', async disposition => {
+    it.each(['unused', '429', 'post-send transport error'] as const)('preserves the distinct Dev reservation disposition for %s', async disposition => {
         const budget = await useStagedDevBudget();
         mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
         mocks.releaseUnusedDevAttempt.mockImplementationOnce(budget.releaseUnusedDevLiveVertexAttempt);
         mocks.settleDevAttempt.mockImplementationOnce(budget.settleDevLiveVertexAttempt);
-        mocks.rpc.mockReset().mockImplementationOnce(async (_name, args) => ({ data: args.p_reservation_id, error: null }))
-            .mockResolvedValueOnce(disposition === 'post-send timeout' ? rollback : committed);
+        mocks.rpc.mockReset().mockImplementationOnce(async (_name, args) => ({ data: args.p_reservation_id, error: null }));
+        if (disposition === 'post-send transport error') mocks.rpc.mockRejectedValueOnce(new Error('connection lost'));
+        else mocks.rpc.mockResolvedValueOnce(committed);
         const audit = stageAuditOptions();
         if (disposition === 'unused') audit.onBeforeAttempt.mockRejectedValueOnce(new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'));
         else if (disposition === '429') mocks.generateContent.mockRejectedValueOnce(new ApiError({ message: 'quota', status: 429 }));
@@ -298,7 +299,7 @@ describe('analyzeWithGemini generation retry policy', () => {
         const expectedError = {
             unused: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
             '429': 'AI_RATE_LIMIT_ERROR',
-            'post-send timeout': 'DEV_LIVE_BUDGET_UNAVAILABLE',
+            'post-send transport error': 'DEV_LIVE_BUDGET_UNAVAILABLE',
         }[disposition];
         await expect(analyzeWithGemini('prompt', undefined, {
             ...audit, stage: 'genderTriage', schema: responseSchema, maxAttempts: 1,
@@ -309,6 +310,51 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(close[1].p_reservation_id).toBe(reserve[1].p_reservation_id);
         expect(close[0]).toBe(disposition === 'unused' ? 'dev_live_budget_release_unused_vertex_v1' : 'dev_live_budget_settle_vertex_v1');
         expect(mocks.generateContent).toHaveBeenCalledTimes(disposition === 'unused' ? 0 : 1);
+    });
+
+    it.each([
+        { outcome: 'success', rejectedByVertex: false, retryReply: committed },
+        { outcome: '429', rejectedByVertex: true, retryReply: committed },
+        { outcome: 'a second settlement timeout', rejectedByVertex: false, retryReply: rollback },
+    ])('retries only the rolled-back Dev settlement for $outcome', async ({ rejectedByVertex, retryReply }) => {
+        const budget = await useStagedDevBudget();
+        mocks.reserveDevAttempt.mockImplementationOnce(budget.reserveDevLiveVertexAttempt);
+        mocks.settleDevAttempt.mockImplementationOnce(budget.settleDevLiveVertexAttempt);
+        mocks.rpc.mockReset()
+            .mockImplementationOnce(async (_name, args) => ({ data: args.p_reservation_id, error: null }))
+            .mockResolvedValueOnce(rollback)
+            .mockResolvedValueOnce(retryReply);
+        const audit = stageAuditOptions();
+        const fetch = vi.fn(async () => new Response());
+        vi.stubGlobal('fetch', fetch);
+        mocks.generateContent.mockImplementationOnce(async () => {
+            await vertexDispatchFetch('https://vertex.invalid');
+            if (rejectedByVertex) throw new ApiError({ message: 'quota', status: 429 });
+            return successfulResponse();
+        });
+
+        const result = withVertexDispatchAuthorization(async () => true, () => analyzeWithGemini('prompt', undefined, {
+            ...audit, stage: 'genderTriage', schema: responseSchema,
+            budgetOperationKey: createAnalysisV2AiOperationKey('genderTriage', 'synthetic-stage'),
+            maxAttempts: rejectedByVertex ? 1 : undefined,
+        }));
+        if (rejectedByVertex) await expect(result).rejects.toThrow('AI_RATE_LIMIT_ERROR');
+        else if (retryReply.error) await expect(result).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        else await expect(result).resolves.toEqual({ value: 'ok' });
+
+        const [reserve, firstSettlement, secondSettlement] = mocks.rpc.mock.calls;
+        expect(mocks.rpc).toHaveBeenCalledTimes(3);
+        expect(firstSettlement).toEqual(['dev_live_budget_settle_vertex_v1', {
+            p_grant_id: reserve[1].p_grant_id,
+            p_reservation_id: reserve[1].p_reservation_id,
+            p_actual_micros: rejectedByVertex ? 0 : expect.any(Number),
+        }]);
+        if (!rejectedByVertex) expect(firstSettlement[1].p_actual_micros).toBeGreaterThan(0);
+        expect(secondSettlement).toEqual(firstSettlement);
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(fetch).toHaveBeenCalledOnce();
+        expect(mocks.releaseUnusedDevAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).toHaveBeenCalledTimes(retryReply.error ? 0 : 1);
     });
 
     it.each(['audit', 'SDK authentication'])('rejects a worker suspended during %s and returns its unused reservation once', async suspension => {

@@ -409,13 +409,19 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 continue;
             }
             const { lease } = acquire;
-            const claim = await input.operationStore.claim({
-                key: task.key,
-                stage: task.stage,
-            }).catch(error => {
+            let claim;
+            try {
+                claim = await input.operationStore.claim({
+                    key: task.key,
+                    stage: task.stage,
+                });
+            } catch (error) {
                 lease.release();
-                throw error;
-            });
+                // Other operations may still be receiving a paid response. Do
+                // not move the parent job fence until their writes have drained.
+                fatalError ??= error;
+                return { status: 'blocked', generation: null };
+            }
             if (claim.decision === 'deferred') {
                 queue.shift();
                 arbiter.cancel(waiter);
@@ -474,16 +480,20 @@ export async function runAnalysisV2FairAiScheduler<T>(
                     }
                     const reason = schedulerAdmissionReason(error);
                     if (reason && input.operationStore.defer) {
-                        const notBeforeAtMs = await input.operationStore.defer({
-                            key: task.key,
-                            stage: task.stage,
-                            claimToken: claim.claimToken,
-                            reason,
-                        });
-                        fatalError ??= new AnalysisV2SchedulerAdmissionDeferredError(
-                            reason,
-                            notBeforeAtMs,
-                        );
+                        try {
+                            const notBeforeAtMs = await input.operationStore.defer({
+                                key: task.key,
+                                stage: task.stage,
+                                claimToken: claim.claimToken,
+                                reason,
+                            });
+                            fatalError ??= new AnalysisV2SchedulerAdmissionDeferredError(
+                                reason,
+                                notBeforeAtMs,
+                            );
+                        } catch (deferralError) {
+                            fatalError ??= deferralError;
+                        }
                         return;
                     }
                     fatalError ??= error;

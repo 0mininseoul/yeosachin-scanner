@@ -575,7 +575,8 @@ describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () =
         await pool.query(`
             GRANT USAGE ON SCHEMA public TO service_role;
             DROP TABLE public.analysis_v2_ai_result_checkpoints, public.analysis_v2_ai_attempts;
-            ALTER TABLE public.analysis_requests ADD COLUMN background_processing boolean;
+            ALTER TABLE public.analysis_requests
+                ADD COLUMN background_processing boolean, ADD COLUMN policy_versions_snapshot jsonb;
             ALTER TABLE public.analysis_pipeline_jobs
                 ADD COLUMN track text, ADD COLUMN kind text, ADD COLUMN batch integer,
                 ADD COLUMN attempt_count integer NOT NULL DEFAULT 0, ADD COLUMN first_started_at timestamptz,
@@ -930,4 +931,244 @@ describePostgres('paid V2 dispatch and Vertex audit PostgreSQL lock order', () =
         }
     }, 15_000);
 
+    it('shares the active job fence across eight distinct audit attempts without weakening ownership', async () => {
+        await pool.query(migrationSource(resultLockMigration));
+        await pool.query(migrationSource('20261123210000_fence_failed_analysis_v2_vertex_dispatch.sql'));
+        const blocker = await pool.connect();
+        const clients = await Promise.all(Array.from({ length: 8 }, () => pool.connect()));
+        try {
+            const attempts = await Promise.all(clients.map(async (client, index) => {
+                const payload = { ...identity, input_hash: hash(`same-job-audit-${index}`) };
+                const { rows } = await client.query<{ value: string }>(
+                    'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [payload],
+                );
+                return { payload, args: [requestId, paidJob, claimToken, rows[0]!.value, randomUUID()] };
+            }));
+            const [first] = attempts;
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query(
+                    'SELECT 1 FROM public.analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2 FOR SHARE',
+                    [requestId, paidJob],
+                );
+                await expect(asService(clients[0]!, reserveSql, [...first!.args, metadata], 250))
+                    .rejects.toMatchObject({ code: '57014' });
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+
+            await blocker.query(migrationSource('20261124163000_share_analysis_v2_ai_audit_job_fences.sql'));
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query(
+                    'SELECT 1 FROM public.analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2 FOR SHARE',
+                    [requestId, paidJob],
+                );
+                await expect(Promise.all(clients.map((client, index) =>
+                    asService(client, reserveSql, [...attempts[index]!.args, metadata], 250),
+                ))).resolves.toEqual(Array(8).fill(expect.objectContaining({ created: true })));
+                await expect(Promise.all(clients.map((client, index) => {
+                    const { payload, args } = attempts[index]!;
+                    return asService(client, auditSql, [...args, telemetry, payload, output, output, outputHash], 250);
+                }))).resolves.toEqual(Array(8).fill(expect.objectContaining({ outcome: 'checkpointed' })));
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+
+            const { args, payload } = attempts[0]!;
+            await expect(Promise.all(clients.slice(0, 2).map(client =>
+                asService(client, auditSql, [...args, telemetry, payload, output, output, outputHash]),
+            ))).resolves.toEqual(Array(2).fill(expect.objectContaining({ outcome: 'checkpointed' })));
+            const recorded = await blocker.query(`
+                SELECT count(*)::int AS attempts, sum(estimated_cost_usd)::text AS cost,
+                       (SELECT count(*)::int FROM public.analysis_v2_ai_result_checkpoints
+                         WHERE request_id=$1 AND operation_key = ANY($2::text[])) AS checkpoints
+                FROM public.analysis_v2_ai_attempts
+                WHERE request_id=$1 AND operation_key = ANY($2::text[])
+            `, [requestId, attempts.map(attempt => attempt.args[3])]);
+            expect(recorded.rows[0]).toEqual({ attempts: 8, checkpoints: 8, cost: '0.008000000000' });
+
+            const collisionOperation = (await blocker.query<{ value: string }>(
+                'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value',
+                [{ ...identity, input_hash: hash('same-job-collision') }],
+            )).rows[0]!.value;
+            const collision = await Promise.all(clients.slice(0, 2).map(client =>
+                asService<{ created: boolean; reservationToken: string }>(client, reserveSql,
+                    [requestId, paidJob, claimToken, collisionOperation, randomUUID(), metadata],
+                ),
+            ));
+            expect(collision.map(reservation => reservation.created).sort()).toEqual([false, true]);
+            expect(collision[0]!.reservationToken).toBe(collision[1]!.reservationToken);
+
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query(
+                    'UPDATE public.analysis_pipeline_jobs SET lease_token=$3 WHERE request_id=$1 AND job_key=$2',
+                    [requestId, paidJob, randomUUID()],
+                );
+                await expect(asService(clients[0]!, auditSql,
+                    [...args, telemetry, payload, output, output, outputHash], 250,
+                )).rejects.toMatchObject({ code: '57014' });
+                await blocker.query('COMMIT');
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            await expect(asService(clients[0]!, auditSql,
+                [...args, telemetry, payload, output, output, outputHash],
+            )).resolves.toMatchObject({ outcome: 'fenced' });
+        } finally {
+            await blocker.query(
+                'UPDATE public.analysis_pipeline_jobs SET lease_token=$3 WHERE request_id=$1 AND job_key=$2',
+                [requestId, paidJob, claimToken],
+            );
+            for (const client of clients) client.release();
+            blocker.release();
+        }
+    }, 15_000);
+
+    it('atomically replays an accepted deterministic narrative with its original rejection and one charge', async () => {
+        const narrativeJob = 'track:narratives:batch:0';
+        const attemptSource = migrationSource('20260725010000_add_analysis_v2_gender_resolution_stage.sql');
+        const attemptConstraintStart = attemptSource.indexOf(
+            'ALTER TABLE public.analysis_v2_ai_attempts\n    DROP CONSTRAINT analysis_v2_ai_attempt_stage_check',
+        );
+        const attemptConstraintEnd = attemptSource.indexOf(
+            'ALTER TABLE public.analysis_v2_ai_result_checkpoints', attemptConstraintStart,
+        );
+        if (attemptConstraintStart < 0 || attemptConstraintEnd < 0) {
+            throw new Error('Missing attempt status constraints');
+        }
+        await pool.query(attemptSource.slice(attemptConstraintStart, attemptConstraintEnd));
+        const resultSource = migrationSource('20260713185711_add_analysis_v2_result_finalization.sql');
+        const resultFences = migrationSource('20260713213000_harden_analysis_v2_result_runtime_boundary.sql');
+        const tableDefinition = (name: string) => {
+            const start = resultSource.indexOf(`CREATE TABLE public.${name} (`);
+            const end = resultSource.indexOf('\n);', start);
+            if (start < 0 || end < 0) throw new Error(`Missing result fixture table ${name}`);
+            return resultSource.slice(start, end + 3);
+        };
+        await pool.query(functionDefinition(resultSource, 'analysis_v2_result_valid_public_copy'));
+        await pool.query(tableDefinition('analysis_v2_narrative_manifests'));
+        await pool.query(tableDefinition('analysis_v2_narrative_rows'));
+        await pool.query(`ALTER TABLE public.analysis_v2_candidate_feature_manifests
+            ADD COLUMN producer_input_hash text, ADD COLUMN producer_claim_token uuid`);
+        for (const manifest of [
+            'preliminary_score', 'reverse_like', 'partner_safety', 'candidate_score', 'private_name',
+        ]) {
+            await pool.query(`CREATE TABLE public.analysis_v2_${manifest}_manifests (
+                request_id uuid, producer_job_key text, producer_input_hash text, producer_claim_token uuid
+            )`);
+        }
+        await pool.query(`CREATE TABLE public.analysis_v2_candidate_score_rows (
+            request_id uuid, candidate_id text, risk_band text, featured_rank integer
+        )`);
+        await pool.query(functionDefinition(resultFences, 'analysis_v2_assert_result_job_fence'));
+        await pool.query(functionDefinition(resultFences, 'analysis_v2_result_staging_hash'));
+        await pool.query(functionDefinition(resultFences, 'analysis_v2_result_checkpoint_json'));
+        await pool.query(functionDefinition(resultSource, 'checkpoint_analysis_v2_narratives'));
+        await pool.query(`INSERT INTO public.analysis_pipeline_jobs (
+            request_id,job_key,track,kind,batch,input_hash,status,attempt_count,
+            dispatch_state,dispatch_generation,dispatch_reservation_token,dispatch_task_name,
+            dispatch_reserved_at,dispatched_at,delivered_at,lease_token,lease_expires_at,
+            dispatch_workload_role,dispatch_contract_version,claim_workload_role,claim_contract_version,
+            created_at,updated_at
+        ) SELECT request_id,$2,'narratives','ai',0,input_hash,status,attempt_count,
+            dispatch_state,dispatch_generation,dispatch_reservation_token,dispatch_task_name,
+            dispatch_reserved_at,dispatched_at,delivered_at,$3,clock_timestamp()+interval '5 minutes',
+            dispatch_workload_role,dispatch_contract_version,claim_workload_role,claim_contract_version,
+            created_at,updated_at
+          FROM public.analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$4`,
+        [requestId,narrativeJob,claimToken,paidJob]);
+        await pool.query(`INSERT INTO public.analysis_v2_candidate_score_rows VALUES ($1,'candidate:fixture','high_risk',1)`,
+            [requestId]);
+        const narrativeIdentity = { ...identity, stage: 'highRiskNarrative' };
+        const narrativeTelemetry = { ...telemetry, stage: 'highRiskNarrative' };
+        const narrativeMetadata = { ...metadata, stage: 'highRiskNarrative' };
+        const lines = ['후보의 공개 게시물에서 확인한 내용입니다.', '확인한 공개 단서와 수집 범위를 함께 봐야 합니다.'];
+        const narrativeOutput = JSON.stringify({ lines: lines.map(text => ({ evidenceRefs: ['profile:bio'], text })) });
+        const narrativeHash = hash(`analysis-v2-ai-result-content:v1\0${narrativeOutput}`);
+        const renderSql = 'SELECT public.checkpoint_analysis_v2_narratives($1,$2,$3,$4,$5::jsonb) AS result';
+        const client = await pool.connect();
+        const blocker = await pool.connect();
+        try {
+            const intent = async (input: typeof narrativeIdentity) => {
+                const { rows } = await client.query<{ value: string }>(
+                    'SELECT public.analysis_v2_ai_result_operation_key($1::jsonb) AS value', [input],
+                );
+                const args = [requestId, narrativeJob, claimToken, rows[0]!.value, randomUUID()];
+                await expect(asService(client, reserveSql, [...args, narrativeMetadata]))
+                    .resolves.toMatchObject({ created: true });
+                return args;
+            };
+            const render = (operationKey: string) => asService(client, renderSql, [
+                requestId,narrativeJob,claimToken,jobInputHash,
+                JSON.stringify([{ candidateId: 'candidate:fixture', lines, source: 'checkpoint',
+                    operationKey, aiResultHash: narrativeHash }]),
+            ]);
+            const oldRejected = await intent({ ...narrativeIdentity, input_hash: hash('prior-rejection') });
+            await asService(client, `SELECT public.terminalize_analysis_v2_ai_attempt(
+                $1::uuid,$2::text,$3::uuid,$4::text,1::smallint,$5::uuid,'response_rejected',$6::jsonb
+            ) AS result`, [...oldRejected, narrativeTelemetry]);
+            await expect(render(oldRejected[3]!)).rejects.toMatchObject({
+                code: 'P0001', message: 'ANALYSIS_V2_RESULT_NOT_READY',
+            });
+
+            await client.query(migrationSource('20261124163002_checkpoint_deterministically_repaired_narratives.sql'));
+            const repair = auditSql.replace('terminalize_analysis_v2_ai_attempt_with_result', 'terminalize_analysis_v2_repaired_narrative');
+            const args = await intent(narrativeIdentity);
+            const paid = [...args, narrativeTelemetry, narrativeIdentity, narrativeOutput, narrativeOutput, narrativeHash];
+            await expect(asService(client, repair, paid)).rejects.toMatchObject({
+                code: 'P0001', message: 'ANALYSIS_V2_AI_RESULT_INVALID',
+            });
+            await client.query(`UPDATE public.analysis_requests SET policy_versions_snapshot='{"aiStage":"ai-stage-policy-v2.11"}' WHERE id=$1`,
+                [requestId]);
+            await blocker.query('BEGIN');
+            try {
+                await blocker.query('SELECT id FROM public.analysis_preflights WHERE id=$1 FOR UPDATE', [preflightId]);
+                await expect(asService(client, repair, paid, 200)).rejects.toMatchObject({ code: '57014' });
+            } finally {
+                await blocker.query('ROLLBACK');
+            }
+            const savedEvidence = () => client.query(`
+                SELECT attempt.status, attempt.finish_reason, attempt.estimated_cost_usd::text AS cost,
+                       checkpoint.source, checkpoint.result_hash
+                FROM public.analysis_v2_ai_attempts AS attempt
+                LEFT JOIN public.analysis_v2_ai_result_checkpoints AS checkpoint
+                  ON checkpoint.request_id=attempt.request_id AND checkpoint.operation_key=attempt.operation_key
+                WHERE attempt.request_id=$1 AND attempt.operation_key=$2`, [requestId,args[3]]);
+            expect((await savedEvidence()).rows).toEqual([
+                { status:'reserved', finish_reason:null, cost:null, source:null, result_hash:null },
+            ]);
+            await expect(Promise.all([asService(client,repair,paid), asService(blocker,repair,paid)]))
+                .resolves.toEqual(Array(2).fill(expect.objectContaining({
+                    outcome: 'checkpointed',
+                    checkpoint: expect.objectContaining({ source: 'deterministic_repair', estimatedCostUsd: 0.001 }),
+                })));
+            expect((await savedEvidence()).rows).toEqual([{
+                status: 'response_rejected', finish_reason: 'STOP', cost: '0.001000000000',
+                source: 'deterministic_repair', result_hash: narrativeHash,
+            }]);
+            await expect(asService(client,
+                'SELECT public.load_analysis_v2_ai_result_checkpoint($1,$2) AS result', [requestId, args[3]],
+            )).resolves.toMatchObject({
+                source: 'deterministic_repair', result: JSON.parse(narrativeOutput), resultHash: narrativeHash,
+            });
+            await expect(render(args[3]!)).resolves.toMatchObject({ itemCount: 1, rowCount: 1 });
+            const stored = await client.query('SELECT line_one,line_two FROM public.analysis_v2_narrative_rows WHERE request_id=$1',
+                [requestId]);
+            expect(stored.rows).toEqual([{ line_one: lines[0], line_two: lines[1] }]);
+            const ordinaryIdentity = { ...narrativeIdentity, input_hash: hash('ordinary-success') };
+            const ordinary = await intent(ordinaryIdentity);
+            await expect(asService(client, auditSql, [
+                ...ordinary, narrativeTelemetry, ordinaryIdentity, narrativeOutput, narrativeOutput, narrativeHash,
+            ])).resolves.toMatchObject({ outcome: 'checkpointed', checkpoint: { source: 'generated' } });
+            expect((await client.query(
+                'SELECT status FROM public.analysis_v2_ai_attempts WHERE request_id=$1 AND operation_key=$2',
+                [requestId, ordinary[3]],
+            )).rows).toEqual([{ status: 'success' }]);
+        } finally {
+            blocker.release();
+            client.release();
+        }
+    }, 15_000);
 });

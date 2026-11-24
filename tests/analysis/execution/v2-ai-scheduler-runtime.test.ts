@@ -7,6 +7,7 @@ import {
     type AnalysisV2SchedulerTask,
 } from '../../../lib/services/analysis/v2-ai-scheduler-runtime';
 import { AnalysisV2AiTerminalUnavailableError } from '../../../lib/services/analysis/v2-ai-fallback-policy';
+import { AnalysisV2SchedulerContinuationError } from '../../../lib/services/analysis/v2-ai-scheduler-continuation';
 
 function operationStore<T = string>(
     states = new Map<string, 'claimed' | 'ready'>(),
@@ -44,6 +45,44 @@ function task(
 }
 
 describe('analysis V2 scheduler-v1 runtime', () => {
+    it.each(['claim', 'defer'] as const)('drains admitted siblings before continuing after a DB %s timeout', async operation => {
+        const timeout = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+        const store = operationStore();
+        const claim = store.claim;
+        const failureReached = vi.fn();
+        const fail = async () => {
+            failureReached();
+            throw timeout;
+        };
+        if (operation === 'claim') {
+            store.claim = vi.fn(input => input.key === 'waiting' ? fail() : claim(input));
+        } else {
+            store.defer = vi.fn(fail);
+        }
+        let release!: () => void;
+        const receiving = new Promise<string>(resolve => { release = () => resolve('checkpointed'); });
+        const sibling = vi.fn(() => receiving);
+        const waiting = vi.fn(async () => { throw new DevLiveVertexBudgetReservationPendingError(); });
+        const finished = vi.fn();
+        const run = runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1',
+            tasks: [task('receiving', 'featureAnalysis', 0, sibling), task('waiting', 'featureAnalysis', 1, waiting)],
+            operationStore: store, handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+        }).catch(error => { finished(error); return error; });
+        try {
+            await vi.waitFor(() => expect(failureReached).toHaveBeenCalledOnce());
+            expect(sibling).toHaveBeenCalledOnce();
+            expect(finished).not.toHaveBeenCalled();
+        } finally {
+            release();
+            await run;
+        }
+        expect(finished).toHaveBeenCalledWith(timeout);
+        expect(store.commitReady).toHaveBeenCalledExactlyOnceWith({
+            key: 'receiving', stage: 'featureAnalysis', claimToken: 'claim:receiving', value: 'checkpointed',
+        });
+    });
+
     it('releases the operation fence only for a proven pre-dispatch budget rollback', async () => {
         const rollback = new DevLiveVertexBudgetReservationPendingError();
         const store = { ...operationStore(), defer: vi.fn().mockResolvedValue(5_000) };
