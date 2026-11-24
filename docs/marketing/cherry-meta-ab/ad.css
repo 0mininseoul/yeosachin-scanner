@@ -131,3 +131,42 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .ad--story.c4 .bubble { font-size: 62px; }
 .ad--story.c4 .cherry { width: 460px; top: calc(var(--top) + 440px); }
 .ad--story.c4 h1 { font-size: 100px; bottom: calc(var(--bottom) + 210px); }
+
+/* Optical left alignment: Paperlogy's side bearing grows with size, so large lines sat ~10px inside
+   the logo and chip edges. Pull text ink back onto the same left edge as the boxes. */
+.c1 .lead, .c1 .punch, .c2 .lead, .c2 .punch, .c4 h1 span { margin-left: -0.06em; }
+.c1 .offer span, footer .brand span { margin-left: -0.04em; }
+.c4 .name { margin-left: -0.04em; }
+
+/* C2 v2: the alert card is the hero. No lock-screen clock or date. */
+.c2 .lock { top: calc(var(--top) + 330px); }
+.c2 .push { margin-top: 0; padding: 44px 48px 48px; border-radius: 52px; }
+.c2 .push header { font-size: 32px; gap: 16px; }
+.c2 .push header img { width: 56px; height: 56px; }
+.c2 .push-title { margin-top: 22px; font-size: 48px; }
+.c2 .push-text { margin-top: 10px; font-size: 44px; line-height: 1.4; }
+.c2 .push-people { gap: 20px; margin-top: 34px; }
+.c2 .push-people li { padding: 12px 28px 12px 12px; }
+.c2 .push-people img { width: 84px; height: 84px; }
+.c2 .push-people b { font-size: 36px; }
+.ad--story.c2 .lock { top: calc(var(--top) + 400px); }
+.ad--story.c2 .push { margin-top: 0; }
+
+/* C2 v3 headline: "남친(짝남)이 딴 여자랑 맞팔하면 / 바로 알려드려요", set larger as the hook. */
+.c2 .lead { font-size: 84px; line-height: 1.16; color: var(--cream); }
+.c2 .punch { font-size: 132px; line-height: 1.08; letter-spacing: -0.065em; color: var(--pink); }
+.c2 .lock { top: calc(var(--top) + 370px); }
+.ad--story.c2 .lead { font-size: 88px; }
+.ad--story.c2 .punch { font-size: 138px; }
+.ad--story.c2 .lock { top: calc(var(--top) + 480px); }
+
+/* C1 v2: the offer chip sits right under the headline instead of the bottom corner. */
+.c1 .stack { position: absolute; left: var(--side); top: calc(var(--top) + 150px); display: flex; flex-direction: column; align-items: flex-start; gap: 46px; }
+.c1 .stack h1, .c1 .stack .offer { position: static; }
+.ad--story.c1 .stack { top: calc(var(--top) + 190px); gap: 56px; }
+
+/* C2 v4: tighten the gap under the headline; card and footer move up, headline stays. */
+.c2 .lock { top: calc(var(--top) + 300px); }
+.c2 footer { bottom: calc(var(--bottom) + 90px); }
+.ad--story.c2 .lock { top: calc(var(--top) + 320px); }
+.ad--story.c2 footer { bottom: calc(var(--bottom) + 200px); }

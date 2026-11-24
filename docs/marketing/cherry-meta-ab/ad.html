@@ -22,20 +22,20 @@
       document.documentElement.dataset.variant = variant;
 
       const cherry = `<img class="cherry" src="${asset('design/namchin-demand/og/cherry.png')}" alt="">`;
-      const offer = `<p class="offer"><b>${shared.offer}</b><span>${shared.deadline}</span></p>`;
+      const offer = `<p class="offer"><b>${shared.offer}</b></p>`;
       const brandRow = `<p class="brand"><img src="${asset('public/cherry/logo.png')}" alt=""><span>${copy.brand}</span></p>`;
 
       const scenes = {
         1: () => `
           ${cherry}
           ${brandRow}
-          <h1><span class="lead">${copy.c1Lead}</span>${shared.c1Punch.map((line) => `<span class="punch">${line}</span>`).join('')}</h1>
-          ${offer}`,
+          <div class="stack">
+            <h1><span class="lead">${copy.c1Lead}</span>${shared.c1Punch.map((line) => `<span class="punch">${line}</span>`).join('')}</h1>
+            ${offer}
+          </div>`,
         2: () => `
           <h1><span class="lead">${copy.c2Lead}</span><span class="punch">${shared.c2Punch}</span></h1>
           <div class="lock">
-            <p class="clock">9:07</p>
-            <p class="date">11월 24일 월요일</p>
             <article class="push">
               <header><img src="${asset('public/cherry/assets/kakao-symbol.svg')}" alt=""><span>카카오톡</span><time>지금</time></header>
               <p class="push-title">체리</p>
@@ -72,6 +72,8 @@
           <footer>${brandRow}${offer}</footer>`,
       };
       ad.innerHTML = scenes[concept]();
+      // ?guide=1 draws the left content edge, for alignment checks only.
+      if (params.get('guide')) ad.insertAdjacentHTML('beforeend', '<i style="position:absolute;top:0;bottom:0;left:80px;width:2px;background:#00a2ff;z-index:9"></i>');
     </script>
   </body>
 </html>
