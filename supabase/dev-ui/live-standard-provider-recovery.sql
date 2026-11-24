@@ -10,7 +10,10 @@ BEGIN
         OR pg_catalog.to_regprocedure('public.dev_live_owner_start_v4(uuid,text,uuid)') IS NULL
         OR pg_catalog.to_regprocedure('dev_live_budget.active_standard_recovery_request_v1()') IS NULL
         OR pg_catalog.to_regprocedure('public.analysis_provider_admission_gemini_no_start_proven(public.analysis_provider_admission_leases)') IS NULL
-        OR pg_catalog.to_regprocedure('public.resolve_analysis_provider_admission(text,uuid)') IS NULL THEN
+        OR pg_catalog.to_regprocedure('public.resolve_analysis_provider_admission(text,uuid)') IS NULL
+        OR pg_catalog.to_regprocedure(
+            'public.cutoff_analysis_v2_gender_resolution_attempt(uuid,text,uuid,text,smallint,uuid,jsonb,integer,uuid,bigint)'
+        ) IS NULL THEN
         RAISE EXCEPTION 'DEV_STANDARD_RECOVERY_WRONG_DATABASE';
     END IF;
 END;
@@ -150,6 +153,105 @@ $$;
 REVOKE ALL ON FUNCTION public.retire_dev_live_standard_gemini_slots_v1(integer)
     FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.retire_dev_live_standard_gemini_slots_v1(integer) TO service_role;
+
+-- The optional resolver runs outside the scheduler. Keep its cutoff in a
+-- separate RPC so the Gemini advisory lock never spans provider lease recovery.
+CREATE OR REPLACE FUNCTION public.recover_dev_live_standard_resolver_cutoffs_v1()
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+SET lock_timeout = '750ms'
+AS $$
+DECLARE
+    v_request uuid := dev_live_budget.active_standard_recovery_request_v1();
+    v_now timestamptz := pg_catalog.clock_timestamp();
+    v_candidate record;
+    v_reply jsonb;
+    v_recovered integer := 0;
+BEGIN
+    IF v_request IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    FOR v_candidate IN
+        SELECT attempt.*, lease.slot, lease.lease_claim_token, lease.fence
+        FROM public.analysis_v2_gemini_leases AS lease
+        JOIN public.analysis_v2_ai_attempts AS attempt
+          ON attempt.request_id = lease.request_id AND attempt.job_key = lease.job_key
+         AND attempt.operation_key = lease.operation_key AND attempt.attempt = lease.attempt
+        JOIN public.analysis_pipeline_jobs AS job
+          ON job.request_id = attempt.request_id AND job.job_key = attempt.job_key
+        JOIN public.analysis_provider_admission_leases AS admission
+          ON admission.request_id = lease.request_id AND admission.job_key = lease.job_key
+         AND admission.operation_key = 'gemini:' || lease.operation_key || ':attempt:' || lease.attempt::text
+         AND admission.credential_slot = 'gemini-' || lease.slot::text
+         AND admission.provider_fence = lease.fence AND admission.claim_token = lease.lease_claim_token
+        WHERE lease.request_id = v_request AND lease.stage = 'genderResolution'
+          AND lease.state IN ('leased', 'quarantined') AND lease.expires_at <= v_now
+          AND admission.workload_role = 'paid' AND admission.logical_provider = 'gemini'
+          AND admission.expires_at <= v_now
+          AND attempt.stage = 'genderResolution' AND attempt.status = 'reserved'
+          AND job.status IN ('pending', 'processing')
+          AND job.lease_token IS DISTINCT FROM attempt.job_claim_token
+          AND NOT EXISTS (
+              SELECT 1 FROM public.analysis_v2_ai_attempts AS newer
+              WHERE newer.request_id = attempt.request_id AND newer.operation_key = attempt.operation_key
+                AND newer.attempt > attempt.attempt
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM public.analysis_v2_ai_result_checkpoints AS checkpoint
+              WHERE checkpoint.request_id = attempt.request_id AND checkpoint.operation_key = attempt.operation_key
+          )
+        ORDER BY lease.slot
+        LIMIT 8
+    LOOP
+        IF NOT pg_catalog.pg_try_advisory_xact_lock(
+            pg_catalog.hashtextextended('analysis-v2-gemini-leases', 0)
+        ) OR dev_live_budget.active_standard_recovery_request_v1() IS DISTINCT FROM v_request THEN
+            EXIT;
+        END IF;
+
+        -- The shared cutoff verifies the original fences and preserves any
+        -- recorded success. Missing usage stays unknown; no budget RPC is used.
+        v_reply := public.cutoff_analysis_v2_gender_resolution_attempt(
+            v_request, v_candidate.job_key, v_candidate.job_claim_token,
+            v_candidate.operation_key, v_candidate.attempt::smallint, v_candidate.reservation_token,
+            pg_catalog.jsonb_build_object(
+                'model_name', v_candidate.model_name,
+                'location', v_candidate.location,
+                'stage', 'genderResolution',
+                'thinking_level', v_candidate.thinking_level,
+                'media_count', v_candidate.media_count,
+                'media_resolution', v_candidate.media_resolution,
+                'prompt_version', v_candidate.prompt_version,
+                'schema_version', v_candidate.schema_version,
+                'max_output_tokens', v_candidate.max_output_tokens,
+                'retry_count', v_candidate.retry_count,
+                'usage_metadata_status', 'missing',
+                'usage_complete', FALSE,
+                'prompt_tokens', NULL,
+                'completion_tokens', NULL,
+                'total_tokens', NULL,
+                'thinking_tokens', NULL,
+                'latency_ms', LEAST(3600000::numeric, GREATEST(
+                    0::numeric, EXTRACT(EPOCH FROM (v_now - v_candidate.created_at)) * 1000
+                ))::integer,
+                'estimated_cost_usd', NULL,
+                'finish_reason', NULL
+            ),
+            v_candidate.slot, v_candidate.lease_claim_token, v_candidate.fence
+        );
+        IF v_reply->>'outcome' = 'cutoff' AND v_reply->>'attempt_status' = 'cutoff' THEN
+            v_recovered := v_recovered + 1;
+        END IF;
+    END LOOP;
+    RETURN v_recovered;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.recover_dev_live_standard_resolver_cutoffs_v1()
+    FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.recover_dev_live_standard_resolver_cutoffs_v1() TO service_role;
 
 CREATE OR REPLACE FUNCTION public.recover_dev_live_standard_provider_admissions_v1(p_limit integer DEFAULT 16)
 RETURNS jsonb

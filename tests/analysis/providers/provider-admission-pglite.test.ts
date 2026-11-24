@@ -2190,6 +2190,7 @@ describe('provider admission migration PGlite contract', () => {
     describe('Dev Standard recovery', () => {
         beforeAll(installDevRecovery);
         it('rotates exactly the expired preflight with a checkpointed Actor and lets the next delivery adopt it', verifyPreflightRecovery);
+        it('cuts off only the approved expired optional resolver and preserves unknown usage across recovery', verifyResolverRecovery);
         it('recovers only evidenced leases for the approved Dev Standard request and cleans proven terminal capacity when idle', verifyPaidRecovery);
     });
 
@@ -2218,7 +2219,28 @@ describe('provider admission migration PGlite contract', () => {
             updated_at timestamptz, completed_at timestamptz, result_json jsonb, PRIMARY KEY(request_id,operation_key)
         );
             ALTER TABLE public.analysis_v2_ai_attempts ADD stage text, ADD job_claim_token uuid,
-                ADD created_at timestamptz NOT NULL DEFAULT now();
+                ADD created_at timestamptz NOT NULL DEFAULT now(),
+                ADD reservation_token uuid, ADD model_name text, ADD location text, ADD thinking_level text,
+                ADD media_count smallint, ADD media_resolution text, ADD prompt_version text,
+                ADD schema_version smallint, ADD max_output_tokens integer, ADD retry_count smallint,
+                ADD usage_metadata_status text, ADD usage_complete boolean;
+            CREATE TABLE public.analysis_v2_ai_result_checkpoints (request_id uuid, operation_key text);
+            CREATE FUNCTION public.analysis_v2_ai_operation_matches_stage(text,text)
+            RETURNS boolean LANGUAGE sql AS $$
+                SELECT $2 = 'genderResolution' AND $1 LIKE 'gender-resolution:%'
+            $$;
+            CREATE FUNCTION public.analysis_v2_terminalize_ai_attempt_internal(
+                uuid,text,uuid,text,smallint,uuid,text,jsonb
+            ) RETURNS void LANGUAGE plpgsql AS $$
+            BEGIN
+                UPDATE public.analysis_v2_ai_attempts SET status=$7, terminalized_at=clock_timestamp(),
+                    usage_metadata_status=$8->>'usage_metadata_status', usage_complete=($8->>'usage_complete')::boolean,
+                    estimated_cost_usd=($8->>'estimated_cost_usd')::numeric
+                WHERE request_id=$1 AND job_key=$2 AND job_claim_token=$3 AND operation_key=$4
+                    AND attempt=$5 AND reservation_token=$6 AND status='reserved';
+                IF NOT FOUND THEN RAISE EXCEPTION 'ANALYSIS_V2_AI_ATTEMPT_CONFLICT'; END IF;
+            END;
+            $$;
             ALTER TABLE public.analysis_requests ADD user_id uuid, ADD completed_at timestamptz,
                 ADD selected_plan_id_snapshot text;
             ALTER TABLE public.analysis_preflights ADD idempotency_key text, ADD target_instagram_id text,
@@ -2240,6 +2262,11 @@ describe('provider admission migration PGlite contract', () => {
         await db.exec(readFileSync(new URL(
             '../../../supabase/migrations/20261122150000_retire_closed_analysis_v2_gemini_slots.sql', import.meta.url,
         ), 'utf8'));
+        const resolver = readMigration('20260725010000_add_analysis_v2_gender_resolution_stage');
+        await db.exec(resolver.slice(
+            resolver.indexOf('CREATE FUNCTION public.cutoff_analysis_v2_gender_resolution_attempt('),
+            resolver.indexOf('CREATE FUNCTION public.recover_analysis_v2_gender_resolution_cutoffs('),
+        ));
         await db.exec(recoverySql);
         await db.exec(recoverySql);
         const lockOrder = [
@@ -2353,7 +2380,7 @@ describe('provider admission migration PGlite contract', () => {
         }
     }
 
-    async function verifyPaidRecovery() {
+    async function seedDevApprovedStandard() {
         const owner = randomUUID();
         const request = randomUUID();
         const preflight = randomUUID();
@@ -2375,7 +2402,93 @@ describe('provider admission migration PGlite contract', () => {
                 (id,status,user_id,consumed_request_id,expires_at,idempotency_key,target_instagram_id,access_mode)
             VALUES ($1,'consumed',$2,$3,clock_timestamp() + interval '30 minutes',$4,$5,'test_entitlement')
         `, [preflight, owner, request, 'dev-live:owner:standard:' + grant, target]);
+        return { request, preflight, owner, policy, target };
+    }
 
+    async function verifyResolverRecovery() {
+        await db.exec('BEGIN');
+        try {
+            const { request } = await seedDevApprovedStandard();
+            const seed = async (slot: number, guard: 'expired' | 'active' | 'checkpoint' | 'foreign') => {
+                const requestId = guard === 'foreign' ? randomUUID() : request;
+                const jobKey = `track:profile-ai:batch:${slot}`;
+                const operation = `gender-resolution:${String(slot).repeat(64)}`;
+                const jobClaimToken = randomUUID();
+                const credentialSlot = `gemini-${slot}`;
+                const input = {
+                    ...geminiInput(), requestId, jobKey, jobClaimToken, claimToken: randomUUID(),
+                    credentialSlot, budgetKey: `paid:gemini:${credentialSlot}`,
+                    operationKey: `gemini:${operation}:attempt:1`, providerFence: 50,
+                };
+                await seedPaidJob(requestId, jobKey, jobClaimToken);
+                await seedGeminiSlot(input, operation);
+                const admission = await acquireWithLeaseToken(input, randomUUID());
+                expect(admission.outcome).toBe('acquired');
+                await db.query(`
+                    INSERT INTO public.analysis_v2_ai_attempts
+                        (request_id,job_key,operation_key,attempt,status,stage,job_claim_token,reservation_token)
+                    VALUES ($1,$2,$3,1,'reserved','genderResolution',$4,$5)
+                `, [requestId, jobKey, operation, jobClaimToken, randomUUID()]);
+                await db.query(`
+                    UPDATE public.analysis_v2_gemini_leases SET stage='genderResolution', state='quarantined',
+                        expires_at=clock_timestamp()-interval '1 second' WHERE slot=$1
+                `, [slot]);
+                await db.query(`
+                    UPDATE public.analysis_provider_admission_leases SET expires_at=clock_timestamp()-interval '1 second'
+                    WHERE admission_id=$1
+                `, [admission.admissionId]);
+                if (guard !== 'active') {
+                    await db.query(`
+                        UPDATE public.analysis_pipeline_jobs SET status='pending',lease_token=NULL,lease_expires_at=NULL
+                        WHERE request_id=$1 AND job_key=$2
+                    `, [requestId, jobKey]);
+                }
+                if (guard === 'checkpoint') {
+                    await db.query('INSERT INTO public.analysis_v2_ai_result_checkpoints VALUES ($1,$2)',
+                        [requestId, operation]);
+                }
+            };
+            await seed(1, 'expired');
+            await seed(2, 'active');
+            await seed(3, 'checkpoint');
+            await seed(4, 'foreign');
+
+            const dispatchState = () => db.query(`
+                SELECT
+                    (SELECT jsonb_agg(to_jsonb(lease) ORDER BY admission_id)
+                       FROM public.analysis_provider_admission_leases lease) AS admissions,
+                    (SELECT jsonb_agg(to_jsonb(budget) ORDER BY budget_key)
+                       FROM public.analysis_provider_admission_budgets budget) AS budgets
+            `).then(result => result.rows);
+            const before = await dispatchState();
+            const recover = () => asService('SELECT public.recover_dev_live_standard_resolver_cutoffs_v1() AS recovered');
+            expect((await recover()).rows).toEqual([{ recovered: 1 }]);
+            expect((await recover()).rows).toEqual([{ recovered: 0 }]);
+            expect(await dispatchState()).toEqual(before);
+            expect((await db.query(`
+                SELECT job_key,status,usage_metadata_status,usage_complete,estimated_cost_usd
+                FROM public.analysis_v2_ai_attempts WHERE stage='genderResolution' ORDER BY job_key
+            `)).rows).toEqual([
+                { job_key: 'track:profile-ai:batch:1', status: 'cutoff', usage_metadata_status: 'missing',
+                    usage_complete: false, estimated_cost_usd: null },
+                ...[2, 3, 4].map(slot => ({
+                    job_key: `track:profile-ai:batch:${slot}`, status: 'reserved', usage_metadata_status: null,
+                    usage_complete: null, estimated_cost_usd: null,
+                })),
+            ]);
+            expect((await db.query('SELECT state FROM public.analysis_v2_gemini_leases WHERE slot=1')).rows)
+                .toEqual([{ state: 'quarantined' }]);
+            expect((await db.query(`
+                SELECT has_function_privilege('anon','public.recover_dev_live_standard_resolver_cutoffs_v1()','EXECUTE') AS anon,
+                    has_function_privilege('authenticated','public.recover_dev_live_standard_resolver_cutoffs_v1()','EXECUTE') AS authenticated
+            `)).rows).toEqual([{ anon: false, authenticated: false }]);
+        } finally {
+            await db.exec('ROLLBACK');
+        }
+    }
+
+    async function verifyPaidRecovery() {
+        const { request, preflight, owner, policy, target } = await seedDevApprovedStandard();
         const apify = async (jobKey: string, requestId: string) => {
             const claim = randomUUID();
             const input = { ...paidInput(), jobKey, requestId, jobClaimToken: claim, claimToken: claim };

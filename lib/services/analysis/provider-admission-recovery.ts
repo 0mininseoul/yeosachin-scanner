@@ -37,6 +37,9 @@ const devRecoverySummarySchema = z.object({
 }).strict();
 
 export async function recoverDevLiveStandardProviderAdmissions() {
+    // Each RPC is a separate transaction. Resolver cutoff takes the Gemini
+    // advisory lock and must release it before the provider sweeps take job locks.
+    const cutoff = await supabaseAdmin.rpc('recover_dev_live_standard_resolver_cutoffs_v1');
     const { data, error } = await supabaseAdmin.rpc('recover_dev_live_standard_provider_admissions_v1', {
         p_limit: ANALYSIS_PROVIDER_ADMISSION_RECOVERY_PAGE_SIZE,
     });
@@ -44,10 +47,13 @@ export async function recoverDevLiveStandardProviderAdmissions() {
     const retired = await supabaseAdmin.rpc('retire_dev_live_standard_gemini_slots_v1', { p_limit: 8 });
     if (error) throw new Error('DEV_STANDARD_PROVIDER_ADMISSION_RECOVERY_FAILED');
     const summary = devRecoverySummarySchema.parse(data);
-    if (retired.error) return { ...summary, failed: summary.failed + 1 };
+    const count = z.number().int().min(0).max(8);
+    const cutoffs = count.safeParse(cutoff.data);
     return {
         ...summary,
-        geminiSlotsReaped: summary.geminiSlotsReaped + z.number().int().min(0).max(8).parse(retired.data),
+        failed: summary.failed + Number(Boolean(cutoff.error) || !cutoffs.success) + Number(Boolean(retired.error)),
+        geminiSlotsReaped: summary.geminiSlotsReaped + (retired.error ? 0 : count.parse(retired.data)),
+        resolverCutoffsRecovered: cutoff.error || !cutoffs.success ? 0 : cutoffs.data,
     };
 }
 

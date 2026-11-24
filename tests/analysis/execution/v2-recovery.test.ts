@@ -126,7 +126,7 @@ describe('analysis V2 dispatch recovery', () => {
             .mockRejectedValueOnce(new Error('lookup unavailable'));
         const dispatch = vi.fn(async () => undefined);
 
-        const providerAdmissions = { scanned: 3, recovered: 2, resolved: 1, skipped: 2, failed: 0, hasMore: false, geminiSlotsReaped: 1 };
+        const providerAdmissions = { scanned: 3, recovered: 2, resolved: 1, skipped: 2, failed: 0, hasMore: false, geminiSlotsReaped: 1, resolverCutoffsRecovered: 0 };
         const recoverLeases = vi.fn(async () => providerAdmissions);
         await expect(recoverDevLiveStandard({ store: jobStore, lookup, dispatch, recoverLeases })).resolves.toEqual({
             scanned: 3, dispatched: 1, taskPresent: 1, lostRace: 0, failed: 1, providerAdmissions,
@@ -156,7 +156,7 @@ describe('analysis V2 dispatch recovery', () => {
         vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', undefined);
         const jobStore = store([job('track:profile-ai:batch:0', 'pending')]);
         const dispatch = vi.fn(async () => undefined);
-        const providerAdmissions = { scanned: 1, recovered: 1, resolved: 1, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 1 };
+        const providerAdmissions = { scanned: 1, recovered: 1, resolved: 1, skipped: 0, failed: 0, hasMore: false, geminiSlotsReaped: 1, resolverCutoffsRecovered: 0 };
         const recoverLeases = vi.fn(async () => providerAdmissions);
         const recoverOrderAudits = vi.fn(async () => { throw new Error('audit unavailable'); });
 
