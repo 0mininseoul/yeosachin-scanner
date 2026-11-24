@@ -57,6 +57,14 @@ const repairedFeatureLineageUrl = new URL(
     '../../../supabase/migrations/20261124035000_accept_deterministic_feature_repair_lineage.sql',
     import.meta.url
 );
+const partnerCheckpointSource = readFileSync(new URL(
+    '../../../supabase/migrations/20260723013000_fix_partner_safety_checkpoint_contract.sql',
+    import.meta.url
+), 'utf8');
+const partnerRepairedFeatureUrl = new URL(
+    '../../../supabase/migrations/20261124191000_use_repaired_feature_lineage_in_partner_checkpoint.sql',
+    import.meta.url
+);
 
 function functionDefinition(source: string, name: string): string {
     const marker = `CREATE OR REPLACE FUNCTION public.${name}(`;
@@ -217,7 +225,8 @@ CREATE TABLE public.analysis_v2_ai_result_checkpoints (
     job_key TEXT NOT NULL,
     operation_key TEXT NOT NULL,
     stage TEXT NOT NULL,
-    result_hash TEXT NOT NULL
+    result_hash TEXT NOT NULL,
+    result_json JSONB
 );
 CREATE TABLE public.analysis_v2_ai_attempts (
     request_id UUID NOT NULL,
@@ -756,6 +765,9 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
         `);
         originalCandidateLineageDefinition = original.rows[0]!.definition;
         await db.exec(readFileSync(repairedFeatureLineageUrl, 'utf8'));
+        await db.exec(functionDefinition(resultSource, 'analysis_v2_result_valid_ref_list'));
+        await db.exec(partnerCheckpointSource);
+        await db.exec(readFileSync(partnerRepairedFeatureUrl, 'utf8'));
     }, 30_000);
 
     beforeEach(async () => {
@@ -1024,6 +1036,60 @@ describe('analysis V2 checkpoint contract correction PGlite migration', () => {
             one_line_overview: rows[0]!.feature!.oneLineOverview,
         }] });
         await expect(db.query(providerEvidence, params)).resolves.toMatchObject({ rows: before.rows });
+    });
+
+    it('reuses exactly the persisted v2.11 repaired feature during partner checkpoint validation', async () => {
+        const rows = await seedRepairedFeatureBatch();
+        await checkpointCandidates(rows);
+
+        const publicRow = {
+            candidateId: 'candidate:female',
+            source: 'not_collected',
+            hasStrongPartnerEvidence: false,
+            hasWeakPartnerEvidence: false,
+            strongEvidenceBasis: 'none',
+            evidenceSelectionIds: [],
+            bundleId: null,
+            operationKey: null,
+            aiResultHash: null,
+        };
+        const matches = () => db.query<{ matches: boolean }>(
+            `SELECT public.analysis_v2_result_partner_safety_row_matches(
+                 $1, 'track:partner-safety:batch:0', $2::JSONB
+             ) AS matches`,
+            [REQUEST_ID, JSON.stringify(publicRow)],
+        ).then(result => result.rows);
+        const evidence = `
+            SELECT status, finish_reason, estimated_cost_usd FROM public.analysis_v2_ai_attempts
+            WHERE request_id = $1 AND operation_key = $2
+        `;
+        const params = [REQUEST_ID, FEMALE_FEATURE_OPERATION];
+        const originalAudit = await db.query(evidence, params);
+        expect(await matches()).toEqual([{ matches: true }]);
+        expect((await db.query(evidence, params)).rows).toEqual(originalAudit.rows);
+        expect((await db.query(
+            'SELECT count(*)::int AS n FROM public.analysis_v2_ai_result_checkpoints WHERE request_id=$1 AND operation_key=$2',
+            params,
+        )).rows).toEqual([{ n: 0 }]);
+
+        // A simultaneous malformed repair cannot override a real raw checkpoint.
+        await db.query(`
+            INSERT INTO public.analysis_v2_ai_result_checkpoints
+            (request_id,job_key,operation_key,stage,result_hash,result_json)
+            SELECT $1,job_key,operation_key,stage,result_json->>'resultHash', result_json->'result'->'features'
+            FROM public.analysis_v2_scheduler_operations WHERE request_id=$1 AND operation_key=$2
+        `, params);
+        await db.query(`
+            UPDATE public.analysis_v2_scheduler_operations
+            SET result_json=jsonb_set(result_json,'{result,features,exposureScore}','5'::JSONB)
+            WHERE request_id=$1 AND operation_key=$2
+        `, params);
+        expect(await matches()).toEqual([{ matches: true }]);
+        await db.query(
+            'DELETE FROM public.analysis_v2_ai_result_checkpoints WHERE request_id=$1 AND operation_key=$2',
+            params,
+        );
+        expect(await matches()).toEqual([{ matches: false }]);
     });
 
     it.each([
