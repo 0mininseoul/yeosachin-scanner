@@ -82,7 +82,7 @@ export class SyntheticApify {
                     postUrl: url,
                     commentUrl: url + 'c/' + (51 + 2 * i + j) + '/',
                     id: String(51 + 2 * i + j),
-                    text: '여행 사진 잘 봤어!',
+                    text: '여행지에서기억에남는사진들!',
                     ownerUsername: candidate,
                     ownerProfilePicUrl: picture(candidate),
                     timestamp: '2026-10-02T09:00:00.000Z',

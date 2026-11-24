@@ -3956,7 +3956,7 @@ function deterministicV211NarrativeRepair(
     if (sentences.length > 0 && second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
         const compact = directions.map(({ actor, receiver, signals }) => `${actor}→${receiver} ${signals}.`);
         const quote = commentTerm ? ` “${commentTerm}”.` : '';
-        second = `${compact.join(' ')}${quote} 표본 밖 누락 가능성.`;
+        second = `${compact.join(' ')}${quote} 표본 밖 미확인.`;
     }
 
     return {
