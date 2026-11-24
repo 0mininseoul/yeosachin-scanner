@@ -3521,6 +3521,16 @@ function containsNamedInteractionDirection(
     receiver: string,
     interaction: '좋아요' | '댓글' | '태그' | '멘션',
 ): boolean {
+    // The compact two-way form names both endpoints once. Its second sentence
+    // explicitly reverses that pair and can contain only observed signal labels.
+    const signal = '(?:좋아요|댓글|태그|멘션)';
+    const signalList = `${signal}(?:·${signal})*`;
+    const reverse = new RegExp(
+        `^${escapesRegex(receiver)}→${escapesRegex(actor)} ${signalList}\\. 역방향 (${signalList})\\.`
+        + '(?: “[가-힣a-z]{2,12}”\\.)? 표본 밖 미확인\\.$',
+        'u',
+    ).exec(line);
+    if (reverse?.[1].split('·').includes(interaction)) return true;
     return new RegExp(
         `${escapesRegex(actor)}[^.]{0,80}${escapesRegex(receiver)}[^.]{0,80}${interaction}`,
         'u',
@@ -3957,6 +3967,9 @@ function deterministicV211NarrativeRepair(
         const compact = directions.map(({ actor, receiver, signals }) => `${actor}→${receiver} ${signals}.`);
         const quote = commentTerm ? ` “${commentTerm}”.` : '';
         second = `${compact.join(' ')}${quote} 표본 밖 미확인.`;
+        if (second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH && directions.length === 2) {
+            second = `${compact[0]} 역방향 ${directions[1].signals}.${quote} 표본 밖 미확인.`;
+        }
     }
 
     return {

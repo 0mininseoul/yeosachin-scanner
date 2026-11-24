@@ -3201,8 +3201,15 @@ describe('V2 staged AI services', () => {
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
-    it('repairs the observed v2.11 relationship-style and omitted-like contract violation without spend', async () => {
+    it.each([false, true])('repairs omitted v2.11 directions without additional spend (long names %s)', async longNames => {
         const input = narrativeInput();
+        if (longNames) {
+            input.publicSubjects = { candidateFullName: '수'.repeat(40), targetFullName: '유'.repeat(40) };
+            Object.assign(input.interactions, {
+                candidateToTargetTag: observed('tag:forward'), targetToCandidateTag: observed('tag:reverse'),
+                candidateToTargetMention: observed('mention:forward'), targetToCandidateMention: observed('mention:reverse'),
+            });
+        }
         const candidate = { lines: [{
             text: '박민지님의 여행 피드에는 커플 기류가 은근히 읽히는 장면이 이어집니다.',
             evidenceRefs: ['profile:bio'],
@@ -3259,7 +3266,12 @@ describe('V2 staged AI services', () => {
         );
 
         expect(result.source).toBe('gemini');
-        expect(result.lines[1]).toContain('김준호님이 박민지님에게 남긴 좋아요');
+        if (longNames) {
+            expect(result.lines[1]).toContain(`${'수'.repeat(40)}님→${'유'.repeat(40)}님 좋아요·댓글·태그·멘션. 역방향 좋아요·태그·멘션.`);
+            expect(result.lines[1].length).toBeLessThanOrEqual(180);
+        } else {
+            expect(result.lines[1]).toContain('김준호님이 박민지님에게 남긴 좋아요');
+        }
         expect(mocks.analyzeWithGemini).toHaveBeenCalledTimes(1);
     });
 
