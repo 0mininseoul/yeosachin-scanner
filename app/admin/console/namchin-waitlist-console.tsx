@@ -4,12 +4,19 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
+import { reservationSourceLabels } from '@/public/cherry/reservation-source.mjs';
 import { ConsoleWorkspaceSwitch } from './console-workspace-switch';
 import { Card, EmptyRow, ErrorNotice } from './console-ui';
 
 type Filter = { query: string; page: number };
 type Roster = {
-    rows: { email: string; phone: string; consentedAt: string; variant: 'bf' | 'crush' | null }[];
+    rows: {
+        email: string;
+        phone: string;
+        consentedAt: string;
+        variant: 'bf' | 'crush' | null;
+        source: keyof typeof reservationSourceLabels | null;
+    }[];
     count: number;
     hasNext: boolean;
     variantCounts: { bf: number; crush: number; none: number } | null;
@@ -69,7 +76,7 @@ export function NamchinWaitlistConsole() {
                 <div>
                     <div className="ac-crumb"><span>운영 콘솔</span><span aria-hidden="true">/</span><span>체리(남친 맞팔 알리미)</span></div>
                     <h1>사전 예약 명단</h1>
-                    <p>신청 이메일, 휴대폰 번호, 출시 알림 수신 동의 일시를 확인합니다.</p>
+                    <p>신청 연락처, 출시 알림 수신 동의 일시, 유입 경로를 확인합니다.</p>
                 </div>
                 <button type="button" className="ac-btn" onClick={refresh}>새로고침</button>
             </header>
@@ -98,13 +105,15 @@ export function NamchinWaitlistConsole() {
                             <th scope="col">휴대폰 번호</th>
                             <th scope="col">수신 동의 일시 <span className="ac-namchin-timezone">KST</span></th>
                             <th scope="col">광고 변형</th>
+                            <th scope="col">유입 경로</th>
                         </tr></thead>
                         <tbody>{roster?.rows.length ? roster.rows.map(row => <tr key={row.email}>
                             <td><b>{row.email}</b></td>
                             <td className="ac-tabular">{formatPhone(row.phone)}</td>
                             <td><time dateTime={row.consentedAt}>{DATE_TIME.format(new Date(row.consentedAt))}</time></td>
                             <td>{row.variant ? VARIANT_LABEL[row.variant] : '변형 없음'}</td>
-                        </tr>) : <EmptyRow colSpan={4}>{current ? (roster ? (filter.query ? '검색 조건에 맞는 예약이 없습니다.' : '아직 접수된 사전 예약이 없습니다.') : '명단을 표시할 수 없습니다.') : '불러오는 중…'}</EmptyRow>}</tbody>
+                            <td>{row.source ? reservationSourceLabels[row.source] : '확인 불가'}</td>
+                        </tr>) : <EmptyRow colSpan={5}>{current ? (roster ? (filter.query ? '검색 조건에 맞는 예약이 없습니다.' : '아직 접수된 사전 예약이 없습니다.') : '명단을 표시할 수 없습니다.') : '불러오는 중…'}</EmptyRow>}</tbody>
                     </table>
                 </div>
                 {filter.page > 1 || roster?.hasNext ? <div className="ac-tools-bar" aria-label="명단 페이지">

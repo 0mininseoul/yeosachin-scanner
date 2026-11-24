@@ -2,6 +2,7 @@ import { CHERRY_EVENTS, initAmplitude, markAnalyticsIdentityReady, trackEvent } 
 import { createClient } from '../supabase/client';
 import { inject } from '@vercel/analytics';
 import { isDevUiTelemetryDisabled } from '../constants/dev-ui';
+import { parseReservationSource } from '@/public/cherry/reservation-source.mjs';
 
 if (!isDevUiTelemetryDisabled()) inject();
 
@@ -23,7 +24,10 @@ void (async () => {
     }
 })();
 // The Meta A/B arm the server rendered (?v=bf|crush); absent for visitors without one.
-const variant = document.documentElement.dataset.variant;
+const taggedSource = parseReservationSource(new URLSearchParams(window.location.search).get('utm_source'));
+const variant = taggedSource || document.documentElement.hasAttribute('data-organic-concept')
+    ? undefined
+    : document.documentElement.dataset.variant;
 const properties = variant ? { variant } : undefined;
 
 trackEvent(CHERRY_EVENTS.VIEWED, properties);
