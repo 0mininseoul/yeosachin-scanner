@@ -14,7 +14,7 @@ import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-pro
 import { assertOwnerPage } from './fixtures/standard-result-page';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
-import { SyntheticApify, target } from './fixtures/standard-providers';
+import { SyntheticApify, target, candidate } from './fixtures/standard-providers';
 import { POST as start } from '@/app/api/analysis/preflight/route';
 import { PATCH as update } from '@/app/api/analysis/preflight/[preflightId]/route';
 import { POST as entitle } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
@@ -99,6 +99,8 @@ vi.mock('@aws-sdk/client-s3', async (original) => ({
         send = runtime.r2;
     },
 }));
+// Cloud credentials must never be materialized from the host environment by this offline test.
+vi.mock('@/lib/services/google/credentials', () => ({ prepareGoogleApplicationCredentials: () => undefined }));
 vi.mock('@google/genai/node', async (original) => ({
     ...(await original<typeof import('@google/genai/node')>()),
     GoogleGenAI: class {
@@ -443,12 +445,15 @@ it.each(['first', 'second', 'timeout'])(
             const body = await page.json();
             expect(body.femaleAccounts).toHaveLength(1);
             const row = body.femaleAccounts[0];
-            expect(row.instagramId).toBe('sample2');
+            expect(row.instagramId).toBe(candidate);
             expect(row.highRiskNarrative).toHaveLength(2);
             expect(row).toMatchObject({ displayScore: 7.2, riskBand: 'high_risk' });
-            expect(row.highRiskNarrative[0]).toContain('sample2님');
-            expect(row.highRiskNarrative[1]).toContain('target7님');
+            expect(row.highRiskNarrative[0]).toContain(candidate + '님');
+            expect(row.highRiskNarrative[1]).toContain(target + '님');
             expect(row.highRiskNarrative.join(' ')).not.toContain('님님');
+            expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
+            expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
+            expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
             expect(steps).toBe(12 + continued);
             expect(apify.starts).toHaveLength(9);
             expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);

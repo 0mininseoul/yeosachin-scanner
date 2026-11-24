@@ -3920,14 +3920,12 @@ function deterministicV211NarrativeRepair(
 
     // Keep each actor's observations in one sentence. Repeating both names for
     // every signal can push the repair past the public 180-character limit.
-    const directionClauses: string[] = [];
+    const directions: Array<{ actor: string; receiver: string; signals: string }> = [];
     function addDirection(actor: string, receiver: string, observations: ReadonlyArray<
         readonly [z.infer<typeof interactionObservationSchema>, string]
     >) {
         const signals = observations.filter(([observation]) => observed(observation)).map(([, signal]) => signal);
-        if (signals.length) directionClauses.push(
-            `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${signals.join('·')} 기록이 있습니다.`,
-        );
+        if (signals.length) directions.push({ actor, receiver, signals: signals.join('·') });
     }
     addDirection(subjects.candidate, subjects.target, [
         [input.interactions.candidateToTargetLike, '좋아요'],
@@ -3948,9 +3946,18 @@ function deterministicV211NarrativeRepair(
     // boundaries are part of the validator's actor -> receiver -> interaction grammar: without
     // them, a target->candidate clause could be falsely inferred by crossing a prior clause.
     const commentSuffix = commentTerm ? ` 실제 댓글에는 “${commentTerm}” 표현이 남았습니다.` : '';
-    const second = directionClauses.length > 0
-        ? `${directionClauses.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
-        : `${candidateTitle}과 ${subjects.target.endsWith('님') ? subjects.target : subjects.target + '님'}의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
+    const targetTitle = subjects.target.endsWith('님') ? subjects.target : subjects.target + '님';
+    const sentences = directions.map(({ actor, receiver, signals }) =>
+        `${actor}${actor.endsWith('님') ? '이' : '가'} ${receiver}에게 남긴 ${signals} 기록이 있습니다.`
+    );
+    let second = sentences.length > 0
+        ? `${sentences.join(' ')}${commentSuffix} 수집 표본 밖 누락 가능성은 남습니다.`
+        : `${candidateTitle}과 ${targetTitle}의 공개 상호작용은 제공 범위에서 제한적으로 확인되며, 수집 표본 밖 누락 가능성은 남습니다.`;
+    if (sentences.length > 0 && second.length > MAX_PUBLIC_RISK_NARRATIVE_LINE_LENGTH) {
+        const compact = directions.map(({ actor, receiver, signals }) => `${actor}→${receiver} ${signals}.`);
+        const quote = commentTerm ? ` “${commentTerm}”.` : '';
+        second = `${compact.join(' ')}${quote} 표본 밖 누락 가능성.`;
+    }
 
     return {
         lines: [

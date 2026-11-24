@@ -1,5 +1,5 @@
-export const target = 'target7';
-export const candidate = 'sample2';
+export const target = 'target7'.padStart(30, 't');
+export const candidate = 'sample2'.padStart(30, 's');
 const postCode = (username: string) => (username === target ? 'TargetPost7' : 'SamplePost2');
 const picture = (username: string) => 'https://scontent.cdninstagram.com/' + username + '.jpg';
 
@@ -27,7 +27,7 @@ export function profileItem(username: string) {
                 caption: '함께한 여행 사진 @' + (username === target ? candidate : target),
                 timestamp: '2026-10-01T09:00:00.000Z',
                 likesCount: 1,
-                commentsCount: 1,
+                commentsCount: username === target ? 2 : 1,
                 taggedUsers: [{ username: username === target ? candidate : target }],
             };
         }),
