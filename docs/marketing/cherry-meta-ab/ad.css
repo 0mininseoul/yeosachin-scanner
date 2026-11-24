@@ -159,3 +159,8 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .ad--story.c2 .lead { font-size: 88px; }
 .ad--story.c2 .punch { font-size: 138px; }
 .ad--story.c2 .lock { top: calc(var(--top) + 480px); }
+
+/* C1 v2: the offer chip sits right under the headline instead of the bottom corner. */
+.c1 .stack { position: absolute; left: var(--side); top: calc(var(--top) + 150px); display: flex; flex-direction: column; align-items: flex-start; gap: 46px; }
+.c1 .stack h1, .c1 .stack .offer { position: static; }
+.ad--story.c1 .stack { top: calc(var(--top) + 190px); gap: 56px; }

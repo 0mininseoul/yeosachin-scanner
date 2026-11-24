@@ -29,8 +29,10 @@
         1: () => `
           ${cherry}
           ${brandRow}
-          <h1><span class="lead">${copy.c1Lead}</span>${shared.c1Punch.map((line) => `<span class="punch">${line}</span>`).join('')}</h1>
-          ${offer}`,
+          <div class="stack">
+            <h1><span class="lead">${copy.c1Lead}</span>${shared.c1Punch.map((line) => `<span class="punch">${line}</span>`).join('')}</h1>
+            ${offer}
+          </div>`,
         2: () => `
           <h1><span class="lead">${copy.c2Lead}</span><span class="punch">${shared.c2Punch}</span></h1>
           <div class="lock">
