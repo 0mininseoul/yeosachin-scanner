@@ -229,6 +229,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         does: [
             '맞팔 계정의 성별을 판정합니다 (1차 → 트리아지 → 해결).',
             'Standard 1차 판독은 호출 전에 후보 묶음을 저장합니다. 작업이 재전달되면 처음 사용한 이미지와 같은 묶음의 호출 기록을 복구합니다.',
+            'Dev Standard에서 재전달된 배치는 이미 완료한 성별·특징 판독 결과를 함께 읽고, 남은 판독부터 이어갑니다.',
             '여성 후보는 외모·노출·계정 성격·파트너 근거를 분석합니다.',
         ],
         services: 'Gemini',
