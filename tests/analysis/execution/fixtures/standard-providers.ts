@@ -46,13 +46,13 @@ type ActorInput = {
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
-    constructor(private readonly candidatePostCount = 1, private readonly includePrivate = false) {}
+    constructor(private readonly candidatePostCount = 1, private readonly privateCount = 0) {}
 
     private rows(actor: string, input: ActorInput) {
         if (actor === 'apify/instagram-profile-scraper' && input.usernames)
             return input.usernames.map(username => {
                 const profile = profileItem(username, this.candidatePostCount);
-                if (this.includePrivate && username === target) profile.followersCount = profile.followsCount = 2;
+                if (username === target) profile.followersCount = profile.followsCount = 1 + this.privateCount;
                 return profile;
             });
         if (input.Account)
@@ -67,11 +67,14 @@ export class SyntheticApify {
                     is_verified: false,
                     profile_pic_url: picture(candidate),
                 },
-                ...(this.includePrivate ? [{
-                    username_scrape: target, type: input.dataToScrape, id: '3', username: privateCandidate,
-                    full_name: privateCandidate, is_private: true, is_verified: false,
-                    profile_pic_url: picture(privateCandidate) + '?z=2&a=1&utm_source=offline',
-                }] : []),
+                ...Array.from({ length: this.privateCount }, (_, index) => {
+                    const username = 'fixture_private_' + index;
+                    return {
+                        username_scrape: target, type: input.dataToScrape,
+                        id: String(index + 1000), username, full_name: username,
+                        is_private: true, is_verified: false, profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
+                    };
+                }),
             ];
         if (input.posts)
             return input.posts.map((url) => {
@@ -82,7 +85,7 @@ export class SyntheticApify {
                     id: '2',
                     is_private: false,
                     is_verified: false,
-                    profile_pic_url: picture(username),
+                    profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
                     liked_post: url,
                     total_likes: 1,
                     is_new: true,

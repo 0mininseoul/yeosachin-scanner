@@ -1,15 +1,19 @@
 import 'server-only';
+import { createStandardQaResultProofAccess } from './standard-qa-result-proof';
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
 import {
     ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS,
     ANALYSIS_V2_MEDIA_BUNDLE_MAX_BYTES,
     createGoogleCloudPrivateMediaObjectClient,
     isAnalysisV2DevLiveMediaBucketName,
+    isAnalysisV2DevQaCopyBucketName,
     type AnalysisV2DevArchiveObjectClient,
 } from '@/lib/services/analysis/v2-media-artifact-store';
 
 const DOMAIN = 'yeosachin-dev-standard-archive:v1';
+const COPY_DOMAIN = 'yeosachin-dev-standard-qa-copy:v1';
+const AES_WRAP_IV = Buffer.alloc(8, 0xa6); // RFC 3394 default initial value
 const VERSION = 1;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
@@ -24,6 +28,7 @@ const GRANT_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[
 const TARGET_PATTERN = /^[a-z0-9._]{1,30}$/;
 const KIND_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+const COPY_NAME_PATTERN = /^([a-z][a-z0-9_-]{0,63})\/([a-f0-9]{80})\.bin$/;
 const FRAGMENT_NAME_PATTERN = /^([a-z][a-z0-9_-]{0,63})\/([a-f0-9]{64})\.bin$/;
 
 export const DEV_STANDARD_ARCHIVE_MAX_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -105,15 +110,37 @@ function encode(value: unknown, maximumBytes: number): Buffer {
     return Buffer.from(serialized, 'utf8');
 }
 
-export function createDevStandardArchiveStore(input: {
+type ArchiveStoreInput = {
     bucketName: string;
     slot: string;
     key: string;
     objects?: AnalysisV2DevArchiveObjectClient;
     now?: () => number;
-}) {
-    if (!isAnalysisV2DevLiveMediaBucketName(input.bucketName)
-        || typeof input.slot !== 'string' || !SLOT_PATTERN.test(input.slot)
+};
+
+export function createDevStandardArchiveStore(input: ArchiveStoreInput) {
+    if (!isAnalysisV2DevLiveMediaBucketName(input.bucketName)) {
+        throw new Error('DEV_STANDARD_ARCHIVE_STORE_CONFIG');
+    }
+    return createStore(input, DOMAIN, DEV_STANDARD_ARCHIVE_MAX_RETENTION_MS).store;
+}
+
+export function devStandardQaCopyObjectPrefix(bucketName: string, slot: string) {
+    if (!isAnalysisV2DevQaCopyBucketName(bucketName) || !SLOT_PATTERN.test(slot)) return invalid();
+    return 'analysis-v2-dev-standard-archive/' + hash(JSON.stringify([COPY_DOMAIN, bucketName, slot])) + '/';
+}
+
+/** Separate storage, encryption context and deadline for an independently authorized QA fixture. */
+export function createDevStandardQaCopyStore(input: ArchiveStoreInput) {
+    if (!isAnalysisV2DevQaCopyBucketName(input.bucketName)) return invalid();
+    const { store, bindCopyOrigin, readCopyOrigin, proofEnvelope } = createStore(input, COPY_DOMAIN, 90 * 24 * 60 * 60_000);
+    const proof = createStandardQaResultProofAccess({ openSealedArchive: store.openSealedArchive,
+        readCopyOrigin, ...proofEnvelope }, input.now ?? Date.now);
+    return { ...store, bindCopyOrigin, readCopyOrigin, ...proof };
+}
+
+function createStore(input: ArchiveStoreInput, domain: string, maximumLifetime: number) {
+    if (typeof input.slot !== 'string' || !SLOT_PATTERN.test(input.slot)
         || typeof input.key !== 'string' || !KEY_PATTERN.test(input.key)) {
         throw new Error('DEV_STANDARD_ARCHIVE_STORE_CONFIG');
     }
@@ -124,9 +151,25 @@ export function createDevStandardArchiveStore(input: {
 
     const objects = input.objects ?? createGoogleCloudPrivateMediaObjectClient({ bucketName: input.bucketName });
     const now = input.now ?? Date.now;
-    const scope = [DOMAIN, input.bucketName, input.slot];
+    const scope = [domain, input.bucketName, input.slot];
     const slotHash = hash(JSON.stringify(scope));
-    const archivePrefix = `analysis-v2-dev-standard-archive/${slotHash}/`;
+    const nameKey = domain === COPY_DOMAIN
+        ? Buffer.from(hkdfSync('sha256', key, Buffer.from(slotHash), 'private-qa-input-name/v1', 32))
+        : null;
+    // A hash derived from a username can be guessed. Wrap the fixed-size input key
+    // using AES key wrap before using it in a private-copy GCS object name.
+    function physicalInputKey(digest: string, unwrap: boolean): string {
+        if (!nameKey) return digest;
+        try {
+            const cipher = unwrap ? createDecipheriv('id-aes256-wrap', nameKey, AES_WRAP_IV)
+                : createCipheriv('id-aes256-wrap', nameKey, AES_WRAP_IV);
+            return Buffer.concat([cipher.update(Buffer.from(digest, 'hex')), cipher.final()]).toString('hex');
+        } catch {
+            return invalid();
+        }
+    }
+    const archivePrefix = domain === COPY_DOMAIN ? devStandardQaCopyObjectPrefix(input.bucketName, input.slot)
+        : `analysis-v2-dev-standard-archive/${slotHash}/`;
     const fragmentPrefix = `${archivePrefix}fragment/`;
 
     function reference(...address: readonly string[]): ArchiveReference {
@@ -148,7 +191,8 @@ export function createDevStandardArchiveStore(input: {
     }
 
     function fragmentRef(binding: DevStandardArchiveBinding, identity: FragmentIdentity): ArchiveReference {
-        const objectName = `${fragmentPrefix}${fragmentKey(identity)}.bin`;
+        fragmentKey(identity);
+        const objectName = `${fragmentPrefix}${identity.kind}/${physicalInputKey(identity.inputKey, false)}.bin`;
         const lineage = hash(encode(binding, MAX_METADATA_BYTES));
         return { ...reference('fragment', lineage, identity.kind, identity.inputKey), objectName };
     }
@@ -161,7 +205,7 @@ export function createDevStandardArchiveStore(input: {
         if (typeof grantId !== 'string' || !GRANT_PATTERN.test(grantId)
             || typeof target !== 'string' || !TARGET_PATTERN.test(target)
             || typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt)
-            || !Number.isSafeInteger(time) || time < 0 || expiresAt - time > DEV_STANDARD_ARCHIVE_MAX_RETENTION_MS) {
+            || !Number.isSafeInteger(time) || time < 0 || expiresAt - time > maximumLifetime) {
             return invalid();
         }
         if (expiresAt <= time) throw new Error('DEV_STANDARD_ARCHIVE_STORE_EXPIRED');
@@ -288,12 +332,12 @@ export function createDevStandardArchiveStore(input: {
             || names.length > ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS
             || names.some(name => typeof name !== 'string')
             || new Set(names).size !== names.length) return invalid();
-        const identities = [...names].sort().map(name => {
+        const identities = names.map(name => {
             if (!name.startsWith(fragmentPrefix)) return invalid();
-            const match = FRAGMENT_NAME_PATTERN.exec(name.slice(fragmentPrefix.length));
+            const match = (nameKey ? COPY_NAME_PATTERN : FRAGMENT_NAME_PATTERN).exec(name.slice(fragmentPrefix.length));
             if (!match) return invalid();
-            return { kind: match[1]!, inputKey: match[2]! };
-        });
+            return { kind: match[1]!, inputKey: physicalInputKey(match[2]!, true) };
+        }).sort((left, right) => fragmentKey(left) < fragmentKey(right) ? -1 : 1);
         const fragments: ManifestEntry[] = [];
         for (let offset = 0; offset < identities.length; offset += VERIFY_CONCURRENCY) {
             fragments.push(...await Promise.all(identities.slice(offset, offset + VERIFY_CONCURRENCY).map(
@@ -325,6 +369,8 @@ export function createDevStandardArchiveStore(input: {
         )));
         return {
             binding: manifest.binding,
+            fingerprint: hash(encode(manifest, MAX_MANIFEST_BYTES)),
+            members: () => manifest.fragments.map(([kind, inputKey]) => ({ kind, inputKey })),
             inputKeys(kind: string): readonly string[] {
                 return manifest.fragments.filter(entry => entry[0] === kind).map(entry => entry[1]);
             },
@@ -336,7 +382,7 @@ export function createDevStandardArchiveStore(input: {
         };
     }
 
-    return {
+    const store = {
         async bindCapture(value: DevStandardArchiveBinding): Promise<DevStandardArchiveBinding> {
             const binding = validateBinding(value);
             await persist(bindingRef, binding, MAX_METADATA_BYTES);
@@ -386,6 +432,31 @@ export function createDevStandardArchiveStore(input: {
                 ));
             }
             return validateBinding(manifest.binding);
+        },
+    };
+    const originRef = reference('qa-copy-origin');
+    return {
+        store,
+        proofEnvelope: {
+            async readEnvelope(address: string) {
+                return (await read(reference('result-proof/v1', address), 64 * 1024))?.value;
+            },
+            async writeEnvelope(address: string, entries: unknown, beforeCreate: () => Promise<void>) {
+                await persist(reference('result-proof/v1', address), entries, 64 * 1024, beforeCreate);
+            },
+        },
+        async bindCopyOrigin(context: string, fingerprint: string) {
+            await requireBinding();
+            if (!DIGEST_PATTERN.test(context) || !DIGEST_PATTERN.test(fingerprint)) return invalid();
+            await persist(originRef, { context, fingerprint }, MAX_METADATA_BYTES);
+        },
+        async readCopyOrigin(context: string) {
+            await requireBinding();
+            const origin = (await read(originRef, MAX_METADATA_BYTES))?.value;
+            if (!origin || typeof origin !== 'object' || !('context' in origin)
+                || origin.context !== context || !('fingerprint' in origin)
+                || typeof origin.fingerprint !== 'string' || !DIGEST_PATTERN.test(origin.fingerprint)) return null;
+            return origin.fingerprint;
         },
     };
 }

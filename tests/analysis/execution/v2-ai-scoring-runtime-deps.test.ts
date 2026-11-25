@@ -1157,6 +1157,19 @@ describe('Dev Standard reverse-like archive', () => {
         );
         expect(JSON.stringify([...stored.values()])).not.toContain('synthetic.non_target');
 
+        const { private90ReverseScope } = await import('./fixtures/private90-reverse-scope');
+        const probe = private90ReverseScope(archivedInput.targetUsername, [...stored.values()][0]);
+        const profile = (shortCode:string, likesCount:number) => ({
+            username:'fixture',isPrivate:false,isVerified:false,postsCount:2,followersCount:1,followingCount:1,
+            latestPosts:['zz','aa'].map(id => ({ id, shortCode:id==='aa'?shortCode:'UNSELECTED', type:'image' as const,
+                timestamp:'2026-01-01T00:00:00Z', likesCount, commentsCount:0, taggedUsers:[],mentionedUsers:[] })),
+        });
+        probe.remember('candidate:b',profile('POST_B',114));
+        probe.remember('candidate:a',profile('POST_A',0));
+        expect(probe.sourceCounts()).toEqual({reverseExpected:2,reverseSourceTupleCount:2,reverseSourceHashMatch:1});
+        probe.remember('candidate:a',profile('WRONG',0));
+        expect(probe.sourceCounts().reverseSourceHashMatch).toBe(0);
+
         archiveScope('replay', stored);
         const replay = createCollector();
         const replayed = await replay.collector.collect({

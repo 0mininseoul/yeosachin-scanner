@@ -219,6 +219,7 @@ async function readArchiveInput(
 }
 
 export const DEV_STANDARD_REVERSE_INPUT_COMMITMENT = 'reverse-input-commitment/v1';
+export type StandardQaFixtureOperation<T> = (coverage: ArchiveCoverage, reader: Pick<SealedArchive, 'readFragment'>) => T;
 
 function readonlySession(reader: ArchiveReader, target: string): DevStandardArchiveSession {
     return {
@@ -245,32 +246,45 @@ function readonlySession(reader: ArchiveReader, target: string): DevStandardArch
     };
 }
 
-/** Open a sealed archive for a registered QA target. This grants no Dev analysis admission. */
+/** Verify the bound target, complete collection coverage, and exact sealed object membership. */
+export async function openVerifiedStandardQaArchive(target: string, store: ArchiveStore) {
+    try {
+        const reader = await store.openSealedArchive();
+        if (reader?.binding.target !== target) return fail();
+        const summary = await readArchiveInput(reader, COVERAGE_KIND, [target]);
+        if (!Array.isArray(summary) || summary.some(batch => !Number.isInteger(batch))) return fail();
+        const coverage = { profileBatches: summary as readonly number[] };
+        await verifyCoverage(reader, coverage, target);
+        await verifyMediaSelectionMembership(reader);
+        if (!(await store.verifySealedMembership())) return fail();
+        return { reader, coverage };
+    } catch (error) {
+        return fail(error);
+    }
+}
+
+/** Runs an isolated fixture reader. Calling this function grants no Dev analysis admission. */
+export async function withSealedStandardQaFixture<T>(
+    target: string, store: ArchiveStore, operation: StandardQaFixtureOperation<T>,
+): Promise<T> {
+    const { reader, coverage } = await openVerifiedStandardQaArchive(target, store);
+    return workerArchive.run(readonlySession(reader, target), () => operation(coverage, { readFragment: reader.readFragment }));
+}
+
 export async function withVerifiedDevStandardArchive<T>(
     target: string,
     operation: (coverage: ArchiveCoverage) => T,
     env: Record<string, string | undefined> = process.env,
 ): Promise<T> {
-    let reader: ArchiveReader;
-    let coverage: ArchiveCoverage;
+    let store: ArchiveStore;
     try {
-        const store = storeForEnvironment(env);
-        const opened = await store.openSealedArchive();
-        if (opened?.binding.target !== target) return fail();
-        reader = opened;
-        const summary = await readArchiveInput(reader, COVERAGE_KIND, [target]);
-        if (!Array.isArray(summary) || summary.some(batch => !Number.isInteger(batch))) return fail();
-        coverage = { profileBatches: summary };
-        await verifyCoverage(reader, coverage, target);
-        await verifyMediaSelectionMembership(opened);
-        if (!(await store.verifySealedMembership())) return fail();
+        store = storeForEnvironment(env);
     } catch (error) {
         return fail(error);
     }
-    return workerArchive.run(readonlySession(reader, target), () => operation(coverage));
+    return withSealedStandardQaFixture(target, store, operation);
 }
 
-/** Called within workers after the registered Dev and delivery authorization checks. */
 export async function withDevStandardArchiveApproval<T>(
     approval: DevLiveApproval,
     operation: () => T,
