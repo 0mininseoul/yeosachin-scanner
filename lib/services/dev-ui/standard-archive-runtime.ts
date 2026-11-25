@@ -218,6 +218,8 @@ async function readArchiveInput(
     return fail();
 }
 
+export const DEV_STANDARD_REVERSE_INPUT_COMMITMENT = 'reverse-input-commitment/v1';
+
 function readonlySession(reader: ArchiveReader, target: string): DevStandardArchiveSession {
     return {
         mode: 'replay',
@@ -227,10 +229,13 @@ function readonlySession(reader: ArchiveReader, target: string): DevStandardArch
         beginPreflightCapture: async () => fail(),
         load: (kind, identity) => readArchiveInput(reader, kind, identity),
         async find(kind, identity) {
-            // Only public image callers have two legitimate observations. The sealed
-            // reader returns null for a nonmember and throws on a damaged member.
-            if (kind !== 'result-image-v1' || identity.length !== 3 || identity[0] !== 'female'
-                || typeof identity[1] !== 'string' || typeof identity[2] !== 'string' || !POINTER_HASH.test(identity[2])) return fail();
+            // Optional reads still authenticate seal membership and expiry; damaged
+            // members throw. Absence can only select the designated compatibility path.
+            const publicImage = kind === 'result-image-v1' && identity.length === 3 && identity[0] === 'female'
+                && typeof identity[1] === 'string' && typeof identity[2] === 'string' && POINTER_HASH.test(identity[2]);
+            const reverseProof = kind === 'reverse-coverage-v1' && identity.length === 2
+                && identity[0] === DEV_STANDARD_REVERSE_INPUT_COMMITMENT && identity[1] === target;
+            if (!publicImage && !reverseProof) return fail();
             try {
                 return await reader.readFragment({ kind, inputKey: inputKey(identity) });
             } catch (error) { return fail(error); }

@@ -38,6 +38,7 @@ function archiveScope(mode: 'capture' | 'replay', stored: Map<string, unknown>) 
     const fail = (): never => { throw new DevStandardArchiveError(); };
     const scope = {
         mode,
+        target: 'target.account',
         fail,
         ready: () => true,
         beginPreflightCapture: vi.fn(),
@@ -1150,7 +1151,7 @@ describe('Dev Standard reverse-like archive', () => {
             { candidateId: 'candidate:a', status: 'not_observed' },
             { candidateId: 'candidate:b', status: 'not_collected' },
         ]);
-        expect(capture.capture).toHaveBeenCalledExactlyOnceWith(
+        expect(capture.capture).toHaveBeenCalledWith(
             'reverse-coverage-v1', ['target.account'],
             { scopeHash: expect.stringMatching(/^[a-f0-9]{64}$/), results: original.results },
         );
@@ -1165,10 +1166,129 @@ describe('Dev Standard reverse-like archive', () => {
         });
         expect(replayed.operationKey).toMatch(/^archive-candidate-likers:[a-f0-9]{64}$/);
         expect(replayed.results).toEqual([...original.results].reverse());
-        await expect(replay.collector.collect({
+        expect(await replay.collector.collect({
             ...archivedInput,
             candidates: [{ ...archivedInput.candidates[0]!, postUrl: 'https://instagram.com/p/OTHER/' }],
-        })).rejects.toBeInstanceOf(DevStandardArchiveError);
+        })).toMatchObject({ results:[{candidateId:'candidate:a',status:'not_collected'}],
+            replayScopeDelta:{added:0,removed:1,unverified:1} });
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+    });
+
+    const proofKey = JSON.stringify(['reverse-coverage-v1',['reverse-input-commitment/v1','target.account']]);
+    const sourceKey = JSON.stringify(['reverse-coverage-v1',['target.account']]);
+    const added = { candidateId: 'candidate:new', postUrl: 'https://www.instagram.com/reel/NEW/', declaredLikesCount: 7 };
+    const common = { ...archivedInput.candidates[0]!, postUrl: 'https://www.instagram.com/p/POST_A/?utm_source=offline' };
+
+    it.each(['new', 'legacy'] as const)('reuses only matching original tuples from a %s capture with a new member', async format => {
+        const stored = new Map<string,unknown>();
+        archiveScope('capture',stored);
+        const live = createCollector();
+        await live.collector.collect(archivedInput);
+        const proof = stored.get(proofKey);
+        expect(proof).toBeDefined();
+        expect(JSON.stringify(proof)).not.toContain('POST_A');
+        if (format === 'legacy') stored.delete(proofKey);
+        archiveScope('replay',stored);
+        const replay = createCollector();
+        const prior = vi.fn(() => archivedInput.candidates);
+        const input = {...archivedInput,candidates:[added,common],legacyArchiveInputs:prior};
+        const result = await replay.collector.collect(input);
+        expect(result).toMatchObject({ replayScopeDelta:{added:1,removed:1,unverified:0}, results:[
+            {candidateId:added.candidateId,status:'not_collected'}, {candidateId:common.candidateId,status:'not_observed'},
+        ] });
+        expect(result.operationKey).toMatch(/^archive-candidate-likers:[a-f0-9]{64}$/);
+        if (format === 'legacy') expect(prior).toHaveBeenCalledOnce();
+        else expect(prior).not.toHaveBeenCalled();
+        expect(await replay.collector.collect(input)).toEqual(result);
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+    });
+
+    it('counts postless shortlist substitutions in new seals and limits legacy comparisons to actual post inputs', async () => {
+        const stored = new Map<string,unknown>();
+        const sourceIds = archivedInput.candidates.map(row => row.candidateId);
+        archiveScope('capture',stored);
+        await createCollector().collector.collect({...archivedInput,archiveShortlistIds:[...sourceIds,'none:old','none:common']});
+        expect(JSON.stringify([...stored.values()])).not.toContain('none:old');
+        archiveScope('replay',stored);
+        const replay = createCollector();
+        const unchangedQueries = {...archivedInput,archiveShortlistIds:[...sourceIds,'none:new','none:common']};
+        expect(await replay.collector.collect(unchangedQueries)).toMatchObject({replayScopeDelta:{added:1,removed:1,unverified:0}});
+        const changedQueries = {...unchangedQueries,candidates:[common,{...added,candidateId:'none:common'}]};
+        expect(await replay.collector.collect(changedQueries)).toMatchObject({replayScopeDelta:{added:1,removed:1,unverified:2},
+            results:[{status:'not_observed'},{status:'not_collected'}]});
+        await expect(replay.collector.collect({...unchangedQueries,archiveShortlistIds:[sourceIds[0]!]}))
+            .rejects.toBeInstanceOf(DevStandardArchiveError);
+        stored.delete(proofKey);
+        expect((await replay.collector.collect(unchangedQueries)).replayScopeDelta).toBeUndefined();
+        expect(await replay.collector.collect({...changedQueries,legacyArchiveInputs:() => archivedInput.candidates}))
+            .toMatchObject({replayScopeDelta:{added:1,removed:1,unverified:0}});
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+    });
+
+    it('preserves positive observations only for a matching post and distinguishes a changed like-count witness', async () => {
+        const stored = new Map<string,unknown>();
+        archiveScope('capture',stored);
+        const live = createCollector();
+        live.getPostLikers.mockResolvedValueOnce([{ postUrl:archivedInput.candidates[1]!.postUrl,
+            id:'synthetic',username:archivedInput.targetUsername,profilePicUrl:'https://cdninstagram.com/offline.jpg',
+            isPrivate:false,isVerified:false,totalLikes:114 }]);
+        await live.collector.collect(archivedInput);
+        archiveScope('replay',stored);
+        const replay = createCollector();
+        const input = {...archivedInput,candidates:[added,archivedInput.candidates[1]!]};
+        expect(await replay.collector.collect(input)).toMatchObject({
+            replayScopeDelta:{added:1,removed:1,unverified:0},results:[{status:'not_collected'},{status:'observed'}],
+        });
+        expect(await replay.collector.collect({...input,candidates:[added,{...archivedInput.candidates[1]!,declaredLikesCountKnown:false}]}))
+            .toMatchObject({replayScopeDelta:{added:1,removed:1,unverified:1},results:[{status:'not_collected'},{status:'not_collected'}]});
+        expect(await replay.collector.collect({...input,candidates:[]})).toEqual({
+            results:[],operationKey:null,replayScopeDelta:{added:0,removed:2,unverified:0},
+        });
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+    });
+
+    it('keeps unproved legacy observations separate from negative observations and rejects a contradictory full reconstruction', async () => {
+        const stored = new Map<string,unknown>();
+        archiveScope('capture',stored);
+        await createCollector().collector.collect(archivedInput);
+        stored.delete(proofKey);
+        archiveScope('replay',stored);
+        const replay = createCollector();
+        const input = { ...archivedInput, candidates:[added,common] };
+        expect(await replay.collector.collect({...input,legacyArchiveInputs:() => [common]})).toMatchObject({
+            replayScopeDelta:{added:1,removed:1,unverified:1}, results:[
+                {candidateId:added.candidateId,status:'not_collected'}, {candidateId:common.candidateId,status:'not_collected'},
+            ],
+        });
+        await expect(replay.collector.collect({...input,legacyArchiveInputs:() => [common,
+            {...archivedInput.candidates[1]!,declaredLikesCountKnown:false}]})).rejects.toBeInstanceOf(DevStandardArchiveError);
+        expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(replay.getPostLikers).not.toHaveBeenCalled();
+    });
+
+    it('rejects a transferred or damaged source/proof, duplicates and a foreign replay target before any provider call', async () => {
+        const sealed = new Map<string,unknown>();
+        archiveScope('capture',sealed);
+        await createCollector().collector.collect(archivedInput);
+        const proof = sealed.get(proofKey) as { hashes:string[]; commitment:string };
+        const source = sealed.get(sourceKey) as { scopeHash:string; results:{candidateId:string;status:string}[] };
+        const replay = createCollector();
+        for (const [key,replacement] of [
+            [proofKey,{...proof,hashes:[...proof.hashes].reverse()}],
+            [sourceKey,{...source,scopeHash:'0'.repeat(64)}],
+            [sourceKey,{...source,results:[source.results[0],source.results[0]]}],
+            [sourceKey,{...source,results:[{...source.results[0],status:'observed'},source.results[1]]}],
+        ] as const) {
+            archiveScope('replay',new Map(sealed).set(key,replacement));
+            await expect(replay.collector.collect({...archivedInput,candidates:[added]})).rejects.toBeInstanceOf(DevStandardArchiveError);
+        }
+        const scope = archiveScope('replay',sealed);
+        vi.mocked(currentDevStandardArchive).mockReturnValue({...scope,target:'different.target'});
+        await expect(replay.collector.collect(archivedInput)).rejects.toBeInstanceOf(DevStandardArchiveError);
         expect(replay.bindAdapterCheckpoint).not.toHaveBeenCalled();
         expect(replay.getPostLikers).not.toHaveBeenCalled();
     });

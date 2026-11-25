@@ -615,9 +615,12 @@ export interface AnalysisV2ReverseLikeCollector {
         targetUsername: string;
         candidates: readonly AnalysisV2ReverseLikeCollectionInput[];
         limitPerPost: 100;
+        archiveShortlistIds?: readonly string[];
+        legacyArchiveInputs?: (ids: readonly string[]) => readonly AnalysisV2ReverseLikeCollectionInput[];
     }): Promise<Readonly<{
         operationKey: string | null;
         results: readonly AnalysisV2ReverseLikeCollectionResult[];
+        replayScopeDelta?: Readonly<{ added: number; removed: number; unverified: number }>;
     }>>;
 }
 
@@ -3166,16 +3169,21 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 .sort((left, right) => (
                     left.verificationShortlistRank! - right.verificationShortlistRank!
                 ));
-            const collectionInputs = shortlist.flatMap(row => {
-                const profile = outcomeById.get(row.candidateId)?.profile;
+            const inputsFor = (ids: readonly string[]) => ids.flatMap(candidateId => {
+                const profile = outcomeById.get(candidateId)?.profile;
                 const scope = profile ? latestPostLikeScope(profile) : null;
-                return scope ? [{ candidateId: row.candidateId, ...scope }] : [];
+                return scope ? [{ candidateId, ...scope }] : [];
             });
+            const shortlistIds = shortlist.map(row => row.candidateId);
+            const collectionInputs = inputsFor(shortlistIds);
+            const archive = currentDevStandardArchive();
             const collected = await dependencies.reverseLikes.collect({
                 ...checkpointClaim(context),
                 targetUsername: target.username,
                 candidates: collectionInputs,
                 limitPerPost: REVERSE_LIKE_LIMIT,
+                ...(archive ? { archiveShortlistIds: shortlistIds } : {}),
+                ...(archive?.mode === 'replay' ? { legacyArchiveInputs: inputsFor } : {}),
             });
             validateReverseLikeCollection(collectionInputs, collected);
             const resultById = new Map(collected.results.map(row => [row.candidateId, row]));
