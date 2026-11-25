@@ -141,6 +141,12 @@ describe.runIf(process.env.RUN_SCHEDULER_READ_FENCE_POSTGRES_TEST === '1')(
                 await admin.query(`REVOKE ALL ON FUNCTION public.${signature} FROM PUBLIC;
                     GRANT EXECUTE ON FUNCTION public.${signature} TO service_role;`);
             }
+            const signature = `${vertexDispatch}(uuid,text,uuid,text)`;
+            const migration = '20261123210000_fence_failed_analysis_v2_vertex_dispatch.sql';
+            await admin.query(functionSql(migration, 'analysis_v2_vertex_request_admission_open'));
+            await admin.query(functionSql(migration, vertexDispatch));
+            await admin.query(`REVOKE ALL ON FUNCTION public.${signature} FROM PUBLIC;
+                GRANT EXECUTE ON FUNCTION public.${signature} TO service_role;`);
             await Promise.all(readers.map(reader => reader.query('SET ROLE service_role')));
             await admin.query(`
                 INSERT INTO public.analysis_requests VALUES ($1, 'v2', 'processing', $2);
@@ -274,12 +280,6 @@ describe.runIf(process.env.RUN_SCHEDULER_READ_FENCE_POSTGRES_TEST === '1')(
         });
 
         it('serializes Vertex transport authorization against the failure intent and preserves the attempt ledger', async () => {
-            const signature = `${vertexDispatch}(uuid,text,uuid,text)`;
-            const migration = '20261123210000_fence_failed_analysis_v2_vertex_dispatch.sql';
-            await admin.query(functionSql(migration, 'analysis_v2_vertex_request_admission_open'));
-            await admin.query(functionSql(migration, vertexDispatch));
-            await admin.query(`REVOKE ALL ON FUNCTION public.${signature} FROM PUBLIC;
-                GRANT EXECUTE ON FUNCTION public.${signature} TO service_role;`);
             await admin.query(`UPDATE public.analysis_pipeline_jobs
                 SET lease_expires_at = clock_timestamp() + INTERVAL '5 minutes' WHERE request_id = $1`, [requestId]);
 
@@ -317,6 +317,94 @@ describe.runIf(process.env.RUN_SCHEDULER_READ_FENCE_POSTGRES_TEST === '1')(
             }
             await expect(admin.query(`SELECT status, estimated_cost_usd
                 FROM public.analysis_v2_ai_attempts ORDER BY status`)).resolves.toMatchObject({ rows: before.rows });
+        });
+
+        it('shares the installed Dev profile reader across batches while fencing cleanup and the active job', async () => {
+            const scopedRequest = randomUUID();
+            const preflight = randomUUID();
+            const readDevSql = (name: string) => readFileSync(new URL(`../dev-ui/${name}.sql`, migrations), 'utf8');
+            const read = (client: Client, index: number) => client.query(
+                'SELECT public.load_dev_standard_profile_media_ready_v1($1,$2,$3,$4) AS media',
+                [scopedRequest, batch(index), leaseToken, inputHash],
+            );
+            const authorize = (client: Client, index: number) => client.query(
+                `SELECT public.${vertexDispatch}($1,$2,$3,$4) AS allowed`,
+                [scopedRequest, batch(index), leaseToken, inputHash],
+            );
+            const cleanup = () => readers[1]!.query(
+                'SELECT public.request_analysis_v2_provider_run_cleanup($1,$2,$3,$4,$5) AS requested',
+                [scopedRequest, batch(1), leaseToken, inputHash, 'FIXTURE_FAILURE'],
+            );
+            await admin.query(`
+                ALTER TABLE public.analysis_requests ADD COLUMN preflight_id uuid, ADD COLUMN selected_plan_id_snapshot text;
+                ALTER TABLE public.analysis_pipeline_jobs ADD COLUMN track text, ADD COLUMN kind text, ADD COLUMN batch integer;
+                ALTER TABLE public.analysis_v2_ai_attempts ADD COLUMN stage text;
+                ALTER TABLE public.analysis_v2_provider_cleanup_intents
+                    ADD COLUMN failed_job_key text, ADD COLUMN failed_job_input_hash text,
+                    ADD COLUMN failed_claim_token uuid, ADD COLUMN error_code text;
+                CREATE TABLE public.analysis_preflights(id uuid PRIMARY KEY, consumed_request_id uuid);
+                CREATE SCHEMA dev_ui;
+                CREATE SCHEMA dev_live_budget;
+                CREATE TABLE dev_ui.runs(id uuid);
+                CREATE TABLE dev_live_budget.standard_owner_policy(id uuid);
+                -- Isolate row-lock compatibility. The Standard admission suite covers the full owner/grant lineage.
+                CREATE FUNCTION dev_live_budget.valid_standard_profile_lineage(p public.analysis_preflights, r public.analysis_requests)
+                RETURNS boolean LANGUAGE sql AS $$ SELECT p.id = r.preflight_id AND p.consumed_request_id = r.id $$;
+            `);
+            await admin.query(readSql('20261122120000_pin_profile_gender_microbatches.sql'));
+            await admin.query(functionSql('20260714011500_add_analysis_v2_provider_terminal_safety.sql',
+                'request_analysis_v2_provider_run_cleanup'));
+            await admin.query(readDevSql('live-standard-profile-media-ready'));
+            await admin.query('INSERT INTO public.analysis_preflights VALUES($1,$2)', [preflight, scopedRequest]);
+            await admin.query(`INSERT INTO public.analysis_requests(id, pipeline_version, status, policy_versions_snapshot, preflight_id, selected_plan_id_snapshot)
+                VALUES($1, 'v2', 'processing', $2, $3, 'standard')`, [scopedRequest, {
+                pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.11', scheduler: 'ai-scheduler-v1',
+            }, preflight]);
+            await admin.query(`INSERT INTO public.analysis_pipeline_jobs
+                (request_id, job_key, status, input_hash, lease_token, lease_expires_at, track, kind, batch)
+                SELECT $1, 'track:profile-ai:batch:' || i, 'processing', $2, $3, now() + interval '5 minutes', 'profile_ai', 'ai', i
+                FROM generate_series(0,7) AS t(i)`, [scopedRequest, inputHash, leaseToken]);
+
+            const siblings = readers.slice(1);
+            const media = { rows: [{ media: {
+                inputs: [], hasGenderHistory: false, hasUnownedFeatureHistory: false, readyOperations: [],
+            } }] };
+            for (const shared of [false, true]) {
+                if (shared) await admin.query(readDevSql('live-standard-profile-shared-reader'));
+                await blocker.query('BEGIN');
+                try {
+                    await expect(read(blocker, 0)).resolves.toMatchObject(media);
+                    await Promise.all(siblings.map(async (client, i) => {
+                        if (shared) {
+                            await expect(read(client, i + 1)).resolves.toMatchObject(media);
+                            await expect(authorize(client, i + 1)).resolves.toMatchObject({ rows: [{ allowed: true }] });
+                        } else {
+                            await expect(read(client, i + 1)).rejects.toHaveProperty('code', '57014');
+                            await expect(authorize(client, i + 1)).rejects.toHaveProperty('code', '57014');
+                        }
+                    }));
+                    await expect(read(readers[0]!, 0)).rejects.toHaveProperty('code', '57014');
+                    await expect(authorize(readers[0]!, 0)).rejects.toHaveProperty('code', '57014');
+                    await expect(cleanup()).rejects.toHaveProperty('code', '57014');
+                    await expect(readers[1]!.query(
+                        "SELECT public.pin_analysis_v2_profile_media_inputs($1,$2,$3,$4,'[]'::jsonb)",
+                        [scopedRequest, batch(1), leaseToken, inputHash],
+                    )).rejects.toHaveProperty('code', '57014');
+                    await admin.query('BEGIN');
+                    try {
+                        await admin.query("SET LOCAL lock_timeout = '150ms'");
+                        await expect(admin.query("UPDATE public.analysis_requests SET status = 'processing' WHERE id = $1",
+                            [scopedRequest])).rejects.toHaveProperty('code', '55P03');
+                    } finally {
+                        await admin.query('ROLLBACK');
+                    }
+                } finally {
+                    await blocker.query('ROLLBACK');
+                }
+                await expect(authorize(readers[0]!, 0)).resolves.toMatchObject({ rows: [{ allowed: true }] });
+            }
+            await expect(cleanup()).resolves.toMatchObject({ rows: [{ requested: true }] });
+            await expect(authorize(readers[1]!, 1)).resolves.toMatchObject({ rows: [{ allowed: false }] });
         });
     },
 );
