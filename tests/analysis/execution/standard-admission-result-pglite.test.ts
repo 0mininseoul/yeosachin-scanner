@@ -816,7 +816,7 @@ it('replays a separately sealed copy through the owner image using independent s
             await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow('UNAVAILABLE');
             runtime.kmsOrBucket.mockResolvedValueOnce({ status: 403 }).mockResolvedValueOnce({ data: { permissions: [] } });
             await expect(verifyExpiredStandardQaCopy('revoked')).resolves.toBe('revoked');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 403 }).mockResolvedValueOnce({ data: { permissions: ['cloudkms.cryptoKeyVersions.useToDecrypt'] } });
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ data: { permissions: ['cloudkms.cryptoKeyVersions.useToDecrypt'] } });
             await expect(verifyExpiredStandardQaCopy('revoked')).rejects.toThrow('ACCESS_UNVERIFIED');
             runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({
                 status: 400, data: { error: { errors: [{ reason: 'invalidArgument' }] } },

@@ -142,14 +142,16 @@ export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
     if (mode === 'revoked') {
         const receipt = await client.request({
             url: url + '/' + encodeURIComponent(wrappedKeyName), params: { fields: 'kind' },
-            validateStatus: status => status === 403,
+            validateStatus: status => status === 200 || status === 403 || status === 404,
         });
         const permission = 'cloudkms.cryptoKeyVersions.useToDecrypt';
         const key = await client.request<{ permissions?: string[] }>({
             url: 'https://cloudkms.googleapis.com/v1/' + kmsKey + ':testIamPermissions', method: 'POST',
             data: { permissions: [permission] },
         });
-        if (receipt.status !== 403 || key.data.permissions?.includes(permission)) throw new Error('QA_COPY_ACCESS_UNVERIFIED');
+        if (![200, 403, 404].includes(receipt.status) || key.data.permissions?.includes(permission)) {
+            throw new Error('QA_COPY_ACCESS_UNVERIFIED');
+        }
         return 'revoked';
     }
     for (const options of [{ versions: true }, { softDeleted: true }]) {
@@ -176,7 +178,7 @@ export async function checkPrivateQaCopyPrincipalAccess() {
     const cfg = configuration('iam');
     if (!cfg.sourceBucket) throw new Error('QA_COPY_CONFIGURATION_INVALID');
     return verifyStandardQaCopyIam({
-        ...cfg, sourceBucket: cfg.sourceBucket,
+        ...cfg, sourceBucket: cfg.sourceBucket, sourceKeySecret: required('DEV_STANDARD_QA_COPY_SOURCE_KEY_SECRET'),
         authorized: required('DEV_STANDARD_QA_COPY_APPROVED_PRINCIPALS').split(',').map(value => value.trim()),
     });
 }

@@ -4,23 +4,22 @@ import { GoogleAuth } from 'google-auth-library';
 
 type Binding = { role: string; members: string[]; condition?: { expression?: string } };
 type Policy = { bindings?: Binding[]; version?: number; etag?: string };
-const storagePermissions = new Set(['storage.objects.get', 'storage.objects.create']);
-const keyPermissions = new Set(['cloudkms.cryptoKeyVersions.useToDecrypt', 'cloudkms.cryptoKeyVersions.useToEncrypt']);
 const principalPattern = /^(?:user|serviceAccount|group):[^\s:@,]+@[^\s:@,]+$/;
 function reject(): never { throw new Error('QA_COPY_IAM_UNVERIFIED'); }
 
 export type QaCopyIamScope = {
-    project: string; projectNumber: string; sourceBucket: string; bucketName: string; kmsKey: string;
+    project: string; projectNumber: string; sourceBucket: string; sourceKeySecret: string; bucketName: string; kmsKey: string;
     expiresAt: number; authorized: string[];
 };
 
 /**
  * Inspect the policy hierarchy using the auditor's ADC. Only unconditional original access
- * and an exact request.time deadline in the destination are accepted. Unknown CEL is ambiguous.
+ * and simple request.time cutoffs prove access. Unknown CEL is considered potentially active.
  */
 export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
-    const { authorized, bucketName, expiresAt, kmsKey, project, projectNumber, sourceBucket } = scope;
+    const { authorized, bucketName, expiresAt, kmsKey, project, projectNumber, sourceBucket, sourceKeySecret } = scope;
     if (!authorized.length || new Set(authorized).size !== authorized.length || authorized.some(member => !principalPattern.test(member))) reject();
+    if (!new RegExp('^projects/(' + project + '|' + projectNumber + ')/secrets/[a-zA-Z0-9_-]+$').test(sourceKeySecret)) reject();
     const client = await new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }).getClient();
     const manager = 'https://cloudresourcemanager.googleapis.com/v3/';
     const hierarchy: Binding[] = [];
@@ -63,49 +62,81 @@ export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
         });
         return bindings(response.data);
     }
-    const [source, destination, ring, cryptoKey] = await Promise.all([
+    const [source, destination, ring, cryptoKey, { data: originalKeyPolicy }] = await Promise.all([
         bucket(sourceBucket), bucket(bucketName), key(kmsKey.split('/cryptoKeys/')[0]!), key(kmsKey),
+        client.request<Policy>({
+            url: 'https://secretmanager.googleapis.com/v1/' + sourceKeySecret + ':getIamPolicy',
+            params: { 'options.requestedPolicyVersion': 3 },
+        }),
     ]);
+    const sourceKeyPolicies = [...hierarchy, ...bindings(originalKeyPolicy)];
     const keyPolicies = [...hierarchy, ...ring, ...cryptoKey];
     const permissions = new Map<string, Set<string>>();
-    for (const role of new Set([...source, ...destination, ...keyPolicies].map(binding => binding.role))) {
+    for (const role of new Set([...source, ...sourceKeyPolicies, ...destination, ...keyPolicies].map(binding => binding.role))) {
         if (!/^(?:(?:projects|organizations)\/[a-z0-9-]+\/)?roles\/[A-Za-z0-9_.]+$/.test(role)) reject();
         const { data } = await client.request<{ includedPermissions?: string[] }>({ url: 'https://iam.googleapis.com/v1/' + role });
         if (!Array.isArray(data.includedPermissions)) reject();
         permissions.set(role, new Set(data.includedPermissions));
     }
-    function has(binding: Binding, wanted: ReadonlySet<string>) {
-        return [...wanted].some(permission => permissions.get(binding.role)?.has(permission));
-    }
-    function end(binding: Binding): number | undefined {
-        if (!binding.condition) return undefined;
-        const match = /^request\.time\s*<\s*timestamp\((["'])([\dT:.-]+Z)\1\)$/.exec(binding.condition.expression?.trim() ?? '');
+    const now = Date.now();
+    const approved = new Set(authorized);
+    function cutoff(item: Binding) {
+        if (!item.condition) return Infinity;
+        const match = /^request\.time\s*<\s*timestamp\((["'])([\dT:.-]+Z)\1\)$/.exec(item.condition.expression?.trim() ?? '');
         return match ? Date.parse(match[2]!) : NaN;
     }
-    const approved = new Set(authorized);
-    const sourceReaders = new Set<string>();
-    for (const item of source) {
-        if (!has(item, new Set(['storage.objects.get']))) continue;
-        const cutoff = end(item);
-        if (cutoff === undefined || cutoff > Date.now()) item.members.forEach(member => sourceReaders.add(member));
-    }
-    if (authorized.some(member => !sourceReaders.has(member))) reject();
-    function timedPrincipals(policies: Binding[], wanted: ReadonlySet<string>) {
-        const observed = new Set<string>();
-        for (const item of policies) {
-            if (!has(item, wanted)) continue;
-            const cutoff = end(item);
-            if (cutoff !== undefined && cutoff <= Date.now()) continue;
-            if (cutoff !== expiresAt || item.members.some(member => !approved.has(member))) reject();
-            item.members.forEach(member => observed.add(member));
+    function principals(policies: Binding[], permission: string, when: number, potential: boolean) {
+        const result = new Set<string>();
+        function add(member: string, depth = 0) {
+            if (depth > 2) reject();
+            const legacy = /^project(Owner|Editor|Viewer):(.+)$/.exec(member);
+            if (legacy && (legacy[2] === project || legacy[2] === projectNumber)) {
+                const role = 'roles/' + legacy[1]!.toLowerCase();
+                for (const binding of hierarchy.filter(item => item.role === role && effective(item))) {
+                    for (const nested of binding.members) add(nested, depth + 1);
+                }
+            } else if (!member.startsWith('deleted:')) result.add(member);
         }
-        if (!observed.size) reject();
-        return observed;
+        function effective(item: Binding) {
+            const end = cutoff(item);
+            return Number.isNaN(end) ? potential : when < end;
+        }
+        for (const item of policies) {
+            if (permissions.get(item.role)?.has(permission) && effective(item)) item.members.forEach(member => add(member));
+        }
+        return result;
     }
-    timedPrincipals(destination, storagePermissions);
-    timedPrincipals(keyPolicies, keyPermissions);
-    const objectAccess = timedPrincipals(destination, new Set(['storage.objects.get']));
-    const cryptographicAccess = timedPrincipals(keyPolicies, new Set(['cloudkms.cryptoKeyVersions.useToDecrypt']));
-    if (authorized.some(member => !objectAccess.has(member) || !cryptographicAccess.has(member))) reject();
+    function contains(proven: Set<string>, member: string) {
+        return proven.has(member) || proven.has('allAuthenticatedUsers') || proven.has('allUsers');
+    }
+    function overlaps(left: Set<string>, right: Set<string>) {
+        // A broad or unresolved identity (e.g. a group) can include a leaf principal
+        // on the other side. Never prove exclusion from two unresolved group names.
+        const leaf = (member: string) => /^(user|serviceAccount):/.test(member);
+        const leftWide = [...left].filter(member => !leaf(member));
+        const rightWide = [...right].filter(member => !leaf(member));
+        if (leftWide.length && rightWide.length) reject();
+        return new Set([
+            ...[...left].filter(member => right.has(member) || rightWide.length > 0),
+            ...[...right].filter(member => left.has(member) || leftWide.length > 0),
+        ]);
+    }
+
+    const originalObjects = principals(source, 'storage.objects.get', now, false);
+    const originalKeys = principals(sourceKeyPolicies, 'secretmanager.versions.access', now, false);
+    if (authorized.some(member => !contains(originalObjects, member) || !contains(originalKeys, member))) reject();
+
+    const copyObjects = (when: number, potential: boolean) => principals(destination, 'storage.objects.get', when, potential);
+    const copyKeys = (when: number, potential: boolean) => principals(keyPolicies, 'cloudkms.cryptoKeyVersions.useToDecrypt', when, potential);
+    const actualReaders = overlaps(copyObjects(now, true), copyKeys(now, true));
+    if ([...actualReaders].some(member => !approved.has(member))) reject();
+    const accessibleObjects = copyObjects(now, false);
+    const decryptableKeys = copyKeys(now, false);
+    if (authorized.some(member => !contains(accessibleObjects, member) || !contains(decryptableKeys, member))) reject();
+    const lastObjects = copyObjects(expiresAt - 1, false);
+    const lastKeys = copyKeys(expiresAt - 1, false);
+    const expiredKeys = copyKeys(expiresAt, true);
+    if (authorized.some(member => !contains(lastObjects, member) || !contains(lastKeys, member) || contains(expiredKeys, member))) reject();
+    if (overlaps(copyObjects(expiresAt, true), expiredKeys).size) reject();
     return { approvedPrincipals: authorized.length, hierarchyResources: ancestors.size };
 }
