@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createStandardDatabase } from './fixtures/standard-database';
 
 const migrationPath = path.join(
     process.cwd(),
@@ -203,6 +204,81 @@ afterAll(async () => {
 });
 
 describe('analysis V2 live scheduler migration', () => {
+    it('restricts the Dev shared request lock to the opted-in reader and rolls back on drift', async () => {
+        const dev = await createStandardDatabase();
+        const install = await readFile('supabase/dev-ui/live-standard-profile-shared-reader.sql', 'utf8');
+        const lock = 'public.lock_analysis_v2_profile_plan_job';
+        const read = 'public.load_analysis_v2_profile_media_inputs';
+        const api = 'public.load_dev_standard_profile_media_ready_v1';
+        const sharedLock = 'dev_live_budget.lock_standard_profile_reader_v1';
+        const sharedRead = 'dev_live_budget.load_standard_profile_media_inputs_v1';
+        const args = '(uuid,text,uuid,text)';
+        const catalog = async (name: string) => (await dev.query<{
+            def: string; worker: boolean; authenticated: boolean; anon: boolean;
+        }>(`SELECT pg_get_functiondef(oid) AS def,
+             has_function_privilege('service_role',oid,'EXECUTE') AS worker,
+             has_function_privilege('authenticated',oid,'EXECUTE') AS authenticated,
+             has_function_privilege('anon',oid,'EXECUTE') AS anon
+             FROM pg_proc WHERE oid=to_regprocedure($1)`, [name + args])).rows[0]!;
+        try {
+            const [guard, reader, clonedGuard, clonedReader, publicApi] = await Promise.all(
+                [lock, read, sharedLock, sharedRead, api].map(catalog),
+            );
+            expect(clonedGuard).toEqual({ ...guard, def: guard.def.replace(lock, sharedLock)
+                .replace('WHERE r.id = p_request_id FOR UPDATE;', 'WHERE r.id = p_request_id FOR SHARE;') });
+            expect(clonedReader).toEqual({ ...reader, worker: false, def: reader.def.replace(read, sharedRead)
+                .replace('PERFORM ' + lock, 'PERFORM ' + sharedLock) });
+            expect(clonedGuard).toMatchObject({ worker: false, authenticated: false, anon: false });
+            expect(clonedReader).toMatchObject({ worker: false, authenticated: false, anon: false });
+            expect(publicApi).toMatchObject({ worker: true, authenticated: false, anon: false });
+            expect(publicApi.def).toContain('media := ' + sharedRead + '(');
+            const privateCallers = await dev.query<{ caller: string }>(`
+                SELECT n.nspname || '.' || p.proname AS caller FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE strpos(p.prosrc, $1) > 0 OR strpos(p.prosrc, $2) > 0 ORDER BY caller
+            `, [sharedLock + '(', sharedRead + '(']);
+            expect(privateCallers.rows.map(row => row.caller)).toEqual([sharedRead, api]);
+            const writers = await dev.query<{ exclusive_fence: boolean }>(`
+                SELECT strpos(prosrc, $1) > 0 AS exclusive_fence FROM pg_proc
+                WHERE pronamespace='public'::regnamespace AND proname IN
+                    ('pin_analysis_v2_profile_gender_plan', 'pin_analysis_v2_profile_media_inputs')
+            `, ['PERFORM ' + lock + '(']);
+            expect(writers.rows).toEqual([{ exclusive_fence: true }, { exclusive_fence: true }]);
+            await dev.exec(install);
+            expect(await catalog(api)).toEqual(publicApi);
+            for (const source of [lock, read]) expect(await catalog(source)).toEqual(source === lock ? guard : reader);
+
+            // Run the same DDL under a savepoint to prove that an error *after* creating
+            // both helpers restores the original catalog. The fixture remains unchanged.
+            const ddl = install.slice(install.indexOf('DO $install$'), install.indexOf('COMMIT;'));
+            await dev.transaction(async tx => {
+                await tx.exec('DROP FUNCTION ' + sharedRead + args + ', ' + sharedLock + args);
+                await tx.exec(publicApi.def.replace('RETURN media ||', '-- unexpected upstream edit\n    RETURN media ||'));
+                await tx.exec('SAVEPOINT before_patch');
+                await expect(tx.exec(ddl)).rejects.toThrow('DEV_STANDARD_PROFILE_SHARED_SOURCE_DRIFT');
+                await tx.exec('ROLLBACK TO SAVEPOINT before_patch');
+                const gone = (await tx.query(`SELECT to_regprocedure($1) IS NULL AS guard,
+                    to_regprocedure($2) IS NULL AS reader`, [sharedLock + args, sharedRead + args])).rows[0];
+                expect(gone).toEqual({ guard: true, reader: true });
+                await tx.rollback();
+            });
+            for (const [statement, code] of [
+                ['GRANT EXECUTE ON FUNCTION ' + read + args + ' TO authenticated', 'SOURCE_DRIFT'],
+                ['GRANT service_role TO authenticated', 'SOURCE_DRIFT'],
+                [guard.def.replace('FOR UPDATE;', 'FOR NO KEY UPDATE;'), 'SOURCE_DRIFT'],
+                ['GRANT EXECUTE ON FUNCTION ' + sharedLock + args + ' TO authenticated', 'TARGET_DRIFT'],
+            ]) {
+                await dev.transaction(async tx => {
+                    await tx.exec(statement);
+                    await expect(tx.exec(ddl)).rejects.toThrow('DEV_STANDARD_PROFILE_SHARED_' + code);
+                    await tx.rollback();
+                });
+            }
+        } finally {
+            await dev.close();
+        }
+    });
+
     it.each(['before', 'after'])('preserves the Dev override applied %s the slot lock migration', async (overrideOrder) => {
         const safeBaseline = await readFile(
             path.join(process.cwd(), 'supabase/dev-ui/production-baseline.sql'), 'utf8'

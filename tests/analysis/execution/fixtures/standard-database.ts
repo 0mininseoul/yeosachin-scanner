@@ -92,7 +92,12 @@ export async function createStandardDatabase() {
             if (matches.length !== 1) throw new Error('Expected one migration for ' + version);
             await db.exec(readFileSync('supabase/migrations/' + matches[0], 'utf8'));
         }
-        for (const name of ['live-standard-provider-recovery', 'live-standard-feature-concurrency']) {
+        for (const name of [
+            'live-standard-provider-recovery',
+            'live-standard-feature-concurrency',
+            'live-standard-profile-media-ready',
+            'live-standard-profile-shared-reader',
+        ]) {
             await db.exec(devSql(name));
         }
         return db;

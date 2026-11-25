@@ -1,3 +1,5 @@
+import * as devBudget from '@/lib/services/dev-ui/live-budget';
+import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
 import { AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
@@ -5750,6 +5752,100 @@ function runScheduledStandardProfileBatch(deps: AnalysisV2AiScoringExecutorDepen
 }
 
 describe('v2.11 profile AI redelivery', () => {
+    it('writes one aggregate for each opted-in delivery, retaining the original success, deferral and failure', async () => {
+        const job = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, state: state({ planId: 'standard' }) });
+        const active = { ...job, schedulerCapability: 'scheduler-v1' as const };
+        const optIn = vi.spyOn(devBudget, 'devStandardProfileReadyReuseEnabled').mockReturnValue(false);
+        const log = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+        const output = { checkpoint: { kind: 'profile_ai_batch' as const, manifest: {
+            batch: 0, itemCount: 1, producerInputHash: job.job.inputHash, resultHash: digest('ok'), revision: 1,
+        } } };
+        let fail: Error | undefined;
+        const execute = observeDevStandardProfileDelivery(async (_context, delivery) => {
+            if (delivery) {
+                delivery.enter('readyRead');
+                delivery.readyRows = 3;
+                delivery.enter('analysis');
+                delivery.readyHits++;
+                delivery.claimRpc()();
+            }
+            if (fail) throw fail;
+            return output;
+        });
+        try {
+            expect(await execute(active)).toBe(output);
+            expect(log).not.toHaveBeenCalled();
+            optIn.mockReturnValue(true);
+            expect(await execute(active)).toBe(output);
+            fail = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_QUARANTINE_ACTIVE', 60);
+            await expect(execute(active)).rejects.toBe(fail);
+            fail = new Error('hidden diagnostic value');
+            await expect(execute(active)).rejects.toBe(fail);
+            expect(log).toHaveBeenCalledTimes(3);
+            const outcomes = ['completed', 'deferred_quarantine', 'failed'];
+            for (const [index, [line]] of log.mock.calls.entries()) {
+                expect(JSON.parse(line)).toEqual({
+                    event: 'dev_standard.profile_ai_delivery', batch: 0, generation: active.claim.generation,
+                    result: outcomes[index], lastPhase: 'analysis', totalMs: expect.any(Number),
+                    phaseMs: { producer: expect.any(Number), readyRead: expect.any(Number), prepare: 0,
+                        analysis: expect.any(Number), checkpoint: 0 },
+                    readyRows: 3, readyHits: 1, individualClaimRpcs: 1, firstClaimMs: expect.any(Number),
+                    maxClaimStartGapMs: null, maxClaimRpcMs: expect.any(Number),
+                });
+            }
+        } finally { log.mockRestore(); optIn.mockRestore(); }
+    });
+    it('reuses ready features across eight 30-account deliveries without admitting or charging them again', async () => {
+        const policy = AI_STAGE_POLICY_V211_VERSION;
+        const batches = Array.from({ length: 8 }, (_, batch) => {
+            const scope = { requestId: REQUEST_ID, claimToken: CLAIM_TOKEN,
+                jobKey: `track:profile-ai:batch:${batch}`, inputHash: digest(`input-${batch}`) };
+            const inputs = Array.from({ length: 30 }, (_, ordinal) => {
+                const id = `profile:test-${batch}-${ordinal}`;
+                return { media: [{ selectionId: id, kind: 'profile' as const, normalizedJpegBase64: '/9j/2Q==' }],
+                    triage: triage([id], 'female'), bio: null, captions: [] };
+            });
+            return { scope, inputs };
+        });
+        const run = async (prefetch: boolean) => {
+            let claims = 0;
+            let modelRuns = 0;
+            const outputs = await Promise.all(batches.map(async ({ scope, inputs }) => {
+                const ready = new Map(inputs.slice(0, 24).map(input => {
+                    const key = createFeatureAnalysisResultIdentity(input, policy).operationKey;
+                    const result = feature(input.media.map(row => row.selectionId));
+                    return [key, { stage: 'featureAnalysis' as const, operationKey: key,
+                        result: { operationKey: key, result, resultHash: digest(key), source: 'checkpoint' } }] as const;
+                }));
+                const runtime = createDurableAnalysisV2AiStageRuntime({
+                    createSchedulerOperationStore: options => ({
+                        async claim({ key }) {
+                            claims++;
+                            const hit = ready.get(key);
+                            return hit ? { decision: 'ready', value: options.schemas.get(key)!.parse(hit.result) }
+                                : { decision: 'execute', claimToken: CLAIM_TOKEN };
+                        },
+                        async commitReady() {},
+                    }),
+                    runFeatures: async input => {
+                        modelRuns++;
+                        return feature(input.media.map(row => row.selectionId));
+                    },
+                });
+                const jobFence = { ...scope, jobInputHash: scope.inputHash, aiStagePolicyVersion: policy,
+                    schedulerCapability: 'scheduler-v1' as const, handlerDeadlineAtMs: performance.now() + 540_000,
+                    ...(prefetch ? { profileReadySnapshot: { fence: scope, byKey: ready } } : {}) };
+                return Promise.all(inputs.map(input => runtime.features(input, jobFence)));
+            }));
+            return { claims, modelRuns, outputs };
+        };
+        const prior = await run(false);
+        const current = await run(true);
+        expect(prior).toMatchObject({ claims: 240, modelRuns: 48 });
+        expect(current).toMatchObject({ claims: 48, modelRuns: 48 });
+        expect(current.outputs).toEqual(prior.outputs);
+    });
     const scenarios = ['gender 5 to 4', 'gender 4 to 5', 'gender 404',
         'features 6 to 5', 'features 5 to 6'] as const;
     const cases = (['ready', 'claimed'] as const).flatMap(status => scenarios.map(scenario => ({status, scenario})));

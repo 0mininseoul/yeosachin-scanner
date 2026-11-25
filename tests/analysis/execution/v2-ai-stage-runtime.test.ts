@@ -31,6 +31,7 @@ import {
     AnalysisV2AiResultRecoveredCutoffError,
     AnalysisV2AiResultRecoveryPendingError,
 } from '../../../lib/services/analysis/v2-ai-result-store';
+import { profileMediaInputStore } from '../../../lib/services/analysis/v2-profile-media-inputs';
 import type { AnalysisV2SchedulerRuntimeOptions } from '../../../lib/services/analysis/v2-ai-scheduler-runtime';
 
 const supabase = vi.hoisted(() => ({ rpc: vi.fn() }));
@@ -72,6 +73,76 @@ function cachedAuditFactory(input: {
         });
     return { createAudit, beforeAttempt, attemptTelemetry };
 }
+
+describe('fenced Dev Standard ready profile results', () => {
+    const inputHash = 'a'.repeat(64);
+    const scope = { requestId, jobKey: fence.jobKey, claimToken, inputHash };
+    const media = { inputs: [], hasGenderHistory: true, hasUnownedFeatureHistory: false };
+    const stage = 'genderTriage';
+    const input: GenderTriageInput = { media: [{ selectionId: 'profile:example', kind: 'profile', normalizedJpegBase64: '/9j/2Q==' }] };
+    const account = prepareGenderTriagePlanAccount(input, AI_STAGE_POLICY_V211_VERSION);
+    const group = { accountIds: [account.accountId], operationKey: plannedGenderTriageOperationKey([account], AI_STAGE_POLICY_V211_VERSION) };
+    const result = { assessment: { inferredGender: 'unknown', confidence: 'low', ownerConsistency: 'multiple_or_unclear', evidenceSelectionIds: [] },
+        routingDecision: 'route_to_feature_analysis', routingReason: 'conserve_female_recall', analyzedSelectionIds: ['profile:example'] };
+    const envelope = { operationKey: group.operationKey, results: [{ accountId: account.accountId, result, source: 'checkpoint' }] };
+    const row = { operationKey: group.operationKey, stage, result: envelope };
+
+    it('loads only the opted-in RPC, validates the ready envelope and reuses it only inside its original claim', async () => {
+        supabase.rpc.mockReset().mockResolvedValueOnce({ data: media, error: null })
+            .mockResolvedValueOnce({ data: { ...media, readyOperations: [row] }, error: null });
+        expect(await profileMediaInputStore.load(scope)).toEqual(media);
+        const { readySnapshot } = await profileMediaInputStore.load(scope, true);
+        const args = { p_request_id: requestId, p_job_key: scope.jobKey, p_claim_token: claimToken, p_input_hash: inputHash };
+        expect(supabase.rpc.mock.calls).toEqual([
+            ['load_analysis_v2_profile_media_inputs', args], ['load_dev_standard_profile_media_ready_v1', args],
+        ]);
+        const claim = vi.fn(async (): Promise<never> => { throw new AnalysisV2JobFenceError(); });
+        const runGenderMicrobatch = vi.fn();
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createSchedulerOperationStore: () => ({ claim, commitReady: vi.fn() }), runGenderMicrobatch,
+        });
+        const active = { ...fence, jobInputHash: inputHash, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            schedulerCapability: 'scheduler-v1' as const, handlerDeadlineAtMs: performance.now() + 540_000,
+            profileReadySnapshot: readySnapshot };
+        expect(await runtime.profileGender!.run([input], group, active)).toMatchObject([{ result, source: 'checkpoint' }]);
+        expect(claim).not.toHaveBeenCalled();
+        for (const change of [{ requestId: 'different' }, { jobKey: 'track:profile-ai:batch:1' },
+            { claimToken: 'different' }, { jobInputHash: 'b'.repeat(64) }]) {
+            await expect(runtime.profileGender!.run([input], group, { ...active, ...change })).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+        }
+        expect(claim).toHaveBeenCalledTimes(4);
+        supabase.rpc.mockResolvedValueOnce({ data: { ...media, readyOperations: [{ ...row, result: { ...envelope, results: [] } }] }, error: null });
+        const corrupt = await profileMediaInputStore.load(scope, true);
+        await expect(runtime.profileGender!.run([input], group, { ...active, profileReadySnapshot: corrupt.readySnapshot }))
+            .rejects.toThrow('invalid ready result');
+        expect(claim).toHaveBeenCalledTimes(4);
+        expect(runGenderMicrobatch).not.toHaveBeenCalled();
+        await expect(runtime.profileGender!.run([input], group, { ...active, handlerDeadlineAtMs: 0 }))
+            .rejects.toMatchObject({ reason: 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT' });
+    });
+
+    it.each([['57014', 'statement'], ['55P03', 'lock']])('continues after a repeated rolled-back Dev read %s', async (code, kind) => {
+        supabase.rpc.mockReset().mockResolvedValue({ data: null, error: {
+            code, message: 'canceling statement due to ' + kind + ' timeout',
+        } });
+        try {
+            await expect(profileMediaInputStore.load(scope, true)).rejects.toMatchObject({
+                reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING', delaySeconds: 5,
+            });
+            expect(supabase.rpc).toHaveBeenCalledTimes(2);
+        } finally { supabase.rpc.mockReset(); }
+    });
+
+    it('rejects wrong stage keys, duplicate or missing ready rows and an expired parent fence', async () => {
+        const malformed = [[row, row], [{ ...row, stage: 'featureAnalysis' }], undefined];
+        for (const readyOperations of malformed) {
+            supabase.rpc.mockResolvedValueOnce({ data: { ...media, readyOperations }, error: null });
+            await expect(profileMediaInputStore.load(scope, true)).rejects.toThrow('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
+        }
+        supabase.rpc.mockResolvedValueOnce({ data: null, error: { message: 'ANALYSIS_V2_PROFILE_GENDER_PLAN_FENCE_MISMATCH' } });
+        await expect(profileMediaInputStore.load(scope, true)).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+    });
+});
 
 describe('durable V2 AI stage runtime', () => {
     it('rejects every cross-version job before creating an audit or calling Gemini', async () => {

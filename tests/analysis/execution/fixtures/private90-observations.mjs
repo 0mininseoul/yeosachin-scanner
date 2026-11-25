@@ -28,7 +28,7 @@ const workerEnums = {
     deliveryStatus: ['none','running','threw','retry','failed','completed','already_terminal','continuation'],
     disposition: ['none','other','transient','permanent','fence','deferred','exhausted','already_terminal','completed'],
     assertion: ['none','queue_limit','task_parse','worker_return','recovery_fanout','continuation_successor','dispatch_fence',
-        'terminal_duplicate','duplicate_side_effects','duplicate_ledger','private_source_hash','owner_result','publication','vertex_ledger','image'],
+        'terminal_duplicate','duplicate_side_effects','duplicate_ledger','private_source_hash','owner_result','profile_ready_reads','publication','vertex_ledger','image'],
     modelStage: ['none','unknown','private_names','name_only','gender_triage','features','resolver','partner','narrative','preview'],
 };
 export function private90ModelStage(input) {
@@ -68,6 +68,7 @@ export function newPrivate90Observations() {
         reverseShared: 0, reverseMissing: 0, reverseExtra: 0, reverseTupleDifferences: 0, reverseActualHashMatch: 0,
         reverseMissingOutcomes: 0, reverseMissingVerified: 0, reverseMissingTriageFemale: 0, reverseMissingFeatureFemale: 0,
         reverseMissingAnalysisUnavailable: 0, reverseMissingMediaUnavailable: 0, reverseMissingUnresolved: 0, reverseMissingNonFemale: 0,
+        profileReadyReads: 0, profileReadyReadBatches: 0, profileReadyRowsReturned: 0,
         mediaRegistryLoads: 0, mediaRegistryRegistrations: 0, ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         stageProofRows: 0, stageProofOriginalHash: 0, stageProofDirectTarget: 0, stageProofDirectPublic: 0,

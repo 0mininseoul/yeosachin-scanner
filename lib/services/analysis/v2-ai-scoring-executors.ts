@@ -1,3 +1,4 @@
+import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
 import type { ReplayScopeDelta } from '@/lib/contracts/dev-standard-replay';
 import { checkpointDevReplayScope } from '@/lib/services/dev-ui/standard-replay-scope-note';
 import type { V211CopySubjects } from './public-copy-quality';
@@ -2120,7 +2121,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
         ?? MAX_NARRATIVE_CONCURRENCY;
 
     return {
-        async profile_ai(context) {
+        profile_ai: observeDevStandardProfileDelivery(async (context, delivery) => {
             const topology = topologyBatch(context, 'profile');
             const producerJobKey = `${PROFILE_BATCH_JOB_PREFIX}${context.job.batch}`;
             const producer = context.state.profileFetchBatches?.find(item => (
@@ -2184,9 +2185,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             }
             const inputStore = plannedGender ? dependencies.profileMediaInputs ?? profileMediaInputStore : null;
             const inputFence = { ...aiFence, inputHash: context.claim.inputHash };
-            const saved = await inputStore?.load(inputFence) ?? {
+            delivery?.enter('readyRead');
+            const saved = await inputStore?.load(inputFence, Boolean(delivery)) ?? {
                 inputs: [], hasGenderHistory: false, hasUnownedFeatureHistory: false,
             };
+            if (delivery) {
+                delivery.readyRows = saved.readySnapshot?.byKey.size ?? 0;
+                delivery.enter('prepare');
+            }
+            const scheduledProfileFence = delivery
+                ? { ...aiFence, profileReadySnapshot: saved.readySnapshot, profileDelivery: delivery } : aiFence;
             if (saved.inputs.some(row => row.ordinal >= results.length)) {
                 throw new Error('ANALYSIS_V2_PROFILE_GENDER_PLAN_DRIFT');
             }
@@ -2551,7 +2559,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     }
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
-                        features = await dependencies.ai.features(featureInput, aiFence);
+                        features = await dependencies.ai.features(featureInput, scheduledProfileFence);
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return {
@@ -2788,13 +2796,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         gender: Awaited<ReturnType<GenderEvaluation>>;
                         receipt: ProfileMediaInput;
                     }[] = [];
+                    delivery?.enter('analysis');
                     await runProfileGroups(plan, profileConcurrency, group => (
                         group.accountIds.reduce((count, id) => count + byAccount.get(id)!.length, 0)
                     ), async (group, slots) => {
                         const entries = group.accountIds.map(id => byAccount.get(id)!);
                         const media = await Promise.all(entries.map(rows => rows[0]!.work.load()));
                         const gender = plannedGender.run(
-                            entries.map((rows, index) => profileGenderInput(media[index]!, rows[0]!.work.evidence)), group, aiFence,
+                            entries.map((rows, index) => profileGenderInput(media[index]!, rows[0]!.work.evidence)), group, scheduledProfileFence,
                         );
                         const rows = entries.flatMap((members, memberIndex) => members.map((item, ordinal) => (
                             { ...item, memberIndex, ordinal }
@@ -2851,6 +2860,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         : outcome
                 ),
             );
+            delivery?.enter('checkpoint');
             const publicCheckpoint = await dependencies.resultStore.checkpointFeatureBatch({
                 ...checkpointClaim(context),
                 batch: context.job.batch!,
@@ -2881,7 +2891,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     },
                 },
             };
-        },
+        }),
 
         async private_names(context) {
             const topology = topologyBatch(context, 'private');
