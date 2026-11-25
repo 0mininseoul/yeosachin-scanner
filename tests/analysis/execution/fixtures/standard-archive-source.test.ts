@@ -122,3 +122,47 @@ it('requires the same result-image kind, candidate and URL fingerprint after a s
     expect(observed([{ ...source, candidateLocator: 'offline-other', sourceUrl: projected }])).toMatchObject({ imagePublicAbsent: 1 });
     expect(observed([{ ...source, sourceUrl: null }])).toMatchObject({ imageScopeNullMismatch: 1 });
 });
+
+it('binds a legacy result-stage URL only to its original member, projected source and full sealed receipt', async () => {
+    const { private90StageImages } = await import('./private90-stage-images');
+    const { resultImageArchiveIdentity, resultImageSourceFingerprint, resultImageOrderedManifestHash } =
+        await import('@/lib/services/media/result-image-capture');
+    const { analysisV2CandidateId } = await import('@/lib/services/analysis/v2-ai-scoring-executors');
+    const { archiveMediaUrlAnchor } = await import('@/lib/services/dev-ui/standard-archive-media-identity');
+    const { canonicalizeImageProxyUrl } = await import('@/lib/services/media/image-proxy-token');
+    const username = 'offline_member';
+    const locator = analysisV2CandidateId(username);
+    const raw = (n: string) => 'https://scontent.cdninstagram.com/' + n + '.jpg?z=2&a=1';
+    const projected = archiveMediaUrlAnchor(raw(username));
+    const targetSource = { kind:'target' as const, candidateLocator:'target', sortOrdinal:0, sourceUrl:raw(target) };
+    const candidateSource = { kind:'female' as const, candidateLocator:locator, sortOrdinal:1, sourceUrl:canonicalizeImageProxyUrl(raw(username)) };
+    const sources = [targetSource, candidateSource];
+    const entries = sources.map(item => ({ sourceFingerprint:resultImageSourceFingerprint(item.sourceUrl)!, webpSha256:hash('fixture WebP') }));
+    const manifest = { imageInputs:sources.map(resultImageArchiveIdentity), orderedManifestHash:resultImageOrderedManifestHash(sources) };
+    const records = new Map<string,unknown>();
+    const id = (parts: unknown[]) => hash(JSON.stringify(parts));
+    function put(kind: string, identity: unknown[], value: unknown, pointer?: number | string) {
+        const k = id(identity);
+        records.set(kind+k,value);
+        if (pointer !== undefined) records.set('capture-coverage-v1'+id([kind,pointer]),k);
+    }
+    put('result-image-manifest-v1',[target],manifest);
+    put('formal-target-profile-v2',[target],{ profile:{ username:target,profilePicUrl:archiveMediaUrlAnchor(raw(target)) } });
+    for (const side of ['followers','following']) put('relationship-side-v1',[target,side,0,'standard'],{rows:[]},side);
+    put('candidate-profile-batch-v1',[target,0,username],[{
+        outcome:{status:'success',requestedUsername:username},profile:{username,isPrivate:false,profilePicUrl:projected},
+    }],0);
+    const reader = { async readFragment({kind,inputKey}:{kind:string;inputKey:string}) {
+        const value=records.get(kind+inputKey);
+        return value === undefined ? null : {value};
+    } };
+    const input={reader,target,batches:[0],proof:entries};
+    const verified=await private90StageImages(input);
+    expect(verified.counts()).toMatchObject({stageProofDirectTarget:1,stageProofDirectPublic:0,stageProofDirectDrift:1});
+    expect(verified.project('female',locator,projected)).toBe(archiveMediaUrlAnchor(candidateSource.sourceUrl));
+    expect(() => verified.project('private',locator,projected)).toThrow('PRIVATE90_RESULT_STAGE_PROOF_INVALID');
+    expect(() => verified.project('female',locator,archiveMediaUrlAnchor(raw('another')))).toThrow('PRIVATE90_RESULT_STAGE_PROOF_INVALID');
+    await expect(private90StageImages({...input,proof:[...entries].reverse()})).rejects.toThrow('PRIVATE90_RESULT_STAGE_PROOF_INVALID');
+    put('result-image-manifest-v1',[target],{...manifest,imageInputs:[manifest.imageInputs[0],[candidateSource.kind,locator,hash('wrong source')]]});
+    await expect(private90StageImages(input)).rejects.toThrow('PRIVATE90_RESULT_STAGE_PROOF_INVALID');
+});

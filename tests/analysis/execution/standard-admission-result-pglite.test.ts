@@ -1,3 +1,5 @@
+import { private90StageImages } from './fixtures/private90-stage-images';
+import { readStandardQaResultProof, enrollStandardQaResultProof } from '@/lib/services/dev-ui/standard-qa-result-proof';
 import type { ResultImageCaptureSource } from '@/lib/services/media/result-image-capture';
 import { createFeatureAnalysisResultIdentity, type FeatureAnalysisInput } from '@/lib/services/ai/v2-staged-analysis';
 import type { AnalysisV2ReverseLikeCollector } from '@/lib/services/analysis/v2-ai-scoring-executors';
@@ -72,10 +74,33 @@ const runtime = vi.hoisted(() => ({
     genderOuter: null as null | ((account:string,event:Private90OuterEvent,op:string)=>void),
     featureOuter: null as null | ((input:FeatureAnalysisInput,event:Private90OuterEvent)=>void),
     featureProbe: null as null | ((input:FeatureAnalysisInput, state:'start'|'return'|'error', error?:unknown) => void),
+    stageImages: null as null | Awaited<ReturnType<typeof private90StageImages>>,
     imageProbe: null as null | ((sources: readonly ResultImageCaptureSource[]) => void),
     reverseProbe: null as null | ((input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) => Promise<void>),
     vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[]; byOperation:Map<string,Set<string>> },
 }));
+vi.mock('@/lib/services/analysis/v2-result-store', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-result-store')>();
+    const store = actual.analysisV2ResultStore;
+    return { ...actual, analysisV2ResultStore: { ...store,
+        checkpointFeatureBatch(input: Parameters<typeof store.checkpointFeatureBatch>[0]) {
+            const proof = runtime.stageImages;
+            if (!proof) return store.checkpointFeatureBatch(input);
+            const rows = input.rows.map(row => row.classification === 'verified_female' ? {
+                ...row, profileImageUrl: proof.project('female', row.candidateId, row.profileImageUrl),
+            } : row);
+            return store.checkpointFeatureBatch({ ...input, rows });
+        },
+        checkpointPrivateNames(input: Parameters<typeof store.checkpointPrivateNames>[0]) {
+            const proof = runtime.stageImages;
+            if (!proof) return store.checkpointPrivateNames(input);
+            const rows = input.rows.map(row => ({
+                ...row, profileImageUrl: proof.project('private', row.candidateId, row.profileImageUrl),
+            }));
+            return store.checkpointPrivateNames({ ...input, rows });
+        },
+    } };
+});
 vi.mock('@/lib/services/media/result-image-capture', async original => {
     const actual = await original<typeof import('@/lib/services/media/result-image-capture')>();
     return { ...actual, async captureResultImageSources(input: Parameters<typeof actual.captureResultImageSources>[0]) {
@@ -394,6 +419,7 @@ afterEach(() => {
     runtime.vertexReceipts = null;
     runtime.reverseProbe = null;
     runtime.imageProbe = null;
+    runtime.stageImages = null;
     runtime.featureProbe = null;
     runtime.genderOuter = null;
     runtime.featureOuter = null;
@@ -415,6 +441,7 @@ async function runStandardRequest(
         generate: typeof syntheticGeneration;
         reverseScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['reverseScope'];
         imageScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['imageScope'];
+        stageImages: Awaited<ReturnType<typeof private90StageImages>>;
         observed: Private90Observations;
     },
 ) {
@@ -432,8 +459,9 @@ async function runStandardRequest(
         if (state === 'start') probe.event(id,'featureStart',createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
         else probe.event(id,state === 'return' ? 'featureReturned' : probe.featureFailure(error));
     } : null;
+    runtime.stageImages = privateReplay?.stageImages ?? null;
     runtime.imageProbe = privateReplay ? sources => {
-        Object.assign(privateReplay.observed, privateReplay.imageScope(sources));
+        Object.assign(privateReplay.observed, privateReplay.stageImages.counts(), privateReplay.imageScope(sources));
     } : null;
     runtime.reverseProbe = privateReplay ? async input => {
         Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates,runtime.vertexReceipts?.byOperation));
@@ -494,7 +522,7 @@ async function runStandardRequest(
     // Exercise two private-name chunks before public profile AI, including the 100-name boundary.
     const syntheticPrivateCount = process.env.PRIVATE90_FULL_REPLAY === 'synthetic' ? 101 : 0;
     const privateNameChunks = Math.ceil(syntheticPrivateCount / 100);
-    const apify = new SyntheticApify(syntheticPrivateCount);
+    const apify = new SyntheticApify(syntheticPrivateCount, scenario === 'archive_capture' && syntheticPrivateCount > 0);
     runtime.apify.mockClear().mockImplementation(() => {
         if (privateReplay) privateReplay.observed.apifyCalls++;
         if (isReplay) throw new Error('Unexpected Apify access during archive replay');
@@ -1137,6 +1165,12 @@ it('replays a separately sealed copy through the owner image using independent s
         const { policy, destination } = await openStandardQaCopyForJob('export');
         const result = await exportStandardQaCopy(policy, live, destination);
         expect(result.profileBatches).toBe(1);
+        if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
+            const receipts = await archiveDb.query<{ sourceFingerprint: string; webpSha256: string }>(
+                'SELECT source_fingerprint AS "sourceFingerprint", sha256 AS "webpSha256" FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status=\'ready\' ORDER BY sort_ordinal',
+                [capture.requestId]);
+            await enrollStandardQaResultProof(policy, destination, receipts.rows);
+        }
         sourceTime = Date.parse(capture.approvedAt) + 86_400_001;
         await expect(live.openSealedArchive()).rejects.toThrow('EXPIRED');
     } finally {
@@ -1148,6 +1182,21 @@ it('replays a separately sealed copy through the owner image using independent s
     sourceObjects = createFixtureObjects();
     vi.unstubAllGlobals();
     configure();
+    if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
+        runtime.archiveObjects.mockImplementation((name: string) => {
+            if (name !== copyBucket) throw new Error('Original capture unavailable');
+            return copyObjects;
+        });
+        return reportPrivate90(async observed => {
+            const { policy, destination } = await openStandardQaCopyForJob('read');
+            await withVerifiedStandardQaCopy(policy, destination, async (coverage, reader) => {
+                const proof = await readStandardQaResultProof(policy, destination);
+                await runPrivate90Fixture(target, coverage.profileBatches, reader, observed, proof);
+                expect(observed.stageProofDirectDrift).toBe(observed.stageProofRows - 1);
+                expect(observed.stageProofRowsApplied).toBe(observed.publicImages + observed.privateImages);
+            });
+        });
+    }
     const nextDb = await createStandardDatabase();
     try {
         captureConfig();
@@ -1180,10 +1229,6 @@ it('replays a separately sealed copy through the owner image using independent s
             return runStandardRequest(nextDb, owner, 'archive_replay', true);
         });
         expect(result.imageHash).toBe(reference.imageHash);
-        if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
-            await reportPrivate90(async observed => withCloudStandardQaFixture((coverage, reader) =>
-                runPrivate90Fixture(target, coverage.profileBatches, reader, observed)));
-        }
         expect(result.previewDto).toEqual(reference.previewDto);
         expect(wrapping).toBe(1);
         const rightKey = secretBytes;
@@ -1221,7 +1266,7 @@ it('replays a separately sealed copy through the owner image using independent s
 type PrivateReader = Parameters<StandardQaFixtureOperation<unknown>>[1];
 
 async function runPrivate90Fixture(
-    requestTarget: string, profileBatches: readonly number[], reader: PrivateReader, observed: Private90Observations,
+    requestTarget: string, profileBatches: readonly number[], reader: PrivateReader, observed: Private90Observations, proof: unknown,
 ) {
     const archive = currentDevStandardArchive();
     if (archive?.mode !== 'replay' || archive.target !== requestTarget) throw new Error('PRIVATE90_READER_REQUIRED');
@@ -1246,6 +1291,10 @@ async function runPrivate90Fixture(
         vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED', 'true');
         observed.phase = 'fixed_model';
         observed.cause = 'sealed_model_inputs';
+        observed.cause = 'result_stage_proof';
+        const stageImages = await private90StageImages({ reader, target: requestTarget, batches: profileBatches, proof });
+        Object.assign(observed, stageImages.counts());
+        observed.cause = 'sealed_model_inputs';
         const model = await prepareStandardArchiveVertex({ target: requestTarget, reader, profileBatches });
         Object.assign(observed,model.reverseScope.sourceCounts());
         observed.publicProfilesInspected = model.counts().profiles;
@@ -1259,7 +1308,7 @@ async function runPrivate90Fixture(
         `, [source.requestId]);
         await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
         await runStandardRequest(db, owner, 'archive_replay', true, {
-            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, imageScope:model.imageScope, profileBatches, observed,
+            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, imageScope:model.imageScope, stageImages, profileBatches, observed,
         });
         observed.phase = 'complete';
         observed.assertion = 'none';
@@ -1322,7 +1371,10 @@ it.skipIf(process.env.PRIVATE90_FULL_REPLAY !== 'cloud')('runs the authorized pr
             return createGoogleCloudPrivateMediaObjectClient({ bucketName: bucket, requester: { request: requestReadOnly } });
         });
         const { policy, destination } = await openStandardQaCopyForJob('read');
-        await withVerifiedStandardQaCopy(policy, destination, (coverage, reader) =>
-            runPrivate90Fixture(policy.target, coverage.profileBatches, reader, observed));
+        await withVerifiedStandardQaCopy(policy, destination, async (coverage, reader) => {
+            observed.cause = 'result_stage_proof';
+            const proof = await readStandardQaResultProof(policy, destination);
+            await runPrivate90Fixture(policy.target, coverage.profileBatches, reader, observed, proof);
+        });
     });
 }, 3_600_000);
