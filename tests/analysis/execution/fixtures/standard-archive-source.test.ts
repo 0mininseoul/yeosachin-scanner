@@ -121,6 +121,14 @@ it('requires the same result-image kind, candidate and URL fingerprint after a s
     expect(observed([{ ...source, sourceUrl: projected, kind: 'private' }])).toMatchObject({ imagePrivateAbsent: 1, imagePrivateExact: 0 });
     expect(observed([{ ...source, candidateLocator: 'offline-other', sourceUrl: projected }])).toMatchObject({ imagePublicAbsent: 1 });
     expect(observed([{ ...source, sourceUrl: null }])).toMatchObject({ imageScopeNullMismatch: 1 });
+    const member = { ...source, sourceUrl: canonicalizeImageProxyUrl(raw) };
+    const privateRow = { ...member, kind: 'private' as const, candidateLocator: 'offline-private' };
+    const excluded = { ...member, candidateLocator: 'not-in-fixed-plan' };
+    const plan = private90ImageScope([member, privateRow, excluded].map(resultImageArchiveIdentity), new Set([member.candidateLocator]));
+    expect(plan([member, privateRow])).toMatchObject({ imageScopeExpected: 3, imageScopePlanned: 2,
+        imageScopePlanMissing: 0, imageScopePlanExtra: 0, imageScopePlanDuplicate: 0 });
+    expect(plan([member, member, excluded])).toMatchObject({ imageScopeMismatched: 0,
+        imageScopePlanMissing: 1, imageScopePlanExtra: 1, imageScopePlanDuplicate: 1 });
 });
 
 it('binds a legacy result-stage URL only to its original member, projected source and full sealed receipt', async () => {

@@ -885,7 +885,12 @@ async function runStandardRequest(
         expect(observed.mediaRegistryLoads).toBeGreaterThan(0);
         expect(observed.mediaRegistryRegistrations).toBeGreaterThan(0);
         expect(observed).toMatchObject({ reverseCompared:1,reverseSourceHashMatch:1,reverseActualHashMatch:1,reverseMissing:0,reverseExtra:0 });
-        expect(observed).toMatchObject({ imageScopeCompared: 1, imageScopeMismatched: 0 });
+        expect(observed).toMatchObject({
+            imageScopeCompared: 1, imageScopeMismatched: 0, imageScopePlanMissing: 0,
+            imageScopePlanExtra: 0, imageScopePlanDuplicate: 0,
+        });
+        expect(observed.stageProofRowsApplied).toBe(observed.imageScopePlanned - 1);
+        expect(counts.images).toBe(observed.imageScopePlanned);
         observed.cause = 'model_routing';
         expect(observed.modelError).toBe('none');
         observed.cause = 'ledger_mismatch';
@@ -915,6 +920,7 @@ async function runStandardRequest(
         observed.cause = 'owner_access';
         const locator = await assertOwnerPage(result.requestId, member.instagramId);
         const ownerImage = await readImage(new NextRequest(locator));
+        expect(observed.webpVerified).toBe(observed.imageScopePlanned);
         observed.ownerResult = page.status;
         observed.ownerImage = ownerImage.status;
         expect(ownerImage.status).toBe(200);

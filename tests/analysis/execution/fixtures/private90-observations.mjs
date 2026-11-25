@@ -72,6 +72,7 @@ export function newPrivate90Observations() {
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         stageProofRows: 0, stageProofOriginalHash: 0, stageProofDirectTarget: 0, stageProofDirectPublic: 0,
         stageProofDirectPrivate: 0, stageProofDirectDrift: 0, stageProofRowsApplied: 0,
+        imageScopePlanned: 0, imageScopePlanMissing: 0, imageScopePlanExtra: 0, imageScopePlanDuplicate: 0,
         imageScopeCompared: 0, imageScopeExpected: 0, imageScopeMismatched: 0, imageScopeNullMismatch: 0, imageScopeAmbiguous: 0,
         imageTargetRequests: 0, imagePublicRequests: 0, imagePrivateRequests: 0,
         imageTargetExact: 0, imagePublicExact: 0, imagePrivateExact: 0,

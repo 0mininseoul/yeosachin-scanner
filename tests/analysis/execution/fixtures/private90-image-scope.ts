@@ -2,11 +2,13 @@ import { resultImageArchiveIdentity, type ResultImageCaptureSource } from '@/lib
 
 type Identity = ReturnType<typeof resultImageArchiveIdentity>;
 
-export function private90ImageScope(manifest: readonly Identity[]) {
+export function private90ImageScope(manifest: readonly Identity[], fixedPublic?: ReadonlySet<string>) {
+    const planned = new Set<string>();
     const byLocator = new Map<string, Set<string | null>>();
     const key = (kind: string, locator: string) => JSON.stringify([kind, locator]);
     for (const [kind, locator, fingerprint] of manifest) {
         const index = key(kind, locator);
+        if (kind !== 'female' || !fixedPublic || fixedPublic.has(locator)) planned.add(index);
         const fingerprints = byLocator.get(index) ?? new Set();
         fingerprints.add(fingerprint);
         byLocator.set(index, fingerprints);
@@ -18,9 +20,14 @@ export function private90ImageScope(manifest: readonly Identity[]) {
         const drift = { ...byKind };
         let ambiguous = 0;
         let nullMismatch = 0;
+        const actual = new Set<string>();
+        let duplicate = 0;
         for (const source of sources) {
             const [kind, locator, fingerprint] = resultImageArchiveIdentity(source);
-            const recorded = byLocator.get(key(kind, locator));
+            const member = key(kind, locator);
+            if (actual.has(member)) duplicate++;
+            actual.add(member);
+            const recorded = byLocator.get(member);
             byKind[kind]++;
             if (!recorded) missing[kind]++;
             else if (recorded.size !== 1) ambiguous++;
@@ -31,7 +38,10 @@ export function private90ImageScope(manifest: readonly Identity[]) {
             }
         }
         return {
-            imageScopeCompared: 1, imageScopeExpected: manifest.length,
+            imageScopeCompared: 1, imageScopeExpected: manifest.length, imageScopePlanned: planned.size,
+            imageScopePlanMissing: [...planned].filter(member => !actual.has(member)).length,
+            imageScopePlanExtra: [...actual].filter(member => !planned.has(member)).length,
+            imageScopePlanDuplicate: duplicate,
             imageTargetRequests: byKind.target, imagePublicRequests: byKind.female, imagePrivateRequests: byKind.private,
             imageTargetExact: exact.target, imagePublicExact: exact.female, imagePrivateExact: exact.private,
             imageTargetAbsent: missing.target, imagePublicAbsent: missing.female, imagePrivateAbsent: missing.private,

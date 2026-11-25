@@ -78,7 +78,6 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             covered.some((n,i) => n !== i || input.profileBatches[i] !== n)) stop('BATCH_COVERAGE');
         const manifest = z.object({ imageInputs: z.array(z.tuple([z.enum(['target','female','private']), z.string(), z.string().nullable()])) })
             .parse(await read('result-image-manifest-v1', key([input.target])));
-        imageScope = private90ImageScope(manifest.imageInputs);
         const female = new Set(manifest.imageInputs.filter(x => x[0] === 'female').map(x => x[1]));
         reverseScope = private90ReverseScope(input.target, await read('reverse-coverage-v1', key([input.target])));
         const reverseIds = reverseScope.expected;
@@ -86,6 +85,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
         // candidates whose result images are in the verified archive. Reranking is still performed by the worker.
         if ([...reverseIds].some(id => !female.has(id))) stop('REVERSE_RESULT_SCOPE_UNSUPPORTED');
         const positive = reverseIds.size ? reverseIds : female;
+        imageScope = private90ImageScope(manifest.imageInputs, positive);
         const matchedPositive = new Set<string>();
         for (const batch of covered) {
             const pointer = z.string().regex(/^[a-f0-9]{64}$/).parse(await read('capture-coverage-v1', key(['candidate-profile-batch-v1', batch])));
