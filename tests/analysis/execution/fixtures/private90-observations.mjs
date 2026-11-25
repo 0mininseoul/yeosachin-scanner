@@ -51,7 +51,7 @@ export function newPrivate90Observations() {
         ...emptyPrivate90Failure(),
         jobStage: 'none', jobBatch: null, deliveryStatus: 'none', disposition: 'none', assertion: 'none',
         workerCode: 'none', sqlState: 'none', modelStage: 'none', modelError: 'none', retries: 0, continuations: 0,
-        ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
+        mediaRegistryLoads: 0, mediaRegistryRegistrations: 0, ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         targetImages: 0, publicRows: 0, privateRows: 0, publicImages: 0, privateImages: 0,
         resultPages: 0, imageGets: 0, webpVerified: 0, sourceReceipts: 0, workerJobs: 0, duplicateDeliveries: 0,

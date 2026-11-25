@@ -19,6 +19,7 @@ const fields = ['ordinal','stage','status','profile','triage','feature','outcome
     'mediaManifest','accounts','accountId','assessment','gender','inferredGender','evidenceSelectionIds',
     'features','oneLineOverview','normalizedSelectionIds','selectionId','result','results','confidence','candidateId'];
 const rpcNames = [
+    'register_analysis_v2_media_artifact','load_analysis_v2_media_artifact',
     'load_analysis_v2_profile_fetch_for_consumer','load_analysis_v2_profile_media_inputs','pin_analysis_v2_profile_media_inputs',
     'pin_analysis_v2_profile_gender_plan','load_analysis_v2_ai_scoring_stage','checkpoint_analysis_v2_ai_scoring_stage',
     'load_analysis_v2_ai_result_checkpoint','load_analysis_v2_ai_operation','reserve_analysis_v2_ai_attempt',
@@ -26,6 +27,7 @@ const rpcNames = [
     'checkpoint_analysis_v2_feature_batch','load_analysis_v2_profile_ai_stage_batches',
 ];
 const messages = new Map([
+    ['SUPABASE_SERVICE_ROLE_KEY is not configured','unconfigured_admin'], ['NEXT_PUBLIC_SUPABASE_URL is not configured','unconfigured_admin'],
     ['PRIVATE90_NETWORK_DENIED','network_denied'], ['Unexpected source image download during archive replay','source_download'],
     ['Unexpected Apify access during archive replay','apify'], ['Missing synthetic media','local_media_absent'],
     ['Missing synthetic result object','local_image_absent'], ['Unexpected synthetic object operation','local_image_method'],

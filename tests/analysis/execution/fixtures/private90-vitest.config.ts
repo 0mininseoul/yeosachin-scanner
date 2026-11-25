@@ -11,9 +11,10 @@ export default defineConfig({
         testTimeout: 3_600_000,
     },
     resolve: {
-        alias: {
-            '@': process.cwd(),
-            'server-only': path.join(process.cwd(), 'node_modules/server-only/empty.js'),
-        },
+        alias: [
+            { find: /^@\/lib\/supabase\/admin$/, replacement: path.resolve('tests/analysis/execution/fixtures/private90-admin.ts') },
+            { find: '@', replacement: process.cwd() },
+            { find: 'server-only', replacement: path.join(process.cwd(), 'node_modules/server-only/empty.js') },
+        ],
     },
 });

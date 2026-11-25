@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { expect, it, vi, afterEach } from 'vitest';
+import { expect, it, vi, afterEach, beforeAll } from 'vitest';
 import { writeSync } from 'node:fs';
 import { describePrivate90Failure, emptyPrivate90Failure } from './fixtures/private90-worker-failure.mjs';
 import { private90VertexLedger } from './fixtures/private90-vertex-ledger';
@@ -119,7 +119,10 @@ vi.mock('@/lib/services/analysis/v2-media-artifact-store', async (original) => {
         ...actual,
         createGoogleCloudPrivateMediaObjectClient: ({ bucketName }: { bucketName: string }) => runtime.archiveObjects(bucketName),
         createConfiguredAnalysisV2MediaArtifactStore: () =>
-            actual.createAnalysisV2MediaArtifactStore({ objects: runtime.objects() }),
+            actual.createAnalysisV2MediaArtifactStore({
+                objects: runtime.objects(),
+                registry: actual.createAnalysisV2MediaArtifactRegistry(runtime.admin),
+            }),
     };
 });
 vi.mock('@/lib/services/analysis/v2-source-media-archive', async (original) => {
@@ -174,6 +177,16 @@ vi.mock('next/navigation', async (original) => {
         useSearchParams: () => new URLSearchParams('devAnalysis=live'),
     };
 });
+beforeAll(async () => {
+    if (!process.env.PRIVATE90_FULL_REPLAY) return;
+    const local = await vi.importActual<typeof import('./fixtures/private90-admin')>('@/lib/supabase/admin');
+    local.bindPrivate90Admin(runtime.admin);
+    // Exercise the cloud reader's importActual boundary. Production lazy imports must resolve
+    // the isolated database even when Vitest's module mock does not intercept them.
+    await vi.importActual('@/lib/services/analysis/v2-media-artifact-store');
+    vi.doUnmock('@/lib/supabase/admin');
+});
+
 const appOrigin = DEV_UI_APP_ORIGIN;
 function configure() {
     const env: Record<string, string> = {
@@ -361,6 +374,10 @@ async function runStandardRequest(
             if (observed) observed.sqlState = safePrivate90Sql(error?.code);
             throw error;
         });
+        if (!out.error && observed) {
+            if (n === 'load_analysis_v2_media_artifact') observed.mediaRegistryLoads++;
+            if (n === 'register_analysis_v2_media_artifact') observed.mediaRegistryRegistrations++;
+        }
         if (out.error && observed) observed.sqlState = safePrivate90Sql(out.error.code);
         if (out.error && !out.error.message.includes('FENCE'))
             sqlErrors.push(observed ? 'rpc_error' : n + ': ' + out.error.message);
@@ -726,6 +743,8 @@ async function runStandardRequest(
         expect(counts).toMatchObject({ published: 1, manifests: 1, cloned: 0, batches: privateReplay.profileBatches.length });
         expect(counts.images).toBeGreaterThan(0);
         expect(observed.fixedVertexCalls).toBeGreaterThan(0);
+        expect(observed.mediaRegistryLoads).toBeGreaterThan(0);
+        expect(observed.mediaRegistryRegistrations).toBeGreaterThan(0);
         observed.cause = 'model_routing';
         expect(observed.modelError).toBe('none');
         observed.cause = 'ledger_mismatch';
