@@ -280,7 +280,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         does: [
             '검증 대상의 최신 게시물 좋아요 목록에서 대상 계정을 찾습니다.',
             '수집하지 못한 경우는 0점이 아니라 미수집으로 남깁니다.',
-            '승인된 Dev Standard 재생은 관계·프로필·상호작용과 함께 보관된 역방향 좋아요를 사용합니다.',
+            'Dev Standard 재생은 보관본에서 같은 후보·게시물의 관측을 재사용합니다. 재판정으로 조회 범위가 바뀌면 미수집 여부를 점수에 반영하고 소유자 결과에 범위 차이를 표시합니다.',
         ],
         services: 'Apify (상호작용 actor)',
         numbers: [{ label: '대상→후보 좋아요', value: points(W.targetToCandidateLike) }],

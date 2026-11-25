@@ -101,7 +101,14 @@ function assignRelativeRiskTiersForVersion(
         }]));
 
     if (eligible.length < 3) {
-        return candidates.map(candidate => excluded.get(candidate.candidateId) ?? naturalAssignment(candidate));
+        // Keep the natural band. The database also bounds the rounded display
+        // score within that band when there are too few candidates to rerank.
+        return candidates.map(candidate => excluded.get(candidate.candidateId) ?? {
+            ...naturalAssignment(candidate),
+            displayScore: candidate.partnerCapApplied
+                ? candidate.naturalDisplayScore
+                : calibratedScore(candidate.naturalDisplayScore, candidate.naturalRiskBand),
+        });
     }
 
     const naturalHighCount = eligible

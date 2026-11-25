@@ -310,6 +310,19 @@ async function runStandardRequest(
             };
         }
         const out = await client.rpc(n, a);
+        if (n === 'checkpoint_dev_standard_replay_scope_note_v1' && out.data === true) {
+            // The real worker issued the call above. Probe replay under that same live claim.
+            expect((await client.rpc(n, a)).data).toBe(true);
+            const unchanged = a.p_added === 0 && a.p_removed === 0 && a.p_unverified === 0;
+            const conflicting = await client.rpc(n, { ...a, p_added: unchanged ? 1 : 0, p_removed: 0, p_unverified: 0 });
+            expect(conflicting.error?.message).toBe('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+            const read = await client.rpc('read_dev_standard_replay_scope_note_v1', { p_request_id: a.p_request_id, p_user_id: user.id });
+            expect(read).toEqual({ data: null, error: null });
+        }
+        if (n === 'read_dev_standard_replay_scope_note_v1' && out.data) {
+            const unauthorized = await client.rpc(n, { ...a, p_user_id: otherId });
+            expect(unauthorized).toEqual({ data: null, error: null });
+        }
         if (out.error && !out.error.message.includes('FENCE'))
             sqlErrors.push(n + ': ' + out.error.message);
         return out;
@@ -475,7 +488,6 @@ async function runStandardRequest(
         const payload = runtime.queue.shift()!;
         const delivery = parseAnalysisV2TaskPayload(payload);
         const verifyFeatureImages = changeTriageOnReplay && isReplay && delivery.jobKey === 'track:profile-ai:batch:0';
-        const expectArchiveGap = routing === 'changed_shortlist' && isReplay && delivery.jobKey === 'track:reverse-likes:collect';
         const outcome = await runDelivery(async () => {
             if (!verifyFeatureImages) return processAnalysisV2TaskDelivery(delivery, worker);
             const archive = currentDevStandardArchive()!;
@@ -520,11 +532,14 @@ async function runStandardRequest(
             continued++;
             continue;
         }
-        if (expectArchiveGap) {
-            expect(outcome).toEqual({ status: 'failed', errorCode: 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' });
-        } else {
-            expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
-            expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
+        expect(outcome.status, [delivery.jobKey, JSON.stringify(outcome), ...sqlErrors].join(' ')).toBe('completed');
+        expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
+        if (routing === 'changed_shortlist' && isReplay && delivery.jobKey === 'track:reverse-likes:collect') {
+            const reverse = await db.query(
+                'SELECT reverse_like_status, component_score::double precision FROM analysis_v2_reverse_like_rows WHERE request_id=$1',
+                [result.requestId],
+            );
+            expect(reverse.rows).toEqual([{ reverse_like_status: 'not_collected', component_score: 0 }]);
         }
         const before = await totals();
         const calls = [apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length];
@@ -550,11 +565,11 @@ async function runStandardRequest(
     const page = await resultPage();
     if (changeTriageOnReplay) {
         const calls = runtime.model.mock.calls.slice(modelCallsBefore);
+        const newCandidate = isReplay && routing === 'changed_shortlist';
         expect(calls).toHaveLength(isReplay ? 3 : 2);
         const modelSchemas = calls.map(([input]) => input.config.responseJsonSchema.properties ?? {});
         expect(modelSchemas.filter(schema => 'accounts' in schema)).toHaveLength(1);
         expect(modelSchemas.filter(schema => 'gender' in schema)).toHaveLength(isReplay ? 1 : 0);
-        const blocked = isReplay && routing === 'changed_shortlist';
         const { rows } = await db.query(`
             SELECT (SELECT count(*)::int FROM analysis_v2_result_summaries WHERE request_id=$1) AS published,
                    (SELECT count(*)::int FROM analysis_progress_events
@@ -571,37 +586,46 @@ async function runStandardRequest(
         `, [result.requestId, approval.id]);
         const budget = await totals();
         expect(rows).toEqual([{
-            published: blocked ? 0 : 1,
-            completed: blocked ? 0 : 1,
+            published: 1,
+            completed: 1,
             feature_operations: isReplay ? 1 : 0,
             feature_inputs: isReplay ? 1 : 0,
             usage_rows: calls.length,
             settled_cost: budget.debit,
             error_code: null,
         }]);
-        expect(page.status).toBe(blocked ? 404 : 200);
+        expect(page.status).toBe(200);
         if (isReplay) {
             expect(runtime.apify).not.toHaveBeenCalled();
             expect(runtime.png).not.toHaveBeenCalled();
             expect(budget).toMatchObject({
-                consumed: 1, grants: 1, requests: 1, actors: 0, models: 3, settled: 3,
+                consumed: 1, grants: 1, requests: 1, actors: 0, models: calls.length, settled: calls.length,
                 apify_reserved: 0, apify_committed: 0, quota: 0,
             });
         }
-        if (blocked) {
-            expect((await page.json()).code).toBe('RESULT_PENDING');
-        } else {
-            const body = await page.json();
-            expect(body.femaleAccounts).toEqual([]);
-            expect(body.privateAccounts).toHaveLength(1);
-            const privateUrl = await assertOwnerPage(result.requestId, privateCandidate, 'private');
-            const privateImage = await readImage(new NextRequest(privateUrl));
-            expect(privateImage.status).toBe(200);
-            expect((await sharp(Buffer.from(await privateImage.arrayBuffer())).metadata()).format).toBe('webp');
-            const image = await readImage(new NextRequest(new URL(body.summary.targetProfileImage, appOrigin)));
+        const body = await page.json();
+        expect(body.femaleAccounts).toHaveLength(newCandidate ? 1 : 0);
+        expect(body.privateAccounts).toHaveLength(1);
+        expect(body.replayScopeDelta).toEqual(newCandidate ? { added: 1, removed: 0, unverified: 0 } : undefined);
+        const images = [new URL(body.summary.targetProfileImage, appOrigin).href];
+        images.push(await assertOwnerPage(result.requestId, privateCandidate, 'private', newCandidate));
+        if (newCandidate) {
+            const publicCandidate = body.femaleAccounts[0];
+            expect(publicCandidate).toMatchObject({ instagramId: candidate, displayScore: 6.7, riskBand: 'caution' });
+            expect((publicCandidate.highRiskNarrative ?? []).join(' ')).not.toContain(target + '님→' + candidate + '님 좋아요');
+            images.push(await assertOwnerPage(result.requestId, candidate, 'public', true));
+        }
+        for (const url of images) {
+            const image = await readImage(new NextRequest(url));
             expect(image.status).toBe(200);
             expect((await sharp(Buffer.from(await image.arrayBuffer())).metadata()).format).toBe('webp');
         }
+        runtime.user = { ...user, id: otherId };
+        expect((await resultPage()).status).toBe(404);
+        for (const url of images) expect((await readImage(new NextRequest(url))).status).toBe(403);
+        runtime.user = null;
+        expect((await resultPage()).status).toBe(401);
+        for (const url of images) expect((await readImage(new NextRequest(url))).status).toBe(401);
         expect(sqlErrors).toEqual([]);
         return {
             grantId: approval.id,
@@ -613,6 +637,7 @@ async function runStandardRequest(
     }
     expect(page.status).toBe(200);
     const body = await page.json();
+    expect(body.replayScopeDelta).toBeUndefined();
     expect(body.femaleAccounts).toHaveLength(1);
     const row = body.femaleAccounts[0];
     expect(row.instagramId).toBe(candidate);
@@ -800,6 +825,6 @@ it('publishes after a changed triage decision using all sealed feature images', 
     await exerciseArchiveReplay(false, 'changed_triage');
 }, 90_000);
 
-it('stops at an uncollected reverse shortlist after successfully replaying changed triage', async () => {
+it('publishes a changed reverse shortlist and shows the coverage note and candidate images to the owner', async () => {
     await exerciseArchiveReplay(false, 'changed_shortlist');
 }, 90_000);
