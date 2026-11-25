@@ -481,6 +481,7 @@ async function runStandardRequest(
     const resumeReady = scenario === 'resume ready individually' || scenario === 'resume ready together';
     if (scenario === 'resume ready individually') vi.stubEnv('DEV_LIVE_STANDARD_PROFILE_READY_REUSE_ENABLED', 'false');
     let interruptFeature = resumeReady;
+    const readyReadBatches = new Set<number>();
     let readyTriageClaims = 0;
     let readSnapshotWithTriage = 0;
     let testedProfileReadyRead = false;
@@ -525,6 +526,15 @@ async function runStandardRequest(
         if (out.error && observed) observed.sqlState = safePrivate90Sql(out.error.code);
         if (n === 'load_dev_standard_profile_media_ready_v1' && !out.error) {
             const ready = out.data as { readyOperations: Array<{stage: string}> };
+            if (privateReplay) {
+                const { jobStage, jobBatch } = private90Job(a.p_job_key);
+                if (a.p_request_id !== result.requestId || jobStage !== 'profile_ai' || jobBatch === null
+                    || !privateReplay.profileBatches.includes(jobBatch)) throw new Error('PRIVATE90_PROFILE_READY_SCOPE');
+                readyReadBatches.add(jobBatch);
+                privateReplay.observed.profileReadyReads++;
+                privateReplay.observed.profileReadyReadBatches = readyReadBatches.size;
+                privateReplay.observed.profileReadyRowsReturned += ready.readyOperations.length;
+            }
             if (ready.readyOperations.some(row => row.stage === 'genderTriage')) readSnapshotWithTriage++;
             if (scenario === 'first' && !testedProfileReadyRead) {
                 testedProfileReadyRead = true;
@@ -1011,6 +1021,10 @@ async function runStandardRequest(
                    (SELECT count(*)::int FROM analysis_pipeline_jobs
                     WHERE request_id=$1 AND job_key LIKE 'track:profile-ai:batch:%' AND status='completed') AS batches
         `, [result.requestId])).rows[0]!;
+        observed.assertion = 'profile_ready_reads';
+        expect(observed.profileReadyReads).toBeGreaterThan(0);
+        expect([...readyReadBatches].sort((a, b) => a - b)).toEqual(privateReplay.profileBatches);
+        observed.assertion = 'publication';
         expect(observed.completedProfileBatches).toBe(counts.batches);
         observed.published = counts.published;
         observed.readyImages = counts.images;
