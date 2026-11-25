@@ -1,3 +1,5 @@
+import type { ReplayScopeDelta } from '@/lib/contracts/dev-standard-replay';
+import { checkpointDevReplayScope } from '@/lib/services/dev-ui/standard-replay-scope-note';
 import type { V211CopySubjects } from './public-copy-quality';
 import {
     currentDevStandardArchive,
@@ -620,7 +622,7 @@ export interface AnalysisV2ReverseLikeCollector {
     }): Promise<Readonly<{
         operationKey: string | null;
         results: readonly AnalysisV2ReverseLikeCollectionResult[];
-        replayScopeDelta?: Readonly<{ added: number; removed: number; unverified: number }>;
+        replayScopeDelta?: Readonly<ReplayScopeDelta>;
     }>>;
 }
 
@@ -3186,6 +3188,9 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 ...(archive?.mode === 'replay' ? { legacyArchiveInputs: inputsFor } : {}),
             });
             validateReverseLikeCollection(collectionInputs, collected);
+            const archiveReplay = context.state.planId === 'standard' && archive?.mode === 'replay';
+            if (collected.replayScopeDelta !== undefined && !archiveReplay) throw new DevStandardArchiveError();
+            if (archiveReplay) await checkpointDevReplayScope(checkpointClaim(context), collected.replayScopeDelta);
             const resultById = new Map(collected.results.map(row => [row.candidateId, row]));
             const rows = shortlist.map(candidate => {
                 const result = resultById.get(candidate.candidateId);

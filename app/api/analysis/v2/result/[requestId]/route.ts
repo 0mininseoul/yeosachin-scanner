@@ -1,3 +1,5 @@
+import { devStandardOwnerResultPageSchema } from '@/lib/contracts/dev-standard-replay';
+import { readDevReplayScope } from '@/lib/services/dev-ui/standard-replay-scope-note';
 import type { User } from '@supabase/supabase-js';
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
@@ -174,7 +176,12 @@ async function handleGET(
             return json({ error: 'Analysis result not found.' }, 404);
         }
 
-        const response = json(storedAnalysisResultPageV1Schema.parse(result), 200);
+        const page = storedAnalysisResultPageV1Schema.parse(result);
+        if (verifiedDevUser && page.summary.planId === 'standard') {
+            const replayScopeDelta = await readDevReplayScope(requestId.data, verifiedDevUser.id);
+            if (replayScopeDelta) return json(devStandardOwnerResultPageSchema.parse({ ...page, replayScopeDelta }), 200);
+        }
+        const response = json(page, 200);
         if (
             !verifiedDevUser
             && !url.searchParams.has('femaleCursor')

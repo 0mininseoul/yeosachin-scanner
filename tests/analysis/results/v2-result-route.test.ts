@@ -1,3 +1,6 @@
+import type { User } from '@supabase/supabase-js';
+import * as devLive from '@/lib/services/dev-ui/live-analysis';
+import * as replayNotes from '@/lib/services/dev-ui/standard-replay-scope-note';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     encodeResultCursor,
@@ -28,6 +31,7 @@ vi.mock('@/lib/services/demo-analysis/store', () => ({
 }));
 vi.mock('@/lib/observability/request', () => ({
     observeRoute: mocks.observeRoute,
+    requestContext: () => ({}),
 }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.operationalEmit },
@@ -156,6 +160,35 @@ describe('analysis V2 owner result route', () => {
             method: 'GET',
         }));
         mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
+    });
+
+    it('loads a replay note only after a verified Dev owner reads a published Standard result', async () => {
+        const isDev = vi.spyOn(devLive, 'isDevLiveAnalysisRequest').mockReturnValue(false);
+        const readDev = vi.spyOn(devLive, 'withDevLiveRead').mockImplementation(
+            (_request, _resource, operation) => operation({ id: userId } as User),
+        );
+        const note = { added: 1, removed: 0, unverified: 2 };
+        const readNote = vi.spyOn(replayNotes, 'readDevReplayScope').mockResolvedValue(note);
+        const current = page();
+        const standard = { ...current, summary: { ...current.summary, planId: 'standard' } };
+        const get = () => GET(new Request(`https://example.com/api/analysis/v2/result/${requestId}`), context());
+        try {
+            mocks.loadPage.mockResolvedValueOnce(standard);
+            expect(await (await get()).json()).not.toHaveProperty('replayScopeDelta');
+            isDev.mockReturnValue(true);
+            mocks.loadPage.mockResolvedValueOnce(current);
+            expect(await (await get()).json()).not.toHaveProperty('replayScopeDelta');
+            mocks.loadPage.mockResolvedValueOnce(null);
+            expect((await get()).status).toBe(404);
+            expect(readNote).not.toHaveBeenCalled();
+            mocks.loadPage.mockResolvedValueOnce(standard);
+            expect(await (await get()).json()).toHaveProperty('replayScopeDelta', note);
+            expect(readNote).toHaveBeenCalledExactlyOnceWith(requestId, userId);
+        } finally {
+            isDev.mockRestore();
+            readDev.mockRestore();
+            readNote.mockRestore();
+        }
     });
 
     it('validates route identifiers safely and keeps malformed production pagination generic', async () => {

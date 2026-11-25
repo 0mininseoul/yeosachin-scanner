@@ -1,3 +1,4 @@
+import type { ReplayScopeDelta } from '@/lib/contracts/dev-standard-replay';
 import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import {
     boundedOwnerResultPage,
@@ -33,6 +34,7 @@ export interface PrivateAccount {
 }
 
 export interface ResultData {
+    replayScopeDelta?: ReplayScopeDelta;
     requestId: string;
     status: string;
     pipelineVersion: 'v1' | 'v2';
@@ -58,7 +60,7 @@ export interface ResultData {
     privateNextCursor?: string | null;
 }
 
-export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks = true): ResultData {
+export function mapV2Result(result: AnalysisResultPageV1 & { replayScopeDelta?: ReplayScopeDelta }, externalProfileLinks = true): ResultData {
     // genderStats is an additive summary field; tolerate results produced before
     // the backend contract ships it and fall back to hiding the gender breakdown.
     const genderStats = (result.summary as {
@@ -71,6 +73,7 @@ export function mapV2Result(result: AnalysisResultPageV1, externalProfileLinks =
         requestId: result.requestId,
         status: 'completed',
         pipelineVersion: 'v2',
+        ...(result.replayScopeDelta ? { replayScopeDelta: result.replayScopeDelta } : {}),
         summary: {
             targetInstagramId: result.summary.targetInstagramId,
             targetFullName: targetFullName || undefined,
