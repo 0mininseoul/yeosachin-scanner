@@ -3,9 +3,9 @@ export const candidate = 'sample2'.padStart(30, 's');
 const postCode = (username: string) => (username === target ? 'TargetPost7' : 'SamplePost2');
 const picture = (username: string) => 'https://scontent.cdninstagram.com/' + username + '.jpg';
 
-export function profileItem(username: string) {
+export function profileItem(username: string, candidatePostCount = 1) {
     const code = postCode(username);
-    const postCount = username === target ? 4 : 1;
+    const postCount = username === target ? 4 : candidatePostCount;
     return {
         username,
         fullName: username,
@@ -17,7 +17,7 @@ export function profileItem(username: string) {
         verified: false,
         profilePicUrl: picture(username),
         latestPosts: Array.from({ length: postCount }, (_, index) => {
-            const shortCode = username === target ? code + index : code;
+            const shortCode = postCount > 1 ? code + index : code;
             return {
                 id: String((username === target ? 701 : 201) + index),
                 shortCode,
@@ -45,9 +45,11 @@ type ActorInput = {
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
+    constructor(private readonly candidatePostCount = 1) {}
+
     private rows(actor: string, input: ActorInput) {
         if (actor === 'apify/instagram-profile-scraper' && input.usernames)
-            return input.usernames.map(profileItem);
+            return input.usernames.map(username => profileItem(username, this.candidatePostCount));
         if (input.Account)
             return [
                 {
