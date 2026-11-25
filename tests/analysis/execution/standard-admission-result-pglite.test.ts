@@ -712,7 +712,16 @@ it('replays a separately sealed copy through the owner image using independent s
     });
     let wrapped: { ciphertext: string; plaintext: string; aad: string } | undefined;
     let wrapping = 0;
+    let secretBytes = randomBytes(32);
+    let deadlineOffset = 0;
+    const expirySecret = 'projects/100001/secrets/private-fixture';
+    const secretUrl = 'https://secretmanager.googleapis.com/v1/' + expirySecret;
     runtime.kmsOrBucket.mockImplementation(async ({ url, data }) => {
+        if (url === secretUrl) return { data: {
+            name: expirySecret, expireTime: new Date(Date.parse(process.env.DEV_STANDARD_QA_COPY_APPROVED_AT!) + 90 * 86_400_000 + deadlineOffset).toISOString(),
+            replication: { userManaged: { replicas: [{ location: 'us-central1' }] } },
+        } };
+        if (url === secretUrl + '/versions/1:access') return { data: { name: expirySecret + '/versions/1', payload: { data: secretBytes.toString('base64') } } };
         if (url === 'https://storage.googleapis.com/storage/v1/b/' + liveBucket) return { data: { projectNumber: '100001', location: 'US-CENTRAL1' } };
         if (url === 'https://storage.googleapis.com/storage/v1/b/' + copyBucket) return { data: {
             projectNumber: '100001', location: 'US-CENTRAL1', storageClass: 'STANDARD',
@@ -761,6 +770,7 @@ it('replays a separately sealed copy through the owner image using independent s
         vi.stubEnv('DEV_STANDARD_QA_COPY_BUCKET', copyBucket);
         vi.stubEnv('DEV_STANDARD_QA_COPY_APPROVED_SOURCE_BUCKET', liveBucket);
         vi.stubEnv('DEV_STANDARD_QA_COPY_KMS_KEY', kms);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION', expirySecret + '/versions/1');
         vi.stubEnv('DEV_STANDARD_QA_COPY_DAYS', '90');
         const { policy, destination } = await openStandardQaCopyForJob('export');
         const result = await exportStandardQaCopy(policy, live, destination);
@@ -810,21 +820,28 @@ it('replays a separately sealed copy through the owner image using independent s
         expect(result.imageHash).toBe(reference.imageHash);
         expect(result.previewDto).toEqual(reference.previewDto);
         expect(wrapping).toBe(1);
+        const rightKey = secretBytes;
+        secretBytes = randomBytes(32);
+        await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow();
+        secretBytes = rightKey;
+        deadlineOffset = 1;
+        await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow('EXPIRY_SECRET_INVALID');
+        deadlineOffset = 0;
         await expect(verifyExpiredStandardQaCopy('revoked')).rejects.toThrow('EARLY');
         const expiry = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(process.env.DEV_STANDARD_QA_COPY_APPROVED_AT!) + 90 * 86_400_000);
         try {
             await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow('UNAVAILABLE');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 403 }).mockResolvedValueOnce({ data: { permissions: [] } });
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ status: 404 });
             await expect(verifyExpiredStandardQaCopy('revoked')).resolves.toBe('revoked');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ data: { permissions: ['cloudkms.cryptoKeyVersions.useToDecrypt'] } });
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ status: 200 });
             await expect(verifyExpiredStandardQaCopy('revoked')).rejects.toThrow('ACCESS_UNVERIFIED');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 404 }).mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({
                 status: 400, data: { error: { errors: [{ reason: 'invalidArgument' }] } },
             });
             await expect(verifyExpiredStandardQaCopy('deleted')).resolves.toBe('versions_absent_soft_delete_unverified');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: { items: [{ kind: 'storage#object' }] } });
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 404 }).mockResolvedValueOnce({ status: 200, data: { items: [{ kind: 'storage#object' }] } });
             await expect(verifyExpiredStandardQaCopy('deleted')).rejects.toThrow('DELETION_PENDING');
-            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({ status: 200, data: {} });
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 404 }).mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({ status: 200, data: {} });
             await expect(verifyExpiredStandardQaCopy('deleted')).resolves.toBe('deleted');
         } finally {
             expiry.mockRestore();

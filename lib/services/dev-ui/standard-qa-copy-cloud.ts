@@ -1,8 +1,9 @@
 import 'server-only';
 
+import { expirySecretResource, readExpirySecret, validateExpirySecret } from './standard-qa-copy-expiry';
 import { verifyStandardQaCopyIam } from './standard-qa-copy-iam';
 import type { StandardQaFixtureOperation } from './standard-archive-runtime';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, hkdfSync, randomBytes } from 'node:crypto';
 import { GoogleAuth } from 'google-auth-library';
 import {
     createGoogleCloudPrivateMediaObjectClient, isAnalysisV2DevQaCopyBucketName, isAnalysisV2DevLiveMediaBucketName,
@@ -49,10 +50,11 @@ function configuration(mode: 'export' | 'read' | 'audit' | 'iam') {
         throw new Error('QA_COPY_CONFIGURATION_INVALID');
     }
 
+    const expirySecret = expirySecretResource(required('DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION'), project, projectNumber, resource[2]!);
     const slot = hash('dev-standard-copy-slot/v1\n' + policy.approval).slice(0, 32);
     const prefix = devStandardQaCopyObjectPrefix(bucketName, slot);
     const wrappedKeyName = prefix + hash('wrapped-key/v1') + '.bin';
-    return { policy, context, bucketName, sourceBucket, project, projectNumber, kmsKey, expiresAt: binding.expiresAt, location: resource[2], slot, prefix, wrappedKeyName };
+    return { policy, context, bucketName, sourceBucket, project, projectNumber, kmsKey, expirySecret, expiresAt: binding.expiresAt, location: resource[2], slot, prefix, wrappedKeyName };
 }
 
 function cloudClient() {
@@ -60,7 +62,7 @@ function cloudClient() {
 }
 
 export async function openStandardQaCopyForJob(mode: 'export' | 'read') {
-    const { policy, context, bucketName, sourceBucket, projectNumber, kmsKey, location, slot, wrappedKeyName } = configuration(mode);
+    const { policy, context, bucketName, sourceBucket, projectNumber, kmsKey, location, slot, wrappedKeyName, expirySecret, expiresAt } = configuration(mode);
     const requester = await cloudClient();
     const { data: bucket } = await requester.request<{
         projectNumber: string; location: string; storageClass: string; billing?: { requesterPays?: boolean };
@@ -91,7 +93,8 @@ export async function openStandardQaCopyForJob(mode: 'export' | 'read') {
 
     // A single scoped receipt permits exact retries after a crash. An attempted change to the
     // authorized target, deadline, key, or bucket invalidates the KMS associated data.
-    const aad = Buffer.from(JSON.stringify([context, bucketName, slot, kmsKey])).toString('base64');
+    await validateExpirySecret(requester, expirySecret, expiresAt);
+    const aad = Buffer.from(JSON.stringify([context, bucketName, slot, kmsKey, expirySecret.version, expiresAt])).toString('base64');
     const objects = createGoogleCloudPrivateMediaObjectClient({ bucketName });
     const wrapped = () => objects.readRetained({ objectName: wrappedKeyName, maximumBytes: 8192 });
     let ciphertext = await wrapped();
@@ -116,16 +119,26 @@ export async function openStandardQaCopyForJob(mode: 'export' | 'read') {
         ciphertext = await wrapped();
     }
     if (!ciphertext) throw new Error('QA_COPY_KEY_UNAVAILABLE');
-    const decrypted = await requester.request<{ plaintext: string }>({
-        url: 'https://cloudkms.googleapis.com/v1/' + kmsKey + ':decrypt', method: 'POST',
-        data: { ciphertext: ciphertext.toString('base64'), additionalAuthenticatedData: aad },
-    });
-    const destination = createDevStandardQaCopyStore({ bucketName, slot, key: decrypted.data.plaintext, objects });
-    delete (decrypted.data as Partial<typeof decrypted.data>).plaintext;
-    return { destination, policy };
+    const expiryKey = await readExpirySecret(requester, expirySecret, expiresAt);
+    try {
+        const decrypted = await requester.request<{ plaintext: string }>({
+            url: 'https://cloudkms.googleapis.com/v1/' + kmsKey + ':decrypt', method: 'POST',
+            data: { ciphertext: ciphertext.toString('base64'), additionalAuthenticatedData: aad },
+        });
+        const seed = Buffer.from(decrypted.data.plaintext, 'base64');
+        delete (decrypted.data as Partial<typeof decrypted.data>).plaintext;
+        try {
+            if (seed.length !== 32 || expiresAt <= Date.now()) throw new Error('QA_COPY_KEY_UNAVAILABLE');
+            const key = Buffer.from(hkdfSync('sha256', seed, expiryKey, 'private-qa-object-key/v2\n' + aad, 32));
+            try {
+                const destination = createDevStandardQaCopyStore({ bucketName, slot, key: key.toString('base64'), objects });
+                return { destination, policy };
+            } finally { key.fill(0); }
+        } finally { seed.fill(0); }
+    } finally { expiryKey.fill(0); }
 }
 
-/** Requires only the separate QA bucket and unwrap permission. No original capture key or provider key is used. */
+/** The isolated reader uses only the copy bucket, wrapped seed and independently expiring secret. */
 export async function withCloudStandardQaFixture<T>(
     operation: StandardQaFixtureOperation<T>,
 ) {
@@ -136,7 +149,7 @@ export async function withCloudStandardQaFixture<T>(
 
 /** Execute as the QA reader for access, or as the list-only auditor for erasure. */
 export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
-    const { bucketName, kmsKey, prefix, wrappedKeyName } = configuration('audit');
+    const { bucketName, expirySecret, prefix, wrappedKeyName } = configuration('audit');
     const client = await cloudClient();
     const url = 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucketName) + '/o';
     if (mode === 'revoked') {
@@ -144,16 +157,19 @@ export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
             url: url + '/' + encodeURIComponent(wrappedKeyName), params: { fields: 'kind' },
             validateStatus: status => status === 200 || status === 403 || status === 404,
         });
-        const permission = 'cloudkms.cryptoKeyVersions.useToDecrypt';
-        const key = await client.request<{ permissions?: string[] }>({
-            url: 'https://cloudkms.googleapis.com/v1/' + kmsKey + ':testIamPermissions', method: 'POST',
-            data: { permissions: [permission] },
+        const secret = await client.request({
+            url: expirySecret.url + '/versions/1:access', params: { fields: 'name' },
+            validateStatus: status => status === 403 || status === 404,
         });
-        if (![200, 403, 404].includes(receipt.status) || key.data.permissions?.includes(permission)) {
+        if (![200, 403, 404].includes(receipt.status) || ![403, 404].includes(secret.status)) {
             throw new Error('QA_COPY_ACCESS_UNVERIFIED');
         }
         return 'revoked';
     }
+    const deletedSecret = await client.request({
+        url: expirySecret.url, params: { fields: 'name' }, validateStatus: status => status === 404,
+    });
+    if (deletedSecret.status !== 404) throw new Error('QA_COPY_DELETION_PENDING');
     for (const options of [{ versions: true }, { softDeleted: true }]) {
         const list = await client.request<{
             items?: { kind: string }[]; nextPageToken?: string; error?: { errors?: { reason?: string }[] };
@@ -177,6 +193,7 @@ export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
 export async function checkPrivateQaCopyPrincipalAccess() {
     const cfg = configuration('iam');
     if (!cfg.sourceBucket) throw new Error('QA_COPY_CONFIGURATION_INVALID');
+    await validateExpirySecret(await cloudClient(), cfg.expirySecret, cfg.expiresAt);
     return verifyStandardQaCopyIam({
         ...cfg, sourceBucket: cfg.sourceBucket, sourceKeySecret: required('DEV_STANDARD_QA_COPY_SOURCE_KEY_SECRET'),
         authorized: required('DEV_STANDARD_QA_COPY_APPROVED_PRINCIPALS').split(',').map(value => value.trim()),

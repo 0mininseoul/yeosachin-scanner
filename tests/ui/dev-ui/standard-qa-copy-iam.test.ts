@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { expirySecretResource } from '@/lib/services/dev-ui/standard-qa-copy-expiry';
 import { verifyStandardQaCopyIam } from '@/lib/services/dev-ui/standard-qa-copy-iam';
 
 const transport = vi.hoisted(() => vi.fn());
@@ -11,6 +12,7 @@ const expiresAt = Date.now() + 90 * 86_400_000;
 const expression = 'request.time < timestamp("' + new Date(expiresAt).toISOString() + '")';
 const scope = {
     authorized: [devReader], expiresAt, sourceBucket: 'source-dev-live-media', bucketName: 'destination-dev-qa-copy',
+    expirySecret: expirySecretResource('projects/fixture/secrets/expiry/versions/1', 'fixture', '123456', 'region'),
     sourceKeySecret: 'projects/fixture/secrets/original', kmsKey: 'projects/fixture/locations/region/keyRings/qa/cryptoKeys/fixture', project: 'fixture', projectNumber: '123456',
 };
 function setup(scenario: string) {
@@ -26,6 +28,9 @@ function setup(scenario: string) {
             if (scenario === 'project alias' && url.includes('projects/')) inherited.push({ role: 'roles/owner', members: [devReader] });
             return { data: { version: 3, bindings: inherited } };
         }
+        if (url === scope.expirySecret.url + ':getIamPolicy') return { data: { version: 3, bindings: [{
+            role: 'roles/secret', members: scenario === 'inherited outsider' ? [devReader, extraReader] : scenario === 'missing expiry key' ? [] : [devReader],
+        }] } };
         if (url.endsWith(scope.sourceKeySecret + ':getIamPolicy')) return { data: { version: 3, bindings: [
             { role: 'roles/secret', members: scenario === 'missing source key' ? [] : [devReader] },
         ] } };
@@ -54,7 +59,11 @@ describe('private-copy effective IAM with original Dev principals', () => {
         setup('ciphertext-only outsider');
         await expect(verifyStandardQaCopyIam(scope)).resolves.toMatchObject({ approvedPrincipals: 1 });
     });
-    it.each(['inherited outsider', 'missing source', 'missing source key', 'untimed key'])('rejects %s', async scenario => {
+    it('accepts an authorized inherited key reader when the independent secret has a fixed expiry', async () => {
+        setup('untimed key');
+        await expect(verifyStandardQaCopyIam(scope)).resolves.toMatchObject({ approvedPrincipals: 1 });
+    });
+    it.each(['inherited outsider', 'missing source', 'missing source key', 'missing expiry key'])('rejects %s', async scenario => {
         setup(scenario);
         await expect(verifyStandardQaCopyIam(scope)).rejects.toThrow('QA_COPY_IAM_UNVERIFIED');
     });

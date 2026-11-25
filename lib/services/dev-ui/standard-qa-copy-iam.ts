@@ -1,5 +1,6 @@
 import 'server-only';
 
+import type { ExpirySecret } from './standard-qa-copy-expiry';
 import { GoogleAuth } from 'google-auth-library';
 
 type Binding = { role: string; members: string[]; condition?: { expression?: string } };
@@ -9,7 +10,7 @@ function reject(): never { throw new Error('QA_COPY_IAM_UNVERIFIED'); }
 
 export type QaCopyIamScope = {
     project: string; projectNumber: string; sourceBucket: string; sourceKeySecret: string; bucketName: string; kmsKey: string;
-    expiresAt: number; authorized: string[];
+    expiresAt: number; authorized: string[]; expirySecret: ExpirySecret;
 };
 
 /**
@@ -17,7 +18,7 @@ export type QaCopyIamScope = {
  * and simple request.time cutoffs prove access. Unknown CEL is considered potentially active.
  */
 export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
-    const { authorized, bucketName, expiresAt, kmsKey, project, projectNumber, sourceBucket, sourceKeySecret } = scope;
+    const { authorized, bucketName, expiresAt, kmsKey, project, projectNumber, sourceBucket, sourceKeySecret, expirySecret } = scope;
     if (!authorized.length || new Set(authorized).size !== authorized.length || authorized.some(member => !principalPattern.test(member))) reject();
     if (!new RegExp('^projects/(' + project + '|' + projectNumber + ')/secrets/[a-zA-Z0-9_-]+$').test(sourceKeySecret)) reject();
     const client = await new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }).getClient();
@@ -62,17 +63,22 @@ export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
         });
         return bindings(response.data);
     }
-    const [source, destination, ring, cryptoKey, { data: originalKeyPolicy }] = await Promise.all([
+    const [source, destination, ring, cryptoKey, { data: expirySecretPolicy }, { data: originalKeyPolicy }] = await Promise.all([
         bucket(sourceBucket), bucket(bucketName), key(kmsKey.split('/cryptoKeys/')[0]!), key(kmsKey),
+        client.request<Policy>({
+            url: expirySecret.url + ':getIamPolicy', params: { 'options.requestedPolicyVersion': 3 },
+        }),
         client.request<Policy>({
             url: 'https://secretmanager.googleapis.com/v1/' + sourceKeySecret + ':getIamPolicy',
             params: { 'options.requestedPolicyVersion': 3 },
         }),
     ]);
+    if (sourceKeySecret.split('/secrets/').at(-1) === expirySecret.resource.split('/secrets/').at(-1)) reject();
+    const expiryPolicies = [...hierarchy, ...bindings(expirySecretPolicy)];
     const sourceKeyPolicies = [...hierarchy, ...bindings(originalKeyPolicy)];
     const keyPolicies = [...hierarchy, ...ring, ...cryptoKey];
     const permissions = new Map<string, Set<string>>();
-    for (const role of new Set([...source, ...sourceKeyPolicies, ...destination, ...keyPolicies].map(binding => binding.role))) {
+    for (const role of new Set([...source, ...sourceKeyPolicies, ...destination, ...keyPolicies, ...expiryPolicies].map(binding => binding.role))) {
         if (!/^(?:(?:projects|organizations)\/[a-z0-9-]+\/)?roles\/[A-Za-z0-9_.]+$/.test(role)) reject();
         const { data } = await client.request<{ includedPermissions?: string[] }>({ url: 'https://iam.googleapis.com/v1/' + role });
         if (!Array.isArray(data.includedPermissions)) reject();
@@ -128,15 +134,18 @@ export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
 
     const copyObjects = (when: number, potential: boolean) => principals(destination, 'storage.objects.get', when, potential);
     const copyKeys = (when: number, potential: boolean) => principals(keyPolicies, 'cloudkms.cryptoKeyVersions.useToDecrypt', when, potential);
-    const actualReaders = overlaps(copyObjects(now, true), copyKeys(now, true));
+    const expiryKeys = (when: number, potential: boolean) => principals(expiryPolicies, 'secretmanager.versions.access', when, potential);
+    const actualReaders = overlaps(overlaps(copyObjects(now, true), copyKeys(now, true)), expiryKeys(now, true));
     if ([...actualReaders].some(member => !approved.has(member))) reject();
     const accessibleObjects = copyObjects(now, false);
     const decryptableKeys = copyKeys(now, false);
-    if (authorized.some(member => !contains(accessibleObjects, member) || !contains(decryptableKeys, member))) reject();
+    const expiryAccess = expiryKeys(now, false);
+    if (authorized.some(member => !contains(accessibleObjects, member) || !contains(decryptableKeys, member) || !contains(expiryAccess, member))) reject();
     const lastObjects = copyObjects(expiresAt - 1, false);
     const lastKeys = copyKeys(expiresAt - 1, false);
-    const expiredKeys = copyKeys(expiresAt, true);
-    if (authorized.some(member => !contains(lastObjects, member) || !contains(lastKeys, member) || contains(expiredKeys, member))) reject();
-    if (overlaps(copyObjects(expiresAt, true), expiredKeys).size) reject();
+    const lastExpiryKeys = expiryKeys(expiresAt - 1, false);
+    if (authorized.some(member => !contains(lastObjects, member) || !contains(lastKeys, member) || !contains(lastExpiryKeys, member))) reject();
+    // The third key is irreversibly deleted by Secret Manager at expiresAt. Its
+    // metadata and exact fixed version are checked by the CLI before this audit.
     return { approvedPrincipals: authorized.length, hierarchyResources: ancestors.size };
 }
