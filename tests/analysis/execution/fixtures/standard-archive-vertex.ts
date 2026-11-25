@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { selectAnalysisV2GenderResolverMedia } from '@/lib/services/analysis/v2-gender-resolver-media-policy';
+import { projectGenderResolutionMedia } from '@/lib/services/ai/gender-resolution-pure';
+import { private90ReverseScope } from './private90-reverse-scope';
 import { selectAnalysisMedia, type SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import { prepareGenderTriagePlanAccount } from '@/lib/services/ai/v2-staged-analysis';
 import { AI_STAGE_POLICY_V211_VERSION } from '@/lib/services/ai/stage-policy';
@@ -45,9 +48,14 @@ export async function prepareStandardArchiveVertex(input: Setup) {
     const session = currentDevStandardArchive();
     if (session?.mode !== 'replay' || session.target !== input.target) stop('SEALED_SESSION_REQUIRED');
     const positiveByAccount = new Map<string, boolean>();
+    const expectedByAccount = new Map<string,string>();
+    const positiveOwners = new Set<string>();
+    const resolverRoutes = new Map<string,boolean | null>();
+    const resolverKey = (images:readonly string[]) => key(images.map(data => createHash('sha256').update(Buffer.from(data,'base64')).digest('hex')));
     const positiveBySelection = new Map<string, boolean | null>();
     const totals = { profileBatches: input.profileBatches.length, profiles: 0, missingRemainder: 0, positiveProfiles: 0,
         batchCalls: 0, featureCalls: 0, resolverCalls: 0, nameCalls: 0, otherCalls: 0 };
+    let reverseScope: ReturnType<typeof private90ReverseScope>;
     const read = async (kind: string, inputKey: string) => {
         const fragment = await input.reader.readFragment({ kind, inputKey });
         return fragment ? fragment.value : stop('SEALED_INPUT_MISSING');
@@ -59,9 +67,8 @@ export async function prepareStandardArchiveVertex(input: Setup) {
         const manifest = z.object({ imageInputs: z.array(z.tuple([z.string(), z.string(), z.string().nullable()])) })
             .parse(await read('result-image-manifest-v1', key([input.target])));
         const female = new Set(manifest.imageInputs.filter(x => x[0] === 'female').map(x => x[1]));
-        const reverse = z.object({ results: z.array(z.object({ candidateId: z.string() })) })
-            .parse(await read('reverse-coverage-v1', key([input.target])));
-        const reverseIds = new Set(reverse.results.map(x => x.candidateId));
+        reverseScope = private90ReverseScope(input.target, await read('reverse-coverage-v1', key([input.target])));
+        const reverseIds = reverseScope.expected;
         // The archived reverse lookup checks the exact candidate set. Retain that shortlist, and only publish
         // candidates whose result images are in the verified archive. Reranking is still performed by the worker.
         if ([...reverseIds].some(id => !female.has(id))) stop('REVERSE_RESULT_SCOPE_UNSUPPORTED');
@@ -77,6 +84,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                 const profile = row.profile;
                 const id = analysisV2CandidateId(profile.username);
                 const desired = positive.has(id);
+                reverseScope.remember(id, profile);
                 const policy = selectAnalysisMedia({ profile: profile.profilePicUrl ? { id: profile.username, imageUrl: profile.profilePicUrl } : undefined,
                     posts: profile.latestPosts ?? [] }, { carouselDiversity: true });
                 if (policy.carouselCoverage.incompletePostIds.length) stop('PROFILE_INPUT_INCOMPLETE');
@@ -89,11 +97,25 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                 // Recreate the same microbatch account ID, including JPEG digests, then discard the image bytes.
                 const triage = await normalizeAnalysisV2MediaSelections(policy.triage.media, async () => stop('NETWORK_ATTEMPT'), version);
                 if (absent && (desired || triage.media.length < 2)) stop('UNCOVERED_REQUIRED_BRANCH');
+                // Only these candidates can reach optional resolution after our fixed triage.
+                // The resolver sees anonymous ordered JPEGs, never the source selection IDs.
+                if (desired || triage.media.length < 2) {
+                    const rest = remainder.length ? (await normalizeAnalysisV2MediaSelections(remainder, async () => stop('NETWORK_ATTEMPT'), version)).media : [];
+                    const byId = new Map([...triage.media,...rest].map(item => [item.selectionId,item]));
+                    const chosen = policy.feature.media.flatMap(item => byId.get(item.selectionId) ?? []);
+                    const resolved = projectGenderResolutionMedia(selectAnalysisV2GenderResolverMedia(chosen));
+                    const fingerprint = resolverKey(resolved.projectedMedia.map(item => item.normalizedJpegBase64));
+                    const previous = resolverRoutes.get(fingerprint);
+                    resolverRoutes.set(fingerprint,previous === undefined || previous === desired ? desired : null);
+                }
+                if (desired) positiveOwners.add(id);
                 const account = prepareGenderTriagePlanAccount({ media: triage.media, accountProfile: {
                     fullName: profile.fullName ?? null, hasProfileImage: Boolean(profile.profilePicUrl?.trim()), bio: profile.bio ?? null,
                 } }, version);
                 if (positiveByAccount.has(account.accountId) && positiveByAccount.get(account.accountId) !== desired) stop('ACCOUNT_ROUTE_AMBIGUOUS');
                 positiveByAccount.set(account.accountId, desired);
+                if (reverseIds.has(id)) expectedByAccount.set(account.accountId,id);
+                reverseScope.bind(id, policy.feature.selectionIds);
                 for (const item of policy.feature.media) {
                     const previous = positiveBySelection.get(item.selectionId);
                     positiveBySelection.set(item.selectionId, previous === undefined || previous === desired ? desired : null);
@@ -130,6 +152,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                 totals.batchCalls++;
                 const accounts = accountManifest.parse(promptData(prompt, 'accounts'));
                 return response({ accounts: accounts.map(account => {
+                    reverseScope.event(expectedByAccount.get(account.accountId), 'triage');
                     const female = positiveByAccount.get(account.accountId);
                     if (female === undefined) stop('UNKNOWN_BATCH_ACCOUNT');
                     const ids = account.mediaManifest.slice(0,2).map(m => m.selectionId);
@@ -141,10 +164,12 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             if ('gender' in fields) {
                 totals.featureCalls++;
                 const items = z.object({ mediaManifest }).parse(promptData(prompt, 'evidence')).mediaManifest;
+                const owner = reverseScope.selectionOwner(items);
+                reverseScope.event(owner,'featureModel');
                 const ids = items.map(x => x.selectionId);
                 const main = ids.slice(0,2);
                 const secondary = items.filter(x => x.kind === 'feed').slice(0,1).map(x => x.selectionId);
-                return response({ gender: desiredFor(items) ? 'female' : 'male', genderConfidence:'high', ownerConsistency:'same_person',
+                return response({ gender: (owner ? positiveOwners.has(owner) : desiredFor(items)) ? 'female' : 'male', genderConfidence:'high', ownerConsistency:'same_person',
                     appearanceGrade:5,exposureScore:2,businessClassification:'personal',businessConfidence:'high',accountContext:'personal',
                     marriageEvidence:'none',partnerEvidence:'none',partnerExclusionContext:'none', evidenceSelectionIds:{
                         gender:main, appearance:secondary, exposure:secondary, business:main.slice(0,1),accountContext:main.slice(0,1),marriagePartner:[],
@@ -152,9 +177,16 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             }
             if ('inferredGender' in fields) {
                 totals.resolverCalls++;
-                const items = mediaManifest.parse(promptData(prompt, 'mediaManifest'));
-                return response({ inferredGender:desiredFor(items)?'female':'male',confidence:'high',ownerConsistency:'same_person',
-                    evidenceSelectionIds:items.slice(0,2).map(x=>x.selectionId) });
+                const parts = (Array.isArray(input.contents) ? input.contents : [input.contents]).flatMap(c => c.parts);
+                const images = parts.flatMap(part => part.inlineData?.data ? [part.inlineData.data] : []);
+                const ids = images.map((_,i) => 'resolver-media:' + (i + 1));
+                if (!ids.length || !prompt.split('\n').includes('사용 가능한 selectionId: ' + ids.join(', '))) stop('PROMPT_SHAPE');
+                const desired = resolverRoutes.get(resolverKey(images));
+                if (desired === undefined) stop('UNKNOWN_RESOLVER_INPUT');
+                if (desired === null || ids.length < 2) return response({ inferredGender:'unknown',confidence:'low',
+                    ownerConsistency:'not_visible',evidenceSelectionIds:[] });
+                return response({ inferredGender:desired?'female':'male',confidence:'high',ownerConsistency:'same_person',
+                    evidenceSelectionIds:ids.slice(0,2) });
             }
             if (schema.type?.toLowerCase() === 'array' && prompt.includes('candidates(JSON): ')) {
                 totals.nameCalls++;
@@ -171,5 +203,5 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             return stop('MODEL_INPUT_SHAPE');
         }
     }
-    return { generate, counts };
+    return { generate, counts, reverseScope };
 }

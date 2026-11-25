@@ -1,3 +1,5 @@
+import { createFeatureAnalysisResultIdentity, type FeatureAnalysisInput } from '@/lib/services/ai/v2-staged-analysis';
+import type { AnalysisV2ReverseLikeCollector } from '@/lib/services/analysis/v2-ai-scoring-executors';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach, beforeAll } from 'vitest';
 import { writeSync } from 'node:fs';
@@ -65,8 +67,34 @@ const runtime = vi.hoisted(() => ({
     model: vi.fn(),
     queue: [] as Record<string, string | number>[],
     due: new WeakMap<object, number>(),
+    featureProbe: null as null | ((input:FeatureAnalysisInput, state:'start'|'return'|'error', error?:unknown) => void),
+    reverseProbe: null as null | ((input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) => Promise<void>),
     vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[] },
 }));
+vi.mock('@/lib/services/ai/v2-staged-analysis', async original => {
+    const actual = await original<typeof import('@/lib/services/ai/v2-staged-analysis')>();
+    return { ...actual, async featureAnalysis(...args: Parameters<typeof actual.featureAnalysis>) {
+        runtime.featureProbe?.(args[0],'start');
+        try {
+            const result = await actual.featureAnalysis(...args);
+            runtime.featureProbe?.(args[0],'return');
+            return result;
+        } catch (error) {
+            runtime.featureProbe?.(args[0],'error',error);
+            throw error;
+        }
+    } };
+});
+vi.mock('@/lib/services/analysis/v2-ai-scoring-runtime-deps', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-ai-scoring-runtime-deps')>();
+    return { ...actual, createAnalysisV2ReverseLikeCollector(...args: Parameters<typeof actual.createAnalysisV2ReverseLikeCollector>) {
+        const collector = actual.createAnalysisV2ReverseLikeCollector(...args);
+        return { async collect(input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) {
+            await runtime.reverseProbe?.(input);
+            return collector.collect(input);
+        } };
+    } };
+});
 vi.mock('google-auth-library', async original => ({
     ...(await original<typeof import('google-auth-library')>()),
     GoogleAuth: class { async getClient() { return { request: runtime.kmsOrBucket }; } },
@@ -315,6 +343,8 @@ afterEach(() => {
     runtime.queue.length = 0;
     runtime.user = null;
     runtime.vertexReceipts = null;
+    runtime.reverseProbe = null;
+    runtime.featureProbe = null;
     vi.clearAllMocks();
 });
 
@@ -331,10 +361,21 @@ async function runStandardRequest(
         target: string;
         profileBatches: readonly number[];
         generate: typeof syntheticGeneration;
+        reverseScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['reverseScope'];
         observed: Private90Observations;
     },
 ) {
     const observed = privateReplay?.observed;
+    runtime.featureProbe = privateReplay ? (input,state,error) => {
+        const probe = privateReplay.reverseScope;
+        const id = probe.selectionOwner(input.media);
+        if (!id || !probe.expected.has(id)) return;
+        if (state === 'start') probe.event(id,'featureStart',createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
+        else probe.event(id,state === 'return' ? 'featureReturned' : probe.featureFailure(error));
+    } : null;
+    runtime.reverseProbe = privateReplay ? async input => {
+        Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates));
+    } : null;
     runtime.vertexReceipts = observed ? { byRequest: new WeakMap(), sent: [] } : null;
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
@@ -745,6 +786,7 @@ async function runStandardRequest(
         expect(observed.fixedVertexCalls).toBeGreaterThan(0);
         expect(observed.mediaRegistryLoads).toBeGreaterThan(0);
         expect(observed.mediaRegistryRegistrations).toBeGreaterThan(0);
+        expect(observed).toMatchObject({ reverseCompared:1,reverseSourceHashMatch:1,reverseActualHashMatch:1,reverseMissing:0,reverseExtra:0 });
         observed.cause = 'model_routing';
         expect(observed.modelError).toBe('none');
         observed.cause = 'ledger_mismatch';
@@ -1134,6 +1176,7 @@ async function runPrivate90Fixture(
         observed.phase = 'fixed_model';
         observed.cause = 'sealed_model_inputs';
         const model = await prepareStandardArchiveVertex({ target: requestTarget, reader, profileBatches });
+        Object.assign(observed,model.reverseScope.sourceCounts());
         observed.publicProfilesInspected = model.counts().profiles;
         observed.missingFeatureInputs = model.counts().missingRemainder;
         observed.phase = 'admission';
@@ -1145,7 +1188,7 @@ async function runPrivate90Fixture(
         `, [source.requestId]);
         await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
         await runStandardRequest(db, owner, 'archive_replay', true, {
-            target: requestTarget, generate: model.generate, profileBatches, observed,
+            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, profileBatches, observed,
         });
         observed.phase = 'complete';
         observed.assertion = 'none';

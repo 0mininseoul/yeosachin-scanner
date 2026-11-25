@@ -20,7 +20,7 @@ const sqlStates = new Set(['none','other','08006','22001','22003','22023','22P02
 export const safePrivate90Sql = value => sqlStates.has(value) ? value : 'other';
 export const safePrivate90WorkerCode = value => isAnalysisV2WorkerErrorCode(value) ? value : 'other';
 const modelErrors = new Set(['none','other', ...['PROMPT_SHAPE','MODEL_INPUT_SHAPE','FEATURE_ROUTE_AMBIGUOUS',
-    'UNKNOWN_BATCH_ACCOUNT','UNSUPPORTED_SCHEMA','ACCOUNT_ROUTE_AMBIGUOUS'].map(s => 'OFFLINE_STANDARD_VERTEX_' + s)]);
+    'UNKNOWN_BATCH_ACCOUNT','UNKNOWN_RESOLVER_INPUT','UNSUPPORTED_SCHEMA','ACCOUNT_ROUTE_AMBIGUOUS'].map(s => 'OFFLINE_STANDARD_VERTEX_' + s)]);
 export const safePrivate90ModelError = value => modelErrors.has(value) ? value : 'other';
 const workerEnums = {
     ...sourceEnums,
@@ -51,6 +51,15 @@ export function newPrivate90Observations() {
         ...emptyPrivate90Failure(),
         jobStage: 'none', jobBatch: null, deliveryStatus: 'none', disposition: 'none', assertion: 'none',
         workerCode: 'none', sqlState: 'none', modelStage: 'none', modelError: 'none', retries: 0, continuations: 0,
+        reverseExpected: 0, reverseSourceTupleCount: 0, reverseSourceHashMatch: 0, reverseCompared: 0, reverseActual: 0,
+        reverseMissingDbAttempts: 0, reverseMissingDbRejected: 0, reverseMissingDbSucceeded: 0, reverseMissingTriageHigh: 0,
+        reverseMissingAdmissionUnknown: 0, reverseMissingFeatureVerified: 0, reverseMissingTriageModelCalls: 0,
+        reverseMissingFeatureModelCalls: 0, reverseMissingFeatureStarts: 0, reverseMissingFeatureReturned: 0,
+        reverseMissingOverviewRejected: 0, reverseMissingEvidenceRejected: 0, reverseMissingSchemaRejected: 0,
+        reverseMissingTerminalUnavailable: 0, reverseMissingOtherErrors: 0,
+        reverseShared: 0, reverseMissing: 0, reverseExtra: 0, reverseTupleDifferences: 0, reverseActualHashMatch: 0,
+        reverseMissingOutcomes: 0, reverseMissingVerified: 0, reverseMissingTriageFemale: 0, reverseMissingFeatureFemale: 0,
+        reverseMissingAnalysisUnavailable: 0, reverseMissingMediaUnavailable: 0, reverseMissingUnresolved: 0, reverseMissingNonFemale: 0,
         mediaRegistryLoads: 0, mediaRegistryRegistrations: 0, ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         targetImages: 0, publicRows: 0, privateRows: 0, publicImages: 0, privateImages: 0,

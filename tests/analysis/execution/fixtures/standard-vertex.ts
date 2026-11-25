@@ -1,7 +1,7 @@
 import { validModelResponse } from '../../../commerce/precheckout/fixtures/blite-model';
 
 type Generation = {
-    contents: { parts: { text?: string }[] } | { parts: { text?: string }[] }[];
+    contents: { parts: { text?: string; inlineData?: { data?: string } }[] } | { parts: { text?: string; inlineData?: { data?: string } }[] }[];
     config: { responseJsonSchema: { properties: Record<string, unknown> } };
 };
 

@@ -63,7 +63,8 @@ it('forces the sealed feature branch for each account and rejects an unavailable
     const candidate = analysisV2CandidateId(names[0]!);
     put('capture-summary-v1', [target], [0]);
     put('result-image-manifest-v1', [target], { imageInputs: [['target', 'target', null], ['female', candidate, null]] });
-    put('reverse-coverage-v1', [target], { results: [{ candidateId: candidate }] });
+    const scopeHash = key([target,100,[[candidate,'https://www.instagram.com/p/S07/',1,true]]]);
+    put('reverse-coverage-v1', [target], { scopeHash, results: [{ candidateId: candidate,status:'observed' }] });
     const ids = [target, 0, ...names];
     put('capture-coverage-v1', ['candidate-profile-batch-v1', 0], key(ids));
     put('candidate-profile-batch-v1', ids, profiles.map(profile => ({
@@ -76,6 +77,16 @@ it('forces the sealed feature branch for each account and rejects an unavailable
     expect(JSON.parse(response.text).accounts.map((r: { assessment: { inferredGender: string } }) => r.assessment.inferredGender))
         .toEqual(['female','male']);
     expect(fixed.counts()).toMatchObject({ profiles:2, missingRemainder:1, positiveProfiles:1, batchCalls:1 });
+    expect(fixed.reverseScope.sourceCounts()).toMatchObject({ reverseExpected:1, reverseSourceHashMatch:1 });
+    const selectionCount = 6;
+    const idsFor = (count:number) => Array.from({length:count},(_,i)=>'resolver-media:'+(i+1));
+    const resolver = (count:number) => ({ contents:{ parts:[{text:'사용 가능한 selectionId: '+idsFor(count).join(', ')},
+        ...idsFor(count).map(()=>({inlineData:{data:'/9gBAv/Z'}}))] },config:{responseJsonSchema:{properties:{inferredGender:{}}}} });
+    // Resolver receives at most one profile and the policy's bounded feed window.
+    const n = (await import('@/lib/domain/analysis/media-policy')).MAX_TRIAGE_FEED_MEDIA + 1;
+    const answer = JSON.parse(fixed.generate(resolver(n)).text);
+    expect(answer).toMatchObject({inferredGender:'female', evidenceSelectionIds:idsFor(2)});
+    expect(() => fixed.generate(resolver(selectionCount+10))).toThrow('UNKNOWN_RESOLVER_INPUT');
     entries.delete(includedListKey);
     await expect(prepareStandardArchiveVertex(input)).rejects.toThrow('UNCOVERED_REQUIRED_BRANCH');
 });
