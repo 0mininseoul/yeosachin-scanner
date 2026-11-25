@@ -50,6 +50,7 @@ import {
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import type { ProfileReadySnapshot } from './v2-profile-media-inputs';
 import { planProfileGender, type PinProfileGenderPlan, type ProfileGenderGroup } from './v2-profile-gender-plan';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
 import {
@@ -76,6 +77,9 @@ import {
 } from './v2-ai-scheduler-continuation';
 
 export interface AnalysisV2AiJobFence {
+    jobInputHash?: string;
+    /** Immutable ready envelopes from this delivery's fenced Dev profile input read. */
+    profileReadySnapshot?: ProfileReadySnapshot;
     requestId: string;
     jobKey: string;
     claimToken: string;
@@ -430,6 +434,18 @@ function createSchedulerMicrobatch(
         fence: AnalysisV2AiJobFence,
         plan: Omit<PendingSchedulerPlan<T>, 'resolve' | 'reject'>,
     ): Promise<T> {
+        const snapshot = fence.profileReadySnapshot;
+        if (snapshot && snapshot.fence.requestId === fence.requestId && snapshot.fence.jobKey === fence.jobKey
+            && snapshot.fence.claimToken === fence.claimToken && snapshot.fence.inputHash === fence.jobInputHash
+            && !fence.schedulerRecoveryOnly && !fence.schedulerTerminalUnavailable
+            && Number.isFinite(fence.handlerDeadlineAtMs) && performance.now() < (fence.handlerDeadlineAtMs ?? 0)) {
+            const ready = snapshot.byKey.get(plan.key);
+            if (ready?.stage === plan.stage) {
+                const parsed = plan.schema.safeParse(ready.result);
+                if (!parsed.success) throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: invalid ready result.');
+                return Promise.resolve(parsed.data);
+            }
+        }
         const groupKey = schedulerBatchKey(fence);
         let group = groups.get(groupKey);
         if (!group) {

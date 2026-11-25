@@ -5750,6 +5750,56 @@ function runScheduledStandardProfileBatch(deps: AnalysisV2AiScoringExecutorDepen
 }
 
 describe('v2.11 profile AI redelivery', () => {
+    it('reuses ready features across eight 30-account deliveries without admitting or charging them again', async () => {
+        const policy = AI_STAGE_POLICY_V211_VERSION;
+        const batches = Array.from({ length: 8 }, (_, batch) => {
+            const scope = { requestId: REQUEST_ID, claimToken: CLAIM_TOKEN,
+                jobKey: `track:profile-ai:batch:${batch}`, inputHash: digest(`input-${batch}`) };
+            const inputs = Array.from({ length: 30 }, (_, ordinal) => {
+                const id = `profile:test-${batch}-${ordinal}`;
+                return { media: [{ selectionId: id, kind: 'profile' as const, normalizedJpegBase64: '/9j/2Q==' }],
+                    triage: triage([id], 'female'), bio: null, captions: [] };
+            });
+            return { scope, inputs };
+        });
+        const run = async (prefetch: boolean) => {
+            let claims = 0;
+            let modelRuns = 0;
+            const outputs = await Promise.all(batches.map(async ({ scope, inputs }) => {
+                const ready = new Map(inputs.slice(0, 24).map(input => {
+                    const key = createFeatureAnalysisResultIdentity(input, policy).operationKey;
+                    const result = feature(input.media.map(row => row.selectionId));
+                    return [key, { stage: 'featureAnalysis' as const, operationKey: key,
+                        result: { operationKey: key, result, resultHash: digest(key), source: 'checkpoint' } }] as const;
+                }));
+                const runtime = createDurableAnalysisV2AiStageRuntime({
+                    createSchedulerOperationStore: options => ({
+                        async claim({ key }) {
+                            claims++;
+                            const hit = ready.get(key);
+                            return hit ? { decision: 'ready', value: options.schemas.get(key)!.parse(hit.result) }
+                                : { decision: 'execute', claimToken: CLAIM_TOKEN };
+                        },
+                        async commitReady() {},
+                    }),
+                    runFeatures: async input => {
+                        modelRuns++;
+                        return feature(input.media.map(row => row.selectionId));
+                    },
+                });
+                const jobFence = { ...scope, jobInputHash: scope.inputHash, aiStagePolicyVersion: policy,
+                    schedulerCapability: 'scheduler-v1' as const, handlerDeadlineAtMs: performance.now() + 540_000,
+                    ...(prefetch ? { profileReadySnapshot: { fence: scope, byKey: ready } } : {}) };
+                return Promise.all(inputs.map(input => runtime.features(input, jobFence)));
+            }));
+            return { claims, modelRuns, outputs };
+        };
+        const prior = await run(false);
+        const current = await run(true);
+        expect(prior).toMatchObject({ claims: 240, modelRuns: 48 });
+        expect(current).toMatchObject({ claims: 48, modelRuns: 48 });
+        expect(current.outputs).toEqual(prior.outputs);
+    });
     const scenarios = ['gender 5 to 4', 'gender 4 to 5', 'gender 404',
         'features 6 to 5', 'features 5 to 6'] as const;
     const cases = (['ready', 'claimed'] as const).flatMap(status => scenarios.map(scenario => ({status, scenario})));
