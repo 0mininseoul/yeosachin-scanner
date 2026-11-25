@@ -96,6 +96,7 @@ export async function createStandardDatabase() {
             'live-standard-provider-recovery',
             'live-standard-feature-concurrency',
             'live-standard-profile-media-ready',
+            'live-standard-profile-shared-reader',
         ]) {
             await db.exec(devSql(name));
         }
