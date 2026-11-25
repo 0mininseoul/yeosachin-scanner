@@ -1,5 +1,6 @@
 import 'server-only';
 
+import { verifyStandardQaCopyIam } from './standard-qa-copy-iam';
 import type { StandardQaFixtureOperation } from './standard-archive-runtime';
 import { createHash, randomBytes } from 'node:crypto';
 import { GoogleAuth } from 'google-auth-library';
@@ -22,7 +23,7 @@ function hash(value: Buffer | string): string {
     return createHash('sha256').update(value).digest('hex');
 }
 
-function configuration(mode: 'export' | 'read' | 'audit') {
+function configuration(mode: 'export' | 'read' | 'audit' | 'iam') {
     const descriptor = {
         approval: required('DEV_STANDARD_QA_COPY_APPROVAL'),
         sourceApproval: required('DEV_STANDARD_QA_COPY_SOURCE_APPROVAL'),
@@ -38,7 +39,7 @@ function configuration(mode: 'export' | 'read' | 'audit') {
     const bucketName = required('DEV_STANDARD_QA_COPY_BUCKET');
     const kmsKey = required('DEV_STANDARD_QA_COPY_KMS_KEY');
     const resource = /^projects\/([a-z][a-z0-9-]+)\/locations\/([a-z0-9-]+)\/keyRings\/[a-zA-Z0-9_-]+\/cryptoKeys\/[a-zA-Z0-9_-]+$/.exec(kmsKey);
-    const sourceBucket = mode === 'export' ? required('DEV_LIVE_STANDARD_ARCHIVE_BUCKET') : undefined;
+    const sourceBucket = mode === 'export' || mode === 'iam' ? required('DEV_LIVE_STANDARD_ARCHIVE_BUCKET') : undefined;
     if (!isAnalysisV2DevQaCopyBucketName(bucketName)
         || project !== required('DEV_LIVE_GCP_PROJECT') || project !== required('GOOGLE_CLOUD_PROJECT')
         || !/^[1-9]\d{5,19}$/.test(projectNumber) || projectNumber !== required('DEV_LIVE_GCP_PROJECT_NUMBER')
@@ -51,7 +52,7 @@ function configuration(mode: 'export' | 'read' | 'audit') {
     const slot = hash('dev-standard-copy-slot/v1\n' + policy.approval).slice(0, 32);
     const prefix = devStandardQaCopyObjectPrefix(bucketName, slot);
     const wrappedKeyName = prefix + hash('wrapped-key/v1') + '.bin';
-    return { policy, context, bucketName, sourceBucket, projectNumber, kmsKey, location: resource[2], slot, prefix, wrappedKeyName };
+    return { policy, context, bucketName, sourceBucket, project, projectNumber, kmsKey, expiresAt: binding.expiresAt, location: resource[2], slot, prefix, wrappedKeyName };
 }
 
 function cloudClient() {
@@ -168,4 +169,14 @@ export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
         }
     }
     return 'deleted';
+}
+
+
+export async function checkPrivateQaCopyPrincipalAccess() {
+    const cfg = configuration('iam');
+    if (!cfg.sourceBucket) throw new Error('QA_COPY_CONFIGURATION_INVALID');
+    return verifyStandardQaCopyIam({
+        ...cfg, sourceBucket: cfg.sourceBucket,
+        authorized: required('DEV_STANDARD_QA_COPY_APPROVED_PRINCIPALS').split(',').map(value => value.trim()),
+    });
 }

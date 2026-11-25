@@ -1,5 +1,5 @@
 import { createDevStandardArchiveStore } from '@/lib/services/dev-ui/standard-archive-store';
-import { openStandardQaCopyForJob, verifyExpiredStandardQaCopy } from '@/lib/services/dev-ui/standard-qa-copy-cloud';
+import { openStandardQaCopyForJob, verifyExpiredStandardQaCopy, checkPrivateQaCopyPrincipalAccess } from '@/lib/services/dev-ui/standard-qa-copy-cloud';
 import { exportStandardQaCopy, withVerifiedStandardQaCopy } from '@/lib/services/dev-ui/standard-qa-copy';
 
 function required(name: string) {
@@ -10,6 +10,10 @@ function required(name: string) {
 
 async function main() {
     const command = process.argv[2];
+    if (process.argv.length === 3 && command === '--verify-iam') {
+        console.log(JSON.stringify({ status: 'verified', ...await checkPrivateQaCopyPrincipalAccess() }));
+        return;
+    }
     if (process.argv.length === 3 && (command === '--verify-revoked' || command === '--verify-deleted')) {
         const mode = command === '--verify-revoked' ? 'revoked' : 'deleted';
         const status = await verifyExpiredStandardQaCopy(mode);
