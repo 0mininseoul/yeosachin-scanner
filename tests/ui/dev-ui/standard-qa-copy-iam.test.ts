@@ -21,6 +21,8 @@ function setup(scenario: string) {
     const key = [{ role: 'roles/key', members: [devReader], condition: { expression } }];
     transport.mockImplementation(async ({ url, params }: { url: string; params?: { pageToken?: string } }) => {
         if (url.endsWith('/managedFolders')) {
+            expect(params).toMatchObject({ prefix: 'analysis-v2-dev-standard-archive/', pageSize: 256 });
+            expect(params).not.toHaveProperty('maxResults');
             if (scenario === 'managed parent') return { data: { items: [{ name: 'analysis-v2-dev-standard-archive/' }] } };
             if (scenario === 'managed descendant' || scenario === 'unrelated folder') {
                 if (!params?.pageToken) return { data: { nextPageToken: 'next' } };

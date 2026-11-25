@@ -84,7 +84,7 @@ export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
     do {
         const response = await client.request<{ items?: { name: string }[]; nextPageToken?: string }>({
             url: 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucketName) + '/managedFolders',
-            params: { prefix: namespace, maxResults: 256, fields: 'items(name),nextPageToken', ...(pageToken && { pageToken }) },
+            params: { prefix: namespace, pageSize: 256, fields: 'items(name),nextPageToken', ...(pageToken && { pageToken }) },
         });
         const items = response.data?.items ?? [];
         if (!Array.isArray(items) || items.some(item => typeof item.name !== 'string' || !item.name.startsWith(namespace)
