@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { GET as readResult } from '@/app/api/analysis/v2/result/[requestId]/route';
@@ -18,9 +18,12 @@ import { SyntheticApify, target, candidate } from './fixtures/standard-providers
 import { POST as start } from '@/app/api/analysis/preflight/route';
 import { PATCH as update } from '@/app/api/analysis/preflight/[preflightId]/route';
 import { POST as entitle } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
+import { runPrecheckoutBlite } from '@/lib/services/precheckout/blite-runner';
+import { enqueuePrecheckoutBliteTask } from '@/lib/services/analysis/preflight-tasks';
 import { processPreflight } from '@/lib/services/analysis/preflight';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import { getApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
+import { currentDevStandardArchive, withDevStandardArchiveApproval, withVerifiedDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import {
     APIFY_CREDENTIAL_TOKEN_ENV,
@@ -39,6 +42,7 @@ const runtime = vi.hoisted(() => ({
     },
     apify: vi.fn(),
     objects: vi.fn(),
+    archiveObjects: vi.fn(),
     r2: vi.fn(),
     png: vi.fn(),
     model: vi.fn(),
@@ -77,6 +81,7 @@ vi.mock('@/lib/services/analysis/v2-media-artifact-store', async (original) => {
     const actual = await original<typeof import('@/lib/services/analysis/v2-media-artifact-store')>();
     return {
         ...actual,
+        createGoogleCloudPrivateMediaObjectClient: () => runtime.archiveObjects(),
         createConfiguredAnalysisV2MediaArtifactStore: () =>
             actual.createAnalysisV2MediaArtifactStore({ objects: runtime.objects() }),
     };
@@ -159,6 +164,8 @@ function configure() {
         PREFLIGHT_PROFILE_PROVIDER: 'apify_pool',
         PREFLIGHT_APIFY_API_TOKEN_SLOTS: APIFY_FREE_CREDENTIAL_SLOTS.join(','),
         ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'secondary',
+        PRECHECKOUT_BLITE_ENABLED: 'false',
+        PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
         SCRAPER_FOLLOWERS: 'apify',
         SCRAPER_FOLLOWING: 'apify',
     };
@@ -257,255 +264,522 @@ afterEach(() => {
     vi.clearAllMocks();
 });
 
-it.each(['first', 'second', 'timeout'])(
+const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout'] as const;
+type Scenario = typeof deliveryScenarios[number] | 'archive_capture' | 'archive_replay';
+
+async function runStandardRequest(
+    db: PGlite,
+    user: Awaited<ReturnType<typeof seedOwner>>,
+    scenario: Scenario,
+    changeTriageOnReplay = false,
+) {
+    const isReplay = scenario === 'archive_replay';
+    const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
+    const capturedBlite = blite && scenario === 'archive_capture';
+    const otherId = randomUUID();
+    vi.stubEnv('DEV_UI_TEST_USER_IDS', [user.id, otherId].join(','));
+    runtime.user = user;
+    const client = localDatabaseClient(db);
+    let timeouts = 0;
+    const receiptCalls: Record<string, unknown>[] = [];
+    const producerHashes: string[] = [];
+    const sqlErrors: string[] = [];
+    runtime.admin.rpc.mockImplementation(async (n, a) => {
+        if (
+            n === 'load_analysis_v2_profile_fetch_for_consumer' &&
+            a.p_consumer_job_key === 'track:profile-ai:batch:0'
+        ) {
+            producerHashes.push(a.p_expected_producer_input_hash);
+            if (scenario === 'timeout' && timeouts === 0) {
+                timeouts++;
+                return {
+                    data: null,
+                    error: { code: '57014', message: 'canceling statement due to statement timeout' },
+                };
+            }
+        }
+        if (scenario === 'terminal receipt timeout' &&
+            n === 'checkpoint_analysis_v2_provider_run_terminal' &&
+            a.p_job_key === 'track:profiles:batch:0') {
+            receiptCalls.push({ ...a });
+            if (receiptCalls.length <= 2) return {
+                data: null,
+                error: { code: '57014', message: 'canceling statement due to statement timeout' },
+            };
+        }
+        const out = await client.rpc(n, a);
+        if (out.error && !out.error.message.includes('FENCE'))
+            sqlErrors.push(n + ': ' + out.error.message);
+        return out;
+    });
+    runtime.admin.from.mockImplementation(client.from);
+    runtime.session.mockImplementation(async () => ({
+        ...localDatabaseClient(db, runtime.user?.id ?? null),
+        auth: { getUser: async () => ({ data: { user: runtime.user }, error: null }) },
+    }));
+    // Five posts leave one feature image beyond the four feed images allowed in triage.
+    const apify = new SyntheticApify(changeTriageOnReplay ? 5 : 1);
+    runtime.apify.mockClear().mockImplementation(() => {
+        if (isReplay) throw new Error('Unexpected Apify access during archive replay');
+        return apify;
+    });
+    runtime.objects.mockReturnValue(createFixtureObjects());
+    runtime.r2.mockImplementation(createFixtureR2());
+    const sourcePng = await makeSourcePng();
+    runtime.png.mockClear().mockImplementation(() => {
+        if (isReplay) throw new Error('Unexpected source image download during archive replay');
+        return sourcePng;
+    });
+    runtime.model.mockImplementation(input =>
+        syntheticGeneration(input, changeTriageOnReplay && !isReplay ? 'male' : 'female'));
+    const attempt = randomUUID();
+    const newPreflight = () => start(request('', 'POST', { targetInstagramId: target }, attempt));
+    const created = await newPreflight();
+    const first = await created.json();
+    expect(created.status, first.code).toBe(202);
+    const preflightId: string = first.preflightId;
+    const replay = await newPreflight();
+    expect(replay.status).toBe(200);
+    expect((await replay.json()).preflightId).toBe(preflightId);
+    const ctx = { params: Promise.resolve({ preflightId }) };
+    expect(runtime.queue).toHaveLength(1);
+    const task = runtime.queue.shift()!;
+    const approval = await getApprovedDevLiveDelivery({ preflightId });
+    if (approval?.planId !== 'standard') throw new Error('Missing synthetic Standard approval');
+    expect(Boolean(approval.archiveReplay)).toBe(isReplay);
+    const runDelivery = <T>(operation: () => T) =>
+        withDevLiveProviderApproval(approval, () => withDevStandardArchiveApproval(approval, operation));
+    vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
+    vi.stubEnv('K_SERVICE', 'dev-live-preflight');
+    const preflight = () =>
+        runDelivery(() =>
+            processPreflight(preflightId, {
+                enqueueBliteInference: (id, dispatchGeneration, dispatchToken) =>
+                    enqueuePrecheckoutBliteTask(id, { dispatchGeneration, dispatchToken }),
+                dispatchFence: {
+                    generation: Number(task.generation),
+                    reservationToken: String(task.reservationToken),
+                },
+            }),
+        );
+    expect(await preflight()).toBe('ready');
+    if (capturedBlite) {
+        expect(runtime.queue).toHaveLength(1);
+        const preview = runtime.queue.shift()!;
+        expect(preview.kind).toBe('precheckout_blite');
+        const infer = () => runDelivery(() => runPrecheckoutBlite(preflightId, {
+            dispatchGeneration: Number(preview.dispatchGeneration),
+            dispatchToken: String(preview.dispatchToken),
+        }));
+        expect(await infer()).toBe('complete');
+    }
+    expect(await preflight()).toBe('noop');
+    let previewDto: unknown = null;
+    if (isReplay || scenario === 'archive_capture') {
+        const preview = await db.query<{ active: boolean; state: string; dto: unknown; attempt_count: number }>(`
+            SELECT p.precheckout_blite_cohort AS active, c.state, c.dto, c.attempt_count
+            FROM analysis_preflights p JOIN precheckout_blite_cache c ON c.preflight_id=p.id
+            WHERE p.id=$1
+        `, [preflightId]);
+        if (blite) {
+            expect(preview.rows).toHaveLength(1);
+            expect(preview.rows[0]).toMatchObject({
+                active: true, state: 'complete', attempt_count: isReplay ? 0 : 1,
+                dto: { persona: { headline: expect.any(String) } },
+            });
+            previewDto = preview.rows[0]!.dto;
+        } else {
+            expect(preview.rows).toEqual([]);
+        }
+        expect(runtime.queue).toHaveLength(0);
+    }
+    const patch = await update(request('/' + preflightId, 'PATCH', { decision: 'skip' }), ctx);
+    expect(patch.status).toBe(204);
+    const consume = () =>
+        entitle(request('/' + preflightId + '/entitle', 'POST', { planId: 'standard' }), ctx);
+    const pending = await consume();
+    expect((await pending.json()).status).toBe('admission_pending');
+    expect(pending.status).toBe(202);
+    expect(runtime.queue).toHaveLength(1);
+    const fresh = runtime.queue.shift()!;
+    vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+    vi.stubEnv('K_SERVICE', 'dev-live-paid');
+    const getProfile = vi.fn(async () => {
+        throw new Error('SCRAPING_SCHEMA_ERROR: synthetic public profile unavailable');
+    });
+    const freshJob = () =>
+        runDelivery(() =>
+            processAnalysisV2FreshAdmission(
+                runtime.admin,
+                {
+                    preflightId,
+                    generation: Number(fresh.generation),
+                    dispatchGeneration: Number(fresh.dispatchGeneration),
+                    dispatchToken: String(fresh.dispatchToken),
+                },
+                { getProfile },
+            ),
+        );
+    expect(await freshJob()).toBe('ready');
+    expect(await freshJob()).toBe('noop');
+    expect(getProfile).toHaveBeenCalledTimes(isReplay ? 0 : 1);
+    const accepted = await consume();
+    const result = await accepted.json();
+    expect(accepted.status, result.code).toBe(201);
+    expect((await (await consume()).json()).requestId).toBe(result.requestId);
+    expect(runtime.queue).toHaveLength(1);
+    const resultPage = () =>
+        readResult(
+            new Request(
+                appOrigin + '/api/analysis/v2/result/' + result.requestId + '?devAnalysis=live',
+            ),
+            { params: Promise.resolve({ requestId: result.requestId }) },
+        );
+    const hidden = await resultPage();
+    expect(hidden.status).toBe(404);
+    expect((await hidden.json()).code).toBe('RESULT_PENDING');
+    const totals = async () =>
+        (
+            await db.query<Record<string, number>>(
+                `SELECT
+    (SELECT count(*)::int FROM analysis_v2_test_entitlement_consumptions WHERE request_id=$2) AS consumed,
+    (SELECT count(*)::int FROM analysis_requests WHERE id=$2) AS requests,
+    (SELECT count(*)::int FROM dev_live_budget.owner_starts WHERE grant_id=$3) AS grants,
+    (SELECT count(*)::int FROM dev_live_budget.reservations WHERE grant_id=$3 AND provider='apify') AS actors,
+    (SELECT count(*)::int FROM dev_live_budget.reservations WHERE grant_id=$3 AND provider='vertex') AS models,
+    (SELECT count(*)::int FROM dev_live_budget.reservations WHERE grant_id=$3 AND provider='vertex' AND actual_micros IS NOT NULL) AS settled,
+    (SELECT coalesce(sum(apify_committed_micros),0)::int FROM dev_live_budget.grants WHERE grant_id=$3) AS apify_committed,
+    (SELECT coalesce(sum(reserved_micros),0)::int FROM dev_live_budget.reservations WHERE grant_id=$3 AND provider='apify') AS apify_reserved,
+    (SELECT coalesce(sum(ai_committed_micros),0)::int FROM dev_live_budget.grants WHERE grant_id=$3) AS debit,
+    (SELECT analysis_count FROM public.users WHERE id=$1) AS quota`,
+                [user.id, result.requestId, approval.id],
+            )
+        ).rows[0];
+    let steps = 0;
+    let continued = 0;
+    let receiptRedeliveries = 0;
+    const modelCallsBefore = runtime.model.mock.calls.length;
+    const stateStore = createSupabaseAnalysisV2DagStateStore();
+    const worker = {
+        stateStore,
+        executors: createAnalysisV2ProductionExecutorRegistry(),
+        progressReporter: createAnalysisV2ProgressReporter({
+            reloadState: (id) => stateStore.load(id),
+        }),
+    };
+    while (runtime.queue.length) {
+        if (++steps > 24) throw new Error('Unexpected repeated task delivery');
+        const payload = runtime.queue.shift()!;
+        const delivery = parseAnalysisV2TaskPayload(payload);
+        const expectArchiveGap = changeTriageOnReplay && isReplay
+            && delivery.jobKey === 'track:profile-ai:batch:0';
+        const outcome = await runDelivery(async () => {
+            if (!expectArchiveGap) return processAnalysisV2TaskDelivery(delivery, worker);
+            const archive = currentDevStandardArchive()!;
+            const load = vi.spyOn(archive, 'load');
+            const result = await processAnalysisV2TaskDelivery(delivery, worker);
+            const imageReads = load.mock.calls.flatMap(([kind], index) =>
+                kind === 'ai-image' ? [load.mock.settledResults[index]!.type] : []);
+            expect(imageReads.filter(state => state === 'fulfilled')).toHaveLength(5);
+            expect(imageReads.filter(state => state === 'rejected')).toHaveLength(1);
+            return result;
+        });
+        if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
+            expect(outcome.errorCode).toBe('ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR');
+            expect(receiptRedeliveries).toBe(0);
+            receiptRedeliveries++;
+            expect(receiptCalls).toHaveLength(2);
+            expect(receiptCalls[1]).toEqual(receiptCalls[0]);
+            const telemetry = await db.query(
+                'SELECT 1 FROM analysis_v2_profile_fetch_telemetry WHERE request_id=$1 AND job_key=$2',
+                [delivery.requestId, delivery.jobKey],
+            );
+            expect(telemetry.rows).toHaveLength(0);
+            runtime.queue.unshift(payload); // Cloud Tasks retries the same delivery.
+            continue;
+        }
+        if (outcome.status === 'continuation' && scenario === 'timeout') {
+            expect(outcome.errorCode).toBe('ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT');
+            expect(outcome.pendingRecoveryCount).toBe(0);
+            expect(runtime.model.mock.calls.length).toBe(modelCallsBefore);
+            expect(runtime.queue).toContainEqual(
+                expect.objectContaining({
+                    jobKey: delivery.jobKey,
+                    generation: delivery.generation + 1,
+                }),
+            );
+            await expect(processAnalysisV2TaskDelivery(delivery)).rejects.toThrow(/FENCE/);
+            const due = await db.query<{ wait_ms: number }>(
+                `SELECT greatest(0,ceil(1000 * extract(epoch FROM
+            (scheduler_not_before_at-clock_timestamp()))))::int AS wait_ms FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2`,
+                [delivery.requestId, delivery.jobKey],
+            );
+            await new Promise((resolve) => setTimeout(resolve, due.rows[0]!.wait_ms + 20));
+            continued++;
+            continue;
+        }
+        if (expectArchiveGap) {
+            expect(outcome).toEqual({ status: 'failed', errorCode: 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' });
+        } else {
+            expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
+            expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
+        }
+        const before = await totals();
+        const calls = [apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length];
+        expect((await processAnalysisV2TaskDelivery(delivery)).status).toBe('already_terminal');
+        expect([apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length]).toEqual(
+            calls,
+        );
+        expect(await totals()).toEqual(before);
+    }
+    expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
+    expect(receiptRedeliveries).toBe(scenario === 'terminal receipt timeout' ? 1 : 0);
+    if (receiptRedeliveries) {
+        expect(receiptCalls).toHaveLength(3);
+        expect(receiptCalls[2].p_claim_token).not.toBe(receiptCalls[0].p_claim_token);
+        expect(receiptCalls[2]).toEqual({
+            ...receiptCalls[0],
+            p_claim_token: receiptCalls[2].p_claim_token,
+        });
+    }
+    expect(producerHashes.length).toBeGreaterThanOrEqual(1 + continued);
+    expect(producerHashes[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(new Set(producerHashes).size).toBe(1);
+    const page = await resultPage();
+    if (changeTriageOnReplay) {
+        const calls = runtime.model.mock.calls.slice(modelCallsBefore);
+        expect(calls).toHaveLength(1);
+        expect(calls[0]![0].config.responseJsonSchema.properties).toHaveProperty('accounts');
+        const { rows } = await db.query(`
+            SELECT (SELECT count(*)::int FROM analysis_v2_result_summaries WHERE request_id=$1) AS published,
+                   (SELECT count(*)::int FROM analysis_progress_events
+                    WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS completed,
+                   (SELECT count(*)::int FROM analysis_v2_scheduler_operations
+                    WHERE request_id=$1 AND stage='featureAnalysis') AS feature_operations,
+                   (SELECT count(*)::int FROM analysis_v2_profile_media_inputs
+                    WHERE request_id=$1 AND stage='feature_remainder') AS feature_inputs,
+                   (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage_rows,
+                   (SELECT sum(actual_micros)::int FROM dev_live_budget.reservations
+                    WHERE grant_id=$2 AND provider='vertex') AS settled_cost,
+                   (SELECT last_error_code FROM analysis_pipeline_jobs
+                    WHERE request_id=$1 AND job_key='track:profile-ai:batch:0') AS error_code
+        `, [result.requestId, approval.id]);
+        const budget = await totals();
+        expect(rows).toEqual([{
+            published: isReplay ? 0 : 1,
+            completed: isReplay ? 0 : 1,
+            feature_operations: 0,
+            feature_inputs: 0,
+            usage_rows: 1,
+            settled_cost: budget.debit,
+            error_code: isReplay ? 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' : null,
+        }]);
+        expect(page.status).toBe(isReplay ? 404 : 200);
+        if (isReplay) {
+            expect((await page.json()).code).toBe('RESULT_PENDING');
+            expect(runtime.apify).not.toHaveBeenCalled();
+            expect(runtime.png).not.toHaveBeenCalled();
+            expect(budget).toMatchObject({
+                consumed: 1, grants: 1, requests: 1, actors: 0, models: 1, settled: 1,
+                apify_reserved: 0, apify_committed: 0, quota: 0,
+            });
+        } else {
+            expect((await page.json()).femaleAccounts).toEqual([]);
+        }
+        expect(sqlErrors).toEqual([]);
+        return {
+            grantId: approval.id,
+            approvedAt: approval.approvedAt,
+            requestId: result.requestId as string,
+            previewDto,
+            imageHash: null,
+        };
+    }
+    expect(page.status).toBe(200);
+    const body = await page.json();
+    expect(body.femaleAccounts).toHaveLength(1);
+    const row = body.femaleAccounts[0];
+    expect(row.instagramId).toBe(candidate);
+    expect(row.highRiskNarrative).toHaveLength(2);
+    expect(row).toMatchObject({ displayScore: 7.2, riskBand: 'high_risk' });
+    expect(row.highRiskNarrative[0]).toContain(candidate + '님');
+    expect(row.highRiskNarrative[1]).toContain(target + '님');
+    expect(row.highRiskNarrative.join(' ')).not.toContain('님님');
+    expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
+    expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
+    expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
+    expect(steps).toBe(12 + continued + receiptRedeliveries);
+    const expectedActors = isReplay ? 0 : 9;
+    expect(apify.starts).toHaveLength(expectedActors);
+    expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);
+    expect(await totals()).toMatchObject({
+        consumed: 1,
+        requests: 1,
+        grants: 1,
+        actors: expectedActors,
+        models: capturedBlite ? 4 : 3,
+        settled: capturedBlite ? 4 : 3,
+        quota: 0,
+    });
+    expect(
+        (
+            await db.query(
+                `SELECT
+    (SELECT count(*)::int FROM analysis_progress_events WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS published,
+    (SELECT count(*)::int FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status='ready') AS ready,
+    (SELECT count(*)::int FROM analysis_v2_result_image_manifests WHERE request_id=$1 AND sealed_at IS NOT NULL) AS sealed,
+    (SELECT policy_versions_snapshot->>'aiStage' FROM analysis_requests WHERE id=$1) AS policy,
+    (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage_rows,
+    (SELECT sum(actual_micros)::int FROM dev_live_budget.reservations WHERE grant_id=$2 AND provider='vertex') AS settled_cost`,
+                [result.requestId, approval.id],
+            )
+        ).rows[0],
+    ).toMatchObject({
+        published: 1,
+        ready: 2,
+        sealed: 1,
+        policy: 'ai-stage-policy-v2.11',
+        usage_rows: 3,
+        settled_cost: (await totals()).debit,
+    });
+    const budget = await totals();
+    expect(budget.debit).toBeGreaterThan(0);
+    if (isReplay) {
+        expect(budget.apify_reserved).toBe(0);
+        expect(runtime.apify).not.toHaveBeenCalled();
+        expect(runtime.png).not.toHaveBeenCalled();
+    } else {
+        expect(budget.apify_reserved).toBeGreaterThan(0);
+    }
+    expect(budget.apify_committed).toBe(budget.apify_reserved);
+    const imageUrl = await assertOwnerPage(result.requestId, row.instagramId);
+    const imageRequest = () => new NextRequest(imageUrl);
+    const image = await readImage(imageRequest());
+    expect(image.status).toBe(200);
+    const bytes = Buffer.from(await image.arrayBuffer());
+    expect((await sharp(bytes).metadata()).format).toBe('webp');
+    runtime.user = { ...user, id: otherId };
+    expect((await resultPage()).status).toBe(404);
+    expect((await readImage(imageRequest())).status).toBe(403);
+    runtime.user = null;
+    expect((await resultPage()).status).toBe(401);
+    expect((await readImage(imageRequest())).status).toBe(401);
+    expect(sqlErrors).toEqual([]);
+    return {
+        grantId: approval.id,
+        approvedAt: approval.approvedAt,
+        previewDto,
+        requestId: result.requestId as string,
+        imageHash: createHash('sha256').update(bytes).digest('hex'),
+    };
+}
+
+it.each(deliveryScenarios)(
     'publishes one Dev Standard request from a fresh database (%s)',
     async (scenario) => {
         configure();
         const db = await createStandardDatabase();
         try {
-            const user = await seedOwner(db);
-            const otherId = randomUUID();
-            vi.stubEnv('DEV_UI_TEST_USER_IDS', [user.id, otherId].join(','));
-            runtime.user = user;
-            const client = localDatabaseClient(db);
-            let timeouts = 0;
-            const producerHashes: string[] = [];
-            const sqlErrors: string[] = [];
-            runtime.admin.rpc.mockImplementation(async (n, a) => {
-                if (
-                    n === 'load_analysis_v2_profile_fetch_for_consumer' &&
-                    a.p_consumer_job_key === 'track:profile-ai:batch:0'
-                ) {
-                    producerHashes.push(a.p_expected_producer_input_hash);
-                    if (scenario === 'timeout' && timeouts === 0) {
-                        timeouts++;
-                        return {
-                            data: null,
-                            error: { code: '57014', message: 'canceling statement due to statement timeout' },
-                        };
-                    }
-                }
-                const out = await client.rpc(n, a);
-                if (out.error && !out.error.message.includes('FENCE'))
-                    sqlErrors.push(n + ': ' + out.error.message);
-                return out;
-            });
-            runtime.admin.from.mockImplementation(client.from);
-            runtime.session.mockImplementation(async () => ({
-                ...localDatabaseClient(db, runtime.user?.id ?? null),
-                auth: { getUser: async () => ({ data: { user: runtime.user }, error: null }) },
-            }));
-            const apify = new SyntheticApify();
-            runtime.apify.mockReturnValue(apify);
-            runtime.objects.mockReturnValue(createFixtureObjects());
-            runtime.r2.mockImplementation(createFixtureR2());
-            runtime.png.mockReturnValue(await makeSourcePng());
-            runtime.model.mockImplementation(syntheticGeneration);
-            const attempt = randomUUID();
-            const newPreflight = () => start(request('', 'POST', { targetInstagramId: target }, attempt));
-            const created = await newPreflight();
-            const first = await created.json();
-            expect(created.status, first.code).toBe(202);
-            const preflightId: string = first.preflightId;
-            const replay = await newPreflight();
-            expect(replay.status).toBe(200);
-            expect((await replay.json()).preflightId).toBe(preflightId);
-            const ctx = { params: Promise.resolve({ preflightId }) };
-            expect(runtime.queue).toHaveLength(1);
-            const task = runtime.queue.shift()!;
-            const approval = await getApprovedDevLiveDelivery({ preflightId });
-            expect(approval?.planId).toBe('standard');
-            vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
-            const preflight = () =>
-                withDevLiveProviderApproval(approval, () =>
-                    processPreflight(preflightId, {
-                        dispatchFence: {
-                            generation: Number(task.generation),
-                            reservationToken: String(task.reservationToken),
-                        },
-                    }),
-                );
-            expect(await preflight()).toBe('ready');
-            expect(await preflight()).toBe('noop');
-            const patch = await update(request('/' + preflightId, 'PATCH', { decision: 'skip' }), ctx);
-            expect(patch.status).toBe(204);
-            const consume = () =>
-                entitle(request('/' + preflightId + '/entitle', 'POST', { planId: 'standard' }), ctx);
-            const pending = await consume();
-            expect((await pending.json()).status).toBe('admission_pending');
-            expect(pending.status).toBe(202);
-            expect(runtime.queue).toHaveLength(1);
-            const fresh = runtime.queue.shift()!;
-            vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
-            vi.stubEnv('K_SERVICE', 'dev-live-paid');
-            const getProfile = vi.fn(async () => {
-                throw new Error('SCRAPING_SCHEMA_ERROR: synthetic public profile unavailable');
-            });
-            const freshJob = () =>
-                withDevLiveProviderApproval(approval, () =>
-                    processAnalysisV2FreshAdmission(
-                        runtime.admin,
-                        {
-                            preflightId,
-                            generation: Number(fresh.generation),
-                            dispatchGeneration: Number(fresh.dispatchGeneration),
-                            dispatchToken: String(fresh.dispatchToken),
-                        },
-                        { getProfile },
-                    ),
-                );
-            expect(await freshJob()).toBe('ready');
-            expect(await freshJob()).toBe('noop');
-            expect(getProfile).toHaveBeenCalledTimes(1);
-            const accepted = await consume();
-            const result = await accepted.json();
-            expect(accepted.status, result.code).toBe(201);
-            expect((await (await consume()).json()).requestId).toBe(result.requestId);
-            expect(runtime.queue).toHaveLength(1);
-            const resultPage = () =>
-                readResult(
-                    new Request(
-                        appOrigin + '/api/analysis/v2/result/' + result.requestId + '?devAnalysis=live',
-                    ),
-                    { params: Promise.resolve({ requestId: result.requestId }) },
-                );
-            const hidden = await resultPage();
-            expect(hidden.status).toBe(404);
-            expect((await hidden.json()).code).toBe('RESULT_PENDING');
-            const totals = async () =>
-                (
-                    await db.query<Record<string, number>>(
-                        `SELECT
-            (SELECT count(*)::int FROM analysis_v2_test_entitlement_consumptions) AS consumed,
-            (SELECT count(*)::int FROM analysis_requests) AS requests,
-            (SELECT count(*)::int FROM dev_live_budget.owner_starts) AS grants,
-            (SELECT count(*)::int FROM dev_live_budget.reservations WHERE provider='apify') AS actors,
-            (SELECT count(*)::int FROM dev_live_budget.reservations WHERE provider='vertex') AS models,
-            (SELECT count(*)::int FROM dev_live_budget.reservations WHERE provider='vertex' AND actual_micros IS NOT NULL) AS settled,
-            (SELECT coalesce(sum(apify_committed_micros),0)::int FROM dev_live_budget.grants) AS apify_committed,
-            (SELECT coalesce(sum(reserved_micros),0)::int FROM dev_live_budget.reservations WHERE provider='apify') AS apify_reserved,
-            (SELECT coalesce(sum(ai_committed_micros),0)::int FROM dev_live_budget.grants) AS debit,
-            (SELECT analysis_count FROM public.users WHERE id=$1) AS quota`,
-                        [user.id],
-                    )
-                ).rows[0];
-            let steps = 0;
-            let continued = 0;
-            const modelCallsBefore = runtime.model.mock.calls.length;
-            const stateStore = createSupabaseAnalysisV2DagStateStore();
-            const worker = {
-                stateStore,
-                executors: createAnalysisV2ProductionExecutorRegistry(),
-                progressReporter: createAnalysisV2ProgressReporter({
-                    reloadState: (id) => stateStore.load(id),
-                }),
-            };
-            while (runtime.queue.length) {
-                if (++steps > 24) throw new Error('Unexpected repeated task delivery');
-                const delivery = parseAnalysisV2TaskPayload(runtime.queue.shift());
-                const outcome = await withDevLiveProviderApproval(approval, () =>
-                    processAnalysisV2TaskDelivery(delivery, worker),
-                );
-                if (outcome.status === 'continuation' && scenario === 'timeout') {
-                    expect(outcome.errorCode).toBe('ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT');
-                    expect(outcome.pendingRecoveryCount).toBe(0);
-                    expect(runtime.model.mock.calls.length).toBe(modelCallsBefore);
-                    expect(runtime.queue).toContainEqual(
-                        expect.objectContaining({
-                            jobKey: delivery.jobKey,
-                            generation: delivery.generation + 1,
-                        }),
-                    );
-                    await expect(processAnalysisV2TaskDelivery(delivery)).rejects.toThrow(/FENCE/);
-                    const due = await db.query<{ wait_ms: number }>(
-                        `SELECT greatest(0,ceil(1000 * extract(epoch FROM
-                    (scheduler_not_before_at-clock_timestamp()))))::int AS wait_ms FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2`,
-                        [delivery.requestId, delivery.jobKey],
-                    );
-                    await new Promise((resolve) => setTimeout(resolve, due.rows[0]!.wait_ms + 20));
-                    continued++;
-                    continue;
-                }
-                expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
-                expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
-                const before = await totals();
-                const calls = [apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length];
-                expect((await processAnalysisV2TaskDelivery(delivery)).status).toBe('already_terminal');
-                expect([apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length]).toEqual(
-                    calls,
-                );
-                expect(await totals()).toEqual(before);
-            }
-            expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
-            expect(producerHashes.length).toBeGreaterThanOrEqual(1 + continued);
-            expect(producerHashes[0]).toMatch(/^[a-f0-9]{64}$/);
-            expect(new Set(producerHashes).size).toBe(1);
-            const page = await resultPage();
-            expect(page.status).toBe(200);
-            const body = await page.json();
-            expect(body.femaleAccounts).toHaveLength(1);
-            const row = body.femaleAccounts[0];
-            expect(row.instagramId).toBe(candidate);
-            expect(row.highRiskNarrative).toHaveLength(2);
-            expect(row).toMatchObject({ displayScore: 7.2, riskBand: 'high_risk' });
-            expect(row.highRiskNarrative[0]).toContain(candidate + '님');
-            expect(row.highRiskNarrative[1]).toContain(target + '님');
-            expect(row.highRiskNarrative.join(' ')).not.toContain('님님');
-            expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
-            expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
-            expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
-            expect(steps).toBe(12 + continued);
-            expect(apify.starts).toHaveLength(9);
-            expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);
-            expect(await totals()).toMatchObject({
-                consumed: 1,
-                requests: 1,
-                grants: 1,
-                actors: 9,
-                models: 3,
-                settled: 3,
-                quota: 0,
-            });
-            expect(
-                (
-                    await db.query(
-                        `SELECT
-            (SELECT count(*)::int FROM analysis_progress_events WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS published,
-            (SELECT count(*)::int FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status='ready') AS ready,
-            (SELECT count(*)::int FROM analysis_v2_result_image_manifests WHERE request_id=$1 AND sealed_at IS NOT NULL) AS sealed,
-            (SELECT policy_versions_snapshot->>'aiStage' FROM analysis_requests WHERE id=$1) AS policy,
-            (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage_rows,
-            (SELECT sum(actual_micros)::int FROM dev_live_budget.reservations WHERE provider='vertex') AS settled_cost`,
-                        [result.requestId],
-                    )
-                ).rows[0],
-            ).toMatchObject({
-                published: 1,
-                ready: 2,
-                sealed: 1,
-                policy: 'ai-stage-policy-v2.11',
-                usage_rows: 3,
-                settled_cost: (await totals()).debit,
-            });
-            const budget = await totals();
-            expect(budget.debit).toBeGreaterThan(0);
-            expect(budget.apify_reserved).toBeGreaterThan(0);
-            expect(budget.apify_committed).toBe(budget.apify_reserved);
-            const imageUrl = await assertOwnerPage(result.requestId, row.instagramId);
-            const imageRequest = () => new NextRequest(imageUrl);
-            const image = await readImage(imageRequest());
-            expect(image.status).toBe(200);
-            expect((await sharp(Buffer.from(await image.arrayBuffer())).metadata()).format).toBe('webp');
-            runtime.user = { ...user, id: otherId };
-            expect((await resultPage()).status).toBe(404);
-            expect((await readImage(imageRequest())).status).toBe(403);
-            runtime.user = null;
-            expect((await resultPage()).status).toBe(401);
-            expect((await readImage(imageRequest())).status).toBe(401);
-            expect(sqlErrors).toEqual([]);
+            await runStandardRequest(db, await seedOwner(db), scenario);
         } finally {
             await db.close();
         }
     },
     60_000,
 );
+
+async function exerciseArchiveReplay(blite: boolean, changeTriage = false) {
+    configure();
+    const db = await createStandardDatabase();
+    try {
+        const user = await seedOwner(db);
+        runtime.archiveObjects.mockReturnValue(createFixtureObjects());
+        vi.stubEnv('PRECHECKOUT_BLITE_ENABLED', String(blite));
+        vi.stubEnv('PRECHECKOUT_BLITE_ROLLOUT_PERCENT', blite ? '100' : '0');
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_capture');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SLOT', '1'.repeat(32));
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_KEY', Buffer.alloc(32, 71).toString('base64'));
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_BUCKET', 'fixture-project-dev-live-media');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_APPROVAL_NOT_BEFORE', new Date(Date.now() - 60_000).toISOString());
+        const source = await runStandardRequest(db, user, 'archive_capture', changeTriage);
+        await withVerifiedDevStandardArchive(target, coverage => {
+            expect(coverage.profileBatches).toEqual([0]);
+        });
+        const sourceReceipts = async () => (await db.query<{
+            receipts: number;
+            succeeded: number;
+            usage: string | null;
+        }>(`
+            SELECT count(*)::int AS receipts,
+                   count(*) FILTER (WHERE status='succeeded')::int AS succeeded,
+                   sum(actual_usage_usd)::text AS usage
+            FROM analysis_v2_provider_runs WHERE request_id=$1
+        `, [source.requestId])).rows[0]!;
+        const original = await sourceReceipts();
+        expect(original.receipts).toBeGreaterThan(0);
+        expect(original.succeeded).toBe(original.receipts);
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_replay');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL', source.grantId);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED', 'true');
+        // A second owner admission is subject to the normal ten-second preflight limit.
+        const nextStart = await db.query<{ wait_ms: number }>(`
+            SELECT greatest(0, ceil(1000 * extract(epoch FROM
+                  (p.created_at + interval '10 seconds' - clock_timestamp()))))::int AS wait_ms
+            FROM analysis_preflights p WHERE p.consumed_request_id=$1
+        `, [source.requestId]);
+        await new Promise(resolve => setTimeout(resolve, nextStart.rows[0]!.wait_ms + 20));
+        const destination = await runStandardRequest(db, user, 'archive_replay', changeTriage);
+        expect(destination.requestId).not.toBe(source.requestId);
+        expect(destination.grantId).not.toBe(source.grantId);
+        if (changeTriage) {
+            const { rows } = await db.query(`
+                SELECT s.operation_key = d.operation_key AS same_model_input,
+                       s.result_json->'results'->0->>'accountId' = d.result_json->'results'->0->>'accountId' AS same_account_input,
+                       st.input->>'archiveSha256' = dt.input->>'archiveSha256' AS same_triage_images,
+                       s.result_json#>>'{results,0,result,routingDecision}' AS source_route,
+                       d.result_json#>>'{results,0,result,routingDecision}' AS replay_route
+                FROM analysis_v2_scheduler_operations s
+                JOIN analysis_v2_scheduler_operations d ON d.request_id=$2 AND d.job_key=s.job_key AND d.stage=s.stage
+                JOIN analysis_v2_profile_media_inputs st ON st.request_id=s.request_id AND st.job_key=s.job_key AND st.stage='triage'
+                JOIN analysis_v2_profile_media_inputs dt ON dt.request_id=d.request_id AND dt.job_key=d.job_key
+                                                       AND dt.stage=st.stage AND dt.ordinal=st.ordinal
+                WHERE s.request_id=$1 AND s.stage='genderTriage' AND s.status='ready' AND d.status='ready'
+            `, [source.requestId, destination.requestId]);
+            expect(rows).toEqual([{
+                same_model_input: true,
+                same_account_input: true,
+                same_triage_images: true,
+                source_route: 'exclude_high_confidence_male',
+                replay_route: 'route_to_feature_analysis',
+            }]);
+        } else {
+            expect(destination.imageHash).toBe(source.imageHash);
+        }
+        expect(destination.previewDto).toEqual(source.previewDto);
+        expect(await sourceReceipts()).toEqual(original);
+        const { rows } = await db.query(`
+            SELECT (SELECT count(*)::int FROM dev_live_budget.standard_archive_replay_grants
+                    WHERE grant_id=$1 AND source_grant_id=$2) AS bindings,
+                   (SELECT count(*)::int FROM analysis_v2_provider_runs WHERE request_id=$3) AS cloned_runs
+        `, [destination.grantId, source.grantId, destination.requestId]);
+        expect(rows).toEqual([{ bindings: 1, cloned_runs: 0 }]);
+
+        const expired = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(source.approvedAt) + 86_400_001);
+        try {
+            await expect(withVerifiedDevStandardArchive(target, () => true))
+                .rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        } finally {
+            expired.mockRestore();
+        }
+    } finally {
+        await db.close();
+    }
+}
+
+it.each([false, true])('replays sealed synthetic inputs through owner result and image without Apify or source downloads (B-lite %s)', async blite => {
+    await exerciseArchiveReplay(blite);
+}, 90_000);
+
+it('rejects a newly requested feature image after a changed replay triage decision', async () => {
+    await exerciseArchiveReplay(false, true);
+}, 90_000);

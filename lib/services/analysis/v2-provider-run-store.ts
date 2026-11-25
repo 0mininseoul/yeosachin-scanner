@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import type {
     ApifyCredentialSlot,
     ProviderCostRunFinished,
@@ -1135,7 +1136,7 @@ export function createAnalysisV2ProviderRunStore(
             const actualUsageUsd = input.actualUsageUsd === null
                 ? null
                 : canonicalMoney(input.actualUsageUsd, 'actual usage');
-            const { data, error } = await client.rpc(
+            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
                 ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.terminalRpc,
                 {
                     p_request_id: input.requestId.toLowerCase(),
@@ -1147,7 +1148,7 @@ export function createAnalysisV2ProviderRunStore(
                     p_status: input.status,
                     p_actual_usage_usd: actualUsageUsd,
                 }
-            );
+            ), { retryDeadlock: false });
             if (error) throwRpcError(error, 'terminal checkpoint');
             const stored = parseStoredRun(data, 'terminal checkpoint');
             if (

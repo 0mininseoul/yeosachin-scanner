@@ -1,9 +1,11 @@
+import { validModelResponse } from '../../../commerce/precheckout/fixtures/blite-model';
+
 type Generation = {
     contents: { parts: { text?: string }[] } | { parts: { text?: string }[] }[];
     config: { responseJsonSchema: { properties: Record<string, unknown> } };
 };
 
-export function syntheticGeneration(input: Generation) {
+export function syntheticGeneration(input: Generation, triageGender: 'female' | 'male' = 'female') {
     const schema = input.config.responseJsonSchema.properties;
     const contents = Array.isArray(input.contents) ? input.contents : [input.contents];
     const prompt = contents
@@ -16,7 +18,9 @@ export function syntheticGeneration(input: Generation) {
         return value;
     };
     let output;
-    if ('accounts' in schema) {
+    if ('persona' in schema) {
+        output = validModelResponse();
+    } else if ('accounts' in schema) {
         const accountId = match(/account:[a-f0-9]{64}/);
         const evidence = 'batch-media:' + accountId.slice(-16) + ':1';
         const ids = [evidence, 'batch-media:' + accountId.slice(-16) + ':2'];
@@ -27,7 +31,7 @@ export function syntheticGeneration(input: Generation) {
                     status: 'ok',
                     accountContext: 'personal',
                     assessment: {
-                        inferredGender: 'female',
+                        inferredGender: triageGender,
                         confidence: 'high',
                         ownerConsistency: 'same_person',
                         evidenceSelectionIds: ids,
@@ -37,7 +41,7 @@ export function syntheticGeneration(input: Generation) {
         };
     } else if ('inferredGender' in schema) {
         output = {
-            inferredGender: 'female',
+            inferredGender: triageGender,
             confidence: 'high',
             ownerConsistency: 'same_person',
             evidenceSelectionIds: ['post:201:thumbnail'],

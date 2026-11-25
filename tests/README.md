@@ -16,7 +16,7 @@
 | 익명/로그인 입력·preflight | app/api/analysis/preflight/, lib/services/analysis/preflight.ts | analysis/preflight/entry-policy.test.ts, analysis/preflight/ |
 | provider·수집·정산 | lib/services/analysis/v2-collection-executors.ts, lib/services/instagram/ | analysis/providers/ |
 | job·재시도·정책 | lib/services/analysis/v2-worker.ts, v2-tasks.ts | analysis/execution/job-policy.test.ts, retry-policy.test.ts |
-| Dev Standard 접수부터 소유자 결과·이미지까지 | app/api/analysis/preflight/, lib/services/analysis/v2-worker.ts, app/result/ | analysis/execution/standard-admission-result-pglite.test.ts (독립 정상 2회, 57014 재개 1회) |
+| Dev Standard 접수부터 소유자 결과·이미지까지 | app/api/analysis/preflight/, lib/services/analysis/v2-worker.ts, app/result/ | analysis/execution/standard-admission-result-pglite.test.ts (독립 정상 2회, 프로필 읽기 및 Apify 종료 기록 57014 재개) |
 | 진행·결과·보관함 | app/progress/, app/result/, app/mypage/ | analysis/results/archive-history.test.ts, presentation-policy.test.ts, interaction-evidence.test.ts |
 | 체리(남친 맞팔 알리미) 감지·알림·구독 | lib/services/cherry/, app/api/cherry/, app/cherry/ | cherry/ |
 | 결제·주문·대기 등록 | app/api/earlybird/, lib/services/earlybird/ | commerce/checkout-policy.test.ts, commerce/ |
@@ -31,7 +31,7 @@
 
 표의 경로는 이 tests/ 디렉터리를 기준으로 한다. 세부 검사 파일명은 대상 기능 폴더에서 검색한다. 모든 파일명을 복제한 별도 인덱스는 유지하지 않는다.
 
-Dev Standard 통합 검사는 매 실행마다 빈 PGlite에 Dev 스키마와 합성 소유자를 준비한다. macOS에서 외부 연결까지 차단해 세 시나리오를 실행하는 명령은 다음과 같다.
+Dev Standard 통합 검사는 매 실행마다 빈 PGlite에 Dev 스키마와 합성 소유자를 준비한다. 정상 실행 두 번, 프로필 체크포인트 재개, 공급자 종료 영수증 시간 초과 뒤 같은 요청 재전달을 확인한다. 또한 저장소의 합성 프로필·게시물·이미지로 새 수집본을 봉인하고 별도 승인에서 재생한다. 일반 사전 점검과 B-lite 사전 점검을 각각 실행하고, B-lite를 재생할 때 보관된 미리보기를 복원하는지 확인한다. 재생은 Apify와 원천 이미지 다운로드 0회, DB 발행, 소유자 결과·후보 WebP 열람, 타인 접근 거부를 검사한다. 같은 초기 판독 입력에서 원본은 후보를 제외하고 재생은 추가 판독으로 보내는 경우도 검사한다. 보관된 초기 이미지가 모두 일치하고 추가 이미지 한 장이 없으면 워커가 실패를 기록하며, 추가 모델 호출·결과 발행·재전달에 따른 중복 차감은 각각 0건이어야 한다. 실제 Dev 수집본의 24시간 보존 기한이 지난 뒤에도 같은 합성 입력으로 실행할 수 있다. macOS에서는 아래 명령으로 외부 연결을 차단한다.
 
 ```sh
 sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' node node_modules/vitest/vitest.mjs run tests/analysis/execution/standard-admission-result-pglite.test.ts
