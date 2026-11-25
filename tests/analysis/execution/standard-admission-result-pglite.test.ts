@@ -1,5 +1,23 @@
+import { private90StageImages } from './fixtures/private90-stage-images';
+import { readStandardQaResultProof, enrollStandardQaResultProof } from '@/lib/services/dev-ui/standard-qa-result-proof';
+import type { ResultImageCaptureSource } from '@/lib/services/media/result-image-capture';
+import { createFeatureAnalysisResultIdentity, type FeatureAnalysisInput } from '@/lib/services/ai/v2-staged-analysis';
+import type { AnalysisV2ReverseLikeCollector } from '@/lib/services/analysis/v2-ai-scoring-executors';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { expect, it, vi, afterEach } from 'vitest';
+import { expect, it, vi, afterEach, beforeAll } from 'vitest';
+import { writeSync } from 'node:fs';
+import { describePrivate90Failure, emptyPrivate90Failure } from './fixtures/private90-worker-failure.mjs';
+import { private90OuterFailure, type Private90OuterEvent } from './fixtures/private90-reverse-scope';
+import { private90VertexLedger } from './fixtures/private90-vertex-ledger';
+import { verifyPrivate90Images } from './fixtures/private90-result-images';
+import { createRequire } from 'node:module';
+import { newPrivate90Observations, safePrivate90Observations, private90Job, private90ModelStage,
+    safePrivate90ModelError, safePrivate90Sql, safePrivate90WorkerCode } from './fixtures/private90-observations.mjs';
+import { bootstrapStandardArchiveSource, createStandardArchiveDatabase } from './fixtures/standard-archive-source';
+import { prepareStandardArchiveVertex } from './fixtures/standard-archive-vertex';
+import { expirySecretResource } from '@/lib/services/dev-ui/standard-qa-copy-expiry';
+import { withVerifiedStandardQaCopy } from '@/lib/services/dev-ui/standard-qa-copy';
+import { currentDevStandardArchive, type StandardQaFixtureOperation } from '@/lib/services/dev-ui/standard-archive-runtime';
 import type { PGlite } from '@electric-sql/pglite';
 import { GET as readResult } from '@/app/api/analysis/v2/result/[requestId]/route';
 import { GET as readImage } from '@/app/api/image-proxy/route';
@@ -12,7 +30,7 @@ import { createAnalysisV2ProductionExecutorRegistry } from '@/lib/services/analy
 import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-progress-reporter';
 import { assertOwnerPage } from './fixtures/standard-result-page';
-import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import { type AnalysisV2JobHandler, classifyAnalysisV2JobFailure, executeAnalysisV2DagJob, processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
 import { SyntheticApify, target, candidate } from './fixtures/standard-providers';
 import { POST as start } from '@/app/api/analysis/preflight/route';
@@ -52,11 +70,120 @@ const runtime = vi.hoisted(() => ({
     png: vi.fn(),
     model: vi.fn(),
     queue: [] as Record<string, string | number>[],
+    due: new WeakMap<object, number>(),
+    genderOuter: null as null | ((account:string,event:Private90OuterEvent,op:string)=>void),
+    featureOuter: null as null | ((input:FeatureAnalysisInput,event:Private90OuterEvent)=>void),
+    featureProbe: null as null | ((input:FeatureAnalysisInput, state:'start'|'return'|'error', error?:unknown) => void),
+    stageImages: null as null | Awaited<ReturnType<typeof private90StageImages>>,
+    imageProbe: null as null | ((sources: readonly ResultImageCaptureSource[]) => void),
+    reverseProbe: null as null | ((input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) => Promise<void>),
+    vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[]; byOperation:Map<string,Set<string>> },
 }));
+vi.mock('@/lib/services/analysis/v2-result-store', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-result-store')>();
+    const store = actual.analysisV2ResultStore;
+    return { ...actual, analysisV2ResultStore: { ...store,
+        checkpointFeatureBatch(input: Parameters<typeof store.checkpointFeatureBatch>[0]) {
+            const proof = runtime.stageImages;
+            if (!proof) return store.checkpointFeatureBatch(input);
+            const rows = input.rows.map(row => row.classification === 'verified_female' ? {
+                ...row, profileImageUrl: proof.project('female', row.candidateId, row.profileImageUrl),
+            } : row);
+            return store.checkpointFeatureBatch({ ...input, rows });
+        },
+        checkpointPrivateNames(input: Parameters<typeof store.checkpointPrivateNames>[0]) {
+            const proof = runtime.stageImages;
+            if (!proof) return store.checkpointPrivateNames(input);
+            const rows = input.rows.map(row => ({
+                ...row, profileImageUrl: proof.project('private', row.candidateId, row.profileImageUrl),
+            }));
+            return store.checkpointPrivateNames({ ...input, rows });
+        },
+    } };
+});
+vi.mock('@/lib/services/media/result-image-capture', async original => {
+    const actual = await original<typeof import('@/lib/services/media/result-image-capture')>();
+    return { ...actual, async captureResultImageSources(input: Parameters<typeof actual.captureResultImageSources>[0]) {
+        runtime.imageProbe?.(input.sources);
+        return actual.captureResultImageSources(input);
+    } };
+});
+vi.mock('@/lib/services/analysis/v2-ai-stage-runtime', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-ai-stage-runtime')>();
+    return { ...actual, createDurableAnalysisV2AiStageRuntime(...args: Parameters<typeof actual.createDurableAnalysisV2AiStageRuntime>) {
+        const stages = actual.createDurableAnalysisV2AiStageRuntime(...args);
+        const gender = stages.profileGender;
+        if (!gender) return stages;
+        return { ...stages, profileGender: { ...gender, async run(...params:Parameters<typeof gender.run>) {
+            const group = params[1];
+            const note = (account:string,e:Private90OuterEvent) => runtime.genderOuter?.(account,e,group.operationKey);
+            group.accountIds.forEach(account => note(account,'genderStart'));
+            try {
+                const rows = await gender.run(...params);
+                group.accountIds.forEach((account,i) => {
+                    const row = rows[i];
+                    if (!row) return note(account,'genderCardinality');
+                    if (row.source==='safe_fallback') note(account,'genderSafeFallback');
+                    const sex = row.result.assessment.inferredGender;
+                    note(account,sex==='female'?'genderFemale':sex==='male'?'genderMale':'genderUnknown');
+                });
+                return rows;
+            } catch (error) { group.accountIds.forEach(account => note(account,private90OuterFailure('gender',error))); throw error; }
+        } }, async features(...params:Parameters<typeof stages.features>) {
+            runtime.featureOuter?.(params[0],'featureOuterStart');
+            try {
+                const row = await stages.features(...params);
+                runtime.featureOuter?.(params[0],row.result.finalGenderDecision==='verified_female'?'featureOuterFemale':'featureOuterUnresolved');
+                return row;
+            } catch (error) { runtime.featureOuter?.(params[0],private90OuterFailure('featureOuter',error)); throw error; }
+        } };
+    } };
+});
+vi.mock('@/lib/services/ai/v2-staged-analysis', async original => {
+    const actual = await original<typeof import('@/lib/services/ai/v2-staged-analysis')>();
+    return { ...actual, async featureAnalysis(...args: Parameters<typeof actual.featureAnalysis>) {
+        runtime.featureProbe?.(args[0],'start');
+        try {
+            const result = await actual.featureAnalysis(...args);
+            runtime.featureProbe?.(args[0],'return');
+            return result;
+        } catch (error) {
+            runtime.featureProbe?.(args[0],'error',error);
+            throw error;
+        }
+    } };
+});
+vi.mock('@/lib/services/analysis/v2-ai-scoring-runtime-deps', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-ai-scoring-runtime-deps')>();
+    return { ...actual, createAnalysisV2ReverseLikeCollector(...args: Parameters<typeof actual.createAnalysisV2ReverseLikeCollector>) {
+        const collector = actual.createAnalysisV2ReverseLikeCollector(...args);
+        return { async collect(input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) {
+            await runtime.reverseProbe?.(input);
+            return collector.collect(input);
+        } };
+    } };
+});
 vi.mock('google-auth-library', async original => ({
     ...(await original<typeof import('google-auth-library')>()),
     GoogleAuth: class { async getClient() { return { request: runtime.kmsOrBucket }; } },
 }));
+vi.mock('@/lib/services/dev-ui/live-budget', async original => {
+    const actual = await original<typeof import('@/lib/services/dev-ui/live-budget')>();
+    return {
+        ...actual,
+        async reserveDevLiveVertexAttempt(...args: Parameters<typeof actual.reserveDevLiveVertexAttempt>) {
+            const receipt = await actual.reserveDevLiveVertexAttempt(...args);
+            runtime.vertexReceipts?.byRequest.set(args[1], receipt.reservationId);
+            if (runtime.vertexReceipts && args[3]) {
+                const op=args[3].operationKey;
+                const ids = runtime.vertexReceipts.byOperation.get(op) ?? new Set();
+                ids.add(receipt.reservationId);
+                runtime.vertexReceipts.byOperation.set(op,ids);
+            }
+            return receipt;
+        },
+    };
+});
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: runtime.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: runtime.session }));
 vi.mock('@/lib/services/dev-ui/live-runtime', async (original) => ({
@@ -71,8 +198,10 @@ vi.mock('@/lib/services/analysis/background-tasks', async (original) => ({
         queuePath: (...s: string[]) => 'projects/' + s[0] + '/locations/' + s[1] + '/queues/' + s[2],
         taskPath: (p: string, l: string, q: string, t: string) =>
             'projects/' + p + '/locations/' + l + '/queues/' + q + '/tasks/' + t,
-        createTask: async ({ task }: { task: { httpRequest: { body: string } } }) => {
-            runtime.queue.push(JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8')));
+        createTask: async ({ task }: { task: { httpRequest: { body: string }; scheduleTime?: { seconds: number } } }) => {
+            const payload = JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8'));
+            runtime.queue.push(payload);
+            if (task.scheduleTime) runtime.due.set(payload, Number(task.scheduleTime.seconds) * 1000);
             return [{}];
         },
     }),
@@ -92,7 +221,10 @@ vi.mock('@/lib/services/analysis/v2-media-artifact-store', async (original) => {
         ...actual,
         createGoogleCloudPrivateMediaObjectClient: ({ bucketName }: { bucketName: string }) => runtime.archiveObjects(bucketName),
         createConfiguredAnalysisV2MediaArtifactStore: () =>
-            actual.createAnalysisV2MediaArtifactStore({ objects: runtime.objects() }),
+            actual.createAnalysisV2MediaArtifactStore({
+                objects: runtime.objects(),
+                registry: actual.createAnalysisV2MediaArtifactRegistry(runtime.admin),
+            }),
     };
 });
 vi.mock('@/lib/services/analysis/v2-source-media-archive', async (original) => {
@@ -124,6 +256,10 @@ vi.mock('@google/genai/node', async (original) => ({
             this.models = {
                 generateContent: async (input: unknown) => {
                     await transport('https://vertex.fixture.invalid');
+                    if (runtime.vertexReceipts) {
+                        const id = runtime.vertexReceipts.byRequest.get(input as object);
+                        if (id) runtime.vertexReceipts.sent.push(id);
+                    }
                     return runtime.model(input);
                 },
             };
@@ -143,6 +279,16 @@ vi.mock('next/navigation', async (original) => {
         useSearchParams: () => new URLSearchParams('devAnalysis=live'),
     };
 });
+beforeAll(async () => {
+    if (!process.env.PRIVATE90_FULL_REPLAY) return;
+    const local = await vi.importActual<typeof import('./fixtures/private90-admin')>('@/lib/supabase/admin');
+    local.bindPrivate90Admin(runtime.admin);
+    // Exercise the cloud reader's importActual boundary. Production lazy imports must resolve
+    // the isolated database even when Vitest's module mock does not intercept them.
+    await vi.importActual('@/lib/services/analysis/v2-media-artifact-store');
+    vi.doUnmock('@/lib/supabase/admin');
+});
+
 const appOrigin = DEV_UI_APP_ORIGIN;
 function configure() {
     const env: Record<string, string> = {
@@ -215,7 +361,7 @@ function configure() {
     });
 }
 
-async function seedOwner(db: PGlite) {
+async function seedOwner(db: PGlite, requestTarget = target) {
     const user = {
         id: randomUUID(),
         email: 'owner@example.invalid',
@@ -246,7 +392,7 @@ async function seedOwner(db: PGlite) {
         [user.id],
     );
     await db.query('INSERT INTO dev_live_budget.standard_owner_policy(target_instagram_id) VALUES($1)', [
-        target,
+        requestTarget,
     ]);
     return user;
 }
@@ -270,10 +416,18 @@ afterEach(() => {
     vi.unstubAllEnvs();
     runtime.queue.length = 0;
     runtime.user = null;
+    runtime.vertexReceipts = null;
+    runtime.reverseProbe = null;
+    runtime.imageProbe = null;
+    runtime.stageImages = null;
+    runtime.featureProbe = null;
+    runtime.genderOuter = null;
+    runtime.featureOuter = null;
     vi.clearAllMocks();
 });
 
 const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout'] as const;
+type Private90Observations = ReturnType<typeof newPrivate90Observations>;
 type Scenario = typeof deliveryScenarios[number] | 'archive_capture' | 'archive_replay';
 
 async function runStandardRequest(
@@ -281,7 +435,38 @@ async function runStandardRequest(
     user: Awaited<ReturnType<typeof seedOwner>>,
     scenario: Scenario,
     privateCopySession = false,
+    privateReplay?: {
+        target: string;
+        profileBatches: readonly number[];
+        generate: typeof syntheticGeneration;
+        reverseScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['reverseScope'];
+        imageScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['imageScope'];
+        stageImages: Awaited<ReturnType<typeof private90StageImages>>;
+        observed: Private90Observations;
+    },
 ) {
+    const observed = privateReplay?.observed;
+    runtime.genderOuter = privateReplay?.reverseScope.accountEvent ?? null;
+    runtime.featureOuter = privateReplay ? (input,event) => {
+        const probe=privateReplay.reverseScope;
+        const id=probe.selectionOwner(input.media);
+        if (id && probe.expected.has(id)) probe.event(id,event,createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
+    } : null;
+    runtime.featureProbe = privateReplay ? (input,state,error) => {
+        const probe = privateReplay.reverseScope;
+        const id = probe.selectionOwner(input.media);
+        if (!id || !probe.expected.has(id)) return;
+        if (state === 'start') probe.event(id,'featureStart',createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
+        else probe.event(id,state === 'return' ? 'featureReturned' : probe.featureFailure(error));
+    } : null;
+    runtime.stageImages = privateReplay?.stageImages ?? null;
+    runtime.imageProbe = privateReplay ? sources => {
+        Object.assign(privateReplay.observed, privateReplay.stageImages.counts(), privateReplay.imageScope(sources));
+    } : null;
+    runtime.reverseProbe = privateReplay ? async input => {
+        Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates,runtime.vertexReceipts?.byOperation));
+    } : null;
+    runtime.vertexReceipts = observed ? { byRequest: new WeakMap(), sent: [], byOperation:new Map() } : null;
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
     const capturedBlite = blite && scenario === 'archive_capture';
@@ -316,9 +501,17 @@ async function runStandardRequest(
                 error: { code: '57014', message: 'canceling statement due to statement timeout' },
             };
         }
-        const out = await client.rpc(n, a);
+        const out = await client.rpc(n, a).catch(error => {
+            if (observed) observed.sqlState = safePrivate90Sql(error?.code);
+            throw error;
+        });
+        if (!out.error && observed) {
+            if (n === 'load_analysis_v2_media_artifact') observed.mediaRegistryLoads++;
+            if (n === 'register_analysis_v2_media_artifact') observed.mediaRegistryRegistrations++;
+        }
+        if (out.error && observed) observed.sqlState = safePrivate90Sql(out.error.code);
         if (out.error && !out.error.message.includes('FENCE'))
-            sqlErrors.push(n + ': ' + out.error.message);
+            sqlErrors.push(observed ? 'rpc_error' : n + ': ' + out.error.message);
         return out;
     });
     runtime.admin.from.mockImplementation(client.from);
@@ -326,8 +519,12 @@ async function runStandardRequest(
         ...localDatabaseClient(db, runtime.user?.id ?? null),
         auth: { getUser: async () => ({ data: { user: runtime.user }, error: null }) },
     }));
-    const apify = new SyntheticApify();
+    // Exercise two private-name chunks before public profile AI, including the 100-name boundary.
+    const syntheticPrivateCount = process.env.PRIVATE90_FULL_REPLAY === 'synthetic' ? 101 : 0;
+    const privateNameChunks = Math.ceil(syntheticPrivateCount / 100);
+    const apify = new SyntheticApify(syntheticPrivateCount, scenario === 'archive_capture' && syntheticPrivateCount > 0);
     runtime.apify.mockClear().mockImplementation(() => {
+        if (privateReplay) privateReplay.observed.apifyCalls++;
         if (isReplay) throw new Error('Unexpected Apify access during archive replay');
         return apify;
     });
@@ -335,12 +532,23 @@ async function runStandardRequest(
     runtime.r2.mockImplementation(createFixtureR2());
     const sourcePng = await makeSourcePng();
     runtime.png.mockClear().mockImplementation(() => {
+        if (privateReplay) privateReplay.observed.sourceDownloads++;
         if (isReplay) throw new Error('Unexpected source image download during archive replay');
         return sourcePng;
     });
-    runtime.model.mockImplementation(syntheticGeneration);
+    runtime.model.mockImplementation(input => {
+        if (!privateReplay) return syntheticGeneration(input);
+        privateReplay.observed.fixedVertexCalls++;
+        privateReplay.observed.modelStage = private90ModelStage(input);
+        try { return privateReplay.generate(input); } catch (error) {
+            privateReplay.observed.modelError = safePrivate90ModelError(error instanceof Error ? error.message : undefined);
+            throw error;
+        }
+    });
+    if (privateReplay) privateReplay.observed.providerCountersActive = 1;
+    const modelCallCount = () => privateReplay?.observed.fixedVertexCalls ?? runtime.model.mock.calls.length;
     const attempt = randomUUID();
-    const newPreflight = () => start(request('', 'POST', { targetInstagramId: target }, attempt));
+    const newPreflight = () => start(request('', 'POST', { targetInstagramId: privateReplay?.target ?? target }, attempt));
     const created = await newPreflight();
     const first = await created.json();
     expect(created.status, first.code).toBe(202);
@@ -465,7 +673,8 @@ async function runStandardRequest(
     let steps = 0;
     let continued = 0;
     let receiptRedeliveries = 0;
-    const modelCallsBefore = runtime.model.mock.calls.length;
+    const modelCallsBefore = modelCallCount();
+    if (privateReplay) expect(modelCallsBefore).toBe(0);
     const stateStore = createSupabaseAnalysisV2DagStateStore();
     const worker = {
         stateStore,
@@ -474,13 +683,107 @@ async function runStandardRequest(
             reloadState: (id) => stateStore.load(id),
         }),
     };
+    // Observe the actual error before the worker maps it to a stable public code.
+    const diagnosticHandler: AnalysisV2JobHandler = async claim => {
+        try {
+            return await executeAnalysisV2DagJob(claim, {
+                ...worker, onPhase: phase => { if (observed) observed.executorPhase = phase; },
+            });
+        } catch (error) {
+            if (observed) Object.assign(observed, describePrivate90Failure(error));
+            throw error;
+        }
+    };
+    const deliveryDependencies = observed ? { ...worker, handler: diagnosticHandler } : worker;
     while (runtime.queue.length) {
-        if (++steps > 24) throw new Error('Unexpected repeated task delivery');
-        const payload = runtime.queue.shift()!;
-        const delivery = parseAnalysisV2TaskPayload(payload);
-        const outcome = await runDelivery(() =>
-            processAnalysisV2TaskDelivery(delivery, worker),
-        );
+        if (observed) observed.assertion = 'queue_limit';
+        if (++steps > 24 + (privateReplay?.profileBatches.length ?? 0) * 36) throw new Error('Unexpected repeated task delivery');
+        let next = 0;
+        if (observed) {
+            // Deliver other ready jobs first. Both Cloud Tasks scheduleTime and the SQL scheduler fence apply.
+            const due = runtime.queue.map(task => runtime.due.get(task) ?? 0);
+            next = due.indexOf(Math.min(...due));
+            const delay = due[next]! - Date.now();
+            if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        const [payload] = runtime.queue.splice(next, 1);
+        if (observed) {
+            Object.assign(observed, emptyPrivate90Failure(), private90Job(payload!.jobKey));
+            observed.executorPhase = 'handler';
+            observed.assertion = 'task_parse';
+            observed.deliveryStatus = 'running';
+            observed.disposition = 'none';
+            observed.workerCode = 'none';
+            observed.sqlState = 'none';
+        }
+        const delivery = parseAnalysisV2TaskPayload(payload!);
+        if (privateReplay) {
+            privateReplay.observed.phase = 'worker';
+            privateReplay.observed.cause = 'worker_stage';
+        }
+        if (observed) observed.assertion = 'worker_return';
+        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, deliveryDependencies)).catch(error => {
+            if (observed) {
+                const failure = classifyAnalysisV2JobFailure(error);
+                observed.deliveryStatus = 'threw';
+                observed.disposition = failure.disposition;
+                observed.workerCode = safePrivate90WorkerCode(failure.code);
+                if (error && typeof error === 'object' && 'code' in error) observed.sqlState = safePrivate90Sql(error.code);
+            }
+            throw error;
+        });
+        if (observed) {
+            observed.deliveryStatus = outcome.status;
+            observed.disposition = ({ completed: 'completed', continuation: 'deferred', already_terminal: 'already_terminal',
+                failed: 'permanent', retry: 'transient' })[outcome.status];
+            if ('errorCode' in outcome) {
+                observed.workerCode = safePrivate90WorkerCode(outcome.errorCode);
+                if (outcome.errorCode === 'JOB_ATTEMPTS_EXHAUSTED') observed.disposition = 'exhausted';
+            }
+        }
+        if (privateReplay && (outcome.status === 'failed' || outcome.status === 'retry')) {
+            if (privateReplay.observed.sqlState !== 'none') privateReplay.observed.cause = 'worker_sql';
+            if (privateReplay.observed.modelError !== 'none') privateReplay.observed.cause = 'model_routing';
+            if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') {
+                privateReplay.observed.cause = 'missing_keyed_media';
+                if (observed?.jobStage === 'reverse_likes' && observed.reverseCompared) {
+                    privateReplay.observed.cause = observed.reverseActualHashMatch ? 'archive_unavailable' : 'reverse_scope';
+                }
+                if (observed?.jobStage === 'finalize' && observed.imageScopeCompared) {
+                    privateReplay.observed.cause = observed.imageScopeMismatched ? 'final_image_identity' : 'archive_unavailable';
+                }
+            }
+            if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
+        }
+        const capacityRetry = outcome.status === 'retry' && [
+            'ANALYSIS_V2_AI_CAPACITY_PENDING', 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+            'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE', 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+        ].includes(outcome.errorCode);
+        if (observed && (outcome.status === 'continuation' || capacityRetry)) {
+            let task = payload!;
+            if (outcome.status === 'continuation') {
+                observed.continuations++;
+                observed.assertion = 'recovery_fanout';
+                expect(outcome.pendingRecoveryCount).toBe(0);
+                observed.assertion = 'continuation_successor';
+                const successor = runtime.queue.find(t => t.jobKey === delivery.jobKey && t.generation === delivery.generation + 1);
+                expect(Boolean(successor)).toBe(true);
+                task = successor!;
+            } else {
+                observed.retries++;
+                runtime.queue.push(task); // Cloud Tasks redelivers the same unacknowledged payload.
+            }
+            observed.assertion = 'dispatch_fence';
+            const due = await db.query<{ ms: number }>(`
+                SELECT greatest(0,ceil(1000*extract(epoch FROM
+                    (greatest(scheduler_not_before_at,lease_expires_at)-clock_timestamp()))))::int AS ms
+                FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2 AND status='pending'
+                    AND dispatch_generation=$3 AND dispatch_reservation_token=$4
+            `, [delivery.requestId, delivery.jobKey, task.generation, task.reservationToken]);
+            expect(due.rows.length).toBe(1);
+            runtime.due.set(task, Math.max(runtime.due.get(task) ?? 0, Date.now() + due.rows[0]!.ms + (capacityRetry ? 1000 : 20)));
+            continue;
+        }
         if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
             expect(outcome.errorCode).toBe('ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR');
             expect(receiptRedeliveries).toBe(0);
@@ -492,7 +795,7 @@ async function runStandardRequest(
                 [delivery.requestId, delivery.jobKey],
             );
             expect(telemetry.rows).toHaveLength(0);
-            runtime.queue.unshift(payload); // Cloud Tasks retries the same delivery.
+            runtime.queue.unshift(payload!); // Cloud Tasks retries the same delivery.
             continue;
         }
         if (outcome.status === 'continuation' && scenario === 'timeout') {
@@ -516,14 +819,28 @@ async function runStandardRequest(
             continue;
         }
         expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
+        if (observed) observed.assertion = 'recovery_fanout';
         expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
         const before = await totals();
-        const calls = [apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length];
+        const calls = [apify.starts.length, modelCallCount(), runtime.queue.length];
+        if (observed) observed.assertion = 'terminal_duplicate';
         expect((await processAnalysisV2TaskDelivery(delivery)).status).toBe('already_terminal');
-        expect([apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length]).toEqual(
+        if (observed) observed.assertion = 'duplicate_side_effects';
+        expect([apify.starts.length, modelCallCount(), runtime.queue.length]).toEqual(
             calls,
         );
+        if (observed) observed.assertion = 'duplicate_ledger';
         expect(await totals()).toEqual(before);
+        if (privateReplay) {
+            if (/^track:profile-ai:batch:\d+$/.test(delivery.jobKey)) privateReplay.observed.completedProfileBatches++;
+            privateReplay.observed.workerJobs++;
+            privateReplay.observed.duplicateDeliveries++;
+            // No completed delivery needs to keep a second copy of image buffers or RPC arguments.
+            runtime.model.mockClear();
+            runtime.admin.rpc.mockClear();
+            runtime.admin.from.mockClear();
+            runtime.r2.mockClear();
+        }
     }
     expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
     expect(receiptRedeliveries).toBe(scenario === 'terminal receipt timeout' ? 1 : 0);
@@ -535,12 +852,91 @@ async function runStandardRequest(
             p_claim_token: receiptCalls[2].p_claim_token,
         });
     }
+    if (observed) observed.assertion = 'private_source_hash';
     expect(producerHashes.length).toBeGreaterThanOrEqual(1 + continued);
     expect(producerHashes[0]).toMatch(/^[a-f0-9]{64}$/);
     expect(new Set(producerHashes).size).toBe(1);
+    if (observed) observed.assertion = 'owner_result';
     const page = await resultPage();
     expect(page.status).toBe(200);
     const body = await page.json();
+    if (privateReplay) {
+        const observed = privateReplay.observed;
+        observed.phase = 'result';
+        observed.cause = 'publication_count';
+        observed.assertion = 'publication';
+        const counts = (await db.query<{ published: number; images: number; manifests: number; usage: number; cloned: number; batches: number }>(`
+            SELECT (SELECT count(*)::int FROM analysis_progress_events WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS published,
+                   (SELECT count(*)::int FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status='ready') AS images,
+                   (SELECT count(*)::int FROM analysis_v2_result_image_manifests WHERE request_id=$1 AND sealed_at IS NOT NULL) AS manifests,
+                   (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage,
+                   (SELECT count(*)::int FROM analysis_v2_provider_runs WHERE request_id=$1) AS cloned,
+                   (SELECT count(*)::int FROM analysis_pipeline_jobs
+                    WHERE request_id=$1 AND job_key LIKE 'track:profile-ai:batch:%' AND status='completed') AS batches
+        `, [result.requestId])).rows[0]!;
+        expect(observed.completedProfileBatches).toBe(counts.batches);
+        observed.published = counts.published;
+        observed.readyImages = counts.images;
+        expect(observed.apifyCalls).toBe(runtime.apify.mock.calls.length);
+        expect(observed.sourceDownloads).toBe(runtime.png.mock.calls.length);
+        expect(counts).toMatchObject({ published: 1, manifests: 1, cloned: 0, batches: privateReplay.profileBatches.length });
+        expect(counts.images).toBeGreaterThan(0);
+        expect(observed.fixedVertexCalls).toBeGreaterThan(0);
+        expect(observed.mediaRegistryLoads).toBeGreaterThan(0);
+        expect(observed.mediaRegistryRegistrations).toBeGreaterThan(0);
+        expect(observed).toMatchObject({ reverseCompared:1,reverseSourceHashMatch:1,reverseActualHashMatch:1,reverseMissing:0,reverseExtra:0 });
+        expect(observed).toMatchObject({
+            imageScopeCompared: 1, imageScopeMismatched: 0, imageScopePlanMissing: 0,
+            imageScopePlanExtra: 0, imageScopePlanDuplicate: 0,
+        });
+        expect(observed.stageProofRowsApplied).toBe(observed.imageScopePlanned - 1);
+        expect(counts.images).toBe(observed.imageScopePlanned);
+        observed.cause = 'model_routing';
+        expect(observed.modelError).toBe('none');
+        observed.cause = 'ledger_mismatch';
+        expect(counts.usage).toBe(observed.fixedVertexCalls);
+        expect(observed.apifyCalls).toBe(0);
+        expect(observed.sourceDownloads).toBe(0);
+        observed.cause = 'ledger_mismatch';
+        observed.assertion = 'vertex_ledger';
+        const sentIds = runtime.vertexReceipts!.sent;
+        expect(sentIds.length).toBe(observed.fixedVertexCalls);
+        expect(new Set(sentIds).size).toBe(sentIds.length);
+        const ledger = await private90VertexLedger(db, approval.id, sentIds);
+        Object.assign(observed, { ledgerChecked: 1, positiveSettlements: ledger.positive, unusedHolds: ledger.unused,
+            unresolvedHolds: ledger.unresolved, duplicatePositive: ledger.duplicate, orphanPositive: ledger.orphan });
+        expect(ledger).toMatchObject({ positive: observed.fixedVertexCalls, unresolved: 0, duplicate: 0, orphan: 0 });
+        expect(await totals()).toMatchObject({
+            consumed: 1, requests: 1, grants: 1, actors: 0, apify_reserved: 0, apify_committed: 0, quota: 0,
+            models: ledger.positive + ledger.unused, settled: ledger.positive + ledger.unused, debit: ledger.debit,
+        });
+        // Keep the selected identity, signed locator and image bytes inside this process.
+        const member = body.femaleAccounts.find((item: { profileImage?: string }) => Boolean(item.profileImage));
+        expect(Boolean(member)).toBe(true);
+        observed.phase = 'owner_image';
+        observed.assertion = 'image';
+        await verifyPrivate90Images(result.requestId, body, observed);
+        expect(observed.webpVerified).toBe(counts.images);
+        observed.cause = 'owner_access';
+        const locator = await assertOwnerPage(result.requestId, member.instagramId);
+        const ownerImage = await readImage(new NextRequest(locator));
+        expect(observed.webpVerified).toBe(observed.imageScopePlanned);
+        observed.ownerResult = page.status;
+        observed.ownerImage = ownerImage.status;
+        expect(ownerImage.status).toBe(200);
+        expect((await sharp(Buffer.from(await ownerImage.arrayBuffer())).metadata()).format).toBe('webp');
+        runtime.user = { ...user, id: otherId };
+        observed.otherResult = (await resultPage()).status;
+        observed.otherImage = (await readImage(new NextRequest(locator))).status;
+        runtime.user = null;
+        observed.anonymousResult = (await resultPage()).status;
+        observed.anonymousImage = (await readImage(new NextRequest(locator))).status;
+        expect([observed.otherResult, observed.otherImage, observed.anonymousResult, observed.anonymousImage])
+            .toEqual([404, 403, 401, 401]);
+        expect(sqlErrors.length).toBe(0);
+        return { grantId: approval.id, approvedAt: approval.approvedAt, previewDto: null,
+            requestId: result.requestId as string, imageHash: '' };
+    }
     expect(body.femaleAccounts).toHaveLength(1);
     const row = body.femaleAccounts[0];
     expect(row.instagramId).toBe(candidate);
@@ -552,17 +948,17 @@ async function runStandardRequest(
     expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
     expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
     expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
-    expect(steps).toBe(12 + continued + receiptRedeliveries);
+    expect(steps).toBe(12 + privateNameChunks + continued + receiptRedeliveries);
     const expectedActors = isReplay ? 0 : 9;
     expect(apify.starts).toHaveLength(expectedActors);
-    expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);
+    expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3 + privateNameChunks);
     expect(await totals()).toMatchObject({
         consumed: 1,
         requests: 1,
         grants: 1,
         actors: expectedActors,
-        models: capturedBlite ? 4 : 3,
-        settled: capturedBlite ? 4 : 3,
+        models: (capturedBlite ? 4 : 3) + privateNameChunks,
+        settled: (capturedBlite ? 4 : 3) + privateNameChunks,
         quota: 0,
     });
     expect(
@@ -580,10 +976,10 @@ async function runStandardRequest(
         ).rows[0],
     ).toMatchObject({
         published: 1,
-        ready: 2,
+        ready: 2 + syntheticPrivateCount,
         sealed: 1,
         policy: 'ai-stage-policy-v2.11',
-        usage_rows: 3,
+        usage_rows: 3 + privateNameChunks,
         settled_cost: (await totals()).debit,
     });
     const budget = await totals();
@@ -775,6 +1171,12 @@ it('replays a separately sealed copy through the owner image using independent s
         const { policy, destination } = await openStandardQaCopyForJob('export');
         const result = await exportStandardQaCopy(policy, live, destination);
         expect(result.profileBatches).toBe(1);
+        if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
+            const receipts = await archiveDb.query<{ sourceFingerprint: string; webpSha256: string }>(
+                'SELECT source_fingerprint AS "sourceFingerprint", sha256 AS "webpSha256" FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status=\'ready\' ORDER BY sort_ordinal',
+                [capture.requestId]);
+            await enrollStandardQaResultProof(policy, destination, receipts.rows);
+        }
         sourceTime = Date.parse(capture.approvedAt) + 86_400_001;
         await expect(live.openSealedArchive()).rejects.toThrow('EXPIRED');
     } finally {
@@ -786,6 +1188,21 @@ it('replays a separately sealed copy through the owner image using independent s
     sourceObjects = createFixtureObjects();
     vi.unstubAllGlobals();
     configure();
+    if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
+        runtime.archiveObjects.mockImplementation((name: string) => {
+            if (name !== copyBucket) throw new Error('Original capture unavailable');
+            return copyObjects;
+        });
+        return reportPrivate90(async observed => {
+            const { policy, destination } = await openStandardQaCopyForJob('read');
+            await withVerifiedStandardQaCopy(policy, destination, async (coverage, reader) => {
+                const proof = await readStandardQaResultProof(policy, destination);
+                await runPrivate90Fixture(target, coverage.profileBatches, reader, observed, proof);
+                expect(observed.stageProofDirectDrift).toBe(observed.stageProofRows - 1);
+                expect(observed.stageProofRowsApplied).toBe(observed.publicImages + observed.privateImages);
+            });
+        });
+    }
     const nextDb = await createStandardDatabase();
     try {
         captureConfig();
@@ -850,3 +1267,120 @@ it('replays a separately sealed copy through the owner image using independent s
         await nextDb.close();
     }
 }, 120_000);
+
+
+type PrivateReader = Parameters<StandardQaFixtureOperation<unknown>>[1];
+
+async function runPrivate90Fixture(
+    requestTarget: string, profileBatches: readonly number[], reader: PrivateReader, observed: Private90Observations, proof: unknown,
+) {
+    const archive = currentDevStandardArchive();
+    if (archive?.mode !== 'replay' || archive.target !== requestTarget) throw new Error('PRIVATE90_READER_REQUIRED');
+    observed.profileBatches = profileBatches.length;
+    const blite = await archive.load('preflight-blite-policy-v1', [requestTarget]);
+    if (typeof blite !== 'boolean') throw new Error('PRIVATE90_BLITE_POLICY_INVALID');
+    vi.unstubAllGlobals();
+    configure();
+    vi.stubEnv('DEV_LIVE_STANDARD_TARGET', requestTarget);
+    vi.stubEnv('PRECHECKOUT_BLITE_ENABLED', String(blite));
+    vi.stubEnv('PRECHECKOUT_BLITE_ROLLOUT_PERCENT', blite ? '100' : '0');
+    const db = await createStandardArchiveDatabase();
+    try {
+        observed.phase = 'source_ledger';
+        observed.cause = 'source_receipts';
+        const owner = await seedOwner(db, requestTarget);
+        const source = await bootstrapStandardArchiveSource(db, { ownerId: owner.id, target: requestTarget, reader, profileBatches });
+        observed.sourceReceipts = source.receiptCount;
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_replay');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SLOT', randomBytes(16).toString('hex'));
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL', source.grantId);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED', 'true');
+        observed.phase = 'fixed_model';
+        observed.cause = 'sealed_model_inputs';
+        observed.cause = 'result_stage_proof';
+        const stageImages = await private90StageImages({ reader, target: requestTarget, batches: profileBatches, proof });
+        Object.assign(observed, stageImages.counts());
+        observed.cause = 'sealed_model_inputs';
+        const model = await prepareStandardArchiveVertex({ target: requestTarget, reader, profileBatches });
+        Object.assign(observed,model.reverseScope.sourceCounts());
+        observed.publicProfilesInspected = model.counts().profiles;
+        observed.missingFeatureInputs = model.counts().missingRemainder;
+        observed.phase = 'admission';
+        observed.cause = 'preflight_admission';
+        const due = await db.query<{ ms: number }>(`
+            SELECT greatest(0,ceil(1000*extract(epoch FROM
+                (created_at + interval '10 seconds' - clock_timestamp()))))::int AS ms
+            FROM analysis_preflights WHERE consumed_request_id=$1
+        `, [source.requestId]);
+        await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
+        await runStandardRequest(db, owner, 'archive_replay', true, {
+            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, imageScope:model.imageScope, stageImages, profileBatches, observed,
+        });
+        observed.phase = 'complete';
+        observed.assertion = 'none';
+        observed.cause = 'none';
+    } finally {
+        await db.close();
+    }
+}
+
+async function reportPrivate90(run: (observed: Private90Observations) => Promise<void>) {
+    // Vitest threads can override execArgv. Install the same guard in this worker before opening any reader.
+    createRequire(import.meta.url)(process.cwd() + '/scripts/dev-standard-private90-egress.cjs');
+    const observed = newPrivate90Observations();
+    try {
+        await run(observed);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message === 'PRIVATE90_NETWORK_DENIED') observed.cause = 'network_denied';
+        if (message === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' || message === 'OFFLINE_STANDARD_VERTEX_SEALED_INPUT_MISSING')
+            observed.cause = 'missing_keyed_media';
+        if (message.startsWith('OFFLINE_STANDARD_VERTEX_') && observed.cause !== 'missing_keyed_media')
+            observed.cause = 'model_routing';
+        if (message.startsWith('Offline Standard source bootstrap failed at local ')) observed.cause = 'source_admission';
+        throw new Error('PRIVATE90_FULL_REPLAY_FAILED');
+    } finally {
+        writeSync(3, JSON.stringify(safePrivate90Observations(observed)));
+    }
+}
+
+it.skipIf(process.env.PRIVATE90_FULL_REPLAY !== 'cloud')('runs the authorized private90 copy through the isolated Standard worker', async () => {
+    await reportPrivate90(async observed => {
+        if (process.env.DEPLOYMENT_ROLE !== 'dev' || !process.env.CLOUD_RUN_JOB) throw new Error('PRIVATE90_DEV_JOB_REQUIRED');
+        const bucket = process.env.DEV_STANDARD_QA_COPY_BUCKET!;
+        const key = process.env.DEV_STANDARD_QA_COPY_KMS_KEY!;
+        const { Compute } = await vi.importActual<typeof import('google-auth-library')>('google-auth-library');
+        // Bind credentials to the Cloud Run metadata service. The reader principal needs read and decrypt only.
+        const credential = new Compute({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+        const bucketPath = '/storage/v1/b/' + encodeURIComponent(bucket);
+        const downloadPath = '/download' + bucketPath + '/o/';
+        const expiry = expirySecretResource(process.env.DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION!,
+            process.env.DEV_STANDARD_QA_COPY_PROJECT!, process.env.DEV_STANDARD_QA_COPY_PROJECT_NUMBER!, key.split('/')[3]!);
+        if (expiry.regional) throw new Error('PRIVATE90_EXPIRY_LOCATION_INVALID');
+        const requestReadOnly = <T>(opts: { url: string; method?: string }) => {
+            const url = new URL(opts.url);
+            const gcs = url.origin === 'https://storage.googleapis.com' && (opts.method ?? 'GET') === 'GET'
+                && (url.pathname === bucketPath || url.pathname === bucketPath + '/o'
+                    || url.pathname.startsWith(bucketPath + '/o/') || url.pathname.startsWith(downloadPath));
+            const kms = opts.method === 'POST' && url.origin === 'https://cloudkms.googleapis.com'
+                && url.pathname === '/v1/' + key + ':decrypt';
+            const expiryRead = (opts.method ?? 'GET') === 'GET'
+                && (url.href === expiry.url || url.href === expiry.url + '/versions/1:access');
+            if (!gcs && !kms && !expiryRead) throw new Error('PRIVATE90_NETWORK_DENIED');
+            return credential.request<T>({ ...opts, url: url.href, redirect: 'error' });
+        };
+        const { createGoogleCloudPrivateMediaObjectClient } =
+            await vi.importActual<typeof import('@/lib/services/analysis/v2-media-artifact-store')>('@/lib/services/analysis/v2-media-artifact-store');
+        runtime.kmsOrBucket.mockImplementation(requestReadOnly);
+        runtime.archiveObjects.mockImplementation((name: string) => {
+            if (name !== bucket) throw new Error('PRIVATE90_BUCKET_DENIED');
+            return createGoogleCloudPrivateMediaObjectClient({ bucketName: bucket, requester: { request: requestReadOnly } });
+        });
+        const { policy, destination } = await openStandardQaCopyForJob('read');
+        await withVerifiedStandardQaCopy(policy, destination, async (coverage, reader) => {
+            observed.cause = 'result_stage_proof';
+            const proof = await readStandardQaResultProof(policy, destination);
+            await runPrivate90Fixture(policy.target, coverage.profileBatches, reader, observed, proof);
+        });
+    });
+}, 3_600_000);

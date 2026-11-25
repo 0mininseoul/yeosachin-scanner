@@ -45,9 +45,18 @@ type ActorInput = {
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
+    constructor(private readonly privateCount = 0, private readonly signedProfileImages = false) {}
+    private profilePicture(username: string) {
+        return picture(username) + (this.signedProfileImages ? '?z=2&a=1&utm_source=offline' : '');
+    }
     private rows(actor: string, input: ActorInput) {
         if (actor === 'apify/instagram-profile-scraper' && input.usernames)
-            return input.usernames.map(profileItem);
+            return input.usernames.map(username => {
+                const profile = profileItem(username);
+                profile.profilePicUrl = this.profilePicture(username);
+                if (username === target) profile.followersCount = profile.followsCount = 1 + this.privateCount;
+                return profile;
+            });
         if (input.Account)
             return [
                 {
@@ -58,8 +67,16 @@ export class SyntheticApify {
                     full_name: candidate,
                     is_private: false,
                     is_verified: false,
-                    profile_pic_url: picture(candidate),
+                    profile_pic_url: this.profilePicture(candidate),
                 },
+                ...Array.from({ length: this.privateCount }, (_, index) => {
+                    const username = 'fixture_private_' + index;
+                    return {
+                        username_scrape: target, type: input.dataToScrape,
+                        id: String(index + 1000), username, full_name: username,
+                        is_private: true, is_verified: false, profile_pic_url: this.profilePicture(username),
+                    };
+                }),
             ];
         if (input.posts)
             return input.posts.map((url) => {
@@ -70,7 +87,7 @@ export class SyntheticApify {
                     id: '2',
                     is_private: false,
                     is_verified: false,
-                    profile_pic_url: picture(username),
+                    profile_pic_url: this.profilePicture(username),
                     liked_post: url,
                     total_likes: 1,
                     is_new: true,

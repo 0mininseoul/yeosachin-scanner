@@ -30,3 +30,27 @@ node --conditions=react-server --import tsx scripts/dev-standard-private-qa-copy
 - 만료 후 원래 QA 열람 주체로 `--verify-revoked`를 실행한다. 감싼 키 객체의 메타데이터 접근 상태와 보조 시크릿 버전 1의 접근을 확인한다. 보조 시크릿 접근이 403 또는 404일 때 `revoked`가 나온다. 같은 권한 조건으로 승인된 각 주체가 대상이다.
 - 본문 열람·KMS 복호화 권한이 없는 목록 점검 주체로 `--verify-deleted`를 실행한다. 만료 전 시크릿 메타데이터 읽기를 확인해 둔 감사 주체로, 만료 시크릿 자체가 404인지와 한 승인 접두사 아래 현행·비현행 버전과 soft-deleted 세대를 조회한다. 둘 다 비어야 `deleted`가 나온다. GCS는 soft delete 정책이 없는 버킷에서 soft-deleted 목록 요청을 400으로 거절할 수 있다. 이때 도구는 `versions_absent_soft_delete_unverified`와 종료 코드 2를 반환한다. 승인 기간 전체의 버킷 변경 감사 로그와 soft delete가 처음부터 비활성화된 증거를 대조한 뒤 복구 가능한 세대의 유무를 기록한다. Secret Manager는 설정한 시각에 시크릿과 버전을 복구 불가 삭제한다. 승인 기간 동안 별도 내보내기 또는 키 보관을 하지 않아야 한다. 공급자의 저장장치 내부 삭제 시각은 객체 API의 검증 범위를 벗어난다. [Secret Manager 만료](https://docs.cloud.google.com/secret-manager/docs/creating-and-managing-expiring-secrets) · [GCS 객체 목록 API](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [GCS 객체 수명 주기](https://docs.cloud.google.com/storage/docs/lifecycle)
 - 기록에는 기한·확인 시각, 승인 범위 내 주체 수, 권한 검사 및 버전 확인 결과와 집계만 남긴다. 미확인 상태나 삭제 대기 건을 완료로 처리하지 않는다.
+
+## 독립 PGlite에서 전체 Standard 재생
+
+Node 24와 저장소의 개발 의존성이 있는 환경에서 저장소 루트를 작업 디렉터리로 쓴다. 아래 합성 검사는 메모리에서 사본을 만들어 봉인한 뒤, 독립 소유자와 새 PGlite 원장으로 사전 점검·접수·워커·DB 발행·소유자 결과와 이미지를 다시 읽는다.
+
+```sh
+node scripts/dev-standard-private90-full-replay.mjs --synthetic
+```
+
+승인된 사본은 전용 Dev Cloud Run Job에서 다음 명령으로 읽는다. 이 Job은 위의 사본 읽기 환경, `DEPLOYMENT_ROLE=dev`, Cloud Run이 주입한 `CLOUD_RUN_JOB`을 사용한다. 읽기 계정에는 승인된 버킷의 읽기, 지정된 KMS 키의 복호화, 지정된 만료 보조키의 메타데이터와 버전 1 읽기가 필요하다.
+
+```sh
+node scripts/dev-standard-private90-full-replay.mjs --read-copy
+```
+
+리더는 검증한 봉인 사본을 메모리에서 읽는다. 분석 호출은 메모리 PGlite, 고정 Vertex 응답, 메모리 R2와 로컬 큐로 연결한다. 결과 페이지의 공개·비공개 커서를 끝까지 읽고, 반환한 이미지 경로별 소유자 GET 및 WebP 형식을 검증하며, 후보 이미지 한 건으로 타인·익명 접근 상태를 확인한다. 결과 수치는 해당 고정 판독을 실행한 실측이다.
+
+결과 단계 입력의 원천 URL이 수집 때와 다른 순서로 정규화된 과거 사본은 같은 승인에 묶인 보조 영수증을 쓴다. 보조 영수증은 원래 결과 행 순서의 URL 지문과 WebP 지문만 담는다. 리더는 원본 명세 전체의 순서 해시와 각 이미지의 실제 바이트를 대조한다. 이후 공개·비공개 결과 체크포인트를 기록할 때 같은 후보의 봉인된 수집 앵커를 확인하고, 원래 결과 이미지의 종류·후보·지문 세 값이 모두 일치하는 결과 단계 앵커를 쓴다. 프로필 수집과 판독에는 원래 수집 앵커가 들어간다. 이 증거는 과거 결과 단계의 입력을 복원하며 삭제된 원시 URL에서 두 앵커가 유도된 과정은 별도 미확인으로 기록한다. 직접 일치 수, 직접 불일치 수, 복원 적용 수는 각각 보고한다.
+
+이 실행기의 보조키 읽기 허용 대상은 승인된 전역 Secret Manager 리소스 한 개의 메타데이터와 버전 1이다.
+
+CLI는 자식의 표준출력과 표준오류를 폐기하고 별도 익명 파이프로 검증된 정수·상태만 출력한다. `status=verified`는 최종 접근 검증을 포함해 완료된 경우다. 실패하면 종료 코드 1과 마지막 단계·허용된 원인 분류·완료 수치만 반환한다. 공급자 계측이 설치되면 `providerCountersActive`가 1이 되고, 호출 시점부터 Apify 접근 시도·원천 이미지 다운로드 시도·고정 Vertex 호출을 집계한다. `--synthetic`은 OS 네트워크 차단 환경에서도 실행된다.
+
+실패 진단에는 허용된 작업 단계·배치 번호, 전달 상태·오류 분류, SQLSTATE, 고정 모델 단계·오류 코드와 마지막 검사 이름을 남긴다. 최종 원장 대조는 고정 SDK 전송에 실제로 배정된 예약과 양수 정산을 대응시킨다. 전송 전 미사용으로 명시 해제된 0원 예약은 별도 집계한다.

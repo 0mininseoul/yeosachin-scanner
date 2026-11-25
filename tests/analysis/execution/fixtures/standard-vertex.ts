@@ -1,9 +1,24 @@
 import { validModelResponse } from '../../../commerce/precheckout/fixtures/blite-model';
 
 type Generation = {
-    contents: { parts: { text?: string }[] } | { parts: { text?: string }[] }[];
+    contents: { parts: { text?: string; inlineData?: { data?: string } }[] } | { parts: { text?: string; inlineData?: { data?: string } }[] }[];
     config: { responseJsonSchema: { properties: Record<string, unknown> } };
 };
+
+/** Return neutral answers in the private-name stage's exact input order. */
+export function fixedPrivateNameResults(input: Generation) {
+    const schema = input.config.responseJsonSchema as { type?: string; items?: { properties?: Record<string, unknown> } };
+    if (schema.type?.toLowerCase() !== 'array' || !schema.items?.properties || !('femaleScore' in schema.items.properties)) return null;
+    const contents = Array.isArray(input.contents) ? input.contents : [input.contents];
+    const prompt = contents.flatMap(content => content.parts).map(part => part.text ?? '').join('\n');
+    const marker = '\n입력 JSON:\n';
+    const offset = prompt.lastIndexOf(marker);
+    if (offset < 0) throw new Error('OFFLINE_STANDARD_VERTEX_PROMPT_SHAPE');
+    const rows: unknown = JSON.parse(prompt.slice(offset + marker.length));
+    if (!Array.isArray(rows) || !rows.every(row => row && typeof row.id === 'string'))
+        throw new Error('OFFLINE_STANDARD_VERTEX_MODEL_INPUT_SHAPE');
+    return rows.map(row => ({ id: row.id, femaleScore: 0.5, isName: false, confidence: 0 }));
+}
 
 export function syntheticGeneration(input: Generation) {
     const schema = input.config.responseJsonSchema.properties;
@@ -18,7 +33,10 @@ export function syntheticGeneration(input: Generation) {
         return value;
     };
     let output;
-    if ('persona' in schema) {
+    const privateNames = fixedPrivateNameResults(input);
+    if (privateNames) {
+        output = privateNames;
+    } else if ('persona' in schema) {
         output = validModelResponse();
     } else if ('accounts' in schema) {
         const accountId = match(/account:[a-f0-9]{64}/);
