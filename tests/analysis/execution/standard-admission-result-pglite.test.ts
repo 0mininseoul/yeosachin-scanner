@@ -1,5 +1,14 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach } from 'vitest';
+import { writeSync } from 'node:fs';
+import { verifyPrivate90Images } from './fixtures/private90-result-images';
+import { createRequire } from 'node:module';
+import { newPrivate90Observations, safePrivate90Observations } from './fixtures/private90-observations.mjs';
+import { bootstrapStandardArchiveSource, createStandardArchiveDatabase } from './fixtures/standard-archive-source';
+import { prepareStandardArchiveVertex } from './fixtures/standard-archive-vertex';
+import { expirySecretResource } from '@/lib/services/dev-ui/standard-qa-copy-expiry';
+import { withVerifiedStandardQaCopy } from '@/lib/services/dev-ui/standard-qa-copy';
+import { currentDevStandardArchive, type StandardQaFixtureOperation } from '@/lib/services/dev-ui/standard-archive-runtime';
 import type { PGlite } from '@electric-sql/pglite';
 import { GET as readResult } from '@/app/api/analysis/v2/result/[requestId]/route';
 import { GET as readImage } from '@/app/api/image-proxy/route';
@@ -215,7 +224,7 @@ function configure() {
     });
 }
 
-async function seedOwner(db: PGlite) {
+async function seedOwner(db: PGlite, requestTarget = target) {
     const user = {
         id: randomUUID(),
         email: 'owner@example.invalid',
@@ -246,7 +255,7 @@ async function seedOwner(db: PGlite) {
         [user.id],
     );
     await db.query('INSERT INTO dev_live_budget.standard_owner_policy(target_instagram_id) VALUES($1)', [
-        target,
+        requestTarget,
     ]);
     return user;
 }
@@ -274,6 +283,7 @@ afterEach(() => {
 });
 
 const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout'] as const;
+type Private90Observations = ReturnType<typeof newPrivate90Observations>;
 type Scenario = typeof deliveryScenarios[number] | 'archive_capture' | 'archive_replay';
 
 async function runStandardRequest(
@@ -281,6 +291,12 @@ async function runStandardRequest(
     user: Awaited<ReturnType<typeof seedOwner>>,
     scenario: Scenario,
     privateCopySession = false,
+    privateReplay?: {
+        target: string;
+        profileBatches: readonly number[];
+        generate: typeof syntheticGeneration;
+        observed: Private90Observations;
+    },
 ) {
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
@@ -338,9 +354,9 @@ async function runStandardRequest(
         if (isReplay) throw new Error('Unexpected source image download during archive replay');
         return sourcePng;
     });
-    runtime.model.mockImplementation(syntheticGeneration);
+    runtime.model.mockImplementation(privateReplay?.generate ?? syntheticGeneration);
     const attempt = randomUUID();
-    const newPreflight = () => start(request('', 'POST', { targetInstagramId: target }, attempt));
+    const newPreflight = () => start(request('', 'POST', { targetInstagramId: privateReplay?.target ?? target }, attempt));
     const created = await newPreflight();
     const first = await created.json();
     expect(created.status, first.code).toBe(202);
@@ -475,12 +491,28 @@ async function runStandardRequest(
         }),
     };
     while (runtime.queue.length) {
-        if (++steps > 24) throw new Error('Unexpected repeated task delivery');
+        if (++steps > 24 + (privateReplay?.profileBatches.length ?? 0) * 36) throw new Error('Unexpected repeated task delivery');
         const payload = runtime.queue.shift()!;
         const delivery = parseAnalysisV2TaskPayload(payload);
-        const outcome = await runDelivery(() =>
-            processAnalysisV2TaskDelivery(delivery, worker),
-        );
+        if (privateReplay) {
+            privateReplay.observed.phase = 'worker';
+            privateReplay.observed.cause = 'worker_stage';
+        }
+        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, worker));
+        if (privateReplay && (outcome.status === 'failed' || outcome.status === 'retry')) {
+            if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') privateReplay.observed.cause = 'missing_keyed_media';
+            if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
+        }
+        if (privateReplay && outcome.status === 'continuation') {
+            expect(outcome.pendingRecoveryCount).toBe(0);
+            expect(runtime.queue.some(task => task.jobKey === delivery.jobKey && task.generation === delivery.generation + 1)).toBe(true);
+            const due = await db.query<{ ms: number }>(`
+                SELECT greatest(0,ceil(1000*extract(epoch FROM (scheduler_not_before_at-clock_timestamp()))))::int AS ms
+                FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2
+            `, [delivery.requestId, delivery.jobKey]);
+            await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
+            continue;
+        }
         if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
             expect(outcome.errorCode).toBe('ANALYSIS_V2_PROVIDER_RUN_COST_TERMINAL_PERSISTENCE_ERROR');
             expect(receiptRedeliveries).toBe(0);
@@ -524,6 +556,11 @@ async function runStandardRequest(
             calls,
         );
         expect(await totals()).toEqual(before);
+        if (privateReplay) {
+            if (/^track:profile-ai:batch:\d+$/.test(delivery.jobKey)) privateReplay.observed.completedProfileBatches++;
+            privateReplay.observed.workerJobs++;
+            privateReplay.observed.duplicateDeliveries++;
+        }
     }
     expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
     expect(receiptRedeliveries).toBe(scenario === 'terminal receipt timeout' ? 1 : 0);
@@ -541,6 +578,61 @@ async function runStandardRequest(
     const page = await resultPage();
     expect(page.status).toBe(200);
     const body = await page.json();
+    if (privateReplay) {
+        const observed = privateReplay.observed;
+        observed.phase = 'result';
+        observed.cause = 'publication_count';
+        const counts = (await db.query<{ published: number; images: number; manifests: number; usage: number; cloned: number; batches: number }>(`
+            SELECT (SELECT count(*)::int FROM analysis_progress_events WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS published,
+                   (SELECT count(*)::int FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status='ready') AS images,
+                   (SELECT count(*)::int FROM analysis_v2_result_image_manifests WHERE request_id=$1 AND sealed_at IS NOT NULL) AS manifests,
+                   (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage,
+                   (SELECT count(*)::int FROM analysis_v2_provider_runs WHERE request_id=$1) AS cloned,
+                   (SELECT count(*)::int FROM analysis_pipeline_jobs
+                    WHERE request_id=$1 AND job_key LIKE 'track:profile-ai:batch:%' AND status='completed') AS batches
+        `, [result.requestId])).rows[0]!;
+        expect(observed.completedProfileBatches).toBe(counts.batches);
+        observed.published = counts.published;
+        observed.readyImages = counts.images;
+        observed.apifyCalls = runtime.apify.mock.calls.length;
+        observed.sourceDownloads = runtime.png.mock.calls.length;
+        observed.fixedVertexCalls = runtime.model.mock.calls.length - modelCallsBefore;
+        expect(counts).toMatchObject({ published: 1, manifests: 1, cloned: 0, batches: privateReplay.profileBatches.length });
+        expect(counts.images).toBeGreaterThan(0);
+        expect(observed.fixedVertexCalls).toBeGreaterThan(0);
+        expect(counts.usage).toBe(observed.fixedVertexCalls);
+        expect(observed.apifyCalls).toBe(0);
+        expect(observed.sourceDownloads).toBe(0);
+        observed.cause = 'ledger_mismatch';
+        expect(await totals()).toMatchObject({
+            consumed: 1, requests: 1, grants: 1, actors: 0, apify_reserved: 0, apify_committed: 0, quota: 0,
+            models: observed.fixedVertexCalls, settled: observed.fixedVertexCalls,
+        });
+        // Keep the selected identity, signed locator and image bytes inside this process.
+        const member = body.femaleAccounts.find((item: { profileImage?: string }) => Boolean(item.profileImage));
+        expect(Boolean(member)).toBe(true);
+        observed.phase = 'owner_image';
+        await verifyPrivate90Images(result.requestId, body, observed);
+        expect(observed.webpVerified).toBe(counts.images);
+        observed.cause = 'owner_access';
+        const locator = await assertOwnerPage(result.requestId, member.instagramId);
+        const ownerImage = await readImage(new NextRequest(locator));
+        observed.ownerResult = page.status;
+        observed.ownerImage = ownerImage.status;
+        expect(ownerImage.status).toBe(200);
+        expect((await sharp(Buffer.from(await ownerImage.arrayBuffer())).metadata()).format).toBe('webp');
+        runtime.user = { ...user, id: otherId };
+        observed.otherResult = (await resultPage()).status;
+        observed.otherImage = (await readImage(new NextRequest(locator))).status;
+        runtime.user = null;
+        observed.anonymousResult = (await resultPage()).status;
+        observed.anonymousImage = (await readImage(new NextRequest(locator))).status;
+        expect([observed.otherResult, observed.otherImage, observed.anonymousResult, observed.anonymousImage])
+            .toEqual([404, 403, 401, 401]);
+        expect(sqlErrors.length).toBe(0);
+        return { grantId: approval.id, approvedAt: approval.approvedAt, previewDto: null,
+            requestId: result.requestId as string, imageHash: '' };
+    }
     expect(body.femaleAccounts).toHaveLength(1);
     const row = body.femaleAccounts[0];
     expect(row.instagramId).toBe(candidate);
@@ -818,6 +910,10 @@ it('replays a separately sealed copy through the owner image using independent s
             return runStandardRequest(nextDb, owner, 'archive_replay', true);
         });
         expect(result.imageHash).toBe(reference.imageHash);
+        if (process.env.PRIVATE90_FULL_REPLAY === 'synthetic') {
+            await reportPrivate90(async observed => withCloudStandardQaFixture((coverage, reader) =>
+                runPrivate90Fixture(target, coverage.profileBatches, reader, observed)));
+        }
         expect(result.previewDto).toEqual(reference.previewDto);
         expect(wrapping).toBe(1);
         const rightKey = secretBytes;
@@ -850,3 +946,111 @@ it('replays a separately sealed copy through the owner image using independent s
         await nextDb.close();
     }
 }, 120_000);
+
+
+type PrivateReader = Parameters<StandardQaFixtureOperation<unknown>>[1];
+
+async function runPrivate90Fixture(
+    requestTarget: string, profileBatches: readonly number[], reader: PrivateReader, observed: Private90Observations,
+) {
+    const archive = currentDevStandardArchive();
+    if (archive?.mode !== 'replay' || archive.target !== requestTarget) throw new Error('PRIVATE90_READER_REQUIRED');
+    observed.profileBatches = profileBatches.length;
+    const blite = await archive.load('preflight-blite-policy-v1', [requestTarget]);
+    if (typeof blite !== 'boolean') throw new Error('PRIVATE90_BLITE_POLICY_INVALID');
+    vi.unstubAllGlobals();
+    configure();
+    vi.stubEnv('DEV_LIVE_STANDARD_TARGET', requestTarget);
+    vi.stubEnv('PRECHECKOUT_BLITE_ENABLED', String(blite));
+    vi.stubEnv('PRECHECKOUT_BLITE_ROLLOUT_PERCENT', blite ? '100' : '0');
+    const db = await createStandardArchiveDatabase();
+    try {
+        observed.phase = 'source_ledger';
+        observed.cause = 'source_receipts';
+        const owner = await seedOwner(db, requestTarget);
+        const source = await bootstrapStandardArchiveSource(db, { ownerId: owner.id, target: requestTarget, reader, profileBatches });
+        observed.sourceReceipts = source.receiptCount;
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_replay');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SLOT', randomBytes(16).toString('hex'));
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL', source.grantId);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED', 'true');
+        observed.phase = 'fixed_model';
+        observed.cause = 'sealed_model_inputs';
+        const model = await prepareStandardArchiveVertex({ target: requestTarget, reader, profileBatches });
+        observed.publicProfilesInspected = model.counts().profiles;
+        observed.missingFeatureInputs = model.counts().missingRemainder;
+        observed.phase = 'admission';
+        observed.cause = 'preflight_admission';
+        const due = await db.query<{ ms: number }>(`
+            SELECT greatest(0,ceil(1000*extract(epoch FROM
+                (created_at + interval '10 seconds' - clock_timestamp()))))::int AS ms
+            FROM analysis_preflights WHERE consumed_request_id=$1
+        `, [source.requestId]);
+        await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
+        await runStandardRequest(db, owner, 'archive_replay', true, {
+            target: requestTarget, generate: model.generate, profileBatches, observed,
+        });
+        observed.phase = 'complete';
+        observed.cause = 'none';
+    } finally {
+        await db.close();
+    }
+}
+
+async function reportPrivate90(run: (observed: Private90Observations) => Promise<void>) {
+    // Vitest threads can override execArgv. Install the same guard in this worker before opening any reader.
+    createRequire(import.meta.url)(process.cwd() + '/scripts/dev-standard-private90-egress.cjs');
+    const observed = newPrivate90Observations();
+    try {
+        await run(observed);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message === 'PRIVATE90_NETWORK_DENIED') observed.cause = 'network_denied';
+        if (message === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' || message === 'OFFLINE_STANDARD_VERTEX_SEALED_INPUT_MISSING')
+            observed.cause = 'missing_keyed_media';
+        if (message.startsWith('OFFLINE_STANDARD_VERTEX_') && observed.cause !== 'missing_keyed_media')
+            observed.cause = 'model_routing';
+        if (message.startsWith('Offline Standard source bootstrap failed at local ')) observed.cause = 'source_admission';
+        throw new Error('PRIVATE90_FULL_REPLAY_FAILED');
+    } finally {
+        writeSync(3, JSON.stringify(safePrivate90Observations(observed)));
+    }
+}
+
+it.skipIf(process.env.PRIVATE90_FULL_REPLAY !== 'cloud')('runs the authorized private90 copy through the isolated Standard worker', async () => {
+    await reportPrivate90(async observed => {
+        if (process.env.DEPLOYMENT_ROLE !== 'dev' || !process.env.CLOUD_RUN_JOB) throw new Error('PRIVATE90_DEV_JOB_REQUIRED');
+        const bucket = process.env.DEV_STANDARD_QA_COPY_BUCKET!;
+        const key = process.env.DEV_STANDARD_QA_COPY_KMS_KEY!;
+        const { Compute } = await vi.importActual<typeof import('google-auth-library')>('google-auth-library');
+        // Bind credentials to the Cloud Run metadata service. The reader principal needs read and decrypt only.
+        const credential = new Compute({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+        const bucketPath = '/storage/v1/b/' + encodeURIComponent(bucket);
+        const downloadPath = '/download' + bucketPath + '/o/';
+        const expiry = expirySecretResource(process.env.DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION!,
+            process.env.DEV_STANDARD_QA_COPY_PROJECT!, process.env.DEV_STANDARD_QA_COPY_PROJECT_NUMBER!, key.split('/')[3]!);
+        if (expiry.regional) throw new Error('PRIVATE90_EXPIRY_LOCATION_INVALID');
+        const requestReadOnly = <T>(opts: { url: string; method?: string }) => {
+            const url = new URL(opts.url);
+            const gcs = url.origin === 'https://storage.googleapis.com' && (opts.method ?? 'GET') === 'GET'
+                && (url.pathname === bucketPath || url.pathname === bucketPath + '/o'
+                    || url.pathname.startsWith(bucketPath + '/o/') || url.pathname.startsWith(downloadPath));
+            const kms = opts.method === 'POST' && url.origin === 'https://cloudkms.googleapis.com'
+                && url.pathname === '/v1/' + key + ':decrypt';
+            const expiryRead = (opts.method ?? 'GET') === 'GET'
+                && (url.href === expiry.url || url.href === expiry.url + '/versions/1:access');
+            if (!gcs && !kms && !expiryRead) throw new Error('PRIVATE90_NETWORK_DENIED');
+            return credential.request<T>({ ...opts, url: url.href, redirect: 'error' });
+        };
+        const { createGoogleCloudPrivateMediaObjectClient } =
+            await vi.importActual<typeof import('@/lib/services/analysis/v2-media-artifact-store')>('@/lib/services/analysis/v2-media-artifact-store');
+        runtime.kmsOrBucket.mockImplementation(requestReadOnly);
+        runtime.archiveObjects.mockImplementation((name: string) => {
+            if (name !== bucket) throw new Error('PRIVATE90_BUCKET_DENIED');
+            return createGoogleCloudPrivateMediaObjectClient({ bucketName: bucket, requester: { request: requestReadOnly } });
+        });
+        const { policy, destination } = await openStandardQaCopyForJob('read');
+        await withVerifiedStandardQaCopy(policy, destination, (coverage, reader) =>
+            runPrivate90Fixture(policy.target, coverage.profileBatches, reader, observed));
+    });
+}, 3_600_000);

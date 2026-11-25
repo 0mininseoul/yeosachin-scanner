@@ -30,3 +30,21 @@ node --conditions=react-server --import tsx scripts/dev-standard-private-qa-copy
 - 만료 후 원래 QA 열람 주체로 `--verify-revoked`를 실행한다. 감싼 키 객체의 메타데이터 접근 상태와 보조 시크릿 버전 1의 접근을 확인한다. 보조 시크릿 접근이 403 또는 404일 때 `revoked`가 나온다. 같은 권한 조건으로 승인된 각 주체가 대상이다.
 - 본문 열람·KMS 복호화 권한이 없는 목록 점검 주체로 `--verify-deleted`를 실행한다. 만료 전 시크릿 메타데이터 읽기를 확인해 둔 감사 주체로, 만료 시크릿 자체가 404인지와 한 승인 접두사 아래 현행·비현행 버전과 soft-deleted 세대를 조회한다. 둘 다 비어야 `deleted`가 나온다. GCS는 soft delete 정책이 없는 버킷에서 soft-deleted 목록 요청을 400으로 거절할 수 있다. 이때 도구는 `versions_absent_soft_delete_unverified`와 종료 코드 2를 반환한다. 승인 기간 전체의 버킷 변경 감사 로그와 soft delete가 처음부터 비활성화된 증거를 대조한 뒤 복구 가능한 세대의 유무를 기록한다. Secret Manager는 설정한 시각에 시크릿과 버전을 복구 불가 삭제한다. 승인 기간 동안 별도 내보내기 또는 키 보관을 하지 않아야 한다. 공급자의 저장장치 내부 삭제 시각은 객체 API의 검증 범위를 벗어난다. [Secret Manager 만료](https://docs.cloud.google.com/secret-manager/docs/creating-and-managing-expiring-secrets) · [GCS 객체 목록 API](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [GCS 객체 수명 주기](https://docs.cloud.google.com/storage/docs/lifecycle)
 - 기록에는 기한·확인 시각, 승인 범위 내 주체 수, 권한 검사 및 버전 확인 결과와 집계만 남긴다. 미확인 상태나 삭제 대기 건을 완료로 처리하지 않는다.
+
+## 독립 PGlite에서 전체 Standard 재생
+
+Node 24와 저장소의 개발 의존성이 있는 환경에서 저장소 루트를 작업 디렉터리로 쓴다. 아래 합성 검사는 메모리에서 사본을 만들어 봉인한 뒤, 독립 소유자와 새 PGlite 원장으로 사전 점검·접수·워커·DB 발행·소유자 결과와 이미지를 다시 읽는다.
+
+```sh
+node scripts/dev-standard-private90-full-replay.mjs --synthetic
+```
+
+승인된 사본은 전용 Dev Cloud Run Job에서 다음 명령으로 읽는다. 이 Job은 위의 사본 읽기 환경, `DEPLOYMENT_ROLE=dev`, Cloud Run이 주입한 `CLOUD_RUN_JOB`을 사용한다. 읽기 계정에는 승인된 버킷의 읽기, 지정된 KMS 키의 복호화, 지정된 만료 보조키의 메타데이터와 버전 1 읽기가 필요하다.
+
+```sh
+node scripts/dev-standard-private90-full-replay.mjs --read-copy
+```
+
+리더는 검증한 봉인 사본을 메모리에서 읽는다. 분석 호출은 메모리 PGlite, 고정 Vertex 응답, 메모리 R2와 로컬 큐로 연결한다. 결과 페이지의 공개·비공개 커서를 끝까지 읽고, 반환한 이미지 경로별 소유자 GET 및 WebP 형식을 검증하며, 후보 이미지 한 건으로 타인·익명 접근 상태를 확인한다. 결과 수치는 해당 고정 판독을 실행한 실측이다.
+
+CLI는 자식의 표준출력과 표준오류를 폐기하고 별도 익명 파이프로 검증된 정수·상태만 출력한다. `status=verified`는 최종 접근 검증을 포함해 완료된 경우다. 실패하면 종료 코드 1과 마지막 단계·허용된 원인 분류·완료 수치만 반환한다. `--synthetic`은 OS 네트워크 차단 환경에서도 실행된다.
