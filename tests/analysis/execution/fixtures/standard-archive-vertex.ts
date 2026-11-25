@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { buildV211EvidenceSpecificOverview, extractV211EvidenceTerms } from '@/lib/services/analysis/public-copy-quality';
 import { selectAnalysisV2GenderResolverMedia } from '@/lib/services/analysis/v2-gender-resolver-media-policy';
 import { projectGenderResolutionMedia } from '@/lib/services/ai/gender-resolution-pure';
 import { private90ReverseScope } from './private90-reverse-scope';
@@ -37,6 +38,18 @@ function promptData(prompt: string, label: string) {
     const line = prompt.split('\n').findLast(s => s.startsWith(prefix));
     if (!line) return stop('PROMPT_SHAPE');
     return JSON.parse(line.slice(prefix.length)) as unknown;
+}
+function fixedFeatureOverview(profileEvidence:string | null, feedEvidence:string[], media:ManifestItem[]) {
+    if (extractV211EvidenceTerms({profileEvidence,feedEvidence}).length) {
+        try { return buildV211EvidenceSpecificOverview({profileEvidence,feedEvidence}); }
+        catch { /* Only the observed media layout remains available for this fixed response. */ }
+    }
+    const profile = media.some(item => item.kind === 'profile');
+    const feed = media.some(item => item.kind === 'feed');
+    if (profile && feed) return '프로필 이미지와 피드 이미지가 함께 있어 소개 화면과 게시물 양쪽에서 사진을 볼 수 있습니다.';
+    if (feed) return '게시물에 올린 피드 이미지를 통해 이 계정이 공개한 사진 구성을 살펴볼 수 있습니다.';
+    if (profile) return '프로필에 이미지를 올려 두어 소개 화면에서 계정을 대표하는 사진을 볼 수 있습니다.';
+    return stop('MODEL_INPUT_SHAPE');
 }
 function response(output: unknown) {
     const text = JSON.stringify(output);
@@ -163,7 +176,9 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             }
             if ('gender' in fields) {
                 totals.featureCalls++;
-                const items = z.object({ mediaManifest }).parse(promptData(prompt, 'evidence')).mediaManifest;
+                const evidence = z.object({mediaManifest,bio:z.string().nullish(),
+                    captions:z.array(z.object({text:z.string().nullish()})).optional()}).parse(promptData(prompt,'evidence'));
+                const items = evidence.mediaManifest;
                 const owner = reverseScope.selectionOwner(items);
                 reverseScope.event(owner,'featureModel');
                 const ids = items.map(x => x.selectionId);
@@ -173,7 +188,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                     appearanceGrade:5,exposureScore:2,businessClassification:'personal',businessConfidence:'high',accountContext:'personal',
                     marriageEvidence:'none',partnerEvidence:'none',partnerExclusionContext:'none', evidenceSelectionIds:{
                         gender:main, appearance:secondary, exposure:secondary, business:main.slice(0,1),accountContext:main.slice(0,1),marriagePartner:[],
-                    }, oneLineOverview:'사진마다 일상의 작은 표정까지 담아내는 모습에서 차분히 추억을 기록하는 취향이 드러납니다.' });
+                    }, oneLineOverview:fixedFeatureOverview(evidence.bio ?? null,(evidence.captions ?? []).flatMap(c=>c.text ? [c.text] : []),items) });
             }
             if ('inferredGender' in fields) {
                 totals.resolverCalls++;

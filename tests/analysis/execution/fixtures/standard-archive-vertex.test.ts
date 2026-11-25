@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
-import { prepareGenderTriagePlanAccount } from '@/lib/services/ai/v2-staged-analysis';
+import { projectV211FeatureEvaluation, prepareGenderTriagePlanAccount } from '@/lib/services/ai/v2-staged-analysis';
 import { normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-media-normalization';
 import { analysisV2CandidateId } from '@/lib/services/analysis/v2-ai-scoring-executors';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
@@ -87,6 +87,22 @@ it('forces the sealed feature branch for each account and rejects an unavailable
     const answer = JSON.parse(fixed.generate(resolver(n)).text);
     expect(answer).toMatchObject({inferredGender:'female', evidenceSelectionIds:idsFor(2)});
     expect(() => fixed.generate(resolver(selectionCount+10))).toThrow('UNKNOWN_RESOLVER_INPUT');
+    // With no usable bio/caption, a rejected response cannot use the production text repair.
+    // Exercise the real v2.11 schema on the SDK's first answer in that case.
+    const media = [{selectionId:'profile:'+names[0],kind:'profile' as const,normalizedJpegBase64:'/9gBAv/Z'},
+        {selectionId:'post:100:thumbnail',kind:'feed' as const,postId:'100',normalizedJpegBase64:'/9gBAv/Z'}];
+    const selected = media.map(item => item.selectionId);
+    const triage = {assessment:{inferredGender:'female' as const,confidence:'high' as const,ownerConsistency:'same_person' as const,
+        evidenceSelectionIds:selected},routingDecision:'route_to_feature_analysis' as const,routingReason:'conserve_female_recall' as const,
+        analyzedSelectionIds:selected};
+    const project = projectV211FeatureEvaluation({triage,media,bio:null,captions:[]},'HIGH');
+    const result = fixed.generate({contents:{parts:[{text:'evidence(JSON): '+JSON.stringify({mediaManifest:media,bio:null,captions:[]})}]},
+        config:{responseJsonSchema:{properties:{gender:{}}}}});
+    const features = JSON.parse(result.text);
+    const output={features,analyzedSelectionIds:selected,finalGenderDecision:'verified_female'};
+    expect(() => project.validateResult({...output,features:{...features,
+        oneLineOverview:'사진마다 일상의 작은 표정까지 담아내는 모습에서 차분히 추억을 기록하는 취향이 드러납니다.'}})).toThrow();
+    expect(project.validateResult(output).finalGenderDecision).toBe('verified_female');
     entries.delete(includedListKey);
     await expect(prepareStandardArchiveVertex(input)).rejects.toThrow('UNCOVERED_REQUIRED_BRANCH');
 });
