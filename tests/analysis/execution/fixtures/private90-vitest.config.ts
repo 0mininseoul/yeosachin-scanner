@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 
 export default defineConfig({
+    envDir: false,
     server: { host: '127.0.0.1', hmr: false },
     test: {
         include: ['tests/analysis/execution/standard-admission-result-pglite.test.ts'],
