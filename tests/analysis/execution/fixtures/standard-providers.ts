@@ -16,7 +16,7 @@ export function profileItem(username: string, candidatePostCount = 1) {
         postsCount: postCount,
         private: false,
         verified: false,
-        profilePicUrl: picture(username),
+        profilePicUrl: picture(username) + '?z=2&a=1&utm_source=offline',
         latestPosts: Array.from({ length: postCount }, (_, index) => {
             const shortCode = postCount > 1 ? code + index : code;
             return {
@@ -53,7 +53,6 @@ export class SyntheticApify {
             return input.usernames.map(username => {
                 const profile = profileItem(username, this.candidatePostCount);
                 if (this.includePrivate && username === target) profile.followersCount = profile.followsCount = 2;
-                if (username === candidate) profile.profilePicUrl += '?z=2&a=1&utm_source=offline';
                 return profile;
             });
         if (input.Account)
