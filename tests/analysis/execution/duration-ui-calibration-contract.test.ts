@@ -34,7 +34,7 @@ describe('analysis duration UI calibration contract', () => {
 
     it('uses the requested duration copy only during a real analysis', () => {
         expect(analysisDurationProgressCopy(true)).toBe('테스트 분석은 약 45초 동안 진행돼요');
-        expect(analysisDurationProgressCopy(false, true)).toBe('꼼꼼하게 정밀 분석 중이에요. 분석 완료까지 최대 1시간이 걸릴 수도 있어요.');
+        expect(analysisDurationProgressCopy(false, true)).toBe('분석 완료까지 최대 1시간이 걸릴 수도 있어요.');
         expect(analysisDurationProgressCopy(true, true)).toBe('테스트 분석은 약 45초 동안 진행돼요');
         expect(analysisDurationProgressCopy(false)).toBe('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
     });
