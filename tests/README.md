@@ -31,7 +31,7 @@
 
 표의 경로는 이 tests/ 디렉터리를 기준으로 한다. 세부 검사 파일명은 대상 기능 폴더에서 검색한다. 모든 파일명을 복제한 별도 인덱스는 유지하지 않는다.
 
-Dev Standard 통합 검사는 매 실행마다 빈 PGlite에 Dev 스키마와 합성 소유자를 준비한다. macOS에서 외부 연결까지 차단해 세 시나리오를 실행하는 명령은 다음과 같다.
+Dev Standard 통합 검사는 매 실행마다 빈 PGlite에 Dev 스키마와 합성 소유자를 준비한다. 정상 실행 두 번과 체크포인트 재개 외에, 저장소의 합성 프로필·게시물·이미지로 새 수집본을 봉인하고 별도 승인에서 재생한다. 일반 사전 점검과 B-lite 사전 점검을 각각 실행하고, B-lite를 재생할 때 보관된 미리보기를 복원하는지 확인한다. 재생은 Apify와 원천 이미지 다운로드 0회, DB 발행, 소유자 결과·후보 WebP 열람, 타인 접근 거부를 검사한다. 실제 Dev 수집본의 24시간 보존 기한이 지난 뒤에도 같은 합성 입력으로 실행할 수 있다. macOS에서는 아래 명령으로 외부 연결을 차단한다.
 
 ```sh
 sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' node node_modules/vitest/vitest.mjs run tests/analysis/execution/standard-admission-result-pglite.test.ts

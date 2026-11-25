@@ -626,13 +626,26 @@ describe('Dev Standard direct fresh-Apify checkpoints', () => {
             [RETRY_CLAIM_TOKEN, TARGET_JOB]);
         await expect(checkpoint({ ...targetProfile, claimToken: RETRY_CLAIM_TOKEN }))
             .resolves.toMatchObject({ rows: target.rows });
+        const usernames = Array.from({ length: 30 }, (_, index) => `candidate_${index + 1}`);
+        const incomplete = usernames[12]!;
         const candidateProfiles = {
             jobKey: BATCH_JOB, operationKey: BATCH_OPERATION, providerInputHash: BATCH_PROVIDER_HASH,
-            requestedUsernames: ['candidate_1'], outcomes: [outcome('candidate_1')],
+            requestedUsernames: usernames,
+            outcomes: usernames.map(name => outcome(name, name === incomplete ? 'failed' : 'success')),
         };
-        await expect(checkpoint(candidateProfiles)).resolves.toMatchObject({
-            rows: [{ snapshot: { requestedUsernames: candidateProfiles.requestedUsernames } }],
-        });
+        const batch = await checkpoint(candidateProfiles);
+        expect(batch.rows).toMatchObject([{ snapshot: {
+            requestedUsernames: usernames,
+            frozenUnresolvedUsernames: [incomplete],
+        } }]);
+        await expect(checkpoint(candidateProfiles)).resolves.toMatchObject({ rows: batch.rows });
+        const batchCounts = await db.query(`
+            SELECT count(*) FILTER (WHERE status='success')::int AS successes,
+                   count(*) FILTER (WHERE status='failed' AND failure_category='incomplete')::int AS incomplete
+            FROM public.analysis_v2_profile_fetch_outcomes
+            WHERE request_id=$1 AND job_key=$2 AND attempt='fresh_apify'
+        `, [REQUEST_ID, BATCH_JOB]);
+        expect(batchCounts.rows).toEqual([{ successes: 29, incomplete: 1 }]);
         await expect(checkpoint({ ...candidateProfiles, providerInputHash: JOB_HASH }))
             .rejects.toThrow('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH');
         const receipts = await db.query('SELECT count(*)::int AS total FROM public.analysis_v2_provider_runs WHERE request_id = $1',
