@@ -148,33 +148,97 @@ function restoreArchivedMedia(
     return { status: row.status, item, bytes };
 }
 
+type NormalizedSelection = {
+    media: NormalizedAiMediaSelection[];
+    bytes: Map<string, Buffer>;
+    coverage: AnalysisV2ProfileMediaCoverage;
+};
+
+function archiveSelection(selected: readonly SelectedAnalysisMedia[], version: string) {
+    const selectionHash = createHash('sha256').update(JSON.stringify(selected.map(item => [
+        item.selectionId, archiveMediaUrlAnchor(item.imageUrl), item.role, item.postId ?? null,
+        item.postType ?? null, item.mediaIndex ?? null,
+    ]))).digest('hex');
+    return {
+        key: [version, selectionHash],
+        members: selected.map((_, index) => [version, selectionHash, index]),
+    };
+}
+
+function checkMembership(value: unknown, expected: (string | number)[][], fail: () => never) {
+    if (!Array.isArray(value) || value.length !== expected.length || value.some((entry, i) => (
+        !Array.isArray(entry) || entry.length !== 3 || entry.some((part, j) => part !== expected[i]![j])
+    ))) fail();
+}
+
+/** Save selected outcomes before any Dev capture branch can skip them. This does not admit an AI call. */
+export async function captureDevStandardMediaSelection(
+    selected: readonly SelectedAnalysisMedia[],
+    normalize: (item: SelectedAnalysisMedia) => Promise<Buffer>,
+    version: string,
+    restorePinned?: () => Promise<NormalizedSelection>,
+): Promise<void> {
+    const archive = currentDevStandardArchive();
+    if (archive?.mode !== 'capture' || !selected.length) return;
+    const selection = archiveSelection(selected, version);
+    const marker = await archive.find('ai-image-selection-v1', selection.key);
+    if (marker) {
+        checkMembership(marker.value, selection.members, archive.fail);
+        if (!restorePinned) return;
+    }
+    const pinned = await restorePinned?.();
+    // Create each immutable child as soon as its download or pinned result is ready.
+    // Drain outstanding writes before releasing the worker if any child fails.
+    const writes = await Promise.allSettled(selected.map(async (item, i) => {
+        const identity = selection.members[i]!;
+        const prior = await archive.find('ai-image', identity);
+        let row: PreparedMedia;
+        if (pinned) {
+            const bytes = pinned.bytes.get(item.selectionId);
+            const failure = pinned.coverage.failures.find(part => part.selectionId === item.selectionId);
+            if (Boolean(bytes) === Boolean(failure)) return archive.fail();
+            row = bytes ? { status: 'success', item, bytes } : { status: 'failure', item, failure: failure! };
+        } else if (prior) {
+            restoreArchivedMedia(item, prior.value, archive.fail);
+            return;
+        } else {
+            row = await prepareMedia(item, normalize);
+        }
+        if (prior) {
+            const existing = restoreArchivedMedia(item, prior.value, archive.fail);
+            if (row.status === 'success' && existing.status === 'success' && row.bytes.equals(existing.bytes)) return;
+            if (row.status === 'failure' && existing.status === 'failure'
+                && row.failure.reason === existing.failure.reason && row.failure.disposition === existing.failure.disposition) return;
+            return archive.fail();
+        }
+        await archive.capture('ai-image', identity, archiveMediaValue(row, archive.fail));
+    }));
+    const failed = writes.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    if (!marker) await archive.capture('ai-image-selection-v1', selection.key, selection.members);
+}
+
 export async function normalizeAnalysisV2MediaSelections(
     selected: readonly SelectedAnalysisMedia[],
     normalizeMedia: (media: SelectedAnalysisMedia) => Promise<Buffer>,
     aiStagePolicyVersion: string = 'ai-stage-policy-v2.6',
-): Promise<Readonly<{
-    media: NormalizedAiMediaSelection[];
-    bytes: Map<string, Buffer>;
-    coverage: AnalysisV2ProfileMediaCoverage;
-}>> {
+): Promise<Readonly<NormalizedSelection>> {
     const archive = currentDevStandardArchive();
-    // Bind the ordered selection and policy so an observed coverage gap from
-    // one selection set cannot substitute for a missing image in another.
-    const selectionHash = archive ? createHash('sha256').update(JSON.stringify(selected.map(item => [
-        item.selectionId, archiveMediaUrlAnchor(item.imageUrl), item.role, item.postId ?? null,
-        item.postType ?? null, item.mediaIndex ?? null,
-    ]))).digest('hex') : '';
-    const archiveIdentity = (index: number) => [aiStagePolicyVersion, selectionHash, index];
+    const selection = archive ? archiveSelection(selected, aiStagePolicyVersion) : null;
+    if (archive?.mode === 'replay' && selected.length) {
+        const marker = await archive.load('ai-image-selection-v1', selection!.key);
+        checkMembership(marker, selection!.members, archive.fail);
+    }
     const alreadyCaptured = new Set<number>();
     const prepared = await Promise.all(selected.map(async (item, index) => {
         if (archive?.mode === 'replay') {
-            const value = await archive.load('ai-image', archiveIdentity(index));
+            const value = await archive.load('ai-image', selection!.members[index]!);
             // Missing or invalid archive records must never become a tolerated
             // CDN coverage gap. Actual recorded failures retain their status.
             return restoreArchivedMedia(item, value, () => archive.fail());
         }
         if (archive?.mode === 'capture') {
-            const prior = await archive.find('ai-image', archiveIdentity(index));
+            const prior = await archive.find('ai-image', selection!.members[index]!);
             if (prior) {
                 alreadyCaptured.add(index);
                 return restoreArchivedMedia(item, prior.value, () => archive.fail());
@@ -204,12 +268,12 @@ export async function normalizeAnalysisV2MediaSelections(
         await Promise.all(prepared.map((row, index) => {
             if (alreadyCaptured.has(index)) return undefined;
             const value = archiveMediaValue(row, () => archive.fail());
-            return archive.capture('ai-image', archiveIdentity(index), value);
+            return archive.capture('ai-image', selection!.members[index]!, value);
         }));
         await archive.capture(
             'ai-image-selection-v1',
-            [aiStagePolicyVersion, selectionHash],
-            prepared.map((_row, index) => archiveIdentity(index)),
+            selection!.key,
+            selection!.members,
         );
     }
     const media: NormalizedAiMediaSelection[] = successful.map(({ item, bytes }) => ({

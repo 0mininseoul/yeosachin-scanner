@@ -938,6 +938,46 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
+    it('captures the unused feature remainder before unusable triage can skip all model calls', async () => {
+        const records = new Map<string, unknown>();
+        vi.mocked(currentDevStandardArchive).mockReturnValue({
+            mode: 'capture', ready: () => true, beginPreflightCapture: vi.fn(), seal: vi.fn(), load: vi.fn(),
+            fail: () => { throw new DevStandardArchiveError(); },
+            capture: async (kind, identity, value) => { records.set(JSON.stringify([kind, identity]), value); },
+            find: async (kind, identity) => {
+                const key = JSON.stringify([kind, identity]);
+                return records.has(key) ? { value: records.get(key) } : null;
+            },
+        });
+        const memoryState = memory();
+        const account = profile('offline.source', { postCount: 8 });
+        const plan = selectAnalysisMedia({ profile: { id: account.username, imageUrl: account.profilePicUrl! },
+            posts: account.latestPosts ?? [] }, { carouselDiversity: true });
+        const triageSelection = new Set(plan.triage.selectionIds);
+        expect(plan.feature.media.length).toBeGreaterThan(triageSelection.size);
+        const deps = dependencies(memoryState, {
+            profileBatches: { loadExactBatch: vi.fn(async () => ({
+                requestedUsernames: [account.username, 'offline.second', 'offline.third'],
+                results: [{ username:account.username,status:'success' as const,profile:account },
+                    { username:'offline.second',status:'unavailable' as const }, { username:'offline.third',status:'unavailable' as const }],
+            })) },
+            normalizeMedia: vi.fn(async item => {
+                if (triageSelection.has(item.selectionId)) throw new AnalysisImagePreparationError('decode_failed', 'permanent');
+                return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+            }),
+        });
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(context('profile_ai', {
+            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+            state:state({ planId:'standard' }),
+        }));
+        expect(memoryState.outcomes[0]).toMatchObject({ status:'media_unavailable', mediaCoverage:{selectedCount:triageSelection.size} });
+        expect(deps.ai.gender).not.toHaveBeenCalled();
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        expect(vi.mocked(deps.normalizeMedia).mock.calls.map(([item]) => item.selectionId).sort())
+            .toEqual([...plan.feature.selectionIds].sort());
+        expect([...records.keys()].filter(k => k.includes('ai-image-selection-v1'))).toHaveLength(2);
+    });
+
     it.each(['triage', 'feature_remainder'] as const)('does not start dependent models or checkpoint if the %s archive write fails', async stage => {
         const memoryState = memory();
         const account = profile('archive.failure', { postCount: 6 });
