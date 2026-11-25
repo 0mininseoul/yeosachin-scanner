@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { GET as readResult } from '@/app/api/analysis/v2/result/[requestId]/route';
@@ -23,6 +23,10 @@ import { enqueuePrecheckoutBliteTask } from '@/lib/services/analysis/preflight-t
 import { processPreflight } from '@/lib/services/analysis/preflight';
 import { processAnalysisV2FreshAdmission } from '@/lib/services/analysis/fresh-plan-admission';
 import { getApprovedDevLiveDelivery } from '@/lib/services/dev-ui/live-analysis';
+import { createDevStandardArchiveStore } from '@/lib/services/dev-ui/standard-archive-store';
+import { openStandardQaCopyForJob, verifyExpiredStandardQaCopy, withCloudStandardQaFixture } from '@/lib/services/dev-ui/standard-qa-copy-cloud';
+import { readDevStandardArchivedProfiles } from '@/lib/services/analysis/v2-standard-archive-replay';
+import { exportStandardQaCopy } from '@/lib/services/dev-ui/standard-qa-copy';
 import { withDevStandardArchiveApproval, withVerifiedDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
 import {
@@ -43,10 +47,15 @@ const runtime = vi.hoisted(() => ({
     apify: vi.fn(),
     objects: vi.fn(),
     archiveObjects: vi.fn(),
+    kmsOrBucket: vi.fn(),
     r2: vi.fn(),
     png: vi.fn(),
     model: vi.fn(),
     queue: [] as Record<string, string | number>[],
+}));
+vi.mock('google-auth-library', async original => ({
+    ...(await original<typeof import('google-auth-library')>()),
+    GoogleAuth: class { async getClient() { return { request: runtime.kmsOrBucket }; } },
 }));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: runtime.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: runtime.session }));
@@ -81,7 +90,7 @@ vi.mock('@/lib/services/analysis/v2-media-artifact-store', async (original) => {
     const actual = await original<typeof import('@/lib/services/analysis/v2-media-artifact-store')>();
     return {
         ...actual,
-        createGoogleCloudPrivateMediaObjectClient: () => runtime.archiveObjects(),
+        createGoogleCloudPrivateMediaObjectClient: ({ bucketName }: { bucketName: string }) => runtime.archiveObjects(bucketName),
         createConfiguredAnalysisV2MediaArtifactStore: () =>
             actual.createAnalysisV2MediaArtifactStore({ objects: runtime.objects() }),
     };
@@ -271,6 +280,7 @@ async function runStandardRequest(
     db: PGlite,
     user: Awaited<ReturnType<typeof seedOwner>>,
     scenario: Scenario,
+    privateCopySession = false,
 ) {
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
@@ -345,7 +355,7 @@ async function runStandardRequest(
     if (approval?.planId !== 'standard') throw new Error('Missing synthetic Standard approval');
     expect(Boolean(approval.archiveReplay)).toBe(isReplay);
     const runDelivery = <T>(operation: () => T) =>
-        withDevLiveProviderApproval(approval, () => withDevStandardArchiveApproval(approval, operation));
+        withDevLiveProviderApproval(approval, () => privateCopySession ? operation() : withDevStandardArchiveApproval(approval, operation));
     vi.stubEnv('DEV_LIVE_WORKLOAD', 'preflight');
     vi.stubEnv('K_SERVICE', 'dev-live-preflight');
     const preflight = () =>
@@ -686,3 +696,140 @@ it.each([false, true])('replays sealed synthetic inputs through owner result and
         await db.close();
     }
 }, 90_000);
+
+
+it('replays a separately sealed copy through the owner image using independent synthetic PGlite lineage', async () => {
+    configure();
+    const liveBucket = 'fixture-qa-dev-live-media';
+    const copyBucket = 'fixture-project-dev-qa-copy';
+    const kms = 'projects/fixture-project/locations/us-central1/keyRings/fixture/cryptoKeys/fixture';
+    let sourceObjects = createFixtureObjects();
+    const copyObjects = createFixtureObjects();
+    runtime.archiveObjects.mockImplementation((name: string) => {
+        if (name === liveBucket) return sourceObjects;
+        if (name === copyBucket) return copyObjects;
+        throw new Error('Unexpected bucket');
+    });
+    let wrapped: { ciphertext: string; plaintext: string; aad: string } | undefined;
+    let wrapping = 0;
+    runtime.kmsOrBucket.mockImplementation(async ({ url, data }) => {
+        if (url === 'https://storage.googleapis.com/storage/v1/b/' + liveBucket) return { data: { projectNumber: '100001', location: 'US-CENTRAL1' } };
+        if (url === 'https://storage.googleapis.com/storage/v1/b/' + copyBucket) return { data: {
+            projectNumber: '100001', location: 'US-CENTRAL1', storageClass: 'STANDARD',
+            iamConfiguration: { uniformBucketLevelAccess: { enabled: true }, publicAccessPrevention: 'enforced' },
+            lifecycle: { rule: [{ action: { type: 'Delete' }, condition: { age: 90 } }] },
+        } };
+        if (url === 'https://cloudkms.googleapis.com/v1/' + kms + ':encrypt') {
+            wrapping++;
+            wrapped = { ciphertext: randomBytes(48).toString('base64'), plaintext: data.plaintext, aad: data.additionalAuthenticatedData };
+            return { data: { name: kms + '/cryptoKeyVersions/1', ciphertext: wrapped.ciphertext } };
+        }
+        if (url === 'https://cloudkms.googleapis.com/v1/' + kms + ':decrypt' && wrapped
+            && data.ciphertext === wrapped.ciphertext && data.additionalAuthenticatedData === wrapped.aad) {
+            return { data: { plaintext: wrapped.plaintext } };
+        }
+        throw new Error('Unexpected offline cloud request');
+    });
+    function captureConfig() {
+        const slot = randomBytes(16).toString('hex');
+        const key = randomBytes(32).toString('base64');
+        vi.stubEnv('PRECHECKOUT_BLITE_ENABLED', 'true');
+        vi.stubEnv('PRECHECKOUT_BLITE_ROLLOUT_PERCENT', '100');
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_capture');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SLOT', slot);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_KEY', key);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_BUCKET', liveBucket);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_APPROVAL_NOT_BEFORE', new Date(Date.now() - 60_000).toISOString());
+        return { key, slot };
+    }
+
+    const archiveDb = await createStandardDatabase();
+    const config = captureConfig();
+    let sourceTime = Date.now();
+    const live = createDevStandardArchiveStore({ ...config, bucketName: liveBucket, objects: sourceObjects, now: () => sourceTime });
+    try {
+        const capture = await runStandardRequest(archiveDb, await seedOwner(archiveDb), 'archive_capture');
+        sourceTime = Date.now();
+        const approvedAt = new Date(sourceTime).toISOString();
+        vi.stubEnv('DEV_STANDARD_QA_COPY_APPROVAL', randomUUID());
+        vi.stubEnv('DEV_STANDARD_QA_COPY_SOURCE_APPROVAL', capture.grantId);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_APPROVED_AT', approvedAt);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_PROJECT', 'fixture-project');
+        vi.stubEnv('DEV_LIVE_GCP_PROJECT', 'fixture-project');
+        vi.stubEnv('DEV_LIVE_GCP_PROJECT_NUMBER', '100001');
+        vi.stubEnv('DEV_STANDARD_QA_COPY_PROJECT_NUMBER', '100001');
+        vi.stubEnv('DEV_STANDARD_QA_COPY_BUCKET', copyBucket);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_APPROVED_SOURCE_BUCKET', liveBucket);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_KMS_KEY', kms);
+        vi.stubEnv('DEV_STANDARD_QA_COPY_DAYS', '90');
+        const { policy, destination } = await openStandardQaCopyForJob('export');
+        const result = await exportStandardQaCopy(policy, live, destination);
+        expect(result.profileBatches).toBe(1);
+        sourceTime = Date.parse(capture.approvedAt) + 86_400_001;
+        await expect(live.openSealedArchive()).rejects.toThrow('EXPIRED');
+    } finally {
+        await archiveDb.close();
+    }
+
+    // Nothing from the first account or DB survives. The reference SQL receipts in
+    // this independent DB are generated from the deterministic synthetic providers.
+    sourceObjects = createFixtureObjects();
+    vi.unstubAllGlobals();
+    configure();
+    const nextDb = await createStandardDatabase();
+    try {
+        captureConfig();
+        const owner = await seedOwner(nextDb);
+        const reference = await runStandardRequest(nextDb, owner, 'archive_capture');
+        expect(reference.grantId).not.toBe(process.env.DEV_STANDARD_QA_COPY_SOURCE_APPROVAL);
+        vi.stubEnv('DEV_LIVE_STANDARD_COLLECTION_MODE', 'archive_replay');
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_SOURCE_APPROVAL', reference.grantId);
+        vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_REPLAY_ENABLED', 'true');
+        const limit = await nextDb.query<{ wait_ms: number }>(`
+            SELECT greatest(0,ceil(1000*extract(epoch FROM (created_at + interval '10 seconds' - clock_timestamp()))))::int AS wait_ms
+            FROM analysis_preflights WHERE consumed_request_id=$1`, [reference.requestId]);
+        await new Promise(resolve => setTimeout(resolve, limit.rows[0]!.wait_ms + 20));
+        // Once the independent mock history is ready, only the new copy bucket is accessible.
+        runtime.archiveObjects.mockImplementation((name: string) => {
+            if (name !== copyBucket) throw new Error('Original capture unavailable');
+            return copyObjects;
+        });
+        const result = await withCloudStandardQaFixture(async coverage => {
+            expect(coverage.profileBatches).toEqual([0]);
+            // The target-profile provider identity includes the original input hash.
+            // Reference only the authenticated proof in this disposable synthetic ledger.
+            const job = 'track:target-evidence:collect';
+            const proof = await readDevStandardArchivedProfiles({ target, jobKey: job, batch: null, usernames: [target] });
+            const seeded = await nextDb.query(`
+                UPDATE analysis_v2_provider_runs SET operation_key=$1, input_hash=$2
+                WHERE request_id=$3 AND job_key=$4 AND operation_key LIKE 'target-profile:%'
+            `, [proof.providerOperationKey, proof.providerInputHash, reference.requestId, job]);
+            expect(seeded.affectedRows).toBe(1);
+            return runStandardRequest(nextDb, owner, 'archive_replay', true);
+        });
+        expect(result.imageHash).toBe(reference.imageHash);
+        expect(result.previewDto).toEqual(reference.previewDto);
+        expect(wrapping).toBe(1);
+        await expect(verifyExpiredStandardQaCopy('revoked')).rejects.toThrow('EARLY');
+        const expiry = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(process.env.DEV_STANDARD_QA_COPY_APPROVED_AT!) + 90 * 86_400_000);
+        try {
+            await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow('UNAVAILABLE');
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 403 }).mockResolvedValueOnce({ data: { permissions: [] } });
+            await expect(verifyExpiredStandardQaCopy('revoked')).resolves.toBe('revoked');
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 403 }).mockResolvedValueOnce({ data: { permissions: ['cloudkms.cryptoKeyVersions.useToDecrypt'] } });
+            await expect(verifyExpiredStandardQaCopy('revoked')).rejects.toThrow('ACCESS_UNVERIFIED');
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({
+                status: 400, data: { error: { errors: [{ reason: 'invalidArgument' }] } },
+            });
+            await expect(verifyExpiredStandardQaCopy('deleted')).resolves.toBe('versions_absent_soft_delete_unverified');
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: { items: [{ kind: 'storage#object' }] } });
+            await expect(verifyExpiredStandardQaCopy('deleted')).rejects.toThrow('DELETION_PENDING');
+            runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200, data: {} }).mockResolvedValueOnce({ status: 200, data: {} });
+            await expect(verifyExpiredStandardQaCopy('deleted')).resolves.toBe('deleted');
+        } finally {
+            expiry.mockRestore();
+        }
+    } finally {
+        await nextDb.close();
+    }
+}, 120_000);
