@@ -6068,7 +6068,7 @@ describe('v2.11 profile AI redelivery', () => {
         });
         const baseline = state();
         const job = context('profile_ai', {
-            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:version,
+            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
             state:state({
                 planId:'standard', relationships:{...baseline.relationships!,profileBatches:[{
                     ...baseline.relationships!.profileBatches[0]!,itemCount:count,
