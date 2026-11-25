@@ -831,6 +831,11 @@ it('replays a separately sealed copy through the owner image using independent s
         const expiry = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(process.env.DEV_STANDARD_QA_COPY_APPROVED_AT!) + 90 * 86_400_000);
         try {
             await expect(withCloudStandardQaFixture(() => true)).rejects.toThrow('UNAVAILABLE');
+            for (const name of [
+                'DEV_LIVE_STANDARD_TARGET', 'DEV_STANDARD_QA_COPY_SOURCE_APPROVAL', 'DEV_LIVE_STANDARD_ARCHIVE_BUCKET',
+                'DEV_LIVE_STANDARD_ARCHIVE_KEY', 'DEV_LIVE_STANDARD_ARCHIVE_SLOT', 'DEV_STANDARD_QA_COPY_KMS_KEY',
+                'DEV_LIVE_GCP_PROJECT', 'DEV_LIVE_GCP_PROJECT_NUMBER', 'GOOGLE_CLOUD_PROJECT',
+            ]) vi.stubEnv(name, undefined);
             runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ status: 404 });
             await expect(verifyExpiredStandardQaCopy('revoked')).resolves.toBe('revoked');
             runtime.kmsOrBucket.mockResolvedValueOnce({ status: 200 }).mockResolvedValueOnce({ status: 200 });

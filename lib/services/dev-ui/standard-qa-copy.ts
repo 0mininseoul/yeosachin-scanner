@@ -33,7 +33,17 @@ function unavailable(): never {
     throw new Error('DEV_STANDARD_QA_COPY_UNAVAILABLE');
 }
 
-export function standardQaCopyPolicyWindow(value: unknown) {
+const auditDescriptor = approvedCopy.pick({ approval: true, approvedAt: true, days: true });
+
+export function standardQaCopyAuditWindow(value: unknown, now = Date.now()) {
+    const result = auditDescriptor.safeParse(value);
+    if (!result.success || !Number.isSafeInteger(now)) return unavailable();
+    const expiresAt = Date.parse(result.data.approvedAt) + result.data.days * DAY_MS;
+    if (now < expiresAt) throw new Error('QA_COPY_AUDIT_EARLY');
+    return { approval: result.data.approval, expiresAt };
+}
+
+function standardQaCopyPolicyWindow(value: unknown) {
     const parsed = approvedCopy.safeParse(value);
     if (!parsed.success || parsed.data.approval === parsed.data.sourceApproval) return unavailable();
     const policy = parsed.data;

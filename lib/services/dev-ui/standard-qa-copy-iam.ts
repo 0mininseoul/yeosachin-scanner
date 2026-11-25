@@ -10,7 +10,7 @@ function reject(): never { throw new Error('QA_COPY_IAM_UNVERIFIED'); }
 
 export type QaCopyIamScope = {
     project: string; projectNumber: string; sourceBucket: string; sourceKeySecret: string; bucketName: string; kmsKey: string;
-    expiresAt: number; authorized: string[]; expirySecret: ExpirySecret;
+    expiresAt: number; authorized: string[]; expirySecret: ExpirySecret; prefix: string;
 };
 
 /**
@@ -75,6 +75,26 @@ export async function verifyStandardQaCopyIam(scope: QaCopyIamScope) {
     ]);
     if (sourceKeySecret.split('/secrets/').at(-1) === expirySecret.resource.split('/secrets/').at(-1)) reject();
     const expiryPolicies = [...hierarchy, ...bindings(expirySecretPolicy)];
+    // Managed-folder policies are additive below a bucket and are not returned by
+    // buckets.getIamPolicy. Require the approval namespace to have no such overlay.
+    if (!/^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/$/.test(scope.prefix)) reject();
+    const namespace = 'analysis-v2-dev-standard-archive/';
+    const pages = new Set<string>();
+    let pageToken: string | undefined;
+    do {
+        const response = await client.request<{ items?: { name: string }[]; nextPageToken?: string }>({
+            url: 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucketName) + '/managedFolders',
+            params: { prefix: namespace, pageSize: 256, fields: 'items(name),nextPageToken', ...(pageToken && { pageToken }) },
+        });
+        const items = response.data?.items ?? [];
+        if (!Array.isArray(items) || items.some(item => typeof item.name !== 'string' || !item.name.startsWith(namespace)
+            || !item.name.endsWith('/') || item.name.startsWith(scope.prefix) || scope.prefix.startsWith(item.name))) reject();
+        pageToken = response.data.nextPageToken;
+        if (pageToken !== undefined) {
+            if (typeof pageToken !== 'string' || !pageToken || pages.has(pageToken)) reject();
+            pages.add(pageToken);
+        }
+    } while (pageToken);
     const sourceKeyPolicies = [...hierarchy, ...bindings(originalKeyPolicy)];
     const keyPolicies = [...hierarchy, ...ring, ...cryptoKey];
     const permissions = new Map<string, Set<string>>();
