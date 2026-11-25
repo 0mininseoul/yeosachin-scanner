@@ -9,7 +9,7 @@ export function newPrivate90Observations() {
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         targetImages: 0, publicRows: 0, privateRows: 0, publicImages: 0, privateImages: 0,
         resultPages: 0, imageGets: 0, webpVerified: 0, sourceReceipts: 0, workerJobs: 0, duplicateDeliveries: 0,
-        apifyCalls: 0, sourceDownloads: 0, fixedVertexCalls: 0, published: 0, readyImages: 0,
+        providerCountersActive: 0, apifyCalls: 0, sourceDownloads: 0, fixedVertexCalls: 0, published: 0, readyImages: 0,
         ownerResult: 0, ownerImage: 0, otherResult: 0, otherImage: 0, anonymousResult: 0, anonymousImage: 0,
     };
 }

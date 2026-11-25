@@ -344,6 +344,7 @@ async function runStandardRequest(
     }));
     const apify = new SyntheticApify();
     runtime.apify.mockClear().mockImplementation(() => {
+        if (privateReplay) privateReplay.observed.apifyCalls++;
         if (isReplay) throw new Error('Unexpected Apify access during archive replay');
         return apify;
     });
@@ -351,10 +352,17 @@ async function runStandardRequest(
     runtime.r2.mockImplementation(createFixtureR2());
     const sourcePng = await makeSourcePng();
     runtime.png.mockClear().mockImplementation(() => {
+        if (privateReplay) privateReplay.observed.sourceDownloads++;
         if (isReplay) throw new Error('Unexpected source image download during archive replay');
         return sourcePng;
     });
-    runtime.model.mockImplementation(privateReplay?.generate ?? syntheticGeneration);
+    runtime.model.mockImplementation(input => {
+        if (!privateReplay) return syntheticGeneration(input);
+        privateReplay.observed.fixedVertexCalls++;
+        return privateReplay.generate(input);
+    });
+    if (privateReplay) privateReplay.observed.providerCountersActive = 1;
+    const modelCallCount = () => privateReplay?.observed.fixedVertexCalls ?? runtime.model.mock.calls.length;
     const attempt = randomUUID();
     const newPreflight = () => start(request('', 'POST', { targetInstagramId: privateReplay?.target ?? target }, attempt));
     const created = await newPreflight();
@@ -481,7 +489,8 @@ async function runStandardRequest(
     let steps = 0;
     let continued = 0;
     let receiptRedeliveries = 0;
-    const modelCallsBefore = runtime.model.mock.calls.length;
+    const modelCallsBefore = modelCallCount();
+    if (privateReplay) expect(modelCallsBefore).toBe(0);
     const stateStore = createSupabaseAnalysisV2DagStateStore();
     const worker = {
         stateStore,
@@ -550,9 +559,9 @@ async function runStandardRequest(
         expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
         expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
         const before = await totals();
-        const calls = [apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length];
+        const calls = [apify.starts.length, modelCallCount(), runtime.queue.length];
         expect((await processAnalysisV2TaskDelivery(delivery)).status).toBe('already_terminal');
-        expect([apify.starts.length, runtime.model.mock.calls.length, runtime.queue.length]).toEqual(
+        expect([apify.starts.length, modelCallCount(), runtime.queue.length]).toEqual(
             calls,
         );
         expect(await totals()).toEqual(before);
@@ -560,6 +569,11 @@ async function runStandardRequest(
             if (/^track:profile-ai:batch:\d+$/.test(delivery.jobKey)) privateReplay.observed.completedProfileBatches++;
             privateReplay.observed.workerJobs++;
             privateReplay.observed.duplicateDeliveries++;
+            // No completed delivery needs to keep a second copy of image buffers or RPC arguments.
+            runtime.model.mockClear();
+            runtime.admin.rpc.mockClear();
+            runtime.admin.from.mockClear();
+            runtime.r2.mockClear();
         }
     }
     expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
@@ -594,9 +608,8 @@ async function runStandardRequest(
         expect(observed.completedProfileBatches).toBe(counts.batches);
         observed.published = counts.published;
         observed.readyImages = counts.images;
-        observed.apifyCalls = runtime.apify.mock.calls.length;
-        observed.sourceDownloads = runtime.png.mock.calls.length;
-        observed.fixedVertexCalls = runtime.model.mock.calls.length - modelCallsBefore;
+        expect(observed.apifyCalls).toBe(runtime.apify.mock.calls.length);
+        expect(observed.sourceDownloads).toBe(runtime.png.mock.calls.length);
         expect(counts).toMatchObject({ published: 1, manifests: 1, cloned: 0, batches: privateReplay.profileBatches.length });
         expect(counts.images).toBeGreaterThan(0);
         expect(observed.fixedVertexCalls).toBeGreaterThan(0);
