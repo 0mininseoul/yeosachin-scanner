@@ -9,9 +9,12 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
     JSDOM: new (html: string, options: { url: string }) => { window: Window & typeof globalThis };
 };
 
-export async function assertOwnerPage(requestId: string, candidate: string, kind: 'public' | 'private' = 'public', expectScopeNote = false) {
-    const location = DEV_UI_APP_ORIGIN + '/result/' + requestId + '?devAnalysis=live';
-    const { window } = new JSDOM('<div id="root"></div>', { url: location });
+export async function assertOwnerPage(
+    requestId: string, candidate: string, kind: 'public' | 'private' = 'public', expectScopeNote = false,
+    pageUrl = DEV_UI_APP_ORIGIN + '/result/' + requestId + '?devAnalysis=live',
+) {
+    const location = new URL(pageUrl);
+    const { window } = new JSDOM('<div id="root"></div>', { url: location.href });
     const requested: string[] = [];
     const route = '/api/analysis/v2/result/' + requestId;
     const params = Promise.resolve({ requestId });
@@ -21,10 +24,16 @@ export async function assertOwnerPage(requestId: string, candidate: string, kind
     vi.stubGlobal('document', window.document);
     vi.stubGlobal('self', window);
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
-    vi.stubGlobal('fetch', async (input: string) => {
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
         const url = new URL(input, location);
+        // The normal result page warms its optional share control on mount.
+        // This result-access fixture keeps that separate write offline.
+        if (location.searchParams.get('pipeline') === 'v2' && url.origin === location.origin
+            && url.pathname === '/api/share/enable' && init?.method === 'POST') {
+            return Response.json({}, { status: 503 });
+        }
         requested.push(url.pathname);
-        if (url.origin !== DEV_UI_APP_ORIGIN || url.pathname !== route)
+        if (url.origin !== location.origin || url.pathname !== route)
             throw new Error('Unexpected page request');
         const response = await GET(new Request(url), { params });
         const payload = await response.clone().json();

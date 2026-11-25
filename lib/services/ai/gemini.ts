@@ -1,3 +1,4 @@
+import { AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore } from './gemini-generation-limiter';
 import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
 import {
@@ -36,7 +37,6 @@ import {
 import {
     AI_STAGE_POLICY_VERSION,
     AI_STAGE_POLICY_V212_VERSION,
-    AI_SHARED_CONCURRENCY_LIMIT,
     AI_GEMINI_LEASE_SECONDS,
     AI_GEMINI_SDK_TIMEOUT_MS,
     aiStagePolicySupports,
@@ -72,101 +72,9 @@ const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 let genAI: GoogleGenAI | null = null;
 let extendedTelemetrySupported: boolean | null = null;
 
-interface GeminiSemaphoreWaiter {
-    resolve: () => void;
-    reject: (error: unknown) => void;
-    signal?: AbortSignal;
-    onAbort?: () => void;
-}
-
-class AsyncSemaphore {
-    private active = 0;
-    private readonly queue: GeminiSemaphoreWaiter[] = [];
-
-    constructor(private readonly limit: number) {}
-
-    async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-        await this.acquire(signal);
-        try {
-            return await task();
-        } finally {
-            this.release();
-        }
-    }
-
-    tryAcquire(): (() => void) | null {
-        if (this.active >= this.limit) return null;
-        this.active++;
-        let released = false;
-        return () => {
-            if (released) return;
-            released = true;
-            this.release();
-        };
-    }
-
-    private acquire(signal?: AbortSignal): Promise<void> {
-        if (signal?.aborted) {
-            return Promise.reject(signal.reason ?? new Error('ABORTED'));
-        }
-        if (this.active < this.limit) {
-            this.active++;
-            return Promise.resolve();
-        }
-
-        return new Promise<void>((resolve, reject) => {
-            const waiter: GeminiSemaphoreWaiter = {
-                resolve,
-                reject,
-                signal,
-            };
-            const onAbort = () => {
-                const index = this.queue.indexOf(waiter);
-                if (index >= 0) this.queue.splice(index, 1);
-                signal?.removeEventListener('abort', onAbort);
-                reject(signal?.reason ?? new Error('ABORTED'));
-            };
-            waiter.onAbort = onAbort;
-            signal?.addEventListener('abort', onAbort, { once: true });
-            this.queue.push(waiter);
-            if (signal?.aborted) onAbort();
-        });
-    }
-
-    private release(): void {
-        while (this.queue.length > 0) {
-            const next = this.queue.shift();
-            if (!next) break;
-            next.signal?.removeEventListener('abort', next.onAbort as EventListener);
-            if (next.signal?.aborted) {
-                next.reject(next.signal.reason ?? new Error('ABORTED'));
-                continue;
-            }
-            next.resolve();
-            return;
-        }
-
-        this.active--;
-    }
-}
-
-interface GeminiGenerationLimiterState {
-    shared: AsyncSemaphore;
-    stages: Map<string, AsyncSemaphore>;
-}
-
 // Basic and legacy Dev grants can tie up most of their smaller budgets in one
 // reservation. Serialize those calls through settlement.
 const devLiveGenerationSlot = new AsyncSemaphore(1);
-
-const processScope = globalThis as typeof globalThis & {
-    __AI_BARAM_GEMINI_GENERATION_LIMITER_V1__?: GeminiGenerationLimiterState;
-};
-const generationLimiterState = processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ ?? {
-    shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT),
-    stages: new Map<string, AsyncSemaphore>(),
-};
-processScope.__AI_BARAM_GEMINI_GENERATION_LIMITER_V1__ = generationLimiterState;
 
 interface VertexAiBudgetProcessGuard {
     mode: 'memory' | 'supabase';
@@ -202,19 +110,6 @@ function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
     return guard;
 }
 
-function getStageGenerationSemaphore(
-    policyVersion: AiStagePolicyVersion,
-    stage: AiStageName,
-): AsyncSemaphore {
-    const key = `${policyVersion}:${stage}`;
-    const existing = generationLimiterState.stages.get(key);
-    if (existing) return existing;
-
-    const semaphore = new AsyncSemaphore(getAiStagePolicy(policyVersion, stage).concurrency);
-    generationLimiterState.stages.set(key, semaphore);
-    return semaphore;
-}
-
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
@@ -230,11 +125,12 @@ async function runWithGenerationSlot<T>(
         }
         return task();
     };
+    const generationLimiterState = getGeminiGenerationLimiter();
     if (!stage) {
         return generationLimiterState.shared.run(guardedTask, signal);
     }
 
-    const stageSemaphore = getStageGenerationSemaphore(policyVersion, stage);
+    const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     if (stage === 'genderResolution') {
         const releaseStage = stageSemaphore.tryAcquire();
         if (!releaseStage) {

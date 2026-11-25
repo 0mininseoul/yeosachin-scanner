@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { PGlite, type Transaction } from '@electric-sql/pglite';
+import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
 const migrationVersions = [
@@ -25,85 +25,108 @@ const migrationVersions = [
     '20261124163001',
     '20261124163002',
     '20261124191000',
+    '20261126031000',
+    '20261126032000',
 ];
+
+export interface StandardConnection {
+    query<Row extends Record<string, unknown> = Record<string, unknown>>(
+        sql: string, values?: unknown[],
+    ): Promise<{ rows: Row[] }>;
+    exec(sql: string): Promise<unknown>;
+}
+
+export interface StandardDatabase extends StandardConnection {
+    transaction<T>(operation: (tx: StandardConnection) => Promise<T>): Promise<T>;
+    close(): Promise<void>;
+}
 
 export async function createStandardDatabase() {
     const db = await PGlite.create({ extensions: { pgcrypto } });
-    const devSql = (name: string) => readFileSync('supabase/dev-ui/' + name + '.sql', 'utf8');
     try {
-        await db.exec(`
-            CREATE ROLE anon;
-            CREATE ROLE authenticated;
-            CREATE ROLE service_role BYPASSRLS;
-            CREATE SCHEMA auth;
-            CREATE SCHEMA extensions;
-            CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
-            CREATE FUNCTION extensions.uuid_generate_v4() RETURNS uuid LANGUAGE SQL VOLATILE AS $$ SELECT gen_random_uuid() $$;
-            CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE SQL STABLE AS $$ SELECT nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
-            CREATE FUNCTION auth.role() RETURNS text LANGUAGE SQL STABLE AS $$ SELECT current_setting('role') $$;
-            CREATE TABLE auth.users(id uuid PRIMARY KEY, email text, raw_app_meta_data jsonb, raw_user_meta_data jsonb, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
-            CREATE TABLE auth.identities(user_id uuid, provider text, identity_data jsonb);
-            GRANT USAGE ON SCHEMA auth, extensions TO anon, authenticated, service_role;
-            CREATE PUBLICATION supabase_realtime;
-        `);
-        // GraphQL is a managed extension. The application under test uses PostgREST.
-        await db.exec(
-            devSql('production-baseline').replace(/^CREATE EXTENSION IF NOT EXISTS pg_graphql .*;$/m, ''),
-        );
-        await db.exec('SET search_path TO public, extensions; SET row_security TO on');
-        for (const name of [
-            'control-plane',
-            'live-budget',
-            'live-owner-start',
-            'live-owner-start-standard',
-            'live-fresh-admission-secondary',
-            'live-standard-preflight-replay',
-            'live-standard-fresh-admission',
-            'live-standard-fresh-profile-checkpoint',
-            'live-standard-dispatch-recovery',
-            'live-standard-archive-replay',
-            'live-standard-archive-blite',
-            'live-standard-archive-evidence',
-            'live-standard-replay-scope-note',
-        ])
-            await db.exec(devSql(name));
-        await db.exec('INSERT INTO public.analysis_v2_gemini_leases(slot) SELECT generate_series(1,8)');
-        const files = readdirSync('supabase/migrations');
-        for (const [version, table] of [
-            ['20260724220000', 'analysis_v2_apify_secret_ref_prune_guard'],
-            ['20260802010000', 'analysis_apify_credit_snapshots'],
-            ['20260831100000', 'analysis_provider_admission_budgets'],
-            ['20260904120000', 'analysis_provider_admission_budgets'],
-            ['20260904120000', 'analysis_apify_credit_snapshots'],
-        ]) {
-            const migration = readFileSync(
-                'supabase/migrations/' + files.find((name) => name.startsWith(version)),
-                'utf8',
-            );
-            const start = migration.indexOf('INSERT INTO public.' + table);
-            if (start < 0) throw new Error('Missing baseline configuration for ' + table);
-            await db.exec(migration.slice(start, migration.indexOf(';', start) + 1));
-        }
-        await db.exec(`UPDATE analysis_apify_credit_snapshots SET health_state='healthy', monthly_limit_usd=10,
-            monthly_usage_usd=1, billing_cycle_start_at=now()-interval '1 day', billing_cycle_end_at=now()+interval '1 day',
-            observed_at=now() WHERE credential_slot='primary'`);
-        for (const version of migrationVersions) {
-            const matches = files.filter((name) => name.startsWith(version + '_'));
-            if (matches.length !== 1) throw new Error('Expected one migration for ' + version);
-            await db.exec(readFileSync('supabase/migrations/' + matches[0], 'utf8'));
-        }
-        for (const name of [
-            'live-standard-provider-recovery',
-            'live-standard-feature-concurrency',
-            'live-standard-profile-media-ready',
-            'live-standard-profile-shared-reader',
-        ]) {
-            await db.exec(devSql(name));
-        }
+        await installStandardFixtureSchema(db);
         return db;
     } catch (error) {
         await db.close();
         throw error;
+    }
+}
+
+// The baseline changes session settings. Keep every script on the same connection.
+export async function installStandardFixtureSchema(
+    db: Pick<StandardConnection, 'exec'>,
+    { providerRecoveryParentFence = true }: { providerRecoveryParentFence?: boolean } = {},
+) {
+    const devSql = (name: string) => readFileSync('supabase/dev-ui/' + name + '.sql', 'utf8');
+    await db.exec(`
+        CREATE ROLE anon;
+        CREATE ROLE authenticated;
+        CREATE ROLE service_role BYPASSRLS;
+        CREATE SCHEMA auth;
+        CREATE SCHEMA extensions;
+        CREATE EXTENSION pgcrypto WITH SCHEMA extensions;
+        CREATE FUNCTION extensions.uuid_generate_v4() RETURNS uuid LANGUAGE SQL VOLATILE AS $$ SELECT gen_random_uuid() $$;
+        CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE SQL STABLE AS $$ SELECT nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
+        CREATE FUNCTION auth.role() RETURNS text LANGUAGE SQL STABLE AS $$ SELECT current_setting('role') $$;
+        CREATE TABLE auth.users(id uuid PRIMARY KEY, email text, raw_app_meta_data jsonb, raw_user_meta_data jsonb, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+        CREATE TABLE auth.identities(user_id uuid, provider text, identity_data jsonb);
+        GRANT USAGE ON SCHEMA auth, extensions TO anon, authenticated, service_role;
+        CREATE PUBLICATION supabase_realtime;
+    `);
+    // GraphQL is a managed extension. The application under test uses PostgREST.
+    await db.exec(
+        devSql('production-baseline').replace(/^CREATE EXTENSION IF NOT EXISTS pg_graphql .*;$/m, ''),
+    );
+    await db.exec('SET search_path TO public, extensions; SET row_security TO on');
+    for (const name of [
+        'control-plane',
+        'live-budget',
+        'live-owner-start',
+        'live-owner-start-standard',
+        'live-fresh-admission-secondary',
+        'live-standard-preflight-replay',
+        'live-standard-fresh-admission',
+        'live-standard-fresh-profile-checkpoint',
+        'live-standard-dispatch-recovery',
+        'live-standard-archive-replay',
+        'live-standard-archive-blite',
+        'live-standard-archive-evidence',
+        'live-standard-replay-scope-note',
+    ])
+        await db.exec(devSql(name));
+    await db.exec('INSERT INTO public.analysis_v2_gemini_leases(slot) SELECT generate_series(1,8)');
+    const files = readdirSync('supabase/migrations');
+    for (const [version, table] of [
+        ['20260724220000', 'analysis_v2_apify_secret_ref_prune_guard'],
+        ['20260802010000', 'analysis_apify_credit_snapshots'],
+        ['20260831100000', 'analysis_provider_admission_budgets'],
+        ['20260904120000', 'analysis_provider_admission_budgets'],
+        ['20260904120000', 'analysis_apify_credit_snapshots'],
+    ]) {
+        const migration = readFileSync(
+            'supabase/migrations/' + files.find((name) => name.startsWith(version)),
+            'utf8',
+        );
+        const start = migration.indexOf('INSERT INTO public.' + table);
+        if (start < 0) throw new Error('Missing baseline configuration for ' + table);
+        await db.exec(migration.slice(start, migration.indexOf(';', start) + 1));
+    }
+    await db.exec(`UPDATE analysis_apify_credit_snapshots SET health_state='healthy', monthly_limit_usd=10,
+        monthly_usage_usd=1, billing_cycle_start_at=now()-interval '1 day', billing_cycle_end_at=now()+interval '1 day',
+        observed_at=now() WHERE credential_slot='primary'`);
+    for (const version of migrationVersions) {
+        if (version === '20261126032000' && !providerRecoveryParentFence) continue;
+        const matches = files.filter((name) => name.startsWith(version + '_'));
+        if (matches.length !== 1) throw new Error('Expected one migration for ' + version);
+        await db.exec(readFileSync('supabase/migrations/' + matches[0], 'utf8'));
+    }
+    for (const name of [
+        'live-standard-provider-recovery',
+        'live-standard-feature-concurrency',
+        'live-standard-profile-media-ready',
+        'live-standard-profile-shared-reader',
+    ]) {
+        await db.exec(devSql(name));
     }
 }
 
@@ -114,8 +137,8 @@ function identifier(value: string) {
 
 // A local PostgREST transport. Use the catalog for named argument types and set-returning
 // functions so callers execute the same SQL and receive the same JSON shape as in Dev.
-export function localDatabaseClient(db: PGlite, subject?: string | null) {
-    function scoped<T>(operation: (tx: Transaction) => Promise<T>) {
+export function localDatabaseClient(db: StandardDatabase, subject?: string | null) {
+    function scoped<T>(operation: (tx: StandardConnection) => Promise<T>) {
         return db.transaction(async (tx) => {
             const role = subject === undefined ? 'service_role' : subject ? 'authenticated' : 'anon';
             await tx.exec('SET LOCAL ROLE ' + role);

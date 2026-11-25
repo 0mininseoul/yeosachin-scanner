@@ -45,6 +45,17 @@ function input() {
 }
 
 describe('deployment-wide Gemini lease store', () => {
+    it.each([
+        { env: { NODE_ENV: 'production', STANDARD_SHARED_VERTEX_SLOTS: '56' }, slot: 9 },
+        { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '8' }, slot: 9 },
+        { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '48' }, slot: 49 },
+        { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '56' }, slot: 57 },
+    ])('rejects slots outside the selected physical pool ($slot)', async ({ env, slot }) => {
+        const rpc = vi.fn(async () => ({ data: [{ outcome: 'acquired', slot, lease_claim_token: claimToken,
+            fence: 1, expires_at: expiresAt }], error: null }));
+        const store = createAnalysisV2GeminiLeaseStore({ rpc, env, nowMs: () => 1_000, randomUuid: () => claimToken });
+        await expect(store.acquire(input())).rejects.toThrow('ANALYSIS_V2_GEMINI_LEASE_PERSISTENCE_ERROR');
+    });
     it('acquires one fenced slot with a bounded database lease', async () => {
         const { rpc, store } = setup([{
             outcome: 'acquired',

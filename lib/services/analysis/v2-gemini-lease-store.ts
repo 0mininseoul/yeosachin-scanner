@@ -51,9 +51,18 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     reapCutoffV2Rpc: 'reap_analysis_v2_gemini_cutoff_leases_v2',
 });
 
+// The two larger pools are opt-in candidates for the isolated native PostgreSQL test.
+// Production and unconfigured tests still reject every slot above eight.
+function slotMaximum(env: Record<string, string | undefined>) {
+    if (env.NODE_ENV !== 'test') return 8;
+    if (env.STANDARD_SHARED_VERTEX_SLOTS === '48') return 48;
+    if (env.STANDARD_SHARED_VERTEX_SLOTS === '56') return 56;
+    return 8;
+}
+const slotNumber = z.number().int().min(1).max(56);
 const acquiredRowSchema = z.object({
     outcome: z.literal('acquired'),
-    slot: z.number().int().min(1).max(8),
+    slot: slotNumber,
     lease_claim_token: z.string().regex(UUID_PATTERN),
     fence: z.number().int().min(1).safe(),
     expires_at: z.string().datetime({ offset: true }),
@@ -64,7 +73,7 @@ const unavailableRowSchema = z.object({
         'resolver_capacity_pending',
         'quarantine_active',
     ]),
-    slot: z.number().int().min(1).max(8).nullable(),
+    slot: slotNumber.nullable(),
     lease_claim_token: z.null(),
     fence: z.number().int().min(1).safe().nullable(),
     expires_at: z.string().datetime({ offset: true }).nullable(),
@@ -499,7 +508,7 @@ export function createAnalysisV2GeminiLeaseStore(
             const { data, error } = result;
             if (error) throw new AnalysisV2GeminiLeasePersistenceError();
             const parsed = acquireResultSchema.safeParse(data);
-            if (!parsed.success) {
+            if (!parsed.success || (parsed.data[0].slot ?? 0) > slotMaximum(dependencies.env ?? process.env)) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
             const row = parsed.data[0];
