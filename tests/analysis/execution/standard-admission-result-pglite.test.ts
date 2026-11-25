@@ -703,7 +703,10 @@ async function runStandardRequest(
             if (privateReplay.observed.sqlState !== 'none') privateReplay.observed.cause = 'worker_sql';
             if (privateReplay.observed.modelError !== 'none') privateReplay.observed.cause = 'model_routing';
             if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') {
-                privateReplay.observed.cause = observed?.jobStage === 'reverse_likes' && observed.reverseCompared ? 'reverse_scope' : 'missing_keyed_media';
+                privateReplay.observed.cause = 'missing_keyed_media';
+                if (observed?.jobStage === 'reverse_likes' && observed.reverseCompared) {
+                    privateReplay.observed.cause = observed.reverseActualHashMatch ? 'archive_unavailable' : 'reverse_scope';
+                }
             }
             if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
         }

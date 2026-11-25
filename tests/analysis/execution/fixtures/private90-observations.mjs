@@ -44,7 +44,7 @@ const phases = ['reader', 'source_ledger', 'fixed_model', 'admission', 'worker',
 
 const causes = ['none', 'reader_verification', 'source_receipts', 'source_admission', 'sealed_model_inputs',
     'missing_keyed_media', 'model_routing', 'preflight_admission', 'worker_stage', 'timeout', 'ledger_mismatch',
-    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql', 'reverse_scope'];
+    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql', 'reverse_scope', 'archive_unavailable'];
 
 export function newPrivate90Observations() {
     return {
