@@ -5,7 +5,26 @@ type Generation = {
     config: { responseJsonSchema: { properties: Record<string, unknown> } };
 };
 
-export function syntheticGeneration(input: Generation, triageGender: 'female' | 'male' = 'female') {
+/** Return neutral answers in the private-name stage's exact input order. */
+export function fixedPrivateNameResults(input: Generation) {
+    const schema = input.config.responseJsonSchema as { type?: string; items?: { properties?: Record<string, unknown> } };
+    if (schema.type?.toLowerCase() !== 'array' || !schema.items?.properties || !('femaleScore' in schema.items.properties)) return null;
+    const contents = Array.isArray(input.contents) ? input.contents : [input.contents];
+    const prompt = contents.flatMap(content => content.parts).map(part => part.text ?? '').join('\n');
+    const marker = '\n입력 JSON:\n';
+    const offset = prompt.lastIndexOf(marker);
+    if (offset < 0) throw new Error('OFFLINE_STANDARD_VERTEX_PROMPT_SHAPE');
+    const rows: unknown = JSON.parse(prompt.slice(offset + marker.length));
+    if (!Array.isArray(rows) || !rows.every(row => row && typeof row.id === 'string'))
+        throw new Error('OFFLINE_STANDARD_VERTEX_MODEL_INPUT_SHAPE');
+    return rows.map(row => ({ id: row.id, femaleScore: 0.5, isName: false, confidence: 0 }));
+}
+
+export function syntheticGeneration(
+    input: Generation,
+    triageGender: 'female' | 'male' = 'female',
+    featureGender: 'female' | 'male' = 'female',
+) {
     const schema = input.config.responseJsonSchema.properties;
     const contents = Array.isArray(input.contents) ? input.contents : [input.contents];
     const prompt = contents
@@ -18,7 +37,10 @@ export function syntheticGeneration(input: Generation, triageGender: 'female' | 
         return value;
     };
     let output;
-    if ('persona' in schema) {
+    const privateNames = fixedPrivateNameResults(input);
+    if (privateNames) {
+        output = privateNames;
+    } else if ('persona' in schema) {
         output = validModelResponse();
     } else if ('accounts' in schema) {
         const accountId = match(/account:[a-f0-9]{64}/);
@@ -50,7 +72,7 @@ export function syntheticGeneration(input: Generation, triageGender: 'female' | 
         const profile = match(/profile:[^"\s,\]]+/);
         const post = match(/post:201:thumbnail/);
         output = {
-            gender: 'female',
+            gender: featureGender,
             genderConfidence: 'high',
             ownerConsistency: 'same_person',
             appearanceGrade: 5,
@@ -70,7 +92,7 @@ export function syntheticGeneration(input: Generation, triageGender: 'female' | 
                 marriagePartner: [],
             },
             oneLineOverview:
-                '여행 사진마다 일상의 작은 표정까지 담아내는 모습에서 차분히 추억을 기록하는 취향이 드러납니다.',
+                '프로필 이미지와 피드 이미지가 함께 있어 소개 화면과 게시물 양쪽에서 사진을 볼 수 있습니다.',
         };
     } else if ('companionPattern' in schema) {
         output = {

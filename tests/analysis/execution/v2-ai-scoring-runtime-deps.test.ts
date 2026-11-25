@@ -1,7 +1,8 @@
+import type { SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
-import { normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-media-normalization';
+import { captureDevStandardMediaSelection, normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-media-normalization';
 import {
     analysisV2ProfileFetchResumeSchema,
     type AnalysisV2ProfileFetchResume,
@@ -1188,6 +1189,71 @@ describe('Dev Standard reverse-like archive', () => {
 });
 
 describe('Dev Standard AI image archive', () => {
+    const remainder = Array.from({ length: 3 }, (_, i) => ({
+        selectionId: 'profile:offline' + i, imageUrl: 'https://cdninstagram.com/offline' + i + '.jpg', role: 'profile' as const,
+    }));
+    const version = 'ai-stage-policy-v2.11';
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+
+    it('completes an interrupted skipped selection from its saved children and replays its exact outcomes', async () => {
+        const records = new Map<string, unknown>();
+        const capture = archiveScope('capture', records);
+        const write = capture.capture.getMockImplementation()!;
+        let interrupted = false;
+        capture.capture.mockImplementation(async (kind, id, value) => {
+            if (kind === 'ai-image' && id[2] === 1 && !interrupted) {
+                interrupted = true;
+                throw new DevStandardArchiveError();
+            }
+            await write(kind, id, value);
+        });
+        const source = vi.fn(async (item: SelectedAnalysisMedia) => {
+            if (item === remainder[1]) throw new AnalysisImagePreparationError('decode_failed', 'permanent');
+            if (item === remainder[2]) throw new AnalysisImagePreparationError('network_failure', 'transient');
+            return jpeg;
+        });
+        await expect(captureDevStandardMediaSelection(remainder, source, version)).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        expect(records.size).toBe(2);
+        await captureDevStandardMediaSelection(remainder, source, version);
+        expect(source.mock.calls.map(([item]) => item.selectionId)).toHaveLength(5);
+        expect(source.mock.calls.filter(([item]) => item === remainder[0])).toHaveLength(1);
+        await captureDevStandardMediaSelection(remainder, source, version);
+        expect(source).toHaveBeenCalledTimes(5);
+        const replay = archiveScope('replay', records);
+        const noSource = vi.fn();
+        await captureDevStandardMediaSelection(remainder, noSource, version);
+        expect(replay.find).not.toHaveBeenCalled();
+        const normalized = await normalizeAnalysisV2MediaSelections(remainder, noSource, version);
+        expect(normalized.bytes.get(remainder[0]!.selectionId)).toEqual(jpeg);
+        expect(normalized.coverage.failures.map(failure => failure.disposition)).toEqual(['permanent', 'transient']);
+        const marker = [...records.keys()].find(k => k.includes('ai-image-selection-v1'))!;
+        const members = records.get(marker) as unknown[];
+        records.set(marker, [...members].reverse());
+        await expect(normalizeAnalysisV2MediaSelections(remainder, noSource, version)).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        expect(noSource).not.toHaveBeenCalled();
+    });
+
+    it('backs up pinned bytes and failure reasons without another source download and rejects conflicts', async () => {
+        const noSource = vi.fn();
+        await captureDevStandardMediaSelection(remainder, noSource, version);
+        expect(noSource).not.toHaveBeenCalled();
+        const pinned = await normalizeAnalysisV2MediaSelections(remainder, async item => {
+            if (item === remainder[1]) throw new AnalysisImagePreparationError('decode_failed', 'permanent');
+            return jpeg;
+        }, version);
+        const records = new Map<string, unknown>();
+        archiveScope('capture', records);
+        await captureDevStandardMediaSelection(remainder, noSource, version, async () => pinned);
+        await captureDevStandardMediaSelection(remainder, noSource, version, async () => pinned);
+        const conflict = new Map(pinned.bytes);
+        conflict.set(remainder[0]!.selectionId, Buffer.from([0xff, 0xd8, 0, 0xff, 0xd9]));
+        await expect(captureDevStandardMediaSelection(remainder, noSource, version,
+            async () => ({ ...pinned, bytes: conflict }))).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        archiveScope('replay', records);
+        await expect(normalizeAnalysisV2MediaSelections(remainder, noSource, version)).resolves.toEqual(pinned);
+        expect(noSource).not.toHaveBeenCalled();
+    });
+
     it('round-trips JPEG and observed media failures without downloading or downgrading an archive miss', async () => {
         const stored = new Map<string, unknown>();
         const jpeg = Buffer.from([0xff, 0xd8, 0x11, 0xff, 0xd9]);

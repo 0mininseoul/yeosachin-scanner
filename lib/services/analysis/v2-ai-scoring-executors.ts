@@ -28,6 +28,7 @@ import {
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
+    retainDevStandardResultProfiles,
     resultImageArchiveIdentity,
     resultImageOrderedManifestHash,
     type ResultImageCaptureSource,
@@ -136,6 +137,7 @@ import type {
 import {
     AnalysisV2TransientMediaPreparationError,
     isAnalysisV2PartialMediaCoverageAllowed,
+    captureDevStandardMediaSelection,
     normalizeAnalysisV2MediaSelections,
     type AnalysisV2ProfileMediaCoverage,
 } from './v2-media-normalization';
@@ -857,6 +859,11 @@ function mediaPolicy(
         throw new Error('ANALYSIS_V2_PROFILE_MEDIA_STRUCTURAL_INCOMPLETE');
     }
     return policy;
+}
+
+function remainingFeatureMedia(policy: ReturnType<typeof mediaPolicy>) {
+    const triage = new Set(policy.triage.selectionIds);
+    return policy.feature.media.filter(item => !triage.has(item.selectionId));
 }
 
 function mediaSelectionProvenance(
@@ -2131,6 +2138,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (results.length !== topology.itemCount) {
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
+            if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture') {
+                await retainDevStandardResultProfiles(results.flatMap(item => item.status === 'success' && item.profile && !item.profile.isPrivate
+                    ? [{ kind: 'female', candidateLocator: analysisV2CandidateId(item.username), sourceUrl: item.profile.profilePicUrl ?? null }]
+                    : []));
+            }
             const aiFence = aiJobFence(context);
             const profileConcurrency = analysisV2ProfilePipelineConcurrency(
                 aiFence.aiStagePolicyVersion,
@@ -2264,6 +2276,21 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         : await normalizeAnalysisV2MediaSelections(
                             policy.triage.media, dependencies.normalizeMedia, aiFence.aiStagePolicyVersion,
                         );
+                    if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture'
+                        && policySupports(aiFence.aiStagePolicyVersion, 'partialMediaCoverage')) {
+                        // A later model can choose features even when this capture skips them.
+                        // Only the archive observes these extra inputs. The normal stage keeps
+                        // its own coverage, checkpoints and model admission.
+                        if (savedTriage) {
+                            await captureDevStandardMediaSelection(policy.triage.media, dependencies.normalizeMedia,
+                                aiFence.aiStagePolicyVersion, async () => triageNormalized);
+                        }
+                        const remainder = remainingFeatureMedia(policy);
+                        const pinned = savedBySlot.get(`${index}:feature_remainder`);
+                        await captureDevStandardMediaSelection(remainder, dependencies.normalizeMedia, aiFence.aiStagePolicyVersion,
+                            pinned ? () => restoreProfileMedia(pinned, remainder, candidateId,
+                                inputFence.requestId, dependencies.sourceMediaArchive) : undefined);
+                    }
                     const usable = isAnalysisV2StageMediaCoverageUsable(triageNormalized.coverage, aiFence.aiStagePolicyVersion);
                     const archiveTriage = usable || inputStore !== null;
                     const triageSha256 = savedTriage ? savedTriage.archiveSha256 : archiveTriage
@@ -2386,10 +2413,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             ? v211FeatureAdmission(gender.result, profile)
                             : v29FeatureAdmission(gender.result, profile)
                         : null;
-                    const triageAttempted = new Set(policy.triage.selectionIds);
-                    const featureRemainder = policy.feature.media.filter(media => (
-                        !triageAttempted.has(media.selectionId)
-                    ));
+                    const featureRemainder = remainingFeatureMedia(policy);
                     const savedRemainder = savedBySlot.get(`${evidence.ordinal}:feature_remainder`);
                     const previousRemainder = savedRemainder ?? retryRemainder;
                     const remainderNormalized = previousRemainder
@@ -2864,6 +2888,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 context.job.batch!,
                 topology.itemCount
             );
+            if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture') {
+                await retainDevStandardResultProfiles(rows.map(row => ({
+                    kind: 'private', candidateLocator: analysisV2CandidateId(row.username), sourceUrl: row.profilePicUrl,
+                })));
+            }
             const analyzed = await dependencies.ai.privateNames(rows.map(row => ({
                 id: analysisV2CandidateId(row.username),
                 username: row.username,

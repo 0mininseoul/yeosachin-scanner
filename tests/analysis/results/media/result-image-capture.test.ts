@@ -2,10 +2,13 @@ import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
 import { currentDevStandardArchive, DevStandardArchiveError } from '@/lib/services/dev-ui/standard-archive-runtime';
+import { canonicalizeImageProxyUrl } from '@/lib/services/media/image-proxy-token';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
 import { SecureImageFetchError } from '../../../../lib/services/media/secure-image-fetch';
 import {
     captureResultImages,
+    resultImageArchiveIdentity,
+    retainDevStandardResultProfiles,
     type ResultImageCaptureSource,
 } from '../../../../lib/services/media/result-image-capture';
 import type {
@@ -226,6 +229,90 @@ describe('captureResultImages', () => {
         })).rejects.toBeInstanceOf(DevStandardArchiveError);
         expect(download).not.toHaveBeenCalled();
         expect(incompleteRegistry.sealManifest).not.toHaveBeenCalled();
+    });
+
+    it('replays a previously unpublished public photo and a private photo by their exact original and canonical identities', async () => {
+        const stored = new Map<string, unknown>();
+        const publicRow = source(1,{sourceUrl:'https://cdninstagram.com/skipped.jpg?z=2&a=1&utm_source=fixture'});
+        const privateRow = source(2,{kind:'private', sourceUrl:'https://cdninstagram.com/private.jpg?sig=fixture&a=1'});
+        const raw = [publicRow, privateRow];
+        const canon = raw.map(row => ({ ...row, sourceUrl:canonicalizeImageProxyUrl(row.sourceUrl!) }));
+        const bytes = await sharp({create:{width:3,height:3,channels:3,background:'#382410'}}).png().toBuffer();
+        const download = vi.fn(async (url: string) => ({ bytes, contentType:'image/png', finalUrl:url }));
+        const store = () => ({put:vi.fn(),head:vi.fn()});
+        const settings = { ...CLAIM,orderedManifestHash:MANIFEST_HASH,hmacSecret:HMAC_SECRET,download };
+        const page = (items:ResultImageCaptureSource[]) => async () => ({items,nextAfterOrdinal:null});
+        const profiles = raw.map(row => ({kind:row.kind as 'female'|'private',candidateLocator:row.candidateLocator,sourceUrl:row.sourceUrl}));
+
+        await retainDevStandardResultProfiles(profiles,{download});
+        expect(download).not.toHaveBeenCalled();
+        installArchive('capture',stored);
+        await retainDevStandardResultProfiles(profiles,{download});
+        await retainDevStandardResultProfiles(profiles,{download});
+        expect(download).toHaveBeenCalledTimes(1);
+        expect(download.mock.calls[0]![0]).toBe(canon[0]!.sourceUrl);
+        expect(JSON.stringify([...stored])).not.toContain('sig=fixture');
+        const originKey = (row:ResultImageCaptureSource) => JSON.stringify(['result-image-v1',resultImageArchiveIdentity(row)]);
+        expect(stored.get(originKey(publicRow))).toMatchObject({status:'result_source_projection_v1'});
+        expect(stored.get(originKey(canon[0]!))).toMatchObject({sha256:expect.stringMatching(/^[a-f0-9]{64}$/)});
+        expect(stored.has(originKey(canon[1]!))).toBe(false);
+        // The originally admitted branch published only the private profile.
+        await captureResultImages({...settings,registry:registry(),store:store(),expectedRows:1,loadSourcePage:page([canon[1]!])});
+        expect(download).toHaveBeenCalledTimes(2);
+        installArchive('replay',stored);
+        download.mockClear();
+        const projected = raw.map(row => ({...row,sourceUrl:archiveMediaUrlAnchor(row.sourceUrl!)}));
+        const local = store();
+        const run = () => captureResultImages({...settings,registry:registry(),store:local,expectedRows:2,loadSourcePage:page(projected)});
+        await run();
+        expect(local.put).toHaveBeenCalledTimes(2);
+        expect(download).not.toHaveBeenCalled();
+        const alias = stored.get(originKey(publicRow));
+        stored.set(originKey(privateRow),alias);
+        await expect(run()).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        stored.set(originKey(canon[0]!), alias);
+        await expect(captureResultImages({...settings,registry:registry(),store:store(),expectedRows:1,loadSourcePage:page([projected[0]!])}))
+            .rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        stored.delete(originKey(canon[0]!));
+        await expect(captureResultImages({...settings,registry:registry(),store:store(),expectedRows:1,loadSourcePage:page([projected[0]!])}))
+            .rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        expect(download).not.toHaveBeenCalled();
+    });
+
+    it('retries a mandatory live image after a speculative transient failure and prefers the final WebP on replay', async () => {
+        const stored = new Map<string, unknown>();
+        const original = source(1, { sourceUrl:'https://cdninstagram.com/returned.jpg?z=2&a=1' });
+        const provider = { kind:'female' as const, candidateLocator:original.candidateLocator, sourceUrl:original.sourceUrl };
+        const final = { ...original, sourceUrl:canonicalizeImageProxyUrl(original.sourceUrl!) };
+        const projected = { ...original, sourceUrl:archiveMediaUrlAnchor(original.sourceUrl!) };
+        const capture = installArchive('capture',stored);
+        const unavailable = vi.fn(async (): Promise<never> => { throw new SecureImageFetchError('network_failure','transient','offline'); });
+        await retainDevStandardResultProfiles([provider],{download:unavailable});
+        await retainDevStandardResultProfiles([provider],{download:unavailable});
+        expect(unavailable).toHaveBeenCalledTimes(3);
+        const prior = [...stored.values()].find(value => (value as {status?:string}).status === 'capture_failed');
+        expect(prior).toBeDefined();
+        expect(stored.has(JSON.stringify(['result-image-v1',resultImageArchiveIdentity(final)]))).toBe(false);
+        const bytes = await sharp({create:{width:2,height:2,channels:3,background:'#162411'}}).png().toBuffer();
+        const succeeded = vi.fn(async (url: string) => ({ bytes, contentType:'image/png', finalUrl:url }));
+        const write = vi.fn();
+        const run = (item: ResultImageCaptureSource) => captureResultImages({
+            ...CLAIM,orderedManifestHash:MANIFEST_HASH,hmacSecret:HMAC_SECRET,expectedRows:1,
+            loadSourcePage:async () => ({items:[item],nextAfterOrdinal:null}),registry:registry(),
+            store:{put:write,head:vi.fn()},download:succeeded,
+        });
+        installArchive('replay',stored);
+        await expect(run(projected)).rejects.toThrow('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
+        // An optional new branch may reuse precisely this recorded failure.
+        await run({...projected,sortOrdinal:4});
+        expect(write).not.toHaveBeenCalled();
+        vi.mocked(currentDevStandardArchive).mockReturnValue(capture);
+        await run(final);
+        expect(succeeded).toHaveBeenCalledOnce();
+        installArchive('replay',stored);
+        await run(projected);
+        expect(succeeded).toHaveBeenCalledOnce();
+        expect(write).toHaveBeenCalledTimes(2);
     });
 
     it('captures and replays optional image failure without treating it as a missing source', async () => {

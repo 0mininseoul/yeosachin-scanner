@@ -9,7 +9,7 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
     JSDOM: new (html: string, options: { url: string }) => { window: Window & typeof globalThis };
 };
 
-export async function assertOwnerPage(requestId: string, candidate: string) {
+export async function assertOwnerPage(requestId: string, candidate: string, kind: 'public' | 'private' = 'public') {
     const location = DEV_UI_APP_ORIGIN + '/result/' + requestId + '?devAnalysis=live';
     const { window } = new JSDOM('<div id="root"></div>', { url: location });
     const requested: string[] = [];
@@ -28,7 +28,8 @@ export async function assertOwnerPage(requestId: string, candidate: string) {
             throw new Error('Unexpected page request');
         const response = await GET(new Request(url), { params });
         const payload = await response.clone().json();
-        imagePath = payload.femaleAccounts.find(
+        const accounts = kind === 'private' ? payload.privateAccounts : payload.femaleAccounts;
+        imagePath = accounts.find(
             (item: { instagramId: string }) => item.instagramId === candidate,
         )?.profileImage;
         return response;
@@ -38,6 +39,13 @@ export async function assertOwnerPage(requestId: string, candidate: string) {
     const root = createRoot(container);
     try {
         await act(async () => root.render(createElement(ResultPage, { params })));
+        if (kind === 'private') {
+            const button = () => Array.from(container.querySelectorAll('button')).find(
+                node => node.textContent?.startsWith('비공개 계정'),
+            );
+            await vi.waitFor(() => expect(button()).toBeDefined());
+            await act(async () => button()!.click());
+        }
         await vi.waitFor(async () => {
             await act(async () => {
                 await new Promise((resolve) => setTimeout(resolve, 5));

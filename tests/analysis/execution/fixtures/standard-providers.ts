@@ -1,5 +1,6 @@
 export const target = 'target7'.padStart(30, 't');
 export const candidate = 'sample2'.padStart(30, 's');
+export const privateCandidate = 'fixture_private_0';
 const postCode = (username: string) => (username === target ? 'TargetPost7' : 'SamplePost2');
 const picture = (username: string) => 'https://scontent.cdninstagram.com/' + username + '.jpg';
 
@@ -15,7 +16,7 @@ export function profileItem(username: string, candidatePostCount = 1) {
         postsCount: postCount,
         private: false,
         verified: false,
-        profilePicUrl: picture(username),
+        profilePicUrl: picture(username) + '?z=2&a=1&utm_source=offline',
         latestPosts: Array.from({ length: postCount }, (_, index) => {
             const shortCode = postCount > 1 ? code + index : code;
             return {
@@ -45,11 +46,15 @@ type ActorInput = {
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
-    constructor(private readonly candidatePostCount = 1) {}
+    constructor(private readonly candidatePostCount = 1, private readonly includePrivate = false) {}
 
     private rows(actor: string, input: ActorInput) {
         if (actor === 'apify/instagram-profile-scraper' && input.usernames)
-            return input.usernames.map(username => profileItem(username, this.candidatePostCount));
+            return input.usernames.map(username => {
+                const profile = profileItem(username, this.candidatePostCount);
+                if (this.includePrivate && username === target) profile.followersCount = profile.followsCount = 2;
+                return profile;
+            });
         if (input.Account)
             return [
                 {
@@ -62,6 +67,11 @@ export class SyntheticApify {
                     is_verified: false,
                     profile_pic_url: picture(candidate),
                 },
+                ...(this.includePrivate ? [{
+                    username_scrape: target, type: input.dataToScrape, id: '3', username: privateCandidate,
+                    full_name: privateCandidate, is_private: true, is_verified: false,
+                    profile_pic_url: picture(privateCandidate) + '?z=2&a=1&utm_source=offline',
+                }] : []),
             ];
         if (input.posts)
             return input.posts.map((url) => {

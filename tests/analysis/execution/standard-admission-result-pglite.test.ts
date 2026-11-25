@@ -14,7 +14,7 @@ import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-pro
 import { assertOwnerPage } from './fixtures/standard-result-page';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
-import { SyntheticApify, target, candidate } from './fixtures/standard-providers';
+import { SyntheticApify, target, candidate, privateCandidate } from './fixtures/standard-providers';
 import { POST as start } from '@/app/api/analysis/preflight/route';
 import { PATCH as update } from '@/app/api/analysis/preflight/[preflightId]/route';
 import { POST as entitle } from '@/app/api/analysis/preflight/[preflightId]/entitle/route';
@@ -266,14 +266,16 @@ afterEach(() => {
 
 const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout'] as const;
 type Scenario = typeof deliveryScenarios[number] | 'archive_capture' | 'archive_replay';
+type RoutingScenario = 'unchanged' | 'changed_triage' | 'changed_shortlist';
 
 async function runStandardRequest(
     db: PGlite,
     user: Awaited<ReturnType<typeof seedOwner>>,
     scenario: Scenario,
-    changeTriageOnReplay = false,
+    routing: RoutingScenario = 'unchanged',
 ) {
     const isReplay = scenario === 'archive_replay';
+    const changeTriageOnReplay = routing !== 'unchanged';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
     const capturedBlite = blite && scenario === 'archive_capture';
     const otherId = randomUUID();
@@ -318,7 +320,7 @@ async function runStandardRequest(
         auth: { getUser: async () => ({ data: { user: runtime.user }, error: null }) },
     }));
     // Five posts leave one feature image beyond the four feed images allowed in triage.
-    const apify = new SyntheticApify(changeTriageOnReplay ? 5 : 1);
+    const apify = new SyntheticApify(changeTriageOnReplay ? 5 : 1, changeTriageOnReplay);
     runtime.apify.mockClear().mockImplementation(() => {
         if (isReplay) throw new Error('Unexpected Apify access during archive replay');
         return apify;
@@ -331,7 +333,8 @@ async function runStandardRequest(
         return sourcePng;
     });
     runtime.model.mockImplementation(input =>
-        syntheticGeneration(input, changeTriageOnReplay && !isReplay ? 'male' : 'female'));
+        syntheticGeneration(input, changeTriageOnReplay && !isReplay ? 'male' : 'female',
+            routing === 'changed_triage' ? 'male' : 'female'));
     const attempt = randomUUID();
     const newPreflight = () => start(request('', 'POST', { targetInstagramId: target }, attempt));
     const created = await newPreflight();
@@ -471,17 +474,16 @@ async function runStandardRequest(
         if (++steps > 24) throw new Error('Unexpected repeated task delivery');
         const payload = runtime.queue.shift()!;
         const delivery = parseAnalysisV2TaskPayload(payload);
-        const expectArchiveGap = changeTriageOnReplay && isReplay
-            && delivery.jobKey === 'track:profile-ai:batch:0';
+        const verifyFeatureImages = changeTriageOnReplay && isReplay && delivery.jobKey === 'track:profile-ai:batch:0';
+        const expectArchiveGap = routing === 'changed_shortlist' && isReplay && delivery.jobKey === 'track:reverse-likes:collect';
         const outcome = await runDelivery(async () => {
-            if (!expectArchiveGap) return processAnalysisV2TaskDelivery(delivery, worker);
+            if (!verifyFeatureImages) return processAnalysisV2TaskDelivery(delivery, worker);
             const archive = currentDevStandardArchive()!;
             const load = vi.spyOn(archive, 'load');
             const result = await processAnalysisV2TaskDelivery(delivery, worker);
             const imageReads = load.mock.calls.flatMap(([kind], index) =>
                 kind === 'ai-image' ? [load.mock.settledResults[index]!.type] : []);
-            expect(imageReads.filter(state => state === 'fulfilled')).toHaveLength(5);
-            expect(imageReads.filter(state => state === 'rejected')).toHaveLength(1);
+            expect(imageReads).toEqual(Array(6).fill('fulfilled'));
             return result;
         });
         if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
@@ -548,14 +550,17 @@ async function runStandardRequest(
     const page = await resultPage();
     if (changeTriageOnReplay) {
         const calls = runtime.model.mock.calls.slice(modelCallsBefore);
-        expect(calls).toHaveLength(1);
-        expect(calls[0]![0].config.responseJsonSchema.properties).toHaveProperty('accounts');
+        expect(calls).toHaveLength(isReplay ? 3 : 2);
+        const modelSchemas = calls.map(([input]) => input.config.responseJsonSchema.properties ?? {});
+        expect(modelSchemas.filter(schema => 'accounts' in schema)).toHaveLength(1);
+        expect(modelSchemas.filter(schema => 'gender' in schema)).toHaveLength(isReplay ? 1 : 0);
+        const blocked = isReplay && routing === 'changed_shortlist';
         const { rows } = await db.query(`
             SELECT (SELECT count(*)::int FROM analysis_v2_result_summaries WHERE request_id=$1) AS published,
                    (SELECT count(*)::int FROM analysis_progress_events
                     WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS completed,
                    (SELECT count(*)::int FROM analysis_v2_scheduler_operations
-                    WHERE request_id=$1 AND stage='featureAnalysis') AS feature_operations,
+                    WHERE request_id=$1 AND stage='featureAnalysis' AND status='ready') AS feature_operations,
                    (SELECT count(*)::int FROM analysis_v2_profile_media_inputs
                     WHERE request_id=$1 AND stage='feature_remainder') AS feature_inputs,
                    (SELECT count(*)::int FROM gemini_token_usage WHERE request_id=$1) AS usage_rows,
@@ -566,25 +571,36 @@ async function runStandardRequest(
         `, [result.requestId, approval.id]);
         const budget = await totals();
         expect(rows).toEqual([{
-            published: isReplay ? 0 : 1,
-            completed: isReplay ? 0 : 1,
-            feature_operations: 0,
-            feature_inputs: 0,
-            usage_rows: 1,
+            published: blocked ? 0 : 1,
+            completed: blocked ? 0 : 1,
+            feature_operations: isReplay ? 1 : 0,
+            feature_inputs: isReplay ? 1 : 0,
+            usage_rows: calls.length,
             settled_cost: budget.debit,
-            error_code: isReplay ? 'DEV_STANDARD_ARCHIVE_UNAVAILABLE' : null,
+            error_code: null,
         }]);
-        expect(page.status).toBe(isReplay ? 404 : 200);
+        expect(page.status).toBe(blocked ? 404 : 200);
         if (isReplay) {
-            expect((await page.json()).code).toBe('RESULT_PENDING');
             expect(runtime.apify).not.toHaveBeenCalled();
             expect(runtime.png).not.toHaveBeenCalled();
             expect(budget).toMatchObject({
-                consumed: 1, grants: 1, requests: 1, actors: 0, models: 1, settled: 1,
+                consumed: 1, grants: 1, requests: 1, actors: 0, models: 3, settled: 3,
                 apify_reserved: 0, apify_committed: 0, quota: 0,
             });
+        }
+        if (blocked) {
+            expect((await page.json()).code).toBe('RESULT_PENDING');
         } else {
-            expect((await page.json()).femaleAccounts).toEqual([]);
+            const body = await page.json();
+            expect(body.femaleAccounts).toEqual([]);
+            expect(body.privateAccounts).toHaveLength(1);
+            const privateUrl = await assertOwnerPage(result.requestId, privateCandidate, 'private');
+            const privateImage = await readImage(new NextRequest(privateUrl));
+            expect(privateImage.status).toBe(200);
+            expect((await sharp(Buffer.from(await privateImage.arrayBuffer())).metadata()).format).toBe('webp');
+            const image = await readImage(new NextRequest(new URL(body.summary.targetProfileImage, appOrigin)));
+            expect(image.status).toBe(200);
+            expect((await sharp(Buffer.from(await image.arrayBuffer())).metadata()).format).toBe('webp');
         }
         expect(sqlErrors).toEqual([]);
         return {
@@ -688,7 +704,7 @@ it.each(deliveryScenarios)(
     60_000,
 );
 
-async function exerciseArchiveReplay(blite: boolean, changeTriage = false) {
+async function exerciseArchiveReplay(blite: boolean, routing: RoutingScenario = 'unchanged') {
     configure();
     const db = await createStandardDatabase();
     try {
@@ -701,7 +717,7 @@ async function exerciseArchiveReplay(blite: boolean, changeTriage = false) {
         vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_KEY', Buffer.alloc(32, 71).toString('base64'));
         vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_BUCKET', 'fixture-project-dev-live-media');
         vi.stubEnv('DEV_LIVE_STANDARD_ARCHIVE_APPROVAL_NOT_BEFORE', new Date(Date.now() - 60_000).toISOString());
-        const source = await runStandardRequest(db, user, 'archive_capture', changeTriage);
+        const source = await runStandardRequest(db, user, 'archive_capture', routing);
         await withVerifiedDevStandardArchive(target, coverage => {
             expect(coverage.profileBatches).toEqual([0]);
         });
@@ -728,10 +744,10 @@ async function exerciseArchiveReplay(blite: boolean, changeTriage = false) {
             FROM analysis_preflights p WHERE p.consumed_request_id=$1
         `, [source.requestId]);
         await new Promise(resolve => setTimeout(resolve, nextStart.rows[0]!.wait_ms + 20));
-        const destination = await runStandardRequest(db, user, 'archive_replay', changeTriage);
+        const destination = await runStandardRequest(db, user, 'archive_replay', routing);
         expect(destination.requestId).not.toBe(source.requestId);
         expect(destination.grantId).not.toBe(source.grantId);
-        if (changeTriage) {
+        if (routing !== 'unchanged') {
             const { rows } = await db.query(`
                 SELECT s.operation_key = d.operation_key AS same_model_input,
                        s.result_json->'results'->0->>'accountId' = d.result_json->'results'->0->>'accountId' AS same_account_input,
@@ -780,6 +796,10 @@ it.each([false, true])('replays sealed synthetic inputs through owner result and
     await exerciseArchiveReplay(blite);
 }, 90_000);
 
-it('rejects a newly requested feature image after a changed replay triage decision', async () => {
-    await exerciseArchiveReplay(false, true);
+it('publishes after a changed triage decision using all sealed feature images', async () => {
+    await exerciseArchiveReplay(false, 'changed_triage');
+}, 90_000);
+
+it('stops at an uncollected reverse shortlist after successfully replaying changed triage', async () => {
+    await exerciseArchiveReplay(false, 'changed_shortlist');
 }, 90_000);
