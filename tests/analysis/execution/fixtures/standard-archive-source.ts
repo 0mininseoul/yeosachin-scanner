@@ -199,4 +199,3 @@ export async function bootstrapStandardArchiveSource(db: PGlite, input: Bootstra
         throw new Error(['Offline Standard source bootstrap failed at ' + phase, code, constraint, reason].filter(Boolean).join(' '));
     }
 }
-
