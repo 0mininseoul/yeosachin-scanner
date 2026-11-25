@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach, beforeAll } from 'vitest';
 import { writeSync } from 'node:fs';
 import { describePrivate90Failure, emptyPrivate90Failure } from './fixtures/private90-worker-failure.mjs';
+import { private90OuterFailure, type Private90OuterEvent } from './fixtures/private90-reverse-scope';
 import { private90VertexLedger } from './fixtures/private90-vertex-ledger';
 import { verifyPrivate90Images } from './fixtures/private90-result-images';
 import { createRequire } from 'node:module';
@@ -67,10 +68,43 @@ const runtime = vi.hoisted(() => ({
     model: vi.fn(),
     queue: [] as Record<string, string | number>[],
     due: new WeakMap<object, number>(),
+    genderOuter: null as null | ((account:string,event:Private90OuterEvent,op:string)=>void),
+    featureOuter: null as null | ((input:FeatureAnalysisInput,event:Private90OuterEvent)=>void),
     featureProbe: null as null | ((input:FeatureAnalysisInput, state:'start'|'return'|'error', error?:unknown) => void),
     reverseProbe: null as null | ((input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) => Promise<void>),
-    vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[] },
+    vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[]; byOperation:Map<string,Set<string>> },
 }));
+vi.mock('@/lib/services/analysis/v2-ai-stage-runtime', async original => {
+    const actual = await original<typeof import('@/lib/services/analysis/v2-ai-stage-runtime')>();
+    return { ...actual, createDurableAnalysisV2AiStageRuntime(...args: Parameters<typeof actual.createDurableAnalysisV2AiStageRuntime>) {
+        const stages = actual.createDurableAnalysisV2AiStageRuntime(...args);
+        const gender = stages.profileGender;
+        if (!gender) return stages;
+        return { ...stages, profileGender: { ...gender, async run(...params:Parameters<typeof gender.run>) {
+            const group = params[1];
+            const note = (account:string,e:Private90OuterEvent) => runtime.genderOuter?.(account,e,group.operationKey);
+            group.accountIds.forEach(account => note(account,'genderStart'));
+            try {
+                const rows = await gender.run(...params);
+                group.accountIds.forEach((account,i) => {
+                    const row = rows[i];
+                    if (!row) return note(account,'genderCardinality');
+                    if (row.source==='safe_fallback') note(account,'genderSafeFallback');
+                    const sex = row.result.assessment.inferredGender;
+                    note(account,sex==='female'?'genderFemale':sex==='male'?'genderMale':'genderUnknown');
+                });
+                return rows;
+            } catch (error) { group.accountIds.forEach(account => note(account,private90OuterFailure('gender',error))); throw error; }
+        } }, async features(...params:Parameters<typeof stages.features>) {
+            runtime.featureOuter?.(params[0],'featureOuterStart');
+            try {
+                const row = await stages.features(...params);
+                runtime.featureOuter?.(params[0],row.result.finalGenderDecision==='verified_female'?'featureOuterFemale':'featureOuterUnresolved');
+                return row;
+            } catch (error) { runtime.featureOuter?.(params[0],private90OuterFailure('featureOuter',error)); throw error; }
+        } };
+    } };
+});
 vi.mock('@/lib/services/ai/v2-staged-analysis', async original => {
     const actual = await original<typeof import('@/lib/services/ai/v2-staged-analysis')>();
     return { ...actual, async featureAnalysis(...args: Parameters<typeof actual.featureAnalysis>) {
@@ -106,6 +140,12 @@ vi.mock('@/lib/services/dev-ui/live-budget', async original => {
         async reserveDevLiveVertexAttempt(...args: Parameters<typeof actual.reserveDevLiveVertexAttempt>) {
             const receipt = await actual.reserveDevLiveVertexAttempt(...args);
             runtime.vertexReceipts?.byRequest.set(args[1], receipt.reservationId);
+            if (runtime.vertexReceipts && args[3]) {
+                const op=args[3].operationKey;
+                const ids = runtime.vertexReceipts.byOperation.get(op) ?? new Set();
+                ids.add(receipt.reservationId);
+                runtime.vertexReceipts.byOperation.set(op,ids);
+            }
             return receipt;
         },
     };
@@ -345,6 +385,8 @@ afterEach(() => {
     runtime.vertexReceipts = null;
     runtime.reverseProbe = null;
     runtime.featureProbe = null;
+    runtime.genderOuter = null;
+    runtime.featureOuter = null;
     vi.clearAllMocks();
 });
 
@@ -366,6 +408,12 @@ async function runStandardRequest(
     },
 ) {
     const observed = privateReplay?.observed;
+    runtime.genderOuter = privateReplay?.reverseScope.accountEvent ?? null;
+    runtime.featureOuter = privateReplay ? (input,event) => {
+        const probe=privateReplay.reverseScope;
+        const id=probe.selectionOwner(input.media);
+        if (id && probe.expected.has(id)) probe.event(id,event,createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
+    } : null;
     runtime.featureProbe = privateReplay ? (input,state,error) => {
         const probe = privateReplay.reverseScope;
         const id = probe.selectionOwner(input.media);
@@ -374,9 +422,9 @@ async function runStandardRequest(
         else probe.event(id,state === 'return' ? 'featureReturned' : probe.featureFailure(error));
     } : null;
     runtime.reverseProbe = privateReplay ? async input => {
-        Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates));
+        Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates,runtime.vertexReceipts?.byOperation));
     } : null;
-    runtime.vertexReceipts = observed ? { byRequest: new WeakMap(), sent: [] } : null;
+    runtime.vertexReceipts = observed ? { byRequest: new WeakMap(), sent: [], byOperation:new Map() } : null;
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
     const capturedBlite = blite && scenario === 'archive_capture';
@@ -654,7 +702,9 @@ async function runStandardRequest(
         if (privateReplay && (outcome.status === 'failed' || outcome.status === 'retry')) {
             if (privateReplay.observed.sqlState !== 'none') privateReplay.observed.cause = 'worker_sql';
             if (privateReplay.observed.modelError !== 'none') privateReplay.observed.cause = 'model_routing';
-            if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') privateReplay.observed.cause = 'missing_keyed_media';
+            if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') {
+                privateReplay.observed.cause = observed?.jobStage === 'reverse_likes' && observed.reverseCompared ? 'reverse_scope' : 'missing_keyed_media';
+            }
             if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
         }
         const capacityRetry = outcome.status === 'retry' && [

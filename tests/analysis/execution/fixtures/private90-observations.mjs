@@ -44,7 +44,7 @@ const phases = ['reader', 'source_ledger', 'fixed_model', 'admission', 'worker',
 
 const causes = ['none', 'reader_verification', 'source_receipts', 'source_admission', 'sealed_model_inputs',
     'missing_keyed_media', 'model_routing', 'preflight_admission', 'worker_stage', 'timeout', 'ledger_mismatch',
-    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql'];
+    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql', 'reverse_scope'];
 
 export function newPrivate90Observations() {
     return {
@@ -52,6 +52,14 @@ export function newPrivate90Observations() {
         jobStage: 'none', jobBatch: null, deliveryStatus: 'none', disposition: 'none', assertion: 'none',
         workerCode: 'none', sqlState: 'none', modelStage: 'none', modelError: 'none', retries: 0, continuations: 0,
         reverseExpected: 0, reverseSourceTupleCount: 0, reverseSourceHashMatch: 0, reverseCompared: 0, reverseActual: 0,
+        reverseMissingGenderStart:0,reverseMissingGenderFemale:0,reverseMissingGenderMale:0,reverseMissingGenderUnknown:0,
+        reverseMissingGenderSafeFallback:0,reverseMissingGenderCardinality:0,reverseMissingGenderRejected:0,reverseMissingGenderTerminal:0,
+        reverseMissingGenderRate:0,reverseMissingGenderOther:0,reverseMissingFeatureOuterStart:0,reverseMissingFeatureOuterFemale:0,
+        reverseMissingFeatureOuterUnresolved:0,reverseMissingFeatureOuterRejected:0,reverseMissingFeatureOuterTerminal:0,
+        reverseMissingFeatureOuterRate:0,reverseMissingFeatureOuterOther:0,reverseMissingGenderAttempts:0,reverseMissingGenderSuccess:0,
+        reverseMissingGenderResponseRejected:0,reverseMissingGenderRateLimited:0,reverseMissingGenderSchedulerTerminal:0,
+        reverseMissingGenderSchedulerReady:0,reverseMissingFeatureSchedulerTerminal:0,reverseMissingFeatureSchedulerReady:0,
+        reverseMissingGenderPaid:0,reverseMissingFeaturePaid:0,
         reverseMissingDbAttempts: 0, reverseMissingDbRejected: 0, reverseMissingDbSucceeded: 0, reverseMissingTriageHigh: 0,
         reverseMissingAdmissionUnknown: 0, reverseMissingFeatureVerified: 0, reverseMissingTriageModelCalls: 0,
         reverseMissingFeatureModelCalls: 0, reverseMissingFeatureStarts: 0, reverseMissingFeatureReturned: 0,

@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { buildV211EvidenceSpecificOverview, extractV211EvidenceTerms } from '@/lib/services/analysis/public-copy-quality';
 import { selectAnalysisV2GenderResolverMedia } from '@/lib/services/analysis/v2-gender-resolver-media-policy';
 import { projectGenderResolutionMedia } from '@/lib/services/ai/gender-resolution-pure';
 import { private90ReverseScope } from './private90-reverse-scope';
@@ -39,11 +38,9 @@ function promptData(prompt: string, label: string) {
     if (!line) return stop('PROMPT_SHAPE');
     return JSON.parse(line.slice(prefix.length)) as unknown;
 }
-function fixedFeatureOverview(profileEvidence:string | null, feedEvidence:string[], media:ManifestItem[]) {
-    if (extractV211EvidenceTerms({profileEvidence,feedEvidence}).length) {
-        try { return buildV211EvidenceSpecificOverview({profileEvidence,feedEvidence}); }
-        catch { /* Only the observed media layout remains available for this fixed response. */ }
-    }
+// The fixed output describes only attachment kinds. User-authored bio/caption text can
+// contain terms the real v2.11 public-copy schema forbids even inside quotations.
+function fixedFeatureOverview(media:ManifestItem[]) {
     const profile = media.some(item => item.kind === 'profile');
     const feed = media.some(item => item.kind === 'feed');
     if (profile && feed) return '프로필 이미지와 피드 이미지가 함께 있어 소개 화면과 게시물 양쪽에서 사진을 볼 수 있습니다.';
@@ -128,6 +125,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                 if (positiveByAccount.has(account.accountId) && positiveByAccount.get(account.accountId) !== desired) stop('ACCOUNT_ROUTE_AMBIGUOUS');
                 positiveByAccount.set(account.accountId, desired);
                 if (reverseIds.has(id)) expectedByAccount.set(account.accountId,id);
+                reverseScope.bindAccount(account.accountId,id);
                 reverseScope.bind(id, policy.feature.selectionIds);
                 for (const item of policy.feature.media) {
                     const previous = positiveBySelection.get(item.selectionId);
@@ -176,9 +174,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             }
             if ('gender' in fields) {
                 totals.featureCalls++;
-                const evidence = z.object({mediaManifest,bio:z.string().nullish(),
-                    captions:z.array(z.object({text:z.string().nullish()})).optional()}).parse(promptData(prompt,'evidence'));
-                const items = evidence.mediaManifest;
+                const items = z.object({mediaManifest}).parse(promptData(prompt,'evidence')).mediaManifest;
                 const owner = reverseScope.selectionOwner(items);
                 reverseScope.event(owner,'featureModel');
                 const ids = items.map(x => x.selectionId);
@@ -188,7 +184,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
                     appearanceGrade:5,exposureScore:2,businessClassification:'personal',businessConfidence:'high',accountContext:'personal',
                     marriageEvidence:'none',partnerEvidence:'none',partnerExclusionContext:'none', evidenceSelectionIds:{
                         gender:main, appearance:secondary, exposure:secondary, business:main.slice(0,1),accountContext:main.slice(0,1),marriagePartner:[],
-                    }, oneLineOverview:fixedFeatureOverview(evidence.bio ?? null,(evidence.captions ?? []).flatMap(c=>c.text ? [c.text] : []),items) });
+                    }, oneLineOverview:fixedFeatureOverview(items) });
             }
             if ('inferredGender' in fields) {
                 totals.resolverCalls++;

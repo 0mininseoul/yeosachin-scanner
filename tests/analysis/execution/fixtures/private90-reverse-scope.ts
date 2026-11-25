@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import { isGeminiRateLimitError, isRecoverableGeminiResponseError } from '@/lib/services/ai/gemini-generation-policy';
 import type { PGlite } from '@electric-sql/pglite';
 import { ANALYSIS_V2_MAX_REVERSE_CANDIDATES, ANALYSIS_V2_REVERSE_LIKE_LIMIT } from '@/lib/services/analysis/v2-apify-operation-costs';
 import type { AnalysisV2CheckpointProfile } from '@/lib/services/analysis/v2-profile-fetch-store';
@@ -9,7 +10,18 @@ const archiveSchema = z.object({
     results: z.array(z.object({ candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
         status: z.enum(['observed','not_observed','not_collected']) }).strict()).max(ANALYSIS_V2_MAX_REVERSE_CANDIDATES),
 }).strict();
-type StageEvent = 'triage' | 'featureModel' | 'featureStart' | 'featureReturned' | 'rejectedOverview' | 'rejectedEvidence' | 'rejectedSchema' | 'terminalUnavailable' | 'stageError';
+const outerEvents = ['genderStart','genderFemale','genderMale','genderUnknown','genderSafeFallback','genderCardinality',
+    'genderRejected','genderTerminal','genderRate','genderOther','featureOuterStart','featureOuterFemale','featureOuterUnresolved',
+    'featureOuterRejected','featureOuterTerminal','featureOuterRate','featureOuterOther'] as const;
+export type Private90OuterEvent = typeof outerEvents[number];
+export function private90OuterFailure(stage:'gender'|'featureOuter',error:unknown): Private90OuterEvent {
+    const name = (error as {name?:string})?.name;
+    if (isRecoverableGeminiResponseError(error)) return stage === 'gender' ? 'genderRejected' : 'featureOuterRejected';
+    if (name === 'AnalysisV2AiTerminalUnavailableError') return stage === 'gender' ? 'genderTerminal' : 'featureOuterTerminal';
+    if (isGeminiRateLimitError(error) || name === 'AnalysisV2AiResultRateLimitExhaustedError') return stage === 'gender' ? 'genderRate' : 'featureOuterRate';
+    return stage === 'gender' ? 'genderOther' : 'featureOuterOther';
+}
+type StageEvent = Private90OuterEvent | 'triage' | 'featureModel' | 'featureStart' | 'featureReturned' | 'rejectedOverview' | 'rejectedEvidence' | 'rejectedSchema' | 'terminalUnavailable' | 'stageError';
 type Row = { candidateId:string; postUrl:string; declaredLikesCount:number; declaredLikesCountKnown?:boolean };
 
 function tuples(rows: readonly Row[]) {
@@ -22,6 +34,7 @@ export function private90ReverseScope(target: string, value: unknown) {
     const expected = new Set(sealed.results.map(r => r.candidateId));
     if (expected.size !== sealed.results.length) throw new Error('OFFLINE_STANDARD_VERTEX_REVERSE_DUPLICATE');
     const source = new Map<string,Row>();
+    const accounts = new Map<string,string>();
     const owners = new Map<string,string | null>();
     const history = new Map<string, Partial<Record<StageEvent,number>>>();
     const operations = new Map<string,Set<string>>();
@@ -47,6 +60,8 @@ export function private90ReverseScope(target: string, value: unknown) {
         .update(JSON.stringify([target, ANALYSIS_V2_REVERSE_LIKE_LIMIT, tuples(rows)])).digest('hex');
     return {
         expected, event, selectionOwner,
+        bindAccount(accountId:string,id:string) { if (expected.has(id)) accounts.set(accountId,id); },
+        accountEvent(accountId:string,stage:Private90OuterEvent,op:string) { event(accounts.get(accountId),stage,op); },
         bind(id: string, selections: readonly string[]) {
             for (const selection of selections) {
                 const old = owners.get(selection);
@@ -79,11 +94,29 @@ export function private90ReverseScope(target: string, value: unknown) {
         sourceCounts() {
             return { reverseExpected:expected.size, reverseSourceTupleCount:source.size, reverseSourceHashMatch:Number(hash([...source.values()]) === sealed.scopeHash) };
         },
-        async compare(db:PGlite,requestId:string,rows:readonly Row[]) {
+        async compare(db:PGlite,requestId:string,rows:readonly Row[], receipts?:ReadonlyMap<string,Set<string>>) {
             const actual = new Set(rows.map(r => r.candidateId));
             const missing = [...expected].filter(id => !actual.has(id));
             const calls = (event: StageEvent) => missing.reduce((n,id) => n+(history.get(id)?.[event] ?? 0),0);
             const keys = missing.flatMap(id => [...operations.get(id) ?? []]);
+            const genderKeys = [...new Set(keys.filter(op => op.startsWith('gender-triage:')))];
+            const featureKeys = [...new Set(keys.filter(op => op.startsWith('feature-analysis:')))];
+            const receiptIds = (ops:string[]) => [...new Set(ops.flatMap(op => [...receipts?.get(op) ?? []]))];
+            const dbStates = (await db.query<Record<string,number>>(`
+              WITH a AS (SELECT status FROM analysis_v2_ai_attempts WHERE request_id=$1 AND operation_key=ANY($2::text[])),
+              s AS (SELECT stage,status FROM analysis_v2_scheduler_operations WHERE request_id=$1 AND operation_key=ANY($2::text[] || $3::text[]))
+              SELECT (SELECT count(*)::int FROM a) AS "reverseMissingGenderAttempts",
+                (SELECT count(*)::int FROM a WHERE status='success') AS "reverseMissingGenderSuccess",
+                (SELECT count(*)::int FROM a WHERE status='response_rejected') AS "reverseMissingGenderResponseRejected",
+                (SELECT count(*)::int FROM a WHERE status='rate_limited') AS "reverseMissingGenderRateLimited",
+                (SELECT count(*)::int FROM s WHERE stage='genderTriage' AND status='terminal_unavailable') AS "reverseMissingGenderSchedulerTerminal",
+                (SELECT count(*)::int FROM s WHERE stage='genderTriage' AND status='ready') AS "reverseMissingGenderSchedulerReady",
+                (SELECT count(*)::int FROM s WHERE stage='featureAnalysis' AND status='terminal_unavailable') AS "reverseMissingFeatureSchedulerTerminal",
+                (SELECT count(*)::int FROM s WHERE stage='featureAnalysis' AND status='ready') AS "reverseMissingFeatureSchedulerReady",
+                (SELECT count(*)::int FROM dev_live_budget.reservations WHERE reservation_id=ANY($4::uuid[]) AND actual_micros>0) AS "reverseMissingGenderPaid",
+                (SELECT count(*)::int FROM dev_live_budget.reservations WHERE reservation_id=ANY($5::uuid[]) AND actual_micros>0) AS "reverseMissingFeaturePaid"`,
+                [requestId,genderKeys,featureKeys,receiptIds(genderKeys),receiptIds(featureKeys)])).rows[0]!;
+            const outerCounts = Object.fromEntries(outerEvents.map(e => ['reverseMissing' + e[0]!.toUpperCase() + e.slice(1), calls(e)]));
             const attemptCounts = (await db.query<Record<string,number>>(`
                 WITH pins AS (
                     SELECT p.input->>'operationKey' op FROM analysis_v2_ai_scoring_stage_checkpoints s
@@ -116,7 +149,7 @@ export function private90ReverseScope(target: string, value: unknown) {
                 FROM o`, [requestId,missing])).rows[0]!;
             return { reverseCompared:1, reverseActual:actual.size,reverseShared:expected.size-missing.length,reverseMissing:missing.length,
                 reverseExtra:[...actual].filter(id => !expected.has(id)).length, reverseTupleDifferences:fieldsChanged,
-                reverseActualHashMatch:Number(hash(rows) === sealed.scopeHash), ...hist, ...attemptCounts,
+                reverseActualHashMatch:Number(hash(rows) === sealed.scopeHash), ...hist, ...attemptCounts, ...outerCounts, ...dbStates,
                 reverseMissingTriageModelCalls:calls('triage'),reverseMissingFeatureModelCalls:calls('featureModel'),
                 reverseMissingFeatureStarts:calls('featureStart'),reverseMissingFeatureReturned:calls('featureReturned'),
                 reverseMissingOverviewRejected:calls('rejectedOverview'),reverseMissingEvidenceRejected:calls('rejectedEvidence'),

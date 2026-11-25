@@ -103,6 +103,14 @@ it('forces the sealed feature branch for each account and rejects an unavailable
     expect(() => project.validateResult({...output,features:{...features,
         oneLineOverview:'사진마다 일상의 작은 표정까지 담아내는 모습에서 차분히 추억을 기록하는 취향이 드러납니다.'}})).toThrow();
     expect(project.validateResult(output).finalGenderDecision).toBe('verified_female');
+    for (const bio of ['결혼','신부','couple']) {
+        const withUserText = fixed.generate({contents:{parts:[{text:'evidence(JSON): '+JSON.stringify({mediaManifest:media,bio,
+            captions:[{text:bio}]})}]},config:{responseJsonSchema:{properties:{gender:{}}}}});
+        const candidateFeatures = JSON.parse(withUserText.text);
+        const check = projectV211FeatureEvaluation({triage,media,bio,captions:[]},'HIGH');
+        expect(check.validateResult({...output,features:candidateFeatures}).finalGenderDecision).toBe('verified_female');
+        expect(candidateFeatures.oneLineOverview).not.toContain(bio);
+    }
     entries.delete(includedListKey);
     await expect(prepareStandardArchiveVertex(input)).rejects.toThrow('UNCOVERED_REQUIRED_BRANCH');
 });
