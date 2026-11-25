@@ -336,6 +336,11 @@ function configuredTaskName(
     return client.taskPath(config.project, config.location, config.queue, taskId);
 }
 
+function taskScheduleTime(delaySeconds: number): { seconds: number; nanos: number } {
+    const dueMs = Date.now() + delaySeconds * 1_000;
+    return { seconds: Math.floor(dueMs / 1_000), nanos: (dueMs % 1_000) * 1_000_000 };
+}
+
 function requireConfig(config: AnalysisV2TasksConfig | null): AnalysisV2TasksConfig {
     if (!config) {
         throw new Error('ANALYSIS_V2_TASKS_UNAVAILABLE: queue is not configured.');
@@ -398,9 +403,7 @@ export async function enqueueAnalysisV2Task(
                 audience: config.oidcAudience,
             },
         },
-        ...(delaySeconds > 0
-            ? { scheduleTime: { seconds: Math.floor(Date.now() / 1_000) + delaySeconds } }
-            : {}),
+        ...(delaySeconds > 0 ? { scheduleTime: taskScheduleTime(delaySeconds) } : {}),
     };
 
     try {
@@ -475,9 +478,7 @@ export async function enqueueAnalysisV2FreshAdmissionTask(
                 audience: config.oidcAudience,
             },
         },
-        ...(delaySeconds > 0
-            ? { scheduleTime: { seconds: Math.floor(Date.now() / 1_000) + delaySeconds } }
-            : {}),
+        ...(delaySeconds > 0 ? { scheduleTime: taskScheduleTime(delaySeconds) } : {}),
     };
     try {
         await client.createTask({ parent, task });

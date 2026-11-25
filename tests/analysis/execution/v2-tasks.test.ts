@@ -22,6 +22,7 @@ import {
     verifyAnalysisV2TaskAuthorization,
     type AnalysisV2TasksConfig,
 } from '../../../lib/services/analysis/v2-tasks';
+import { StandardSharedQueue } from './fixtures/standard-shared-queue';
 
 const requestId = '123e4567-e89b-42d3-a456-426614174000';
 const jobKey = 'coordinator:bootstrap';
@@ -267,6 +268,65 @@ describe('analysis V2 Cloud Tasks', () => {
         expect(parseAnalysisV2WorkerTaskPayload(
             JSON.parse(Buffer.from(request.task.httpRequest.body, 'base64').toString()),
         )).toMatchObject({ kind: 'fresh_admission', workloadRole: 'paid' });
+    });
+
+    it.each(['job', 'fresh'] as const)('preserves millisecond delays and the retry identity for a %s task', async kind => {
+        const start = Date.parse('2026-01-01T12:00:00.000Z');
+        const now = vi.spyOn(Date, 'now').mockReturnValue(start + 850);
+        const client = queueClient();
+        const token = randomUUID();
+        const enqueue = (delaySeconds: number) => {
+            const options = { config, client, delaySeconds };
+            return kind === 'job'
+                ? enqueueAnalysisV2Task({ requestId, jobKey, generation: 3, reservationToken: token }, options)
+                : enqueueAnalysisV2FreshAdmissionTask({
+                    preflightId: requestId, generation: 3, dispatchGeneration: 2, dispatchToken: token,
+                }, options);
+        };
+        try {
+            const first = await enqueue(5);
+            expect(client.createTask.mock.calls[0][0].task.scheduleTime).toEqual({
+                seconds: start / 1000 + 5, nanos: 850_000_000,
+            });
+
+            now.mockReturnValue(start + 1000);
+            client.createTask.mockRejectedValueOnce({ code: 6 });
+            const duplicate = await enqueue(5);
+            expect(duplicate).toEqual({ outcome: 'exists', taskName: first.taskName });
+            const retry = client.createTask.mock.calls[1][0].task;
+            expect(retry.scheduleTime).toEqual({ seconds: start / 1000 + 6, nanos: 0 });
+            expect(retry.httpRequest.body).toBe(client.createTask.mock.calls[0][0].task.httpRequest.body);
+
+            await enqueue(0);
+            expect(client.createTask.mock.calls[2][0].task).not.toHaveProperty('scheduleTime');
+        } finally {
+            now.mockRestore();
+        }
+    });
+
+    it('delivers a shared-queue task at its full timestamp and keeps the first schedule on duplicate create', async () => {
+        const seconds = Date.parse('2026-01-01T12:00:05Z') / 1000;
+        const due = seconds * 1000 + 850;
+        const now = vi.spyOn(Date, 'now').mockReturnValue(due - 1);
+        const queue = new StandardSharedQueue(false);
+        const task = {
+            name: 'synthetic/tasks/same-generation',
+            scheduleTime: { seconds, nanos: 850_000_000 },
+            httpRequest: { body: Buffer.from('{}').toString('base64') },
+        };
+        try {
+            await queue.client.createTask({ task });
+            await expect(queue.client.createTask({ task: { ...task, scheduleTime: { seconds } } }))
+                .rejects.toMatchObject({ code: 6 });
+            const deliver = vi.fn(async () => undefined);
+            const drained = queue.drain(() => true, 1, deliver);
+            expect(deliver).not.toHaveBeenCalled();
+            now.mockReturnValue(due);
+            await expect(drained).resolves.toBe(1);
+            expect(deliver).toHaveBeenCalledOnce();
+        } finally {
+            now.mockRestore();
+        }
     });
 
     it('accepts canonical ALREADY_EXISTS but not a message-only imitation', async () => {

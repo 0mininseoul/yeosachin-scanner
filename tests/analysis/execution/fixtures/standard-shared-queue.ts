@@ -31,14 +31,17 @@ export class StandardSharedQueue {
     readonly client = {
         queuePath: (...parts: string[]) => this.path(parts),
         taskPath: (...parts: string[]) => this.path(parts),
-        createTask: async ({ task }: { task: { name: string; scheduleTime?: { seconds: number }; httpRequest: { body: string } } }) => {
+        createTask: async ({ task }: { task: { name: string; scheduleTime?: { seconds: number; nanos?: number }; httpRequest: { body: string } } }) => {
             if (this.created.has(task.name)) {
                 this.duplicateCreates++;
                 throw Object.assign(new Error('ALREADY_EXISTS'), { code: 6 });
             }
             const payload = JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8'));
             this.created.add(task.name);
-            this.pending.push({ name: task.name, due: Number(task.scheduleTime?.seconds ?? 0) * 1000, payload });
+            const due = task.scheduleTime
+                ? task.scheduleTime.seconds * 1_000 + (task.scheduleTime.nanos ?? 0) / 1_000_000
+                : 0;
+            this.pending.push({ name: task.name, due, payload });
             return [{ name: task.name }];
         },
         getTask: async ({ name }: { name: string }) => {

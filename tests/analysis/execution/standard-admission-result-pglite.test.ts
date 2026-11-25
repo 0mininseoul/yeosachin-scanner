@@ -198,10 +198,13 @@ vi.mock('@/lib/services/analysis/background-tasks', async (original) => ({
         queuePath: (...s: string[]) => 'projects/' + s[0] + '/locations/' + s[1] + '/queues/' + s[2],
         taskPath: (p: string, l: string, q: string, t: string) =>
             'projects/' + p + '/locations/' + l + '/queues/' + q + '/tasks/' + t,
-        createTask: async ({ task }: { task: { httpRequest: { body: string }; scheduleTime?: { seconds: number } } }) => {
+        createTask: async ({ task }: { task: { httpRequest: { body: string }; scheduleTime?: { seconds: number; nanos?: number } } }) => {
             const payload = JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8'));
             runtime.queue.push(payload);
-            if (task.scheduleTime) runtime.due.set(payload, Number(task.scheduleTime.seconds) * 1000);
+            if (task.scheduleTime) {
+                const { seconds, nanos = 0 } = task.scheduleTime;
+                runtime.due.set(payload, seconds * 1_000 + nanos / 1_000_000);
+            }
             return [{}];
         },
     }),
