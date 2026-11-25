@@ -604,8 +604,14 @@ export function isAnalysisV2DevLiveMediaBucketName(bucketName: string): boolean 
         && DEV_LIVE_MEDIA_BUCKET_PATTERN.test(bucketName);
 }
 
+export function isAnalysisV2DevQaCopyBucketName(name: string): boolean {
+    return typeof name === 'string' && /^[a-z][a-z0-9-]{4,28}[a-z0-9]-dev-qa-copy$/.test(name);
+}
+
 const DEV_ARCHIVE_FRAGMENT_PREFIX = /^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/fragment\/$/;
 const DEV_ARCHIVE_FRAGMENT_NAME = /^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/fragment\/[a-z][a-z0-9_-]{0,63}\/[a-f0-9]{64}\.bin$/;
+
+const QA_COPY_FRAGMENT_NAME = /^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/fragment\/[a-z][a-z0-9_-]{0,63}\/[a-f0-9]{80}\.bin$/;
 
 function assertRetainedObjectName(objectName: string, bucketName: string): void {
     const source = /^analysis-v2-retained\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName);
@@ -613,7 +619,10 @@ function assertRetainedObjectName(objectName: string, bucketName: string): void 
         && objectName.endsWith('.bin')
         && (/^analysis-v2-dev-(?:eval(?:-control)?|standard-archive)\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName)
             || DEV_ARCHIVE_FRAGMENT_NAME.test(objectName));
-    if (!source && !devArtifact) {
+    const qaCopy = isAnalysisV2DevQaCopyBucketName(bucketName)
+        && (/^analysis-v2-dev-standard-archive\/[a-f0-9]{64}\/[a-f0-9]{64}\.bin$/.test(objectName)
+            || QA_COPY_FRAGMENT_NAME.test(objectName));
+    if (!source && !devArtifact && !qaCopy) {
         throw new Error(
             'ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: object name mismatch.'
         );
@@ -1152,7 +1161,10 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
         },
 
         async listRetained({ prefix, maximumCount }) {
-            if (!isAnalysisV2DevLiveMediaBucketName(bucketName) || !DEV_ARCHIVE_FRAGMENT_PREFIX.test(prefix)
+            const privateCopy = isAnalysisV2DevQaCopyBucketName(bucketName);
+            const validName = privateCopy ? QA_COPY_FRAGMENT_NAME : DEV_ARCHIVE_FRAGMENT_NAME;
+            if ((!isAnalysisV2DevLiveMediaBucketName(bucketName) && !privateCopy)
+                || !DEV_ARCHIVE_FRAGMENT_PREFIX.test(prefix)
                 || !Number.isSafeInteger(maximumCount) || maximumCount < 1
                 || maximumCount > ANALYSIS_V2_DEV_ARCHIVE_MAX_FRAGMENTS) {
                 throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_VALIDATION_ERROR: list scope mismatch.');
@@ -1194,7 +1206,7 @@ export function createGoogleCloudPrivateMediaObjectClient(input: {
                 for (const item of items) {
                     const name = isRecord(item) ? item.name : undefined;
                     if (typeof name !== 'string' || !name.startsWith(prefix)
-                        || !DEV_ARCHIVE_FRAGMENT_NAME.test(name) || names.has(name) || names.size >= maximumCount) {
+                        || !validName.test(name) || names.has(name) || names.size >= maximumCount) {
                         throw new Error('ANALYSIS_V2_SOURCE_MEDIA_ARCHIVE_OBJECT_ERROR: invalid list object.');
                     }
                     names.add(name);
