@@ -1,9 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach } from 'vitest';
 import { writeSync } from 'node:fs';
+import { private90VertexLedger } from './fixtures/private90-vertex-ledger';
 import { verifyPrivate90Images } from './fixtures/private90-result-images';
 import { createRequire } from 'node:module';
-import { newPrivate90Observations, safePrivate90Observations } from './fixtures/private90-observations.mjs';
+import { newPrivate90Observations, safePrivate90Observations, private90Job, private90ModelStage,
+    safePrivate90ModelError, safePrivate90Sql, safePrivate90WorkerCode } from './fixtures/private90-observations.mjs';
 import { bootstrapStandardArchiveSource, createStandardArchiveDatabase } from './fixtures/standard-archive-source';
 import { prepareStandardArchiveVertex } from './fixtures/standard-archive-vertex';
 import { expirySecretResource } from '@/lib/services/dev-ui/standard-qa-copy-expiry';
@@ -21,7 +23,7 @@ import { createAnalysisV2ProductionExecutorRegistry } from '@/lib/services/analy
 import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-progress-reporter';
 import { assertOwnerPage } from './fixtures/standard-result-page';
-import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import { classifyAnalysisV2JobFailure, processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
 import { SyntheticApify, target, candidate } from './fixtures/standard-providers';
 import { POST as start } from '@/app/api/analysis/preflight/route';
@@ -61,11 +63,24 @@ const runtime = vi.hoisted(() => ({
     png: vi.fn(),
     model: vi.fn(),
     queue: [] as Record<string, string | number>[],
+    due: new WeakMap<object, number>(),
+    vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[] },
 }));
 vi.mock('google-auth-library', async original => ({
     ...(await original<typeof import('google-auth-library')>()),
     GoogleAuth: class { async getClient() { return { request: runtime.kmsOrBucket }; } },
 }));
+vi.mock('@/lib/services/dev-ui/live-budget', async original => {
+    const actual = await original<typeof import('@/lib/services/dev-ui/live-budget')>();
+    return {
+        ...actual,
+        async reserveDevLiveVertexAttempt(...args: Parameters<typeof actual.reserveDevLiveVertexAttempt>) {
+            const receipt = await actual.reserveDevLiveVertexAttempt(...args);
+            runtime.vertexReceipts?.byRequest.set(args[1], receipt.reservationId);
+            return receipt;
+        },
+    };
+});
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: runtime.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: runtime.session }));
 vi.mock('@/lib/services/dev-ui/live-runtime', async (original) => ({
@@ -80,8 +95,10 @@ vi.mock('@/lib/services/analysis/background-tasks', async (original) => ({
         queuePath: (...s: string[]) => 'projects/' + s[0] + '/locations/' + s[1] + '/queues/' + s[2],
         taskPath: (p: string, l: string, q: string, t: string) =>
             'projects/' + p + '/locations/' + l + '/queues/' + q + '/tasks/' + t,
-        createTask: async ({ task }: { task: { httpRequest: { body: string } } }) => {
-            runtime.queue.push(JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8')));
+        createTask: async ({ task }: { task: { httpRequest: { body: string }; scheduleTime?: { seconds: number } } }) => {
+            const payload = JSON.parse(Buffer.from(task.httpRequest.body, 'base64').toString('utf8'));
+            runtime.queue.push(payload);
+            if (task.scheduleTime) runtime.due.set(payload, Number(task.scheduleTime.seconds) * 1000);
             return [{}];
         },
     }),
@@ -133,6 +150,10 @@ vi.mock('@google/genai/node', async (original) => ({
             this.models = {
                 generateContent: async (input: unknown) => {
                     await transport('https://vertex.fixture.invalid');
+                    if (runtime.vertexReceipts) {
+                        const id = runtime.vertexReceipts.byRequest.get(input as object);
+                        if (id) runtime.vertexReceipts.sent.push(id);
+                    }
                     return runtime.model(input);
                 },
             };
@@ -279,6 +300,7 @@ afterEach(() => {
     vi.unstubAllEnvs();
     runtime.queue.length = 0;
     runtime.user = null;
+    runtime.vertexReceipts = null;
     vi.clearAllMocks();
 });
 
@@ -298,6 +320,8 @@ async function runStandardRequest(
         observed: Private90Observations;
     },
 ) {
+    const observed = privateReplay?.observed;
+    runtime.vertexReceipts = observed ? { byRequest: new WeakMap(), sent: [] } : null;
     const isReplay = scenario === 'archive_replay';
     const blite = process.env.PRECHECKOUT_BLITE_ENABLED === 'true';
     const capturedBlite = blite && scenario === 'archive_capture';
@@ -332,9 +356,13 @@ async function runStandardRequest(
                 error: { code: '57014', message: 'canceling statement due to statement timeout' },
             };
         }
-        const out = await client.rpc(n, a);
+        const out = await client.rpc(n, a).catch(error => {
+            if (observed) observed.sqlState = safePrivate90Sql(error?.code);
+            throw error;
+        });
+        if (out.error && observed) observed.sqlState = safePrivate90Sql(out.error.code);
         if (out.error && !out.error.message.includes('FENCE'))
-            sqlErrors.push(n + ': ' + out.error.message);
+            sqlErrors.push(observed ? 'rpc_error' : n + ': ' + out.error.message);
         return out;
     });
     runtime.admin.from.mockImplementation(client.from);
@@ -342,7 +370,10 @@ async function runStandardRequest(
         ...localDatabaseClient(db, runtime.user?.id ?? null),
         auth: { getUser: async () => ({ data: { user: runtime.user }, error: null }) },
     }));
-    const apify = new SyntheticApify();
+    // Exercise two private-name chunks before public profile AI, including the 100-name boundary.
+    const syntheticPrivateCount = process.env.PRIVATE90_FULL_REPLAY === 'synthetic' ? 101 : 0;
+    const privateNameChunks = Math.ceil(syntheticPrivateCount / 100);
+    const apify = new SyntheticApify(syntheticPrivateCount);
     runtime.apify.mockClear().mockImplementation(() => {
         if (privateReplay) privateReplay.observed.apifyCalls++;
         if (isReplay) throw new Error('Unexpected Apify access during archive replay');
@@ -359,7 +390,11 @@ async function runStandardRequest(
     runtime.model.mockImplementation(input => {
         if (!privateReplay) return syntheticGeneration(input);
         privateReplay.observed.fixedVertexCalls++;
-        return privateReplay.generate(input);
+        privateReplay.observed.modelStage = private90ModelStage(input);
+        try { return privateReplay.generate(input); } catch (error) {
+            privateReplay.observed.modelError = safePrivate90ModelError(error instanceof Error ? error.message : undefined);
+            throw error;
+        }
     });
     if (privateReplay) privateReplay.observed.providerCountersActive = 1;
     const modelCallCount = () => privateReplay?.observed.fixedVertexCalls ?? runtime.model.mock.calls.length;
@@ -500,26 +535,83 @@ async function runStandardRequest(
         }),
     };
     while (runtime.queue.length) {
+        if (observed) observed.assertion = 'queue_limit';
         if (++steps > 24 + (privateReplay?.profileBatches.length ?? 0) * 36) throw new Error('Unexpected repeated task delivery');
-        const payload = runtime.queue.shift()!;
-        const delivery = parseAnalysisV2TaskPayload(payload);
+        let next = 0;
+        if (observed) {
+            // Deliver other ready jobs first. Both Cloud Tasks scheduleTime and the SQL scheduler fence apply.
+            const due = runtime.queue.map(task => runtime.due.get(task) ?? 0);
+            next = due.indexOf(Math.min(...due));
+            const delay = due[next]! - Date.now();
+            if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        const [payload] = runtime.queue.splice(next, 1);
+        if (observed) {
+            Object.assign(observed, private90Job(payload!.jobKey));
+            observed.assertion = 'task_parse';
+            observed.deliveryStatus = 'running';
+            observed.disposition = 'none';
+            observed.workerCode = 'none';
+            observed.sqlState = 'none';
+        }
+        const delivery = parseAnalysisV2TaskPayload(payload!);
         if (privateReplay) {
             privateReplay.observed.phase = 'worker';
             privateReplay.observed.cause = 'worker_stage';
         }
-        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, worker));
+        if (observed) observed.assertion = 'worker_return';
+        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, worker)).catch(error => {
+            if (observed) {
+                const failure = classifyAnalysisV2JobFailure(error);
+                observed.deliveryStatus = 'threw';
+                observed.disposition = failure.disposition;
+                observed.workerCode = safePrivate90WorkerCode(failure.code);
+                if (error && typeof error === 'object' && 'code' in error) observed.sqlState = safePrivate90Sql(error.code);
+            }
+            throw error;
+        });
+        if (observed) {
+            observed.deliveryStatus = outcome.status;
+            observed.disposition = ({ completed: 'completed', continuation: 'deferred', already_terminal: 'already_terminal',
+                failed: 'permanent', retry: 'transient' })[outcome.status];
+            if ('errorCode' in outcome) {
+                observed.workerCode = safePrivate90WorkerCode(outcome.errorCode);
+                if (outcome.errorCode === 'JOB_ATTEMPTS_EXHAUSTED') observed.disposition = 'exhausted';
+            }
+        }
         if (privateReplay && (outcome.status === 'failed' || outcome.status === 'retry')) {
+            if (privateReplay.observed.sqlState !== 'none') privateReplay.observed.cause = 'worker_sql';
+            if (privateReplay.observed.modelError !== 'none') privateReplay.observed.cause = 'model_routing';
             if (outcome.errorCode === 'DEV_STANDARD_ARCHIVE_UNAVAILABLE') privateReplay.observed.cause = 'missing_keyed_media';
             if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
         }
-        if (privateReplay && outcome.status === 'continuation') {
-            expect(outcome.pendingRecoveryCount).toBe(0);
-            expect(runtime.queue.some(task => task.jobKey === delivery.jobKey && task.generation === delivery.generation + 1)).toBe(true);
+        const capacityRetry = outcome.status === 'retry' && [
+            'ANALYSIS_V2_AI_CAPACITY_PENDING', 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING',
+            'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE', 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
+        ].includes(outcome.errorCode);
+        if (observed && (outcome.status === 'continuation' || capacityRetry)) {
+            let task = payload!;
+            if (outcome.status === 'continuation') {
+                observed.continuations++;
+                observed.assertion = 'recovery_fanout';
+                expect(outcome.pendingRecoveryCount).toBe(0);
+                observed.assertion = 'continuation_successor';
+                const successor = runtime.queue.find(t => t.jobKey === delivery.jobKey && t.generation === delivery.generation + 1);
+                expect(Boolean(successor)).toBe(true);
+                task = successor!;
+            } else {
+                observed.retries++;
+                runtime.queue.push(task); // Cloud Tasks redelivers the same unacknowledged payload.
+            }
+            observed.assertion = 'dispatch_fence';
             const due = await db.query<{ ms: number }>(`
-                SELECT greatest(0,ceil(1000*extract(epoch FROM (scheduler_not_before_at-clock_timestamp()))))::int AS ms
-                FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2
-            `, [delivery.requestId, delivery.jobKey]);
-            await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
+                SELECT greatest(0,ceil(1000*extract(epoch FROM
+                    (greatest(scheduler_not_before_at,lease_expires_at)-clock_timestamp()))))::int AS ms
+                FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2 AND status='pending'
+                    AND dispatch_generation=$3 AND dispatch_reservation_token=$4
+            `, [delivery.requestId, delivery.jobKey, task.generation, task.reservationToken]);
+            expect(due.rows.length).toBe(1);
+            runtime.due.set(task, Math.max(runtime.due.get(task) ?? 0, Date.now() + due.rows[0]!.ms + (capacityRetry ? 1000 : 20)));
             continue;
         }
         if (scenario === 'terminal receipt timeout' && outcome.status === 'retry') {
@@ -533,7 +625,7 @@ async function runStandardRequest(
                 [delivery.requestId, delivery.jobKey],
             );
             expect(telemetry.rows).toHaveLength(0);
-            runtime.queue.unshift(payload); // Cloud Tasks retries the same delivery.
+            runtime.queue.unshift(payload!); // Cloud Tasks retries the same delivery.
             continue;
         }
         if (outcome.status === 'continuation' && scenario === 'timeout') {
@@ -557,13 +649,17 @@ async function runStandardRequest(
             continue;
         }
         expect(outcome.status, delivery.jobKey + ' ' + JSON.stringify(outcome)).toBe('completed');
+        if (observed) observed.assertion = 'recovery_fanout';
         expect(outcome).toMatchObject({ pendingRecoveryCount: 0 });
         const before = await totals();
         const calls = [apify.starts.length, modelCallCount(), runtime.queue.length];
+        if (observed) observed.assertion = 'terminal_duplicate';
         expect((await processAnalysisV2TaskDelivery(delivery)).status).toBe('already_terminal');
+        if (observed) observed.assertion = 'duplicate_side_effects';
         expect([apify.starts.length, modelCallCount(), runtime.queue.length]).toEqual(
             calls,
         );
+        if (observed) observed.assertion = 'duplicate_ledger';
         expect(await totals()).toEqual(before);
         if (privateReplay) {
             if (/^track:profile-ai:batch:\d+$/.test(delivery.jobKey)) privateReplay.observed.completedProfileBatches++;
@@ -586,9 +682,11 @@ async function runStandardRequest(
             p_claim_token: receiptCalls[2].p_claim_token,
         });
     }
+    if (observed) observed.assertion = 'private_source_hash';
     expect(producerHashes.length).toBeGreaterThanOrEqual(1 + continued);
     expect(producerHashes[0]).toMatch(/^[a-f0-9]{64}$/);
     expect(new Set(producerHashes).size).toBe(1);
+    if (observed) observed.assertion = 'owner_result';
     const page = await resultPage();
     expect(page.status).toBe(200);
     const body = await page.json();
@@ -596,6 +694,7 @@ async function runStandardRequest(
         const observed = privateReplay.observed;
         observed.phase = 'result';
         observed.cause = 'publication_count';
+        observed.assertion = 'publication';
         const counts = (await db.query<{ published: number; images: number; manifests: number; usage: number; cloned: number; batches: number }>(`
             SELECT (SELECT count(*)::int FROM analysis_progress_events WHERE request_id=$1 AND event_code='ANALYSIS_COMPLETED') AS published,
                    (SELECT count(*)::int FROM analysis_v2_result_image_objects WHERE request_id=$1 AND status='ready') AS images,
@@ -613,18 +712,30 @@ async function runStandardRequest(
         expect(counts).toMatchObject({ published: 1, manifests: 1, cloned: 0, batches: privateReplay.profileBatches.length });
         expect(counts.images).toBeGreaterThan(0);
         expect(observed.fixedVertexCalls).toBeGreaterThan(0);
+        observed.cause = 'model_routing';
+        expect(observed.modelError).toBe('none');
+        observed.cause = 'ledger_mismatch';
         expect(counts.usage).toBe(observed.fixedVertexCalls);
         expect(observed.apifyCalls).toBe(0);
         expect(observed.sourceDownloads).toBe(0);
         observed.cause = 'ledger_mismatch';
+        observed.assertion = 'vertex_ledger';
+        const sentIds = runtime.vertexReceipts!.sent;
+        expect(sentIds.length).toBe(observed.fixedVertexCalls);
+        expect(new Set(sentIds).size).toBe(sentIds.length);
+        const ledger = await private90VertexLedger(db, approval.id, sentIds);
+        Object.assign(observed, { positiveSettlements: ledger.positive, unusedHolds: ledger.unused,
+            unresolvedHolds: ledger.unresolved, duplicatePositive: ledger.duplicate, orphanPositive: ledger.orphan });
+        expect(ledger).toMatchObject({ positive: observed.fixedVertexCalls, unresolved: 0, duplicate: 0, orphan: 0 });
         expect(await totals()).toMatchObject({
             consumed: 1, requests: 1, grants: 1, actors: 0, apify_reserved: 0, apify_committed: 0, quota: 0,
-            models: observed.fixedVertexCalls, settled: observed.fixedVertexCalls,
+            models: ledger.positive + ledger.unused, settled: ledger.positive + ledger.unused, debit: ledger.debit,
         });
         // Keep the selected identity, signed locator and image bytes inside this process.
         const member = body.femaleAccounts.find((item: { profileImage?: string }) => Boolean(item.profileImage));
         expect(Boolean(member)).toBe(true);
         observed.phase = 'owner_image';
+        observed.assertion = 'image';
         await verifyPrivate90Images(result.requestId, body, observed);
         expect(observed.webpVerified).toBe(counts.images);
         observed.cause = 'owner_access';
@@ -657,17 +768,17 @@ async function runStandardRequest(
     expect(row.highRiskNarrative[1]).toContain(candidate + '님→' + target + '님 좋아요·댓글');
     expect(row.highRiskNarrative[1]).toContain(target + '님→' + candidate + '님 좋아요');
     expect(row.highRiskNarrative[1].length).toBeLessThanOrEqual(180);
-    expect(steps).toBe(12 + continued + receiptRedeliveries);
+    expect(steps).toBe(12 + privateNameChunks + continued + receiptRedeliveries);
     const expectedActors = isReplay ? 0 : 9;
     expect(apify.starts).toHaveLength(expectedActors);
-    expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3);
+    expect(runtime.model.mock.calls.length - modelCallsBefore).toBe(3 + privateNameChunks);
     expect(await totals()).toMatchObject({
         consumed: 1,
         requests: 1,
         grants: 1,
         actors: expectedActors,
-        models: capturedBlite ? 4 : 3,
-        settled: capturedBlite ? 4 : 3,
+        models: (capturedBlite ? 4 : 3) + privateNameChunks,
+        settled: (capturedBlite ? 4 : 3) + privateNameChunks,
         quota: 0,
     });
     expect(
@@ -685,10 +796,10 @@ async function runStandardRequest(
         ).rows[0],
     ).toMatchObject({
         published: 1,
-        ready: 2,
+        ready: 2 + syntheticPrivateCount,
         sealed: 1,
         policy: 'ai-stage-policy-v2.11',
-        usage_rows: 3,
+        usage_rows: 3 + privateNameChunks,
         settled_cost: (await totals()).debit,
     });
     const budget = await totals();
@@ -1004,6 +1115,7 @@ async function runPrivate90Fixture(
             target: requestTarget, generate: model.generate, profileBatches, observed,
         });
         observed.phase = 'complete';
+        observed.assertion = 'none';
         observed.cause = 'none';
     } finally {
         await db.close();

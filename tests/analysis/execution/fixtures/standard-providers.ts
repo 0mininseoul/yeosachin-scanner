@@ -45,9 +45,14 @@ type ActorInput = {
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
+    constructor(private readonly privateCount = 0) {}
     private rows(actor: string, input: ActorInput) {
         if (actor === 'apify/instagram-profile-scraper' && input.usernames)
-            return input.usernames.map(profileItem);
+            return input.usernames.map(username => {
+                const profile = profileItem(username);
+                if (username === target) profile.followersCount = profile.followsCount = 1 + this.privateCount;
+                return profile;
+            });
         if (input.Account)
             return [
                 {
@@ -60,6 +65,14 @@ export class SyntheticApify {
                     is_verified: false,
                     profile_pic_url: picture(candidate),
                 },
+                ...Array.from({ length: this.privateCount }, (_, index) => {
+                    const username = 'fixture_private_' + index;
+                    return {
+                        username_scrape: target, type: input.dataToScrape,
+                        id: String(index + 1000), username, full_name: username,
+                        is_private: true, is_verified: false, profile_pic_url: picture(username),
+                    };
+                }),
             ];
         if (input.posts)
             return input.posts.map((url) => {

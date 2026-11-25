@@ -8,7 +8,7 @@ import { normalizeAnalysisV2MediaSelections } from '@/lib/services/analysis/v2-m
 import { analysisV2CheckpointProfileSchema } from '@/lib/services/analysis/v2-profile-fetch-store';
 import { currentDevStandardArchive } from '@/lib/services/dev-ui/standard-archive-runtime';
 import { archiveMediaUrlAnchor } from '@/lib/services/dev-ui/standard-archive-media-identity';
-import { syntheticGeneration } from './standard-vertex';
+import { fixedPrivateNameResults, syntheticGeneration } from './standard-vertex';
 import type { bootstrapStandardArchiveSource } from './standard-archive-source';
 
 type Setup = Omit<Parameters<typeof bootstrapStandardArchiveSource>[1], 'ownerId'>;
@@ -121,6 +121,11 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             const fields = schema.properties ?? {};
             const prompt = (Array.isArray(input.contents) ? input.contents : [input.contents])
                 .flatMap(c => c.parts.map(p => p.text ?? '')).join('\n');
+            const privateNames = fixedPrivateNameResults(input);
+            if (privateNames) {
+                totals.nameCalls++;
+                return response(privateNames);
+            }
             if ('accounts' in fields) {
                 totals.batchCalls++;
                 const accounts = accountManifest.parse(promptData(prompt, 'accounts'));
