@@ -1,26 +1,4 @@
-interface TossPayment {
-    requestBillingAuth(request: {
-        method: 'CARD'; successUrl: string; failUrl: string; customerEmail?: string;
-    }): Promise<void>;
-}
-type TossFactory = (clientKey: string) => { payment(options: { customerKey: string }): TossPayment };
-declare global {
-    interface Window { TossPayments?: TossFactory }
-}
-
-const SCRIPT_URL = 'https://js.tosspayments.com/v2/standard';
-
-function loadToss(): Promise<TossFactory> {
-    if (window.TossPayments) return Promise.resolve(window.TossPayments);
-    return new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = SCRIPT_URL;
-        script.async = true;
-        script.onload = () => window.TossPayments ? resolve(window.TossPayments) : reject(new Error('TOSS_SDK_MISSING'));
-        script.onerror = () => reject(new Error('TOSS_SDK_LOAD_FAILED'));
-        document.head.append(script);
-    });
-}
+import { loadToss } from '@/lib/services/toss/browser';
 
 /** Opens the card registration window. Card numbers are entered at Toss, never on this site. */
 export async function openTossBilling(input: {

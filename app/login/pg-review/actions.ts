@@ -9,7 +9,7 @@ import {
 
 const cookieOptions = {
     httpOnly: true,
-    sameSite: 'strict',
+    sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
     path: PG_REVIEW_PATH,
 } as const;

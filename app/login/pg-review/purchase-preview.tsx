@@ -5,19 +5,21 @@ import { useState } from 'react';
 import { AnalysisPlanCards, AnalysisPlanSection } from '@/components/analysis-plan-selection';
 import { CaseCard, PrimaryButton } from '@/components/case-ui';
 import { ANALYSIS_PLAN_CATALOG, buildPlanSelectionCards, type PlanId } from '@/lib/domain/analysis/plan-catalog';
-import { EARLYBIRD_DISCLOSURE_TEXT, isPaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
+import { EARLYBIRD_DISCLOSURE_TEXT, EARLYBIRD_PLAN_CATALOG, isPaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { buildEarlybirdPlanPresentation } from '@/lib/services/earlybird/ui-state';
+import { TossReviewButton } from './toss-review-button';
 
 const plans = buildPlanSelectionCards({ followers: 100, following: 100 }).map(card => ({
     ...ANALYSIS_PLAN_CATALOG[card.planId],
     ...card,
 }));
 
-export function PurchasePreview() {
+export function PurchasePreview({ clientKey }: { clientKey: string | null }) {
     const [plan, setPlan] = useState<PlanId>('basic');
     const [showOrder, setShowOrder] = useState(false);
     const presentation = buildEarlybirdPlanPresentation(plan);
     const paidPlan = isPaidEarlybirdPlanId(plan);
+    const orderName = `위장여사친 판독기 AI 판독 리포트 · ${plan === 'basic' ? 'Basic' : 'Standard'}`;
 
     return (
         <>
@@ -45,14 +47,15 @@ export function PurchasePreview() {
                         <dl className="mt-3 space-y-2 text-sm text-fg">
                             <div className="flex justify-between">
                                 <dt>상품</dt>
-                                <dd>AI 판독 리포트 · {plan === 'basic' ? 'Basic' : 'Standard'}</dd>
+                                <dd className="text-right">{orderName}</dd>
                             </div>
                             <div className="flex justify-between">
                                 <dt>결제 예정 금액</dt>
                                 <dd className="font-bold">{presentation.priceLabel}</dd>
                             </div>
                         </dl>
-                        <p className="mt-3 text-xs text-fg-dim">심사 단계에서는 실제 결제가 진행되지 않습니다.</p>
+                        <TossReviewButton product="analyzer" clientKey={clientKey}
+                            amount={EARLYBIRD_PLAN_CATALOG[plan].earlybirdAmountKrw} orderName={orderName} />
                     </CaseCard>
                 )}
             </AnalysisPlanSection>
