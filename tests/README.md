@@ -16,7 +16,7 @@
 | 익명/로그인 입력·preflight | app/api/analysis/preflight/, lib/services/analysis/preflight.ts | analysis/preflight/entry-policy.test.ts, analysis/preflight/ |
 | provider·수집·정산 | lib/services/analysis/v2-collection-executors.ts, lib/services/instagram/ | analysis/providers/ |
 | job·재시도·정책 | lib/services/analysis/v2-worker.ts, v2-tasks.ts | analysis/execution/job-policy.test.ts, retry-policy.test.ts |
-| Dev Standard 접수부터 소유자 결과·이미지까지 | app/api/analysis/preflight/, lib/services/analysis/v2-worker.ts, app/result/ | analysis/execution/standard-admission-result-pglite.test.ts (독립 정상 2회, 프로필 읽기 및 Apify 종료 기록 57014 재개) |
+| Dev Standard 접수부터 소유자 결과·이미지까지 | app/api/analysis/preflight/, lib/services/analysis/v2-worker.ts, app/result/ | analysis/execution/standard-admission-result-pglite.test.ts (독립 정상 2회, 프로필 읽기 및 Apify 종료 기록 57014 재개, 특징 판독 전 57014 이후 기존 성별 판독의 개별·일괄 복구 비교) |
 | 진행·결과·보관함 | app/progress/, app/result/, app/mypage/ | analysis/results/archive-history.test.ts, presentation-policy.test.ts, interaction-evidence.test.ts |
 | 체리(남친 맞팔 알리미) 감지·알림·구독 | lib/services/cherry/, app/api/cherry/, app/cherry/ | cherry/ |
 | 결제·주문·대기 등록 | app/api/earlybird/, lib/services/earlybird/ | commerce/checkout-policy.test.ts, commerce/ |

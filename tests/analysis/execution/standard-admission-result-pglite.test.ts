@@ -11,6 +11,7 @@ import { createFixtureObjects, createFixtureR2, makeSourcePng } from './fixtures
 import { createAnalysisV2ProductionExecutorRegistry } from '@/lib/services/analysis/v2-production-executors';
 import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-progress-reporter';
+import { verifyDevProfileReadyRead } from './fixtures/dev-standard-profile-media-ready-checks';
 import { assertOwnerPage } from './fixtures/standard-result-page';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
@@ -153,6 +154,7 @@ function configure() {
         ANALYSIS_V2_RESULT_IMAGE_OBJECT_HMAC_SECRET: 'fixture-object-'.repeat(3),
         NEXT_PUBLIC_SUPABASE_URL: 'https://' + registry.deployments[0]!.supabaseProjectRef + '.supabase.co',
         DEV_LIVE_ANALYSIS_ARMED: 'true',
+        DEV_LIVE_STANDARD_PROFILE_READY_REUSE_ENABLED: 'true',
         DEV_LIVE_ANALYSIS_MODE: 'owner_start',
         DEV_LIVE_STANDARD_COLLECTION_MODE: 'live_apify',
         DEV_LIVE_STANDARD_TARGET: target,
@@ -264,7 +266,7 @@ afterEach(() => {
     vi.clearAllMocks();
 });
 
-const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout'] as const;
+const deliveryScenarios = ['first', 'second', 'timeout', 'terminal receipt timeout', 'resume ready individually', 'resume ready together'] as const;
 type Scenario = typeof deliveryScenarios[number] | 'archive_capture' | 'archive_replay';
 type RoutingScenario = 'unchanged' | 'changed_triage' | 'changed_shortlist';
 
@@ -282,6 +284,12 @@ async function runStandardRequest(
     vi.stubEnv('DEV_UI_TEST_USER_IDS', [user.id, otherId].join(','));
     runtime.user = user;
     const client = localDatabaseClient(db);
+    const resumeReady = scenario === 'resume ready individually' || scenario === 'resume ready together';
+    if (scenario === 'resume ready individually') vi.stubEnv('DEV_LIVE_STANDARD_PROFILE_READY_REUSE_ENABLED', 'false');
+    let interruptFeature = resumeReady;
+    let readyTriageClaims = 0;
+    let readSnapshotWithTriage = 0;
+    let testedProfileReadyRead = false;
     let timeouts = 0;
     const receiptCalls: Record<string, unknown>[] = [];
     const producerHashes: string[] = [];
@@ -309,7 +317,22 @@ async function runStandardRequest(
                 error: { code: '57014', message: 'canceling statement due to statement timeout' },
             };
         }
+        if (interruptFeature && n === 'claim_analysis_v2_scheduler_operation' && a.p_stage === 'featureAnalysis') {
+            return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+        }
         const out = await client.rpc(n, a);
+        if (n === 'load_dev_standard_profile_media_ready_v1' && !out.error) {
+            const ready = out.data as { readyOperations: Array<{stage: string}> };
+            if (ready.readyOperations.some(row => row.stage === 'genderTriage')) readSnapshotWithTriage++;
+            if (scenario === 'first' && !testedProfileReadyRead) {
+                testedProfileReadyRead = true;
+                await verifyDevProfileReadyRead(db, a);
+            }
+        }
+        if (n === 'claim_analysis_v2_scheduler_operation' && a.p_stage === 'genderTriage') {
+            const row = Array.isArray(out.data) ? out.data[0] : out.data;
+            if (row?.decision === 'ready') readyTriageClaims++;
+        }
         if (n === 'checkpoint_dev_standard_replay_scope_note_v1' && out.data === true) {
             // The real worker issued the call above. Probe replay under that same live claim.
             expect((await client.rpc(n, a)).data).toBe(true);
@@ -512,10 +535,13 @@ async function runStandardRequest(
             runtime.queue.unshift(payload); // Cloud Tasks retries the same delivery.
             continue;
         }
-        if (outcome.status === 'continuation' && scenario === 'timeout') {
-            expect(outcome.errorCode).toBe('ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT');
+        if (outcome.status === 'continuation' && (scenario === 'timeout' || resumeReady)) {
+            expect(continued).toBe(0);
+            expect(outcome.errorCode).toBe(resumeReady
+                ? 'ANALYSIS_V2_AI_CAPACITY_PENDING' : 'ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT');
             expect(outcome.pendingRecoveryCount).toBe(0);
-            expect(runtime.model.mock.calls.length).toBe(modelCallsBefore);
+            expect(runtime.model.mock.calls.length).toBe(modelCallsBefore + (resumeReady ? 1 : 0));
+            interruptFeature = false;
             expect(runtime.queue).toContainEqual(
                 expect.objectContaining({
                     jobKey: delivery.jobKey,
@@ -549,7 +575,12 @@ async function runStandardRequest(
         );
         expect(await totals()).toEqual(before);
     }
-    expect(continued).toBe(scenario === 'timeout' ? 1 : 0);
+    expect(continued).toBe(scenario === 'timeout' || resumeReady ? 1 : 0);
+    if (scenario === 'first') expect(testedProfileReadyRead).toBe(true);
+    if (resumeReady) {
+        expect(readyTriageClaims).toBe(scenario === 'resume ready individually' ? 1 : 0);
+        expect(readSnapshotWithTriage).toBe(scenario === 'resume ready together' ? 1 : 0);
+    }
     expect(receiptRedeliveries).toBe(scenario === 'terminal receipt timeout' ? 1 : 0);
     if (receiptRedeliveries) {
         expect(receiptCalls).toHaveLength(3);

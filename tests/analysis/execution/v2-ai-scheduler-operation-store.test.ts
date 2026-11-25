@@ -12,13 +12,14 @@ const operationClaimToken = '323e4567-e89b-42d3-a456-426614174000';
 const operationKey = `gender-triage:${'a'.repeat(64)}`;
 const resultSchema = z.object({ value: z.literal('female') }).strict();
 
-function storeWith(rpc: ReturnType<typeof vi.fn>) {
+function storeWith(rpc: ReturnType<typeof vi.fn>, onClaimRpc?: () => () => void) {
     return createAnalysisV2SchedulerOperationStore({
         requestId,
         jobKey: 'track:profile-ai:batch:0',
         jobClaimToken,
         schemas: new Map([[operationKey, resultSchema]]),
         client: { rpc },
+        onClaimRpc,
         randomUuid: () => operationClaimToken,
     });
 }
@@ -76,7 +77,9 @@ describe('analysis V2 scheduler operation store', () => {
             })
             .mockResolvedValueOnce(deadlock)
             .mockResolvedValueOnce({ data: true, error: null });
-        const store = storeWith(rpc);
+        const finish = vi.fn();
+        const countClaim = vi.fn(() => finish);
+        const store = storeWith(rpc, countClaim);
         const operation = { key: operationKey, stage: 'genderTriage' as const };
 
         await expect(store.claim(operation)).resolves.toMatchObject({ claimToken: operationClaimToken });
@@ -84,6 +87,8 @@ describe('analysis V2 scheduler operation store', () => {
             ...operation, claimToken: operationClaimToken, value: { value: 'female' },
         })).resolves.toBeUndefined();
         expect(rpc).toHaveBeenCalledTimes(4);
+        expect(countClaim).toHaveBeenCalledTimes(2);
+        expect(finish).toHaveBeenCalledTimes(2);
         expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
         expect(rpc.mock.calls[3]).toEqual(rpc.mock.calls[2]);
     });

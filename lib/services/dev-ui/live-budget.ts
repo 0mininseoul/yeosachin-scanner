@@ -42,6 +42,15 @@ export function withDevLiveProviderApproval<T>(approval: DevLiveApproval | null,
     return approval ? workerApproval.run(approval, operation) : operation();
 }
 
+/** Only the registered paid worker's current Standard delivery can use the Dev SQL overlay. */
+export function devStandardProfileReadyReuseEnabled(): boolean {
+    return process.env.DEV_LIVE_STANDARD_PROFILE_READY_REUSE_ENABLED === 'true'
+        && process.env.DEV_LIVE_WORKLOAD === 'paid'
+        && workerApproval.getStore()?.planId === 'standard'
+        && devLiveOwnerStartEnabled()
+        && requireDevLiveProviderApproval().planId === 'standard';
+}
+
 export type DevLiveCostReservation = Readonly<{
     grantId: string;
     reservationId: string;

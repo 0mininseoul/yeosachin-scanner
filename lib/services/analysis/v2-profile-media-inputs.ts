@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { MAX_FEATURE_MEDIA, MAX_TRIAGE_MEDIA, type SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import { ANALYSIS_IMAGE_PREPARATION_FAILURE_REASONS } from '@/lib/services/ai/image-preprocessing';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresLockTimeout, isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { AnalysisV2SchedulerContinuationError } from './v2-ai-scheduler-continuation';
 import { AnalysisV2JobFenceError } from './v2-job-store';
 import { ANALYSIS_V2_PROFILE_BATCH_LIMIT } from './v2-dag-planner';
 import type { ProfileGenderPlanFence } from './v2-profile-gender-plan';
@@ -32,13 +33,36 @@ const loadedSchema = z.object({
     hasGenderHistory: z.boolean(),
     hasUnownedFeatureHistory: z.boolean(),
 }).strict();
+const readyOperationSchema = z.discriminatedUnion('stage', [
+    z.object({
+        stage: z.literal('genderTriage'),
+        operationKey: z.string().regex(/^gender-triage:[a-f0-9]{64}$/),
+        result: z.record(z.string(), z.unknown()),
+    }).strict(),
+    z.object({
+        stage: z.literal('featureAnalysis'),
+        operationKey: z.string().regex(/^feature-analysis:[a-f0-9]{64}$/),
+        result: z.record(z.string(), z.unknown()),
+    }).strict(),
+]);
+const devLoadedSchema = loadedSchema.extend({
+    readyOperations: z.array(readyOperationSchema).max(2 * ANALYSIS_V2_PROFILE_BATCH_LIMIT),
+});
+type ReadyOperation = z.infer<typeof readyOperationSchema>;
+export interface ProfileReadySnapshot {
+    readonly fence: Readonly<ProfileGenderPlanFence>;
+    readonly byKey: ReadonlyMap<string, ReadyOperation>;
+}
 export type ProfileMediaInput = z.infer<typeof mediaInputSchema>;
 export interface ProfileMediaInputStore {
-    load(fence: ProfileGenderPlanFence): Promise<z.infer<typeof loadedSchema>>;
+    load(fence: ProfileGenderPlanFence, includeReady?: boolean): Promise<z.infer<typeof loadedSchema> & {
+        readySnapshot?: ProfileReadySnapshot;
+    }>;
     pin(fence: ProfileGenderPlanFence, inputs: readonly ProfileMediaInput[]): Promise<void>;
 }
 type PreparedMedia = Awaited<ReturnType<typeof normalizeAnalysisV2MediaSelections>>;
 
+const DEV_READY_RPC = 'load_dev_standard_profile_media_ready_v1';
 const PROFILE_FEATURE_HISTORY_PENDING = 'ANALYSIS_V2_PROFILE_FEATURE_HISTORY_PENDING';
 
 export class DeferredProfileFeatureInput extends Error {
@@ -54,8 +78,11 @@ async function mediaRpc(name: string, fence: ProfileGenderPlanFence, extra: Reco
     const { data, error } = await retryPostgresAbortedRpc(() => supabaseAdmin.rpc(name, {
         p_request_id: fence.requestId, p_job_key: fence.jobKey, p_claim_token: fence.claimToken,
         p_input_hash: fence.inputHash, ...extra,
-    }));
+    }), { retryLockTimeout: name === DEV_READY_RPC });
     if (!error) return data;
+    if (name === DEV_READY_RPC && (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error))) {
+        throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+    }
     switch (error.message) {
     case PROFILE_FEATURE_HISTORY_PENDING: throw new Error(PROFILE_FEATURE_HISTORY_PENDING);
     case 'ANALYSIS_V2_PROFILE_GENDER_PLAN_FENCE_MISMATCH': throw new AnalysisV2JobFenceError();
@@ -67,13 +94,21 @@ async function mediaRpc(name: string, fence: ProfileGenderPlanFence, extra: Reco
 }
 
 export const profileMediaInputStore: ProfileMediaInputStore = {
-    async load(fence) {
-        const data = await mediaRpc('load_analysis_v2_profile_media_inputs', fence);
-        const parsed = loadedSchema.safeParse(data);
+    async load(fence, includeReady = false) {
+        const rpc = includeReady ? DEV_READY_RPC : 'load_analysis_v2_profile_media_inputs';
+        const data = await mediaRpc(rpc, fence);
+        const parsed = (includeReady ? devLoadedSchema : loadedSchema).safeParse(data);
         if (!parsed.success) drift();
-        const keys = parsed.data.inputs.map(row => `${row.ordinal}:${row.stage}`);
+        const result: z.infer<typeof loadedSchema> & { readyOperations?: ReadyOperation[] } = parsed.data;
+        const keys = result.inputs.map(row => `${row.ordinal}:${row.stage}`);
         if (new Set(keys).size !== keys.length) drift();
-        return parsed.data;
+        if (!result.readyOperations) return result;
+        const { readyOperations, ...inputs } = result;
+        const byKey = new Map(readyOperations.map(row => [row.operationKey, row]));
+        const genderCount = readyOperations.filter(row => row.stage === 'genderTriage').length;
+        if (byKey.size !== readyOperations.length || genderCount > ANALYSIS_V2_PROFILE_BATCH_LIMIT
+            || byKey.size - genderCount > ANALYSIS_V2_PROFILE_BATCH_LIMIT) drift();
+        return { ...inputs, readySnapshot: { fence: { ...fence }, byKey } };
     },
     async pin(fence, inputs) {
         if (!inputs.length) return;

@@ -144,6 +144,7 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
     jobKey: string;
     jobClaimToken: string;
     schemas: ReadonlyMap<string, z.ZodType<T>>;
+    onClaimRpc?: () => () => void;
     client?: AnalysisV2SchedulerOperationSupabaseClient;
     randomUuid?: () => string;
 }): AnalysisV2SchedulerOperationStore<T> {
@@ -169,18 +170,20 @@ export function createAnalysisV2SchedulerOperationStore<T>(input: {
             ) {
                 throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_VALIDATION_ERROR');
             }
-            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
-                ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES.claimRpc,
-                {
-                    p_request_id: input.requestId.toLowerCase(),
-                    p_job_key: input.jobKey,
-                    p_job_claim_token: input.jobClaimToken.toLowerCase(),
-                    p_operation_key: operation.key,
-                    p_stage: operation.stage,
-                    p_operation_claim_token: proposedToken.toLowerCase(),
-                    p_lease_seconds: OPERATION_LEASE_SECONDS,
-                },
-            ));
+            const args = {
+                p_request_id: input.requestId.toLowerCase(),
+                p_job_key: input.jobKey,
+                p_job_claim_token: input.jobClaimToken.toLowerCase(),
+                p_operation_key: operation.key,
+                p_stage: operation.stage,
+                p_operation_claim_token: proposedToken.toLowerCase(),
+                p_lease_seconds: OPERATION_LEASE_SECONDS,
+            };
+            const { data, error } = await retryPostgresAbortedRpc(async () => {
+                const finish = input.onClaimRpc?.();
+                try { return await client.rpc(ANALYSIS_V2_SCHEDULER_OPERATION_DATABASE_NAMES.claimRpc, args); }
+                finally { finish?.(); }
+            });
             if (isPostgresStatementTimeout(error)) {
                 throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
             }
