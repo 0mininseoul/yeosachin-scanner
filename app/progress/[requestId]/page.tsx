@@ -3,7 +3,7 @@
 import { useEffect, use, useRef, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { Archive, Check, ChevronRight } from 'lucide-react';
+import { Archive, ChevronRight } from 'lucide-react';
 import { ProgressFaces } from '@/components/progress-faces';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
@@ -325,11 +325,13 @@ export default function ProgressPage({ params }: PageProps) {
         ? narration === data.progressStep ? narration : analysisV2EventCopy(narration)
         : '판독을 준비하고 있습니다.';
     const profilePrefix = data.activeProfile ? `@${data.activeProfile.maskedUsername} · ` : '';
-    // Profile changes have their own visible label. The live heading announces
-    // changes in activity without rereading the same stage on every heartbeat.
+    // Profile changes have their own visible label and do not change the stage announcement.
     const currentActivity = profilePrefix && activity.startsWith(profilePrefix)
         ? activity.slice(profilePrefix.length)
         : activity;
+
+    const synthetic = isDevUiPresentation() && !devLive;
+    const activeAnalysis = !synthetic && data.status === 'processing' && !data.publicationLagReset && (!data.demo || devLive);
 
     return (
         <div className="min-h-dvh">
@@ -353,6 +355,17 @@ export default function ProgressPage({ params }: PageProps) {
                         <div className="mt-3">{retryButton}</div>
                     </div>
                 )}
+
+                <header className="mb-5 text-center">
+                    <h1 className="text-balance break-keep text-[22px] font-extrabold leading-snug tracking-tight text-fg min-[380px]:text-[24px]"
+                        aria-live={activeAnalysis ? undefined : 'polite'} aria-atomic={activeAnalysis ? undefined : true}>
+                        {activeAnalysis ? '꼼꼼하게 정밀 분석 중이에요.' : currentActivity}
+                    </h1>
+                    <p className="mt-1.5 text-balance break-keep text-[14px] leading-relaxed text-fg-dim">
+                        {analysisDurationProgressCopy(synthetic, activeAnalysis)}
+                    </p>
+                    {activeAnalysis && <p role="status" aria-atomic="true" className="sr-only">{currentActivity}</p>}
+                </header>
 
                 <div
                     className="relative h-[184px] w-[184px] self-center"
@@ -387,14 +400,10 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                 </div>
 
-                <h1 className="mt-4 text-balance break-keep text-center text-[20px] font-extrabold leading-snug tracking-tight text-fg" aria-live="polite" aria-atomic="true">
-                    {currentActivity}
-                </h1>
-
                 {data.pipelineVersion === 'v2' && (
                     <div data-amp-block>
                         <ProgressFaces
-                            allowLocalAssets={isDevUiPresentation() && !devLive}
+                            allowLocalAssets={synthetic}
                             key={requestId}
                             active={data.activeProfile}
                             candidateMedia={data.candidateMedia}
@@ -410,10 +419,6 @@ export default function ProgressPage({ params }: PageProps) {
                         )}
                     </p>
                 )}
-                {devLive && <p className="mt-4 text-center text-sm text-fg-dim">Dev · 실제 분석</p>}
-                <p className="mt-4 text-balance text-center text-[14px] leading-relaxed text-fg-dim">
-                    {analysisDurationProgressCopy(isDevUiPresentation() && !devLive)}
-                </p>
 
                 <ul aria-label="판독 작업 상태" className="mt-4 w-full">
                     {data.pipelineVersion === 'v2' && data.tracks
@@ -447,18 +452,9 @@ export default function ProgressPage({ params }: PageProps) {
                 </ul>
 
                 {data.backgroundProcessing ? (
-                    <div className="mt-4 border-t border-line pt-4">
-                        <div className="space-y-2 text-[14px] font-semibold leading-relaxed text-jade">
-                            <p className="flex items-start gap-2">
-                                <Check aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />
-                                이 화면을 나가셔도 판독은 계속됩니다
-                            </p>
-                            <p className="flex items-start gap-2">
-                                <Check aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0" />
-                                보관함에서 진행 상황을 다시 확인할 수 있어요
-                            </p>
-                        </div>
-                        <Link href="/mypage" className="mt-4 flex min-h-12 items-center justify-center gap-3 border border-blood px-4 py-3 text-[16px] font-bold text-blood-2 transition-colors hover:bg-blood/10">
+                    <div className="mt-2 border-t border-line pt-4">
+                        <p className="text-center text-[14px] leading-relaxed text-fg-dim">화면을 나가도 분석은 계속돼요.</p>
+                        <Link href="/mypage" className="mt-3 flex min-h-12 items-center justify-center gap-3 border border-blood px-4 py-3 text-[16px] font-bold text-blood-2 transition-colors hover:bg-blood/10">
                             <Archive aria-hidden="true" className="h-5 w-5" />
                             보관함으로 이동
                             <ChevronRight aria-hidden="true" className="h-5 w-5" />

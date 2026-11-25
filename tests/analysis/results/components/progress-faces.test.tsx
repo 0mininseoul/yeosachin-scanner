@@ -72,6 +72,13 @@ function media(imageUrl: string): ProgressCandidateMediaV1[] {
     }];
 }
 
+function photoCandidates(count: number) {
+    return Array.from({ length: count }, (_, i) => ({
+        candidateKey: i.toString(16).padStart(64, '0'), maskedUsername: 'a***e',
+        imageUrl: '/api/image-proxy?token=photo-' + i, feedImageUrls: [],
+    }));
+}
+
 function renderSnapshot(
     root: Root,
     activeMedia: ActiveCandidateMedia,
@@ -191,9 +198,9 @@ describe('ProgressFaces stable rail identity', () => {
             vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
             const scheduleFrame = vi.fn<(callback: FrameRequestCallback) => number>(() => 1);
             vi.stubGlobal('requestAnimationFrame', scheduleFrame);
-            const imageUrl = '/api/image-proxy?token=drift';
-            render(imageUrl);
-            act(() => imageLoadHandlers.get(imageUrl)?.[0]?.());
+            const candidates = photoCandidates(7);
+            renderSnapshot(root, candidates[0]!, candidates);
+            loadProbedImages(...candidates.map(c => c.imageUrl));
             const [, second] = container.querySelectorAll<HTMLElement>('[data-progress-copy]');
             const rail = second?.parentElement;
             if (!rail || !second) throw new Error('Expected a decoded two-copy rail.');
@@ -218,10 +225,10 @@ describe('ProgressFaces stable rail identity', () => {
         vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
         const scheduleFrame = vi.fn<(callback: FrameRequestCallback) => number>(() => 1);
         vi.stubGlobal('requestAnimationFrame', scheduleFrame);
-        const first = '/api/image-proxy?token=drag-first';
-        const second = '/api/image-proxy?token=drag-second';
-        renderSnapshot(root, active(first), [{ ...media(first)[0]!, feedImageUrls: [second] }]);
-        loadProbedImages(first);
+        const candidates = photoCandidates(8);
+        const second = candidates.at(-1)!.imageUrl;
+        renderSnapshot(root, candidates[0]!, candidates);
+        loadProbedImages(...candidates.slice(0, -1).map(c => c.imageUrl));
         const [, copy] = container.querySelectorAll<HTMLElement>('[data-progress-copy]');
         const rail = copy?.parentElement;
         if (!rail || !copy) throw new Error('Expected a decoded two-copy rail.');
@@ -259,66 +266,83 @@ describe('ProgressFaces stable rail identity', () => {
         }
     });
 
-    it('renders enough one-tile copies for one full wrap to remain scrollable', () => {
-        const imageUrl = '/api/image-proxy?token=one-tile';
-        const candidateMedia = [{
-            candidateKey: CANDIDATE_KEY,
-            maskedUsername: 'a***e',
-            imageUrl,
-            feedImageUrls: [],
-        }];
-        const geometry = progressRailCopyGeometry(1);
-
-        renderSnapshot(root, active(imageUrl), candidateMedia);
-        loadProbedImages(imageUrl);
-
-        const copyCount = container.querySelectorAll('[data-progress-copy]').length;
-        expect(geometry.copyCount).toBe(6);
-        expect(geometry.copyDistance).toBe(94);
-        expect(geometry.maxScrollLeft).toBe(134);
-        expect(geometry.maxScrollLeft).toBeGreaterThanOrEqual(geometry.copyDistance);
-        expect(copyCount).toBe(geometry.copyCount);
+    it.each([1, 2, 4, 5, 6, 7])('uses a single strip until %i decoded photos can wrap without visible duplicates', count => {
+        const candidates = photoCandidates(count);
+        renderSnapshot(root, candidates[0]!, candidates);
+        loadProbedImages(...candidates.map(c => c.imageUrl));
+        const copies = container.querySelectorAll('[data-progress-copy]');
+        expect(copies).toHaveLength(count >= 6 ? 3 : 1);
+        expect(loadedImages(copies[0]!).map(e => e.getAttribute('data-progress-image')))
+            .toEqual(candidates.map(c => c.imageUrl));
     });
 
-    it('renders enough two-tile copies for one full wrap to remain scrollable', () => {
-        const imageUrl = '/api/image-proxy?token=two-tile';
-        const feedUrl = '/api/image-proxy?token=two-tile-feed';
-        const candidateMedia = [{
-            candidateKey: CANDIDATE_KEY,
-            maskedUsername: 'a***e',
-            imageUrl,
-            feedImageUrls: [feedUrl],
-        }];
-        const geometry = progressRailCopyGeometry(2);
-
-        renderSnapshot(root, active(imageUrl), candidateMedia);
-        loadProbedImages(imageUrl, feedUrl);
-
-        const copyCount = container.querySelectorAll('[data-progress-copy]').length;
-        expect(geometry.copyCount).toBe(4);
-        expect(geometry.copyDistance).toBe(188);
-        expect(geometry.maxScrollLeft).toBe(322);
-        expect(geometry.maxScrollLeft).toBeGreaterThanOrEqual(geometry.copyDistance);
-        expect(copyCount).toBe(geometry.copyCount);
+    it('drifts to the last tile and back when a short strip only partly fits', () => {
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+        const schedule = vi.fn<(callback: FrameRequestCallback) => number>(() => 1);
+        vi.stubGlobal('requestAnimationFrame', schedule);
+        const candidates = photoCandidates(5);
+        renderSnapshot(root, candidates[0]!, candidates);
+        loadProbedImages(...candidates.map(c => c.imageUrl));
+        const rail = container.querySelector<HTMLElement>('[data-progress-copy]')!.parentElement!;
+        const frame = (time: number) => schedule.mock.lastCall![0](time);
+        frame(100);
+        frame(2_100);
+        expect(rail.scrollLeft).toBe(40);
+        frame(3_100);
+        expect(rail.scrollLeft).toBe(14);
     });
 
-    it('keeps three copies for larger histories', () => {
-        const imageUrl = '/api/image-proxy?token=larger-history';
-        const feeds = [
-            '/api/image-proxy?token=larger-history-feed-1',
-            '/api/image-proxy?token=larger-history-feed-2',
-        ];
-        const candidateMedia = [{
-            candidateKey: CANDIDATE_KEY,
-            maskedUsername: 'a***e',
-            imageUrl,
-            feedImageUrls: feeds,
-        }];
+    it('keeps the visible wrap intact on arrival and shows the unseen decoded image ahead of repeats', () => {
+        vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+        const candidates = photoCandidates(9);
+        const initial = candidates.slice(0, 8);
+        renderSnapshot(root, initial[0]!, initial);
+        loadProbedImages(...initial.map(c => c.imageUrl));
+        const copy = container.querySelector<HTMLElement>('[data-progress-copy]')!;
+        const rail = copy.parentElement!;
+        Object.defineProperty(rail, 'clientWidth', { value: 390 });
+        const scrollTo = (left: number) => act(() => {
+            rail.scrollLeft = left;
+            rail.dispatchEvent(new Event('scroll'));
+        });
+        const all = () => loadedImages(rail).map(el => el.getAttribute('data-progress-image'));
+        const centers = () => all().filter((_, i) => {
+            const x = 20 + i * 94 + 42 - rail.scrollLeft;
+            return x >= 0 && x < 390;
+        });
+        for (let i = 0; i < 8; i++) scrollTo(i * 94);
+        scrollTo(648);
+        const before = centers();
+        rail.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+        renderSnapshot(root, candidates[0]!, candidates);
+        expect(centers()).toEqual(before);
+        loadProbedImages(candidates[8]!.imageUrl);
+        expect(centers()).toEqual(before);
+        const images = all();
+        const firstOffscreen = Math.ceil((rail.scrollLeft + 390 - 20) / 94);
+        expect(images[firstOffscreen]).toBe(candidates[8]!.imageUrl);
 
-        renderSnapshot(root, active(imageUrl), candidateMedia);
-        loadProbedImages(imageUrl, ...feeds);
+        renderSnapshot(root, candidates[0]!, [...candidates].reverse());
+        expect(centers()).toEqual(before);
+        // The page keys this component by request. A new request cannot retain photos or visits.
+        act(() => root.render(<ProgressFaces key="another-request" active={null} candidateMedia={[]} />));
+        expect(container.querySelector('[data-progress-copy]')).toBeNull();
+    });
 
-        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(3);
+    it('keeps a decoded feed tile when its previously absent profile picture arrives', () => {
+        const profile = '/api/image-proxy?token=avatar';
+        const feed = '/api/image-proxy?token=feed';
+        const withoutAvatar = { ...media(profile)[0]!, imageUrl: null, feedImageUrls: [feed] };
+        renderSnapshot(root, withoutAvatar, [withoutAvatar]);
+        loadProbedImages(feed);
+        const node = container.querySelector('[data-progress-image]');
+        const complete = { ...withoutAvatar, imageUrl: profile };
+        renderSnapshot(root, complete, [complete]);
+        expect(container.querySelector('[data-progress-image]')).toBe(node);
+        loadProbedImages(profile);
+        expect(loadedImages(container.querySelector('[data-progress-copy]')).map(img => img.getAttribute('data-progress-image')))
+            .toEqual([profile, feed]);
+        expect(node?.isConnected).toBe(true);
     });
 
     it('does not arrange a rail before any collected image has loaded', () => {
@@ -353,7 +377,7 @@ describe('ProgressFaces stable rail identity', () => {
         expect(firstCopy.children).toHaveLength(1);
         expect(firstImage?.getAttribute('data-progress-image')).toContain('token=first');
         expect((firstTile as HTMLElement).style.width).toBe('84px');
-        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(6);
+        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(1);
 
         render(firstUrl);
         const repeatedCopy = container.querySelector<HTMLElement>('[data-progress-copy]');
@@ -371,7 +395,7 @@ describe('ProgressFaces stable rail identity', () => {
         expect((refreshedImage?.parentElement as HTMLElement).style.width).toBe('84px');
         expect(refreshedImage?.getAttribute('data-progress-image')).toContain('token=refreshed');
         expect(refreshedCopy?.children).toHaveLength(1);
-        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(6);
+        expect(container.querySelectorAll('[data-progress-copy]')).toHaveLength(1);
 
         act(() => oldVisibleError?.());
         expect(refreshedCopy?.querySelector('[data-progress-image]')).toBe(refreshedImage);

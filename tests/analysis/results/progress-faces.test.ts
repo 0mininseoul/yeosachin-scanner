@@ -9,6 +9,7 @@ import {
     mergeScreenedCandidateHistory,
     nextDriftOffset,
     progressCopyDistance,
+    ProgressPhotoVisits,
     signedProgressCandidateMedia,
     type ScreenedCandidate,
 } from '../../../lib/services/analysis/progress-faces';
@@ -439,6 +440,17 @@ describe('screened candidate presentation keys and drift', () => {
             first.map(item => item.occurrence)
         );
         expect(second.every((item, index) => item === first[index])).toBe(true);
+    });
+
+    it('counts entries once and ranks unseen, then less seen, then least recently seen photos', () => {
+        const visits = new ProgressPhotoVisits();
+        const keys = ['a', 'b', 'c', 'd', 'e'];
+        visits.arrange(keys, [0, 1], [0, 1]);
+        visits.arrange(keys, [0, 1], [0, 1]);
+        visits.arrange(keys, [1, 2], [1, 2]);
+        visits.arrange(keys, [0, 1], [0, 1]);
+        // d is on screen. e is unseen, b and c have one visit, a has two.
+        expect(visits.arrange(keys, [3], [3])).toEqual(['b', 'c', 'a', 'd', 'e']);
     });
 
     it('measures copy starts and wraps without relying on total scroll width', () => {
