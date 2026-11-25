@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { createStandardDatabase } from './standard-database';
-import { sharedStandardEffects } from './standard-shared-verification';
+import { sharedStandardEffects, sharedStandardLedgerIssues, sharedStandardLedgerStages } from './standard-shared-verification';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
@@ -34,6 +34,22 @@ it('detects swapped charges with unchanged total, missing orders and duplicate s
         expect(await effects()).toMatchObject({ wrong_order: 1, duplicate_settlements: 1, unsettled_attempts: 1, settlements: 3 });
         await db.exec(`UPDATE vertex_ai_budget_reservations SET operation_key='unexpected' WHERE operation_key='other'`);
         expect(await effects()).toMatchObject({ unmatched_settlements: 1, unsettled_attempts: 2 });
+
+        await db.exec(`UPDATE analysis_v2_ai_attempts SET status='success',stage='featureAnalysis';
+            UPDATE analysis_v2_ai_attempts SET status='cutoff',stage='genderResolution',estimated_cost_usd=NULL WHERE operation_key='first';
+            UPDATE vertex_ai_budget_reservations SET attempt=2,actual_cost_usd=NULL,usage_unknown=true,estimated_cost_usd=0.005
+            WHERE order_id IS NULL`);
+        const detailed = await sharedStandardLedgerStages(db, requestId, orderId);
+        expect(detailed).toEqual(expect.arrayContaining([
+            expect.objectContaining({ stage: 'genderResolution', attempts: 2, cutoffs: 2, cutoffs_missing_tokens: 2,
+                unknown_cost_cutoffs: 1, priced_cutoffs_missing_attempt_cost: 1, unknown_settlements: 1,
+                unknown_reserved_estimate_micros: 5000, wrong_order: 1 }),
+            expect.objectContaining({ stage: 'featureAnalysis', attempts: 1, unsettled_attempts: 1 }),
+            expect.objectContaining({ stage: 'unattributed', attempts: 0, unmatched_settlements: 1 }),
+        ]));
+        expect(sharedStandardLedgerIssues(await effects(), 3)).toEqual(expect.arrayContaining([
+            'wrong_order', 'unpriced', 'unsettled_attempts', 'unmatched_settlements', 'mismatched_settlement_costs', 'incomplete_model_outcomes',
+        ]));
     } finally {
         await db.close();
     }

@@ -51,15 +51,16 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     reapCutoffV2Rpc: 'reap_analysis_v2_gemini_cutoff_leases_v2',
 });
 
-// The two larger pools are opt-in candidates for the isolated native PostgreSQL test.
+// The larger pools are opt-in candidates for the isolated native PostgreSQL test.
 // Production and unconfigured tests still reject every slot above eight.
 function slotMaximum(env: Record<string, string | undefined>) {
     if (env.NODE_ENV !== 'test') return 8;
     if (env.STANDARD_SHARED_VERTEX_SLOTS === '48') return 48;
     if (env.STANDARD_SHARED_VERTEX_SLOTS === '56') return 56;
+    if (env.STANDARD_SHARED_VERTEX_SLOTS === '64') return 64;
     return 8;
 }
-const slotNumber = z.number().int().min(1).max(56);
+const slotNumber = z.number().int().min(1).max(64);
 const acquiredRowSchema = z.object({
     outcome: z.literal('acquired'),
     slot: slotNumber,

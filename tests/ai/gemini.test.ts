@@ -688,6 +688,39 @@ describe('analyzeWithGemini generation retry policy', () => {
         expect(mocks.settleDevAttempt).toHaveBeenCalledOnce();
     });
 
+    it.each(['before', 'after'] as const)('settles an owner-start response only when received before cutoff (%s)', async timing => {
+        vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+        const controller = new AbortController();
+        const grant = { id: 'synthetic-owner-grant', planId: 'standard', expiresAt: null };
+        const reservation = { grantId: grant.id, reservationId: 'synthetic-reservation', durableAttempt: true };
+        const audit = stageAuditOptions();
+        mocks.requireDevApproval.mockReturnValue(grant);
+        mocks.reserveDevAttempt.mockResolvedValue(reservation);
+        mocks.generateContent.mockImplementationOnce(async () => {
+            if (timing === 'after') controller.abort();
+            return successfulResponse();
+        });
+        mocks.settleDevAttempt.mockImplementationOnce(async () => { controller.abort(); });
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', stage: 'genderResolution',
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11', budgetOperationKey: 'gender-resolution:' + 'a'.repeat(64),
+            abortSignal: controller.signal, ...audit,
+        })).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+
+        expect(mocks.reserveDevAttempt).toHaveBeenCalledOnce();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        if (timing === 'before') {
+            expect(mocks.settleDevAttempt).toHaveBeenCalledExactlyOnceWith(reservation, 0.0000085);
+        } else {
+            expect(mocks.settleDevAttempt).not.toHaveBeenCalled();
+        }
+        expect(mocks.releaseUnusedDevAttempt).not.toHaveBeenCalled();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+    });
+
     it('reserves against the same structured request and sliced image parts dispatched to Vertex', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');
         const grant = { id: 'synthetic-approval' };
@@ -1098,9 +1131,19 @@ describe('analyzeWithGemini generation retry policy', () => {
         );
     });
 
-    it('conservatively settles an unknown charge when abort arrives after provider dispatch', async () => {
+    it.each([
+        { receipt: 'complete before cutoff', beforeCutoff: true, metadata: successfulResponse().usageMetadata, expected: 0.0000085 },
+        { receipt: 'complete before cutoff with a lost settlement acknowledgement', beforeCutoff: true,
+            metadata: successfulResponse().usageMetadata, expected: 0.0000085, retrySettlement: true },
+        { receipt: 'malformed before cutoff', beforeCutoff: true, metadata: { promptTokenCount: 9 }, expected: null },
+        { receipt: 'missing before cutoff', beforeCutoff: true, metadata: null, expected: null },
+        { receipt: 'complete after cutoff', beforeCutoff: false, metadata: successfulResponse().usageMetadata, expected: null },
+        { receipt: 'SDK rejection after dispatch', beforeCutoff: false, metadata: null, expected: null },
+    ])('settles the reservation from $receipt and suppresses aborted output', async ({ receipt, beforeCutoff, metadata, expected, retrySettlement }) => {
         const controller = new AbortController();
         const onAttemptTelemetry = vi.fn();
+        const settle = vi.fn().mockResolvedValue(undefined);
+        if (retrySettlement) settle.mockRejectedValueOnce(new Error('Settlement acknowledgement lost'));
         const budgetGuard = {
             reserve: vi.fn().mockResolvedValue({
                 reservationId: 'reservation-aborted',
@@ -1114,32 +1157,79 @@ describe('analyzeWithGemini generation retry policy', () => {
                 estimatedCostUsd: 0.001,
                 actualCostUsd: null,
             }),
-            settle: vi.fn().mockResolvedValue(undefined),
+            settle,
             cancel: vi.fn().mockResolvedValue(undefined),
             snapshot: vi.fn(),
         } as unknown as VertexAiBudgetGuard;
+        const onTelemetry = vi.fn();
+        const readContent = vi.fn();
+        const onRejectedResponseTelemetry = vi.fn();
         mocks.generateContent.mockImplementationOnce(() => {
-            controller.abort();
-            return Promise.resolve(successfulResponse());
+            if (!beforeCutoff) controller.abort();
+            if (receipt === 'SDK rejection after dispatch') return Promise.reject(new Error('SDK aborted'));
+            const response = responseWithText('{"value":"late"}', metadata ?? null);
+            const { usageMetadata, candidates } = response;
+            Object.defineProperty(response, 'candidates', { get: () => {
+                readContent();
+                return candidates;
+            } });
+            // The SDK has returned. Abort between reading its usage and processing its content.
+            Object.defineProperty(response, 'usageMetadata', { get: () => {
+                if (beforeCutoff) queueMicrotask(() => controller.abort());
+                return usageMetadata;
+            } });
+            return Promise.resolve(response);
         });
 
         await expect(analyzeWithGemini('prompt', undefined, {
             schema: responseSchema,
+            model: 'gemini-3.1-flash-lite',
             stage: 'featureAnalysis',
             requestId: stageRequestId,
             abortSignal: controller.signal,
             onBeforeAttempt: vi.fn().mockResolvedValue(undefined),
             onAttemptTelemetry,
+            onRejectedResponseTelemetry,
+            onTelemetry,
             budgetGuard,
         })).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
 
         expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(readContent).not.toHaveBeenCalled();
         expect(onAttemptTelemetry).not.toHaveBeenCalled();
+        expect(onRejectedResponseTelemetry).not.toHaveBeenCalled();
+        expect(onTelemetry).not.toHaveBeenCalled();
+        expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
         expect(budgetGuard.cancel).not.toHaveBeenCalled();
-        expect(budgetGuard.settle).toHaveBeenCalledWith(
+        expect(settle.mock.calls).toEqual(Array.from({ length: retrySettlement ? 2 : 1 }, () => [
             expect.objectContaining({ reservationId: 'reservation-aborted' }),
-            { actualCostUsd: null },
-        );
+            { actualCostUsd: expected },
+        ]));
+    });
+
+    it('closes a failed settlement write with the same observed SDK cost without aborting or redispatching', async () => {
+        const reservation = { reservationId: 'synthetic-reservation', estimatedCostUsd: 0.001 };
+        const guard = {
+            reserve: vi.fn().mockResolvedValue(reservation),
+            settle: vi.fn().mockRejectedValueOnce(new Error('First settlement write failed')).mockResolvedValue(undefined),
+            cancel: vi.fn(),
+        };
+        const audit = stageAuditOptions();
+        mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+
+        await expect(analyzeWithGemini('prompt', undefined, {
+            schema: responseSchema, model: 'gemini-3.1-flash-lite', stage: 'featureAnalysis',
+            budgetGuard: guard as unknown as VertexAiBudgetGuard, ...audit,
+        })).rejects.toThrow('First settlement write failed');
+
+        expect(guard.settle.mock.calls).toEqual([
+            [reservation, { actualCostUsd: 0.0000085 }],
+            [reservation, { actualCostUsd: 0.0000085 }],
+        ]);
+        expect(guard.reserve).toHaveBeenCalledOnce();
+        expect(guard.cancel).not.toHaveBeenCalled();
+        expect(mocks.generateContent).toHaveBeenCalledOnce();
+        expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
     });
 
     it('does not retry schema-invalid responses', async () => {

@@ -10,6 +10,7 @@ import { verifyAnalysisV2ResultImageProxyToken } from '@/lib/services/media/imag
 import { PREFLIGHT_PROVIDER_FINISH_STABILITY_MS, reconcileSettledPreflightProviderCosts } from '@/lib/services/analysis/preflight-provider-run';
 import { reconcileAnalysisV2ProviderUsage } from '@/lib/services/analysis/v2-provider-lifecycle';
 import { analysisV2RevenueCostProviderRunSettlement } from '@/lib/services/analysis/revenue-cost-provider-run-reconciliation';
+import { ANALYSIS_V2_AI_STAGES, type AnalysisV2AiStage } from '@/lib/services/analysis/v2-ai-attempt-store';
 import type { StandardConnection } from './standard-database';
 import { assertOwnerPage } from './standard-result-page';
 import { matchesSharedResultImage } from './standard-shared-image-source';
@@ -28,20 +29,29 @@ export async function settleSharedActorReceipts(db: Database) {
             UNION ALL SELECT terminalized_at FROM analysis_preflight_provider_runs
         ) AS provider_finishes
     `);
-    if (clock?.age_ms == null) throw new Error('Missing provider terminal timestamps');
+    if (clock?.age_ms == null) return ['actor_terminal_timestamps_missing'];
     const wait = Math.max(0, PREFLIGHT_PROVIDER_FINISH_STABILITY_MS - clock.age_ms + 25);
     if (wait > 0) await sleep(wait);
-    const preflight = await reconcileSettledPreflightProviderCosts();
-    expect(preflight.failed).toBe(0);
-    expect(preflight.hasMore).toBe(false); // This fixture admits at most 16 buyers with one preflight Actor each.
-    const reconcilePaid = () => reconcileAnalysisV2ProviderUsage({ revenueCostSettlement: analysisV2RevenueCostProviderRunSettlement });
-    let paid;
-    do {
-        paid = await reconcilePaid();
-        expect(paid.failed).toBe(0);
-    } while (paid.hasMore);
-    expect((await reconcilePaid()).eligible).toBe(0);
-    expect((await reconcileSettledPreflightProviderCosts()).eligible).toBe(0);
+    const issues: string[] = [];
+    try {
+        const preflight = await reconcileSettledPreflightProviderCosts();
+        if (preflight.failed) issues.push('actor_preflight_settlement_failed');
+        if (preflight.hasMore || (await reconcileSettledPreflightProviderCosts()).eligible) issues.push('actor_preflight_settlement_remaining');
+    } catch {
+        issues.push('actor_preflight_settlement_query_failed');
+    }
+    try {
+        const reconcilePaid = () => reconcileAnalysisV2ProviderUsage({ revenueCostSettlement: analysisV2RevenueCostProviderRunSettlement });
+        let paid;
+        do {
+            paid = await reconcilePaid();
+            if (paid.failed) issues.push('actor_paid_settlement_failed');
+        } while (!paid.failed && paid.hasMore);
+        if ((await reconcilePaid()).eligible) issues.push('actor_paid_settlement_remaining');
+    } catch {
+        issues.push('actor_paid_settlement_query_failed');
+    }
+    return issues;
 }
 
 async function verifyActorReceipts(db: Database, requestId: string, preflightId: string,
@@ -56,26 +66,30 @@ async function verifyActorReceipts(db: Database, requestId: string, preflightId:
             (status='succeeded' AND terminalized_at IS NOT NULL AND usage_reconciled_at IS NOT NULL)
         FROM analysis_preflight_provider_runs WHERE preflight_id=$2
     `, [requestId, preflightId]);
-    expect(new Set(rows.map(row => row.run_id)).size).toBe(rows.length);
+    const ledgerIssues: string[] = [];
+    if (new Set(rows.map(row => row.run_id)).size !== rows.length) ledgerIssues.push('actor_duplicate_run_id');
     function verify(phase: Receipt['phase'], starts: SyntheticActorStart[]) {
         const receipts = rows.filter(row => row.phase === phase);
-        expect(starts.length).toBeGreaterThan(0);
-        expect(receipts.length).toBe(starts.length);
         const byId = new Map(starts.map(start => [start.runId, start]));
-        expect(byId.size).toBe(starts.length);
-        expect(new Set(starts.map(start => start.actor + ':' + start.inputHash)).size).toBe(starts.length);
+        const duplicateStarts = starts.length - byId.size;
+        const duplicateInputs = starts.length - new Set(starts.map(start => start.actor + ':' + start.inputHash)).size;
+        let matched = 0, unreconciled = 0, wrongCost = 0;
         for (const row of receipts) {
             const start = row.run_id ? byId.get(row.run_id) : undefined;
-            if (!start || row.actor_id !== start.actor) throw new Error('Provider receipt has no matching scoped Actor start');
-            expect(row.reconciled).toBe(true);
-            expect(row.actual_usd).toBe(start.usageUsd);
-            expect(row.actual_usd).toBeGreaterThan(0);
+            if (!row.reconciled) unreconciled++;
+            if (!start || row.actor_id !== start.actor) continue;
+            matched++;
+            if (row.actual_usd !== start.usageUsd || !(row.actual_usd > 0)) wrongCost++;
             byId.delete(start.runId);
         }
-        expect(byId.size).toBe(0);
-        return { matched: receipts.length, simulatedMicros: Math.round(starts.reduce((total, run) => total + run.usageUsd, 0) * 1_000_000) };
+        const unmatchedReceipts = receipts.length - matched, missingReceipts = byId.size;
+        const defects = { no_starts: Number(starts.length === 0), duplicate_starts: duplicateStarts, duplicate_inputs: duplicateInputs,
+            missing_receipts: missingReceipts, unmatched_receipts: unmatchedReceipts, unreconciled, wrong_cost: wrongCost };
+        for (const [code, count] of Object.entries(defects)) if (count) ledgerIssues.push('actor_' + phase + '_' + code);
+        return { matched, starts: starts.length, receipts: receipts.length, duplicateStarts, duplicateInputs, missingReceipts,
+            unmatchedReceipts, unreconciled, wrongCost, simulatedMicros: Math.round(starts.reduce((total, run) => total + run.usageUsd, 0) * 1_000_000) };
     }
-    return { paid: verify('paid', paidStarts), preflight: verify('preflight', preflightStarts) };
+    return { paid: verify('paid', paidStarts), preflight: verify('preflight', preflightStarts), ledgerIssues };
 }
 
 export async function sharedStandardEffects(db: Database, requestId: string, orderId: string, ownerId: string) {
@@ -136,6 +150,68 @@ export async function sharedStandardEffects(db: Database, requestId: string, ord
                 WHERE h.actual_cost_usd IS DISTINCT FROM a.estimated_cost_usd) AS mismatched_settlement_costs
     `, [requestId, orderId, ownerId]);
     return rows[0]!;
+}
+
+export function sharedStandardLedgerIssues(e: Record<string, number>, modelCalls: number) {
+    // Preserve the strict accounting criteria even for an optional resolver cutoff.
+    // The caller records every owner's functional proof before failing the combined run.
+    const expected: Record<string, number> = {
+        ai_attempts: modelCalls, usage_rows: modelCalls, settlements: modelCalls, duplicate_attempts: 0,
+        open_reservations: 0, wrong_order: 0, unpriced: 0, unsettled_attempts: 0, unmatched_settlements: 0,
+        duplicate_settlements: 0, mismatched_settlement_costs: 0, open_provider_leases: 0, open_model_slots: 0,
+        unlinked_attempts: 0, usage_tokens: e.attempt_tokens, reservations: e.settlements + e.cancelled,
+    };
+    const issues = Object.keys(expected).filter(name => e[name] !== expected[name]);
+    if (!(modelCalls > 0)) issues.push('missing_model_calls');
+    if (e.successes + e.repaired_narrative_attempts !== modelCalls) issues.push('incomplete_model_outcomes');
+    if (!(e.attempt_tokens > 0)) issues.push('missing_attempt_tokens');
+    if (!(e.charged_micros > 0)) issues.push('missing_charged_cost');
+    return issues;
+}
+
+export async function sharedStandardLedgerStages(db: Database, requestId: string, orderId: string) {
+    // Aggregate holds before joining so a duplicate settlement cannot inflate the attempt count.
+    type Stage = { stage: AnalysisV2AiStage | 'unattributed' } & Record<
+        'attempts' | 'cutoffs' | 'unknown_cost_cutoffs' | 'priced_cutoffs_missing_attempt_cost' | 'cutoffs_missing_tokens'
+        | 'unsettled_attempts' | 'other_cost_mismatches' | 'unknown_settlements' | 'unknown_reserved_estimate_micros'
+        | 'known_settled_micros' | 'wrong_order' | 'open_reservations' | 'duplicate_settlements' | 'unmatched_settlements'
+        | 'unreleased_leases' | 'expired_leases', number>;
+    const { rows } = await db.query<Stage>(`
+        WITH attempts AS (SELECT * FROM analysis_v2_ai_attempts WHERE request_id=$1),
+        charges AS (
+            SELECT operation_key,attempt,count(*)::int AS holds,
+                count(*) FILTER (WHERE order_id IS DISTINCT FROM $2::uuid::text)::int AS wrong_order,
+                count(*) FILTER (WHERE state='reserved')::int AS open_reservations,
+                count(*) FILTER (WHERE state='settled')::int AS settlements,
+                count(*) FILTER (WHERE state='settled' AND usage_unknown AND actual_cost_usd IS NULL)::int AS settled_unknown,
+                sum(actual_cost_usd) FILTER (WHERE state='settled') AS actual_cost,
+                sum(estimated_cost_usd) FILTER (WHERE state='settled' AND usage_unknown AND actual_cost_usd IS NULL) AS unknown_reserved_estimate
+            FROM vertex_ai_budget_reservations WHERE run_id=$1::uuid::text GROUP BY operation_key,attempt
+        ), leases AS (
+            SELECT job_key,job_claim_token,operation_key,count(*) FILTER (WHERE state<>'released')::int AS unreleased,
+                count(*) FILTER (WHERE state='leased' AND expires_at <= statement_timestamp())::int AS expired
+            FROM analysis_provider_admission_leases WHERE request_id=$1 AND workload_role='paid' AND logical_provider='gemini'
+            GROUP BY job_key,job_claim_token,operation_key
+        )
+        SELECT CASE WHEN a.stage=ANY($3::text[]) THEN a.stage ELSE 'unattributed' END AS stage,
+            count(a.operation_key)::int AS attempts, count(*) FILTER (WHERE a.status='cutoff')::int AS cutoffs,
+            count(*) FILTER (WHERE a.status='cutoff' AND c.settled_unknown>0)::int AS unknown_cost_cutoffs,
+            count(*) FILTER (WHERE a.status='cutoff' AND c.actual_cost>0 AND a.estimated_cost_usd IS NULL)::int AS priced_cutoffs_missing_attempt_cost,
+            count(*) FILTER (WHERE a.status='cutoff' AND a.total_tokens IS NULL)::int AS cutoffs_missing_tokens,
+            count(*) FILTER (WHERE a.operation_key IS NOT NULL AND coalesce(c.settlements,0)=0)::int AS unsettled_attempts,
+            count(*) FILTER (WHERE a.status<>'cutoff' AND c.settlements=1 AND c.actual_cost IS DISTINCT FROM a.estimated_cost_usd)::int AS other_cost_mismatches,
+            coalesce(sum(c.settled_unknown),0)::int AS unknown_settlements,
+            coalesce(round(sum(c.unknown_reserved_estimate)*1000000),0)::int AS unknown_reserved_estimate_micros,
+            coalesce(round(sum(c.actual_cost)*1000000),0)::int AS known_settled_micros,
+            coalesce(sum(c.wrong_order),0)::int AS wrong_order, coalesce(sum(c.open_reservations),0)::int AS open_reservations,
+            coalesce(sum(greatest(c.settlements-1,0)),0)::int AS duplicate_settlements,
+            coalesce(sum(c.settlements) FILTER (WHERE a.operation_key IS NULL),0)::int AS unmatched_settlements,
+            coalesce(sum(l.unreleased),0)::int AS unreleased_leases,coalesce(sum(l.expired),0)::int AS expired_leases
+        FROM attempts a FULL JOIN charges c USING (operation_key,attempt)
+        LEFT JOIN leases l ON l.job_key=a.job_key AND l.job_claim_token=a.job_claim_token
+            AND l.operation_key='gemini:'||a.operation_key||':attempt:'||a.attempt::text
+        GROUP BY 1 ORDER BY 1`, [requestId, orderId, [...ANALYSIS_V2_AI_STAGES]]);
+    return rows;
 }
 
 interface SharedVerification {
@@ -249,27 +325,16 @@ async function verifyOwner(input: SharedVerification, scorePolicy: string) {
 export async function verifySharedStandardRequest(input: SharedVerification) {
     const { db, requestId, orderId, ownerId, preflightId, asUser, modelCalls } = input;
     expect(input.otherOwnerId !== ownerId).toBe(true);
-    const actorReceipts = await verifyActorReceipts(db, requestId, preflightId, input.paidActorStarts, input.preflightActorStarts);
     const effects = await sharedStandardEffects(db, requestId, orderId, ownerId);
-    expect(modelCalls).toBeGreaterThan(0);
     expect(effects).toMatchObject({
         requests: 1, orders: 1, fulfillments: 1, test_entitlements: 0,
         summaries: 1, publications: 1, manifests: 1, images: 1 + input.expectedPublic + input.expectedPrivate,
-        ai_attempts: modelCalls, usage_rows: modelCalls, duplicate_attempts: 0,
-        settlements: modelCalls, open_reservations: 0, wrong_order: 0, unpriced: 0, unsettled_attempts: 0,
-        unmatched_settlements: 0, duplicate_settlements: 0, mismatched_settlement_costs: 0,
-        open_provider_leases: 0, open_model_slots: 0, unlinked_attempts: 0,
     });
     expect(input.paymentMode === 'webhook' ? effects.webhook_payments : effects.mirrored_payments).toBe(1);
     if (input.paymentMode === 'fixture') expect(effects.webhook_payments).toBe(0);
-    expect(effects.successes + effects.repaired_narrative_attempts).toBe(modelCalls);
     expect(effects.published_narratives).toBeGreaterThanOrEqual(effects.repaired_narrative_attempts);
     expect(effects.completed_jobs).toBeGreaterThan(0);
     expect(effects.jobs).toBe(effects.completed_jobs);
-    expect(effects.attempt_tokens).toBeGreaterThan(0);
-    expect(effects.usage_tokens).toBe(effects.attempt_tokens);
-    expect(effects.charged_micros).toBeGreaterThan(0);
-    expect(effects.reservations).toBe(effects.settlements + effects.cancelled);
     const { rows } = await db.query<{
         published: boolean; complete: boolean; consumed: boolean; paid: boolean; fulfilled: boolean;
         receipt: boolean; ai_policy: string; score_policy: string;
@@ -304,8 +369,11 @@ export async function verifySharedStandardRequest(input: SharedVerification) {
         });
     }
     expect(await sharedStandardEffects(db, requestId, orderId, ownerId)).toEqual(effects);
+    const actorReceipts = await verifyActorReceipts(db, requestId, preflightId, input.paidActorStarts, input.preflightActorStarts);
+    const ledgerByStage = await sharedStandardLedgerStages(db, requestId, orderId);
+    const ledgerIssues = [...sharedStandardLedgerIssues(effects, modelCalls), ...actorReceipts.ledgerIssues];
     return {
-        ...effects, actorReceipts, pages: owner.pages, publicRows: owner.publicRows, privateRows: owner.privateRows,
+        ...effects, modelCalls, actorReceipts, ledgerIssues, ledgerByStage, pages: owner.pages, publicRows: owner.publicRows, privateRows: owner.privateRows,
         ownerWebp: owner.urls.length, originalImagesMatched: owner.urls.length, otherImageDenied: owner.urls.length, anonymousImageDenied: owner.urls.length,
         payments: 1, paymentMode: input.paymentMode, ownerResult: 200, otherResult: 404, anonymousResult: 401, pipelineVersion: 'v2',
         resultSchemaVersion: ANALYSIS_V2_SCHEMA_VERSION, policy: rows[0]!.ai_policy, scorePolicy: rows[0]!.score_policy

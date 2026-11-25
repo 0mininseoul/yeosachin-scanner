@@ -6,11 +6,12 @@ import { createGeminiGenerationLimiter } from '@/lib/services/ai/gemini-generati
 import { ProcessWideAnalysisV2SchedulerArbiter, type AnalysisV2SchedulerRuntimeOptions } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import { ApifyActorSemaphore } from '@/lib/services/instagram/providers/apify-actor-semaphore';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
-import { earlybirdFulfillmentStore } from '@/lib/services/earlybird/fulfillment-store';
+import { startSharedStandardMaintenance } from './fixtures/standard-shared-maintenance';
 import { POST as paidWorker } from '@/app/api/analysis/v2/worker/route';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION, ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER } from '@/lib/services/analysis/v2-worker-task-contract';
 import { databaseCounters, sharedStandardFailureSummary, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
 import { createSharedStandardDatabase } from './fixtures/standard-shared-database';
+import { sharedStandardCapacity } from './fixtures/standard-shared-capacities.mjs';
 import { configureSharedStandard } from './fixtures/standard-shared-environment';
 import { StandardSharedQueue } from './fixtures/standard-shared-queue';
 import { createFixtureObjects, createFixtureR2 } from './fixtures/standard-media';
@@ -91,7 +92,8 @@ vi.mock('@google/genai/node', async original => ({
             const transport = options.fetch;
             this.models = {
                 generateContent: async (input: unknown) => {
-                    await transport('https://vertex.fixture.invalid');
+                    const signal = (input as { config?: { abortSignal?: AbortSignal } }).config?.abortSignal;
+            await transport('https://vertex.fixture.invalid', { signal });
                     return boundary.model(input);
                 }
             };
@@ -161,10 +163,9 @@ it('publishes simultaneous paid Standard requests through one database and queue
     const publicCount = Number(process.env.SHARED_STANDARD_PUBLIC ?? 1);
     const observedTiming = process.env.SHARED_STANDARD_TIMING === 'observed';
     const ownersCount = Number(process.env.SHARED_STANDARD_OWNERS ?? 16);
-    const workers = Number(process.env.SHARED_STANDARD_WORKERS ?? 8);
+    const { slots, workers } = sharedStandardCapacity(process.env.STANDARD_SHARED_VERTEX_SLOTS ?? '8');
     expect([2, 16]).toContain(ownersCount);
-    expect([8, 16, 20]).toContain(workers);
-    const slots = workers === 8 ? 8 : workers === 16 ? 48 : 56;
+    if (process.env.SHARED_STANDARD_WORKERS !== undefined) expect(Number(process.env.SHARED_STANDARD_WORKERS)).toBe(workers);
     const recovery = process.env.SHARED_STANDARD_SCENARIO === 'recovery';
     const db = await createSharedStandardDatabase(slots);
     try {
@@ -186,7 +187,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 && name === 'load_analysis_v2_profile_fetch_for_consumer'
                 && args.p_consumer_job_key === 'track:profile-ai:batch:0') resumedTimedOutRead = true;
             if (reply.error) {
-                const key = [name, reply.error.code, safeCode(new Error(reply.error.message))].join('.');
+                const key = [name, reply.error.code, reply.error.constraint ?? safeCode(new Error(reply.error.message))].join('.');
                 errors[key] = (errors[key] ?? 0) + 1;
             }
             return reply;
@@ -248,7 +249,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     expect(duplicate.status).toBe(409);
                     expect((await duplicate.json()).code).toBe('JOB_LEASE_BUSY');
                 }
-                await sleep(delay * (recovery ? 1.25 : 1));
+                await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
                 return syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4);
             } finally {
                 activeModels--;
@@ -256,6 +257,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
         });
         const ioBefore = await databaseCounters(db);
         const firstAt = performance.now();
+        let lateOwners = 0;
+        let ownersWithLedgerIssues = 0;
+        let sharedLedgerIssues: string[] = [];
+        let maintenance: ReturnType<typeof startSharedStandardMaintenance> | undefined;
         try {
             const runs = await completeWave(owners.map(owner => startSharedStandardPreflight(owner, asOwner)));
             expect(new Set(runs.map(run => run.preflightId)).size).toBe(ownersCount);
@@ -284,6 +289,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
             let continuations = 0;
             let queueRetries = 0;
             const retryCodes: Record<string, number> = {};
+            maintenance = startSharedStandardMaintenance();
             const deliveries = await queue.drain(() => true, workers, async (payload, worker) => {
                 const task = parseAnalysisV2TaskPayload(payload);
                 if (!paidRequests.has(task.requestId)) throw new Error('SHARED_UNEXPECTED_OWNER');
@@ -314,14 +320,16 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     if (task.jobKey === 'track:profile-ai:batch:0') sample.set(task.requestId, payload);
                 });
             });
+            await maintenance.stop();
             expect(queue.size).toBe(0);
             expect(sample.size).toBe(ownersCount);
             expect(duplicatedDuringModel.size).toBe(ownersCount);
             const startsBeforeReplay = provider.starts.length;
             const modelsBeforeReplay = boundary.model.mock.calls.length;
             const finishedMs = Math.round(performance.now() - paidStart);
-            await earlybirdFulfillmentStore.reconcile(100);
-            await settleSharedActorReceipts(db);
+            await maintenance.sweep();
+            sharedLedgerIssues = await settleSharedActorReceipts(db);
+            if (maintenance.passes.some(pass => pass.failed > 0)) sharedLedgerIssues.push('provider_recovery_failed');
             const proofs = [];
             for (const [i, run] of admitted.entries()) {
                 const before = await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id);
@@ -336,12 +344,15 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     asUser: (id, fn) => asOwner(id ? owners.find(o => o.id === id) ?? null : null, fn),
                 }));
             }
+            ownersWithLedgerIssues = proofs.filter(proof => proof.ledgerIssues.length > 0).length;
             expect(provider.starts.length).toBe(startsBeforeReplay);
-            expect(proofs.reduce((n, p) => n + p.actorReceipts.paid.matched + p.actorReceipts.preflight.matched, 0)).toBe(provider.starts.length);
+            const matchedActorStarts = proofs.reduce((n, proof) => n + proof.actorReceipts.paid.matched + proof.actorReceipts.preflight.matched, 0);
+            if (matchedActorStarts !== provider.starts.length) sharedLedgerIssues.push('actor_start_count_mismatch');
             expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
             const measurements = await sharedStandardMeasurements(db, admitted.map(run => run.requestId));
             expect(measurements.times).toHaveLength(ownersCount);
-            expect(measurements.times.every(t => t.admissionMs >= 0 && t.paymentMs >= t.admissionMs && t.ownerReadyMs >= t.paymentMs && t.ownerReadyMs <= 3_600_000)).toBe(true);
+            expect(measurements.times.every(t => t.admissionMs >= 0 && t.paymentMs >= t.admissionMs && t.ownerReadyMs >= t.paymentMs)).toBe(true);
+            lateOwners = measurements.times.filter(t => !t.withinHour).length;
             expect(injectedTimeouts).toBe(recovery ? 1 : 0);
             expect(resumedTimedOutRead).toBe(recovery);
             expect(injectedWorker429s).toBe(recovery ? 1 : 0);
@@ -358,7 +369,8 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 tempBytes: ioAfter.tempBytes - ioBefore.tempBytes, deadlocks: ioAfter.deadlocks - ioBefore.deadlocks
             };
             const report = {
-                status: 'verified', retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
+                status: ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners ? 'completed_over_target' : 'verified',
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
                 peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
@@ -366,10 +378,12 @@ it('publishes simultaneous paid Standard requests through one database and queue
             marker('shared-standard-complete', report);
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(report, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
         } catch (error) {
+            // Preserve the original failure and the state left by any in-flight maintenance.
+            await maintenance?.stop().catch(() => undefined);
             const reason = error instanceof Error && /^SHARED_WORKER_[a-z0-9:.-]+:[A-Z_0-9]+$/.test(error.message)
                 ? error.message : safeCode(error);
             const failure = {
-                status: 'failed', retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots,
+                status: 'failed', maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots,
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
                 errors, ...await sharedStandardFailureSummary(db)
             };
@@ -377,6 +391,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
             throw error;
         }
+        // Keep all owner and cost proofs even when the measured deadline was missed.
+        expect(sharedLedgerIssues, 'SHARED_ACCOUNTING_UNRESOLVED').toEqual([]);
+        expect(ownersWithLedgerIssues, 'SHARED_ACCOUNTING_UNRESOLVED').toBe(0);
+        expect(lateOwners, 'SHARED_OWNER_HOUR_EXCEEDED').toBe(0);
     } finally {
         await db.close();
         vi.unstubAllEnvs();

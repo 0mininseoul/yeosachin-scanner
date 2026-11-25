@@ -1030,6 +1030,8 @@ export async function analyzeWithGemini<T>(
     ) {
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
+        let responseReceivedBeforeAbort = false;
+        let receivedCostUsd: number | null = null;
         let budgetSettled = false;
         let devUnusedSettlementFailed = false;
         let devRateLimitSettlementError: Error | null = null;
@@ -1184,7 +1186,8 @@ export async function analyzeWithGemini<T>(
                         const generated = intent || window.needsAuthorization
                             ? await window.run(() => client.models.generateContent(generationRequest))
                             : await client.models.generateContent(generationRequest);
-                        if (devLiveBudget && devReservation) {
+                        responseReceivedBeforeAbort = !abortSignal?.aborted;
+                        if (responseReceivedBeforeAbort && devLiveBudget && devReservation) {
                             const { tokenUsage, status } = extractStrictUsageMetadata(generated.usageMetadata);
                             if (status === 'complete' && tokenUsage) {
                                 const cost = estimateGeminiRequestCost(tokenUsage, modelName, GOOGLE_CLOUD_LOCATION);
@@ -1310,6 +1313,11 @@ export async function analyzeWithGemini<T>(
                 throw devRateLimitSettlementError ?? sanitizeGenerationError(generationError);
             }
 
+            // Receipt of this SDK response fences its usage to the current attempt.
+            // A response first observed after cutoff retains the unknown charge.
+            if (!responseReceivedBeforeAbort) {
+                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
             const usage = extractStrictUsageMetadata(response.usageMetadata);
             const costEstimate = usage.tokenUsage
                 ? estimateGeminiRequestCost(
@@ -1318,6 +1326,16 @@ export async function analyzeWithGemini<T>(
                     GOOGLE_CLOUD_LOCATION
                 )
                 : null;
+            receivedCostUsd = costEstimate?.totalCostUsd ?? null;
+            if (budgetReservation && !budgetSettled) {
+                await resolvedBudgetGuard?.settle(budgetReservation, {
+                    actualCostUsd: receivedCostUsd,
+                });
+                budgetSettled = true;
+            }
+            if (abortSignal?.aborted) {
+                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            }
             const finishReason = readSingleCandidateFinishReason(response);
             let parsed: T | undefined;
             let completionError: Error | null = null;
@@ -1361,12 +1379,6 @@ export async function analyzeWithGemini<T>(
             // V2 persists the validated result and attempt outcome before any best-effort legacy log.
             if (abortSignal?.aborted) {
                 throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
-            }
-            if (budgetReservation && !budgetSettled) {
-                await resolvedBudgetGuard?.settle(budgetReservation, {
-                    actualCostUsd: costEstimate?.totalCostUsd ?? null,
-                });
-                budgetSettled = true;
             }
             const rejectedResponse = completionError;
             const terminalHook = rejectedResponse && onRejectedResponseTelemetry
@@ -1422,13 +1434,12 @@ export async function analyzeWithGemini<T>(
 
             return parsed as T;
         } catch (error) {
-            // An abort can arrive after the provider returned but before result/telemetry
-            // persistence. Close the reservation on every exit path: a reached provider is
-            // conservatively settled as unknown, while a pre-dispatch failure is released.
+            // Retry an unconfirmed settlement with the same receipt, even without
+            // a cutoff. An unknown charge keeps its conservative reservation.
             if (budgetReservation && !budgetSettled) {
                 if (providerDispatchStarted) {
                     await resolvedBudgetGuard?.settle(budgetReservation, {
-                        actualCostUsd: null,
+                        actualCostUsd: receivedCostUsd,
                     });
                 } else {
                     await resolvedBudgetGuard?.cancel(budgetReservation);

@@ -2,11 +2,13 @@ import type { StandardConnection } from './standard-database';
 
 export async function sharedStandardMeasurements(db: StandardConnection, requestIds: string[]) {
     // Ordinals keep per-owner latencies auditable without exporting identifiers.
-    const times = await db.query<{ owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number }>(`
+    const times = await db.query<{ owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number; publishedWithinHour: boolean; withinHour: boolean }>(`
         SELECT n::int AS owner,
             round(1000 * extract(epoch FROM (e.occurred_at - r.created_at)))::int AS "admissionMs",
             round(1000 * extract(epoch FROM (e.occurred_at - o.paid_at)))::int AS "paymentMs",
-            round(1000 * extract(epoch FROM (greatest(e.occurred_at, f.completed_at) - o.paid_at)))::int AS "ownerReadyMs"
+            round(1000 * extract(epoch FROM (greatest(e.occurred_at, f.completed_at) - o.paid_at)))::int AS "ownerReadyMs",
+            e.occurred_at <= o.paid_at + interval '1 hour' AS "publishedWithinHour",
+            greatest(e.occurred_at, f.completed_at) <= o.paid_at + interval '1 hour' AS "withinHour"
         FROM unnest($1::uuid[]) WITH ORDINALITY owner(id,n)
         JOIN analysis_requests r USING (id)
         JOIN earlybird_orders o ON o.result_request_id = r.id
@@ -68,6 +70,19 @@ export async function sharedStandardFailureSummary(db: StandardConnection) {
             max(last_error_code) AS "lastCode", round(max(extract(epoch FROM clock_timestamp()-created_at)))::int AS "oldestSeconds"
         FROM analysis_pipeline_jobs WHERE status <> 'completed' GROUP BY stage,status ORDER BY stage,status
     `);
+    const timing = await db.query(`
+        SELECT count(*)::int AS paid,
+            count(*) FILTER (WHERE e.occurred_at IS NOT NULL)::int AS published,
+            count(*) FILTER (WHERE f.completed_at IS NOT NULL AND e.occurred_at IS NOT NULL
+                AND greatest(f.completed_at,e.occurred_at)<=o.paid_at+interval '1 hour')::int AS "readyWithinHour",
+            count(*) FILTER (WHERE f.completed_at IS NOT NULL AND e.occurred_at IS NOT NULL
+                AND greatest(f.completed_at,e.occurred_at)>o.paid_at+interval '1 hour')::int AS "readyOverHour",
+            count(*) FILTER (WHERE (f.completed_at IS NULL OR e.occurred_at IS NULL)
+                AND clock_timestamp()>o.paid_at+interval '1 hour')::int AS "unfinishedOverHour"
+        FROM earlybird_orders o LEFT JOIN earlybird_fulfillments f ON f.order_id=o.id
+        LEFT JOIN analysis_progress_events e ON e.request_id=o.result_request_id AND e.event_code='ANALYSIS_COMPLETED'
+        WHERE o.paid_at IS NOT NULL
+    `);
     const leases = await db.query(`
         SELECT workload_role,logical_provider,state,count(*)::int AS n FROM analysis_provider_admission_leases
         GROUP BY workload_role,logical_provider,state ORDER BY workload_role,logical_provider,state
@@ -79,7 +94,8 @@ export async function sharedStandardFailureSummary(db: StandardConnection) {
         FROM analysis_v2_ai_attempts GROUP BY stage,status ORDER BY stage,status
     `);
     const holds = await db.query(`
-        SELECT state,count(*)::int AS n,coalesce(round(sum(actual_cost_usd)*1000000),0)::bigint::text AS "settledMicros"
+        SELECT state,count(*)::int AS n,coalesce(round(sum(estimated_cost_usd)*1000000),0)::bigint::text AS "estimatedMicros",
+            coalesce(round(sum(actual_cost_usd)*1000000),0)::bigint::text AS "settledMicros"
         FROM vertex_ai_budget_reservations GROUP BY state ORDER BY state
     `);
     const actors = await db.query(`
@@ -90,7 +106,7 @@ export async function sharedStandardFailureSummary(db: StandardConnection) {
         GROUP BY phase,status ORDER BY phase,status
     `);
     return {
-        requests: requests.rows, unfinished: jobs.rows, leases: leases.rows,
+        paymentTimingAtStop: timing.rows[0], requests: requests.rows, unfinished: jobs.rows, leases: leases.rows,
         attempts: attempts.rows, holds: holds.rows, actors: actors.rows
     };
 }

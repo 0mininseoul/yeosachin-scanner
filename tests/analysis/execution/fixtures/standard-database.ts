@@ -181,8 +181,10 @@ export function localDatabaseClient(db: StandardDatabase, subject?: string | nul
             );
             return { data: value, error: null };
         } catch (cause) {
-            const error = cause as { code: string; message: string };
-            return { data: null, error: { code: error.code, message: error.message } };
+            const error = cause as { code: string; message: string; constraint?: string };
+            const constraint = error.code === '23514' && /^[a-z][a-z0-9_]{0,62}$/.test(error.constraint ?? '')
+                ? error.constraint : undefined;
+            return { data: null, error: { code: error.code, message: error.message, constraint } };
         }
     }
     function from(table: string) {

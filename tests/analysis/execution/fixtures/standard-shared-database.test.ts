@@ -15,6 +15,7 @@ import { getAiStagePolicy } from '@/lib/services/ai/stage-policy';
 import { createAnalysisV2GeminiLeaseStore } from '@/lib/services/analysis/v2-gemini-lease-store';
 import { createAnalysisProviderAdmissionStore } from '@/lib/services/analysis/provider-admission-store';
 import { createSharedStandardDatabase } from './standard-shared-database';
+import { sharedStandardCapacities, sharedStandardCapacity } from './standard-shared-capacities.mjs';
 
 it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
     'shares the installed Dev schema and eight slots across sixteen isolated PostgreSQL sessions', async () => {
@@ -59,7 +60,7 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
 
 function leaseHarness(
     db: Awaited<ReturnType<typeof createSharedStandardDatabase>>,
-    slots: 8 | 48 | 56,
+    slots: ReturnType<typeof sharedStandardCapacity>['slots'],
     job: Awaited<ReturnType<typeof seedProcessingJob>>,
 ) {
     const { rpc } = db.client();
@@ -88,7 +89,7 @@ function leaseHarness(
     return { rpc, providerAdmissionStore, store, identities, acquire };
 }
 
-it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each([48, 56] as const)(
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities.filter(c => c.slots !== 8).map(c => c.slots))(
     'runs high-numbered slot admission, stage limits, dispatch fencing and quarantine recovery with %i physical slots', async slots => {
         const db = await createSharedStandardDatabase(slots);
         try {
@@ -100,7 +101,7 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each([48, 56] as
                 for (let i = 0; i < count; i++) leases.push(await acquire(stage));
                 return leases;
             };
-            const feature = await acquireStage('featureAnalysis', slots === 48 ? 32 : 40);
+            const feature = await acquireStage('featureAnalysis', sharedStandardCapacity(slots).features);
             await expect(acquire('featureAnalysis')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
             const triage = await acquireStage('genderTriage', 12);
             await expect(acquire('genderTriage')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
@@ -214,7 +215,7 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each([48, 56] as
     }, 60_000,
 );
 
-it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each([8, 48, 56] as const)(
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities.map(c => c.slots))(
     'compares the sixteenth serial acquire with a fresh and spent minute on %i slots', async slots => {
         const db = await createSharedStandardDatabase(slots);
         try {

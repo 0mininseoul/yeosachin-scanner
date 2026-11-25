@@ -13,6 +13,7 @@ export default defineConfig({
     test: {
         include: ['tests/analysis/execution/standard-shared-capacity.integration.ts'],
         pool: 'threads', maxWorkers: 1, fileParallelism: false, cache: false,
-        testTimeout: 3_900_000,
+        // Let slow runs finish and emit per-owner evidence before asserting the one-hour target.
+        testTimeout: 4 * 60 * 60 * 1000,
     },
 });

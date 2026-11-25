@@ -4,7 +4,7 @@ BEGIN;
 DO $capacity$
 DECLARE
     slots int := current_setting('standard_shared.vertex_slots')::int;
-    feature_cap int;
+    feature_cap int := current_setting('standard_shared.feature_slots')::int;
     credential_pattern text;
     allocator regprocedure := 'public.acquire_analysis_v2_gemini_lease_v2(uuid,text,text,text,integer,uuid,integer)'::regprocedure;
     existing_rank_end constant text := $original$          AND admission.state IN ('leased', 'recovery_required')
@@ -27,7 +27,8 @@ DECLARE
     installed text;
     revised text;
 BEGIN
-    IF slots NOT IN (48,56) OR current_setting('listen_addresses') <> '' OR inet_server_addr() IS NOT NULL
+    IF slots NOT IN (48,56,64) OR feature_cap <> slots-16
+        OR current_setting('listen_addresses') <> '' OR inet_server_addr() IS NOT NULL
         OR to_regclass('dev_live_budget.standard_owner_policy') IS NULL
         OR EXISTS (SELECT FROM public.analysis_requests)
         OR EXISTS (SELECT FROM public.analysis_provider_admission_leases)
@@ -35,9 +36,9 @@ BEGIN
         OR (SELECT count(*) FROM public.analysis_v2_gemini_leases) <> 8 THEN
         RAISE EXCEPTION 'Expected a newly initialized local Standard fixture';
     END IF;
-    feature_cap := CASE slots WHEN 48 THEN 32 ELSE 40 END;
     credential_pattern := CASE slots WHEN 48 THEN '([1-9]|[1-3][0-9]|4[0-8])'
-        ELSE '([1-9]|[1-4][0-9]|5[0-6])' END;
+        WHEN 56 THEN '([1-9]|[1-4][0-9]|5[0-6])'
+        WHEN 64 THEN '([1-9]|[1-5][0-9]|6[0-4])' END;
 
     FOR patch IN SELECT * FROM (VALUES
         ('acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)',
