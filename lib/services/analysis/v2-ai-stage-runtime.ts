@@ -50,6 +50,7 @@ import {
     type PartnerSafetyResult,
 } from '@/lib/services/ai/v2-staged-analysis';
 import { planGenderTriageMicrobatches } from '@/lib/services/ai/gender-triage-microbatch-plan';
+import type { DevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
 import type { ProfileReadySnapshot } from './v2-profile-media-inputs';
 import { planProfileGender, type PinProfileGenderPlan, type ProfileGenderGroup } from './v2-profile-gender-plan';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
@@ -80,6 +81,7 @@ export interface AnalysisV2AiJobFence {
     jobInputHash?: string;
     /** Immutable ready envelopes from this delivery's fenced Dev profile input read. */
     profileReadySnapshot?: ProfileReadySnapshot;
+    profileDelivery?: DevStandardProfileDelivery;
     requestId: string;
     jobKey: string;
     claimToken: string;
@@ -372,6 +374,7 @@ function createSchedulerMicrobatch(
                 requestId: group.fence.requestId,
                 jobKey: group.fence.jobKey,
                 jobClaimToken: group.fence.claimToken,
+                onClaimRpc: group.fence.profileDelivery?.claimRpc,
                 schemas,
             });
             const tasks: AnalysisV2SchedulerTask<unknown>[] = uniquePlans.map((
@@ -443,6 +446,7 @@ function createSchedulerMicrobatch(
             if (ready?.stage === plan.stage) {
                 const parsed = plan.schema.safeParse(ready.result);
                 if (!parsed.success) throw new Error('ANALYSIS_V2_SCHEDULER_OPERATION_PERSISTENCE_ERROR: invalid ready result.');
+                if (fence.profileDelivery) fence.profileDelivery.readyHits++;
                 return Promise.resolve(parsed.data);
             }
         }
