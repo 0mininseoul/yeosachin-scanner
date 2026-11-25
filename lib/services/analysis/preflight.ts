@@ -2311,8 +2311,10 @@ export async function processPreflight(
                 || claim.analysisEntryChannel !== 'standard' || !claim.targetInputHash) {
                 return archive.fail();
             }
-            const bliteCohort = selectsBliteCohort();
-            if (await archive.load('preflight-blite-policy-v1', [claim.targetInstagramId]) !== bliteCohort) {
+            const bliteCohort = await archive.load('preflight-blite-policy-v1', [claim.targetInstagramId]);
+            // A captured ordinary preflight can come from the immutable preview
+            // deadline fallback even while the current live rollout selects B-lite.
+            if (typeof bliteCohort !== 'boolean' || (bliteCohort && !selectsBliteCohort())) {
                 return archive.fail();
             }
             let bliteOutcome: ArchivedBliteOutcome | undefined;

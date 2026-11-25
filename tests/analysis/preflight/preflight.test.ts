@@ -2522,7 +2522,7 @@ describe('preflight worker domain', () => {
         expect(store.finalizeBlocked).toHaveBeenCalledOnce();
     });
 
-    it('replays a claimed Standard profile using the current catalog and no provider or credit hooks', async () => {
+    it.each(['0', '100'])('replays a saved ordinary Standard preflight with live B-lite rollout %s', async rollout => {
         const claimed = claim({ analysisEntryChannel: 'standard' });
         const store = workerStore(claimed);
         const runs = providerRunStore();
@@ -2547,7 +2547,7 @@ describe('preflight worker domain', () => {
             refreshFreePoolCredits, settleBetaCredit, env: {
                 DEV_LIVE_WORKLOAD: 'preflight', K_SERVICE: 'dev-live-preflight',
                 PREFLIGHT_PROFILE_PROVIDER: 'apify_pool', PRECHECKOUT_BLITE_ENABLED: 'true',
-                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+                PRECHECKOUT_BLITE_ROLLOUT_PERCENT: rollout,
             },
         })).resolves.toBe('ready');
 
@@ -2638,7 +2638,7 @@ describe('preflight worker domain', () => {
         }
     });
 
-    it.each(['missing', 'other target', 'B-lite policy mismatch', 'invalid B-lite outcome', 'raw media'] as const)(
+    it.each(['missing', 'other target', 'B-lite policy mismatch', 'invalid B-lite policy', 'invalid B-lite outcome', 'raw media'] as const)(
         'blocks %s for archived readiness without opening a provider path', async caseName => {
             const claimed = claim({ analysisEntryChannel: 'standard' });
             const store = workerStore(claimed);
@@ -2647,7 +2647,10 @@ describe('preflight worker domain', () => {
             const activateBliteCohort = vi.fn();
             const settleBetaCredit = vi.fn();
             const load = vi.fn(async (kind: string) => {
-                if (kind === 'preflight-blite-policy-v1') return caseName === 'invalid B-lite outcome';
+                if (kind === 'preflight-blite-policy-v1') {
+                    if (caseName === 'invalid B-lite policy') return 'false';
+                    return caseName === 'B-lite policy mismatch' || caseName === 'invalid B-lite outcome';
+                }
                 if (kind === 'preflight-blite-outcome-v1') return { state: 'pending' };
                 if (caseName === 'missing') throw new Error('DEV_STANDARD_ARCHIVE_UNAVAILABLE');
                 return {
@@ -2669,13 +2672,13 @@ describe('preflight worker domain', () => {
                 env: {
                     DEV_LIVE_WORKLOAD: 'preflight', K_SERVICE: 'dev-live-preflight',
                     PRECHECKOUT_BLITE_ENABLED: 'true',
-                    PRECHECKOUT_BLITE_ROLLOUT_PERCENT: caseName.includes('B-lite') ? '100' : '0',
+                    PRECHECKOUT_BLITE_ROLLOUT_PERCENT: caseName === 'invalid B-lite outcome' ? '100' : '0',
                 },
             })).resolves.toBe('blocked');
 
             expect(store.finalizeReady).not.toHaveBeenCalled();
             expect(store.finalizeBlocked).toHaveBeenCalledExactlyOnceWith(claimed, 'ANALYSIS_FAILED');
-            if (caseName === 'B-lite policy mismatch') {
+            if (caseName === 'B-lite policy mismatch' || caseName === 'invalid B-lite policy') {
                 expect(load).toHaveBeenCalledExactlyOnceWith('preflight-blite-policy-v1', ['target.name']);
             }
             for (const hook of [getFallbackProfile, activateBliteCohort, settleBetaCredit, runs.load, runs.reserve, runs.reserveFree]) {
