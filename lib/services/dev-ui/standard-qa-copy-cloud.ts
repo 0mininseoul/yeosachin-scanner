@@ -12,7 +12,7 @@ import {
     createDevStandardQaCopyStore, devStandardQaCopyObjectPrefix,
 } from '@/lib/services/dev-ui/standard-archive-store';
 import {
-    activeStandardQaCopyPolicy, standardQaCopyPolicyWindow, withVerifiedStandardQaCopy,
+    activeStandardQaCopyPolicy, standardQaCopyAuditWindow, withVerifiedStandardQaCopy,
 } from '@/lib/services/dev-ui/standard-qa-copy';
 
 function required(name: string): string {
@@ -24,7 +24,29 @@ function hash(value: Buffer | string): string {
     return createHash('sha256').update(value).digest('hex');
 }
 
-function configuration(mode: 'export' | 'read' | 'audit' | 'iam') {
+function copyObjectNames(bucketName: string, approval: string) {
+    const slot = hash('dev-standard-copy-slot/v1\n' + approval).slice(0, 32);
+    const prefix = devStandardQaCopyObjectPrefix(bucketName, slot);
+    return { slot, prefix, wrappedKeyName: prefix + hash('wrapped-key/v1') + '.bin' };
+}
+
+function auditConfiguration() {
+    const { approval } = standardQaCopyAuditWindow({
+        approval: required('DEV_STANDARD_QA_COPY_APPROVAL'),
+        approvedAt: required('DEV_STANDARD_QA_COPY_APPROVED_AT'),
+        days: Number(required('DEV_STANDARD_QA_COPY_DAYS')),
+    });
+    const project = required('DEV_STANDARD_QA_COPY_PROJECT');
+    const number = required('DEV_STANDARD_QA_COPY_PROJECT_NUMBER');
+    const bucketName = required('DEV_STANDARD_QA_COPY_BUCKET');
+    if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project) || !/^[1-9]\d{5,19}$/.test(number)) {
+        throw new Error('QA_COPY_CONFIGURATION_INVALID');
+    }
+    const expirySecret = expirySecretResource(required('DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION'), project, number);
+    return { bucketName, expirySecret, ...copyObjectNames(bucketName, approval) };
+}
+
+function configuration(mode: 'export' | 'read' | 'iam') {
     const descriptor = {
         approval: required('DEV_STANDARD_QA_COPY_APPROVAL'),
         sourceApproval: required('DEV_STANDARD_QA_COPY_SOURCE_APPROVAL'),
@@ -32,9 +54,7 @@ function configuration(mode: 'export' | 'read' | 'audit' | 'iam') {
         target: required('DEV_LIVE_STANDARD_TARGET'),
         days: Number(required('DEV_STANDARD_QA_COPY_DAYS')),
     };
-    const { policy, context, binding } = mode === 'audit'
-        ? standardQaCopyPolicyWindow(descriptor) : activeStandardQaCopyPolicy(descriptor);
-    if (mode === 'audit' && Date.now() < binding.expiresAt) throw new Error('QA_COPY_AUDIT_EARLY');
+    const { policy, context, binding } = activeStandardQaCopyPolicy(descriptor);
     const project = required('DEV_STANDARD_QA_COPY_PROJECT');
     const projectNumber = required('DEV_STANDARD_QA_COPY_PROJECT_NUMBER');
     const bucketName = required('DEV_STANDARD_QA_COPY_BUCKET');
@@ -51,9 +71,7 @@ function configuration(mode: 'export' | 'read' | 'audit' | 'iam') {
     }
 
     const expirySecret = expirySecretResource(required('DEV_STANDARD_QA_COPY_EXPIRY_SECRET_VERSION'), project, projectNumber, resource[2]!);
-    const slot = hash('dev-standard-copy-slot/v1\n' + policy.approval).slice(0, 32);
-    const prefix = devStandardQaCopyObjectPrefix(bucketName, slot);
-    const wrappedKeyName = prefix + hash('wrapped-key/v1') + '.bin';
+    const { slot, prefix, wrappedKeyName } = copyObjectNames(bucketName, policy.approval);
     return { policy, context, bucketName, sourceBucket, project, projectNumber, kmsKey, expirySecret, expiresAt: binding.expiresAt, location: resource[2], slot, prefix, wrappedKeyName };
 }
 
@@ -149,7 +167,7 @@ export async function withCloudStandardQaFixture<T>(
 
 /** Execute as the QA reader for access, or as the list-only auditor for erasure. */
 export async function verifyExpiredStandardQaCopy(mode: 'revoked' | 'deleted') {
-    const { bucketName, expirySecret, prefix, wrappedKeyName } = configuration('audit');
+    const { bucketName, expirySecret, prefix, wrappedKeyName } = auditConfiguration();
     const client = await cloudClient();
     const url = 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucketName) + '/o';
     if (mode === 'revoked') {

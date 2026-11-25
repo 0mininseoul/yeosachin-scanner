@@ -25,7 +25,7 @@ node --conditions=react-server --import tsx scripts/dev-standard-private-qa-copy
 
 ## 만료와 삭제 확인
 
-새 승인 만료 시각부터 앱의 모든 보관본 읽기가 실패한다. GCS 수명 주기 삭제는 객체 생성 시각을 기준으로 비동기 실행되므로 접근 종료와 공급자 삭제를 각각 확인한다.
+감사 시점까지 따로 유지할 설정은 새 QA 사본 승인, 승인 시각과 90일 기한, Dev 프로젝트 ID·번호, 사본 버킷, 보조 시크릿 버전 리소스명이다. 원본 승인·대상·원본 키·KMS 리소스를 전달하지 않고 이 비민감 설정과 감사자 ADC로 아래 두 검사를 실행한다. 복사 시 확인한 새 승인과 저장 위치를 바탕으로 같은 접두사를 조회한다. 새 승인 만료 시각부터 앱의 모든 보관본 읽기가 실패한다. GCS 수명 주기 삭제는 객체 생성 시각을 기준으로 비동기 실행되므로 접근 종료와 공급자 삭제를 각각 확인한다.
 
 - 만료 후 원래 QA 열람 주체로 `--verify-revoked`를 실행한다. 감싼 키 객체의 메타데이터 접근 상태와 보조 시크릿 버전 1의 접근을 확인한다. 보조 시크릿 접근이 403 또는 404일 때 `revoked`가 나온다. 같은 권한 조건으로 승인된 각 주체가 대상이다.
 - 본문 열람·KMS 복호화 권한이 없는 목록 점검 주체로 `--verify-deleted`를 실행한다. 만료 전 시크릿 메타데이터 읽기를 확인해 둔 감사 주체로, 만료 시크릿 자체가 404인지와 한 승인 접두사 아래 현행·비현행 버전과 soft-deleted 세대를 조회한다. 둘 다 비어야 `deleted`가 나온다. GCS는 soft delete 정책이 없는 버킷에서 soft-deleted 목록 요청을 400으로 거절할 수 있다. 이때 도구는 `versions_absent_soft_delete_unverified`와 종료 코드 2를 반환한다. 승인 기간 전체의 버킷 변경 감사 로그와 soft delete가 처음부터 비활성화된 증거를 대조한 뒤 복구 가능한 세대의 유무를 기록한다. Secret Manager는 설정한 시각에 시크릿과 버전을 복구 불가 삭제한다. 승인 기간 동안 별도 내보내기 또는 키 보관을 하지 않아야 한다. 공급자의 저장장치 내부 삭제 시각은 객체 API의 검증 범위를 벗어난다. [Secret Manager 만료](https://docs.cloud.google.com/secret-manager/docs/creating-and-managing-expiring-secrets) · [GCS 객체 목록 API](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/list) · [GCS 객체 수명 주기](https://docs.cloud.google.com/storage/docs/lifecycle)

@@ -4,11 +4,12 @@ import type { AuthClient } from 'google-auth-library';
 
 export type ExpirySecret = Readonly<{ resource: string; url: string; version: string; location: string; regional: boolean }>;
 
-export function expirySecretResource(version: string, project: string, number: string, location: string): ExpirySecret {
+export function expirySecretResource(version: string, project: string, number: string, expectedLocation?: string): ExpirySecret {
     const match = /^projects\/([a-z\d-]+)(?:\/locations\/([a-z\d-]+))?\/secrets\/([a-zA-Z\d_-]+)\/versions\/1$/.exec(version);
-    if (!match || (match[1] !== project && match[1] !== number) || (match[2] && match[2] !== location)) {
+    if (!match || (match[1] !== project && match[1] !== number) || (match[2] && expectedLocation && match[2] !== expectedLocation)) {
         throw new Error('QA_COPY_EXPIRY_SECRET_INVALID');
     }
+    const location = match[2] ?? expectedLocation ?? '';
     const regional = !!match[2];
     const resource = 'projects/' + number + (regional ? '/locations/' + location : '') + '/secrets/' + match[3];
     const host = regional ? 'secretmanager.' + location + '.rep.googleapis.com' : 'secretmanager.googleapis.com';
