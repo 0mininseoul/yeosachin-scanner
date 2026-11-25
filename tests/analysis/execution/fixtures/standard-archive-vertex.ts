@@ -1,3 +1,4 @@
+import { private90ImageScope } from './private90-image-scope';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { selectAnalysisV2GenderResolverMedia } from '@/lib/services/analysis/v2-gender-resolver-media-policy';
@@ -66,6 +67,7 @@ export async function prepareStandardArchiveVertex(input: Setup) {
     const totals = { profileBatches: input.profileBatches.length, profiles: 0, missingRemainder: 0, positiveProfiles: 0,
         batchCalls: 0, featureCalls: 0, resolverCalls: 0, nameCalls: 0, otherCalls: 0 };
     let reverseScope: ReturnType<typeof private90ReverseScope>;
+    let imageScope: ReturnType<typeof private90ImageScope>;
     const read = async (kind: string, inputKey: string) => {
         const fragment = await input.reader.readFragment({ kind, inputKey });
         return fragment ? fragment.value : stop('SEALED_INPUT_MISSING');
@@ -74,8 +76,9 @@ export async function prepareStandardArchiveVertex(input: Setup) {
         const covered = z.array(z.number().int()).parse(await read('capture-summary-v1', key([input.target])));
         if (covered.length !== input.profileBatches.length ||
             covered.some((n,i) => n !== i || input.profileBatches[i] !== n)) stop('BATCH_COVERAGE');
-        const manifest = z.object({ imageInputs: z.array(z.tuple([z.string(), z.string(), z.string().nullable()])) })
+        const manifest = z.object({ imageInputs: z.array(z.tuple([z.enum(['target','female','private']), z.string(), z.string().nullable()])) })
             .parse(await read('result-image-manifest-v1', key([input.target])));
+        imageScope = private90ImageScope(manifest.imageInputs);
         const female = new Set(manifest.imageInputs.filter(x => x[0] === 'female').map(x => x[1]));
         reverseScope = private90ReverseScope(input.target, await read('reverse-coverage-v1', key([input.target])));
         const reverseIds = reverseScope.expected;
@@ -214,5 +217,5 @@ export async function prepareStandardArchiveVertex(input: Setup) {
             return stop('MODEL_INPUT_SHAPE');
         }
     }
-    return { generate, counts, reverseScope };
+    return { generate, counts, reverseScope, imageScope };
 }

@@ -1,3 +1,4 @@
+import type { ResultImageCaptureSource } from '@/lib/services/media/result-image-capture';
 import { createFeatureAnalysisResultIdentity, type FeatureAnalysisInput } from '@/lib/services/ai/v2-staged-analysis';
 import type { AnalysisV2ReverseLikeCollector } from '@/lib/services/analysis/v2-ai-scoring-executors';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -71,9 +72,17 @@ const runtime = vi.hoisted(() => ({
     genderOuter: null as null | ((account:string,event:Private90OuterEvent,op:string)=>void),
     featureOuter: null as null | ((input:FeatureAnalysisInput,event:Private90OuterEvent)=>void),
     featureProbe: null as null | ((input:FeatureAnalysisInput, state:'start'|'return'|'error', error?:unknown) => void),
+    imageProbe: null as null | ((sources: readonly ResultImageCaptureSource[]) => void),
     reverseProbe: null as null | ((input: Parameters<AnalysisV2ReverseLikeCollector['collect']>[0]) => Promise<void>),
     vertexReceipts: null as null | { byRequest: WeakMap<object,string>; sent: string[]; byOperation:Map<string,Set<string>> },
 }));
+vi.mock('@/lib/services/media/result-image-capture', async original => {
+    const actual = await original<typeof import('@/lib/services/media/result-image-capture')>();
+    return { ...actual, async captureResultImageSources(input: Parameters<typeof actual.captureResultImageSources>[0]) {
+        runtime.imageProbe?.(input.sources);
+        return actual.captureResultImageSources(input);
+    } };
+});
 vi.mock('@/lib/services/analysis/v2-ai-stage-runtime', async original => {
     const actual = await original<typeof import('@/lib/services/analysis/v2-ai-stage-runtime')>();
     return { ...actual, createDurableAnalysisV2AiStageRuntime(...args: Parameters<typeof actual.createDurableAnalysisV2AiStageRuntime>) {
@@ -384,6 +393,7 @@ afterEach(() => {
     runtime.user = null;
     runtime.vertexReceipts = null;
     runtime.reverseProbe = null;
+    runtime.imageProbe = null;
     runtime.featureProbe = null;
     runtime.genderOuter = null;
     runtime.featureOuter = null;
@@ -404,6 +414,7 @@ async function runStandardRequest(
         profileBatches: readonly number[];
         generate: typeof syntheticGeneration;
         reverseScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['reverseScope'];
+        imageScope: Awaited<ReturnType<typeof prepareStandardArchiveVertex>>['imageScope'];
         observed: Private90Observations;
     },
 ) {
@@ -420,6 +431,9 @@ async function runStandardRequest(
         if (!id || !probe.expected.has(id)) return;
         if (state === 'start') probe.event(id,'featureStart',createFeatureAnalysisResultIdentity(input,'ai-stage-policy-v2.11').operationKey);
         else probe.event(id,state === 'return' ? 'featureReturned' : probe.featureFailure(error));
+    } : null;
+    runtime.imageProbe = privateReplay ? sources => {
+        Object.assign(privateReplay.observed, privateReplay.imageScope(sources));
     } : null;
     runtime.reverseProbe = privateReplay ? async input => {
         Object.assign(privateReplay.observed, await privateReplay.reverseScope.compare(db,input.requestId,input.candidates,runtime.vertexReceipts?.byOperation));
@@ -707,6 +721,9 @@ async function runStandardRequest(
                 if (observed?.jobStage === 'reverse_likes' && observed.reverseCompared) {
                     privateReplay.observed.cause = observed.reverseActualHashMatch ? 'archive_unavailable' : 'reverse_scope';
                 }
+                if (observed?.jobStage === 'finalize' && observed.imageScopeCompared) {
+                    privateReplay.observed.cause = observed.imageScopeMismatched ? 'final_image_identity' : 'archive_unavailable';
+                }
             }
             if (outcome.errorCode.includes('TIMEOUT')) privateReplay.observed.cause = 'timeout';
         }
@@ -840,6 +857,7 @@ async function runStandardRequest(
         expect(observed.mediaRegistryLoads).toBeGreaterThan(0);
         expect(observed.mediaRegistryRegistrations).toBeGreaterThan(0);
         expect(observed).toMatchObject({ reverseCompared:1,reverseSourceHashMatch:1,reverseActualHashMatch:1,reverseMissing:0,reverseExtra:0 });
+        expect(observed).toMatchObject({ imageScopeCompared: 1, imageScopeMismatched: 0 });
         observed.cause = 'model_routing';
         expect(observed.modelError).toBe('none');
         observed.cause = 'ledger_mismatch';
@@ -1241,7 +1259,7 @@ async function runPrivate90Fixture(
         `, [source.requestId]);
         await new Promise(resolve => setTimeout(resolve, due.rows[0]!.ms + 20));
         await runStandardRequest(db, owner, 'archive_replay', true, {
-            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, profileBatches, observed,
+            target: requestTarget, generate: model.generate, reverseScope:model.reverseScope, imageScope:model.imageScope, profileBatches, observed,
         });
         observed.phase = 'complete';
         observed.assertion = 'none';

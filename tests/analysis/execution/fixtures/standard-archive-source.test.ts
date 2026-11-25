@@ -106,3 +106,19 @@ it('bootstraps eight authenticated profile groups and independent source lineage
         vi.unstubAllGlobals();
     }
 }, 60_000);
+
+it('requires the same result-image kind, candidate and URL fingerprint after a signed URL is projected', async () => {
+    const { private90ImageScope } = await import('./private90-image-scope');
+    const { resultImageArchiveIdentity } = await import('@/lib/services/media/result-image-capture');
+    const { archiveMediaUrlAnchor } = await import('@/lib/services/dev-ui/standard-archive-media-identity');
+    const { canonicalizeImageProxyUrl } = await import('@/lib/services/media/image-proxy-token');
+    const raw = 'https://scontent.cdninstagram.com/offline.jpg?z=2&a=1&utm_source=test';
+    const projected = archiveMediaUrlAnchor(raw);
+    const source = { kind: 'female' as const, candidateLocator: 'offline', sortOrdinal: 1 };
+    const observed = private90ImageScope([resultImageArchiveIdentity({ ...source, sourceUrl: canonicalizeImageProxyUrl(raw) })]);
+    expect(observed([{ ...source, sourceUrl: projected }])).toMatchObject({ imagePublicExact: 0, imagePublicDrift: 1, imagePublicAbsent: 0 });
+    expect(observed([{ ...source, sourceUrl: archiveMediaUrlAnchor(canonicalizeImageProxyUrl(raw)) }])).toMatchObject({ imagePublicExact: 1, imageScopeMismatched: 0 });
+    expect(observed([{ ...source, sourceUrl: projected, kind: 'private' }])).toMatchObject({ imagePrivateAbsent: 1, imagePrivateExact: 0 });
+    expect(observed([{ ...source, candidateLocator: 'offline-other', sourceUrl: projected }])).toMatchObject({ imagePublicAbsent: 1 });
+    expect(observed([{ ...source, sourceUrl: null }])).toMatchObject({ imageScopeNullMismatch: 1 });
+});

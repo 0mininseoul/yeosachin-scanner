@@ -44,7 +44,7 @@ const phases = ['reader', 'source_ledger', 'fixed_model', 'admission', 'worker',
 
 const causes = ['none', 'reader_verification', 'source_receipts', 'source_admission', 'sealed_model_inputs',
     'missing_keyed_media', 'model_routing', 'preflight_admission', 'worker_stage', 'timeout', 'ledger_mismatch',
-    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql', 'reverse_scope', 'archive_unavailable'];
+    'publication_count', 'page_count', 'image_read', 'image_format', 'owner_access', 'network_denied', 'worker_sql', 'reverse_scope', 'archive_unavailable', 'final_image_identity'];
 
 export function newPrivate90Observations() {
     return {
@@ -70,6 +70,11 @@ export function newPrivate90Observations() {
         reverseMissingAnalysisUnavailable: 0, reverseMissingMediaUnavailable: 0, reverseMissingUnresolved: 0, reverseMissingNonFemale: 0,
         mediaRegistryLoads: 0, mediaRegistryRegistrations: 0, ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
+        imageScopeCompared: 0, imageScopeExpected: 0, imageScopeMismatched: 0, imageScopeNullMismatch: 0, imageScopeAmbiguous: 0,
+        imageTargetRequests: 0, imagePublicRequests: 0, imagePrivateRequests: 0,
+        imageTargetExact: 0, imagePublicExact: 0, imagePrivateExact: 0,
+        imageTargetAbsent: 0, imagePublicAbsent: 0, imagePrivateAbsent: 0,
+        imageTargetDrift: 0, imagePublicDrift: 0, imagePrivateDrift: 0,
         targetImages: 0, publicRows: 0, privateRows: 0, publicImages: 0, privateImages: 0,
         resultPages: 0, imageGets: 0, webpVerified: 0, sourceReceipts: 0, workerJobs: 0, duplicateDeliveries: 0,
         providerCountersActive: 0, apifyCalls: 0, sourceDownloads: 0, fixedVertexCalls: 0, published: 0, readyImages: 0,
