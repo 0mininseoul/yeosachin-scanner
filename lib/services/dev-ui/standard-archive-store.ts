@@ -1,4 +1,5 @@
 import 'server-only';
+import { createStandardQaResultProofAccess } from './standard-qa-result-proof';
 
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from 'node:crypto';
 import {
@@ -132,8 +133,10 @@ export function devStandardQaCopyObjectPrefix(bucketName: string, slot: string) 
 /** Separate storage, encryption context and deadline for an independently authorized QA fixture. */
 export function createDevStandardQaCopyStore(input: ArchiveStoreInput) {
     if (!isAnalysisV2DevQaCopyBucketName(input.bucketName)) return invalid();
-    const { store, bindCopyOrigin, readCopyOrigin } = createStore(input, COPY_DOMAIN, 90 * 24 * 60 * 60_000);
-    return { ...store, bindCopyOrigin, readCopyOrigin };
+    const { store, bindCopyOrigin, readCopyOrigin, proofEnvelope } = createStore(input, COPY_DOMAIN, 90 * 24 * 60 * 60_000);
+    const proof = createStandardQaResultProofAccess({ openSealedArchive: store.openSealedArchive,
+        readCopyOrigin, ...proofEnvelope }, input.now ?? Date.now);
+    return { ...store, bindCopyOrigin, readCopyOrigin, ...proof };
 }
 
 function createStore(input: ArchiveStoreInput, domain: string, maximumLifetime: number) {
@@ -434,6 +437,14 @@ function createStore(input: ArchiveStoreInput, domain: string, maximumLifetime: 
     const originRef = reference('qa-copy-origin');
     return {
         store,
+        proofEnvelope: {
+            async readEnvelope(address: string) {
+                return (await read(reference('result-proof/v1', address), 64 * 1024))?.value;
+            },
+            async writeEnvelope(address: string, entries: unknown, beforeCreate: () => Promise<void>) {
+                await persist(reference('result-proof/v1', address), entries, 64 * 1024, beforeCreate);
+            },
+        },
         async bindCopyOrigin(context: string, fingerprint: string) {
             await requireBinding();
             if (!DIGEST_PATTERN.test(context) || !DIGEST_PATTERN.test(fingerprint)) return invalid();
