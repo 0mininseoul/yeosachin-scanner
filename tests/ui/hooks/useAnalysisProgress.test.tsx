@@ -425,6 +425,15 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(fetchUrls.at(-1)).toContain('reviewAfterDone=-1');
     });
 
+    it('shows the two timing sentences on separate lines only while the request is processing', async () => {
+        const first = '꼼꼼하게 정밀 분석 중이에요.';
+        const second = '분석 완료까지 최대 1시간이 걸릴 수도 있어요.';
+        current.set(REQUEST_A, snapshot(REQUEST_A, { status: 'processing', lastEventSeq: 1 }));
+        await renderPage();
+        const paragraph = [...container.querySelectorAll('p')].find(p => p.textContent === first + ' ' + second);
+        expect([...paragraph!.children].map(el => el.textContent?.trim())).toEqual([first, second]);
+    });
+
     it('keeps production demo reads on variable timing and hides partial profile counts', async () => {
         current.set(REQUEST_A, snapshot(REQUEST_A, { lastEventSeq: 1, activeProfile: { maskedUsername: 'a***', imageUrl: null, currentOrdinal: 10 } }));
         const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
@@ -436,6 +445,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await renderPage();
         expect(container.textContent).toContain('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
         expect(container.textContent).not.toContain('45초');
+        expect(container.textContent).not.toContain('최대 1시간');
         expect(container.textContent).not.toContain('현재 10번째');
         expect(container.textContent).not.toContain('대상 30개');
         expect(container.textContent).not.toMatch(/맞팔 \d+명/);

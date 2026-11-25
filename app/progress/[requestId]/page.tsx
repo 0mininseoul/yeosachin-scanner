@@ -331,6 +331,11 @@ export default function ProgressPage({ params }: PageProps) {
         ? activity.slice(profilePrefix.length)
         : activity;
 
+    const durationCopy = analysisDurationProgressCopy(
+        isDevUiPresentation() && !devLive,
+        data.status === 'processing' && !data.publicationLagReset && (!data.demo || devLive),
+    );
+
     return (
         <div className="min-h-dvh">
             <TopBar
@@ -412,7 +417,9 @@ export default function ProgressPage({ params }: PageProps) {
                 )}
                 {devLive && <p className="mt-4 text-center text-sm text-fg-dim">Dev · 실제 분석</p>}
                 <p className="mt-4 text-balance text-center text-[14px] leading-relaxed text-fg-dim">
-                    {analysisDurationProgressCopy(isDevUiPresentation() && !devLive)}
+                    {durationCopy.split(/(?<=\.) /).map((sentence, index) => (
+                        <span key={sentence} className="block">{index > 0 ? ' ' : ''}{sentence}</span>
+                    ))}
                 </p>
 
                 <ul aria-label="판독 작업 상태" className="mt-4 w-full">
