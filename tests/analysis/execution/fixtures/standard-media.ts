@@ -1,11 +1,12 @@
 import sharp from 'sharp';
 import type {
+    AnalysisV2DevArchiveObjectClient,
     AnalysisV2PrivateMediaObjectClient,
     AnalysisV2PrivateRetainedMediaObjectClient,
 } from '@/lib/services/analysis/v2-media-artifact-store';
 
 export function createFixtureObjects(): AnalysisV2PrivateMediaObjectClient &
-    AnalysisV2PrivateRetainedMediaObjectClient {
+    AnalysisV2PrivateRetainedMediaObjectClient & AnalysisV2DevArchiveObjectClient {
     const objects = new Map<string, Buffer>();
     async function create({ objectName, bytes }: { objectName: string; bytes: Buffer }) {
         const created = !objects.has(objectName);
@@ -20,6 +21,7 @@ export function createFixtureObjects(): AnalysisV2PrivateMediaObjectClient &
             if (!value) throw new Error('Missing synthetic media');
             return value;
         },
+        listRetained: async ({ prefix }) => [...objects.keys()].filter(name => name.startsWith(prefix)),
         readRetained: async ({ objectName }) => objects.get(objectName) ?? null,
         delete: async ({ objectName }) => {
             objects.delete(objectName);
