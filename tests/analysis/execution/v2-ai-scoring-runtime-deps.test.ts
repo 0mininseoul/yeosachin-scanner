@@ -1158,7 +1158,8 @@ describe('Dev Standard reverse-like archive', () => {
         expect(JSON.stringify([...stored.values()])).not.toContain('synthetic.non_target');
 
         const { private90ReverseScope } = await import('./fixtures/private90-reverse-scope');
-        const probe = private90ReverseScope(archivedInput.targetUsername, [...stored.values()][0]);
+        const source = await capture.load('reverse-coverage-v1', [archivedInput.targetUsername]);
+        const probe = private90ReverseScope(archivedInput.targetUsername, source);
         const profile = (shortCode:string, likesCount:number) => ({
             username:'fixture',isPrivate:false,isVerified:false,postsCount:2,followersCount:1,followingCount:1,
             latestPosts:['zz','aa'].map(id => ({ id, shortCode:id==='aa'?shortCode:'UNSELECTED', type:'image' as const,
