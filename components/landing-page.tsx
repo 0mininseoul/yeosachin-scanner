@@ -387,8 +387,12 @@ export default function LandingPage({
               contact@ascentum.co.kr
             </a>
           </div>
-          <p className="mt-5 text-[8.5px] leading-relaxed tracking-tight text-fg-mute">
+          <p className="mt-5 text-[12px] leading-relaxed text-fg-mute">
             Company: Ascentum · BRN: 478-59-01063 · Representative: Youngmin Park
+            <br />
+            Address: Suite 206, 51, Samjeon-ro 13-gil, Songpa-gu, Seoul 05565, Republic of Korea
+            <br />
+            Tel: <a href="tel:+821040083483" className="transition-colors hover:text-fg">+82 10-4008-3483</a>
           </p>
         </footer>
       </main>
