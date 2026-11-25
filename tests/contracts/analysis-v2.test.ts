@@ -1,3 +1,4 @@
+import { devStandardOwnerResultPageSchema } from '@/lib/contracts/dev-standard-replay';
 import { describe, expect, it } from 'vitest';
 import {
     analysisResultPageV1Schema,
@@ -621,6 +622,19 @@ describe('analysis V2 public contracts', () => {
             ...base,
             femaleAccounts: [row],
         }).success).toBe(true);
+        const devNote = {
+            ...base, summary: { ...base.summary, planId: 'standard' },
+            femaleAccounts: [row], replayScopeDelta: { added: 1, removed: 0, unverified: 0 },
+        };
+        expect(devStandardOwnerResultPageSchema.safeParse(devNote).success).toBe(true);
+        expect(analysisResultPageV1Schema.safeParse(devNote).success).toBe(false);
+        expect(devStandardOwnerResultPageSchema.safeParse({ ...devNote, summary: base.summary }).success).toBe(false);
+        for (const delta of [
+            { added: 0, removed: 0, unverified: 0 }, { added: 4, removed: 1, unverified: 7 },
+            { added: 0.5, removed: 0, unverified: 0 }, { added: 0, removed: 1, unverified: 0, candidate: 'unexpected' },
+        ]) {
+            expect(devStandardOwnerResultPageSchema.safeParse({ ...devNote, replayScopeDelta: delta }).success).toBe(false);
+        }
         const internalAggregateInput = analysisResultPageV1Schema.safeParse({
             ...base,
             summary: {

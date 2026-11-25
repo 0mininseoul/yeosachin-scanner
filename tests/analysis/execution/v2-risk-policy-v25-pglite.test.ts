@@ -125,6 +125,7 @@ describe('risk-policy v2.5 database replay', () => {
 
     it('matches the TypeScript policy across deterministic boundary cohorts', async () => {
         const cohorts = [
+            [6.79, 4.19, 1],
             [4.2, 4.1, 3, 2, 1],
             [7, 6.8, 6.7, 4.2, 4.1, 1],
             Array.from({ length: 16 }, (_, index) => Math.max(1, 8 - index * 0.4)),

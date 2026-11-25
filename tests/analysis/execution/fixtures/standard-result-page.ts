@@ -9,7 +9,7 @@ const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
     JSDOM: new (html: string, options: { url: string }) => { window: Window & typeof globalThis };
 };
 
-export async function assertOwnerPage(requestId: string, candidate: string, kind: 'public' | 'private' = 'public') {
+export async function assertOwnerPage(requestId: string, candidate: string, kind: 'public' | 'private' = 'public', expectScopeNote = false) {
     const location = DEV_UI_APP_ORIGIN + '/result/' + requestId + '?devAnalysis=live';
     const { window } = new JSDOM('<div id="root"></div>', { url: location });
     const requested: string[] = [];
@@ -52,6 +52,14 @@ export async function assertOwnerPage(requestId: string, candidate: string, kind
             });
             expect(container.textContent).toContain('@' + candidate);
         });
+        const scopeNotes = Array.from(container.querySelectorAll('aside'))
+            .filter(aside => aside.textContent?.includes('역방향 좋아요 확인 범위'));
+        expect(scopeNotes).toHaveLength(expectScopeNote ? 1 : 0);
+        if (expectScopeNote) {
+            expect(scopeNotes[0]!.textContent).toContain('추가된 후보 1명');
+            expect(scopeNotes[0]!.textContent).toContain('제외된 후보 0명');
+            expect(scopeNotes[0]!.textContent).toContain('미수집');
+        }
         expect(requested).toEqual([route]);
         if (!imagePath) throw new Error('Owner result response lacks the candidate image');
         const imageUrl = new URL(imagePath, location).href;

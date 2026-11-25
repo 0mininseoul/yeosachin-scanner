@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { captureDevStandardReverseLikes, replayDevStandardReverseLikes } from './v2-standard-archive-reverse-likes';
 import { z } from 'zod';
 import type { SelectedAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 import {
@@ -87,14 +87,6 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PROFILE_JOB_PREFIX = 'track:profiles:batch:';
 const PROFILE_AI_JOB_PREFIX = 'track:profile-ai:batch:';
 const REVERSE_LIKE_JOB_KEY = 'track:reverse-likes:collect';
-const ARCHIVE_REVERSE_COVERAGE_KIND = 'reverse-coverage-v1';
-const reverseArchiveSchema = z.object({
-    scopeHash: z.string().regex(SHA256_PATTERN),
-    results: z.array(z.object({
-        candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/),
-        status: z.enum(['observed', 'not_observed', 'not_collected']),
-    }).strict()).max(MAX_REVERSE_CANDIDATES),
-}).strict();
 const analysisV2RevenueCostOperationStore = new RevenueCostOperationStore(supabaseAdmin);
 
 export const ANALYSIS_V2_PROFILE_CONSUMER_DATABASE_NAMES = Object.freeze({
@@ -439,7 +431,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
             const targetUsername = z.string().trim().toLowerCase()
                 .regex(/^[a-z0-9._]{1,30}$/)
                 .parse(rawInput.targetUsername);
-            const candidates = rawInput.candidates.map(candidate => ({
+            const parseCandidate = (candidate: (typeof rawInput.candidates)[number]) => ({
                 candidateId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/)
                     .parse(candidate.candidateId),
                 postUrl: canonicalPostUrl(candidate.postUrl),
@@ -447,49 +439,31 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                     .parse(candidate.declaredLikesCount),
                 declaredLikesCountKnown: z.boolean().default(true)
                     .parse(candidate.declaredLikesCountKnown),
-            }));
+            });
+            const candidates = rawInput.candidates.map(parseCandidate);
             if (
                 new Set(candidates.map(row => row.candidateId)).size !== candidates.length
                 || new Set(candidates.map(row => row.postUrl)).size !== candidates.length
             ) {
                 throw new Error('ANALYSIS_V2_REVERSE_LIKE_SCOPE_MISMATCH');
             }
-            const inputIdentity = [targetUsername];
-            const scopeHash = archive ? createHash('sha256').update(JSON.stringify([
-                targetUsername,
-                REVERSE_LIKE_LIMIT,
-                [...candidates].sort((left, right) => left.candidateId.localeCompare(right.candidateId))
-                    .map(row => [row.candidateId, row.postUrl, row.declaredLikesCount, row.declaredLikesCountKnown]),
-            ])).digest('hex') : '';
             if (archive && (
-                requestContext.planId !== 'standard'
+                archive.target !== targetUsername || requestContext.planId !== 'standard'
                 || requestContext.accessMode !== 'test_entitlement'
                 || requestContext.targetUsername !== targetUsername
             )) return archive.fail();
+            const shortlist = archive ? (rawInput.archiveShortlistIds ?? candidates.map(row => row.candidateId)) : [];
+            if (archive && (shortlist.length > MAX_REVERSE_CANDIDATES || new Set(shortlist).size !== shortlist.length
+                || shortlist.some(id => typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(id))
+                || candidates.some(row => !shortlist.includes(row.candidateId)))) return archive.fail();
             if (archive?.mode === 'replay') {
-                const parsed = reverseArchiveSchema.safeParse(
-                    await archive.load(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity)
-                );
-                if (!parsed.success || parsed.data.scopeHash !== scopeHash
-                    || parsed.data.results.length !== candidates.length) {
-                    return archive.fail();
-                }
-                const byCandidate = new Map(parsed.data.results.map(row => [row.candidateId, row.status]));
-                const results = candidates.map(row => {
-                    const status = byCandidate.get(row.candidateId);
-                    if (status === undefined || (status === 'not_observed'
-                        && (!row.declaredLikesCountKnown || row.declaredLikesCount > REVERSE_LIKE_LIMIT))) {
-                        return archive.fail();
-                    }
-                    return Object.freeze({ candidateId: row.candidateId, status });
-                });
-                return Object.freeze({
-                    operationKey: candidates.length === 0 ? null : `archive-candidate-likers:${scopeHash}`,
-                    results: Object.freeze(results),
-                });
+                const legacy = rawInput.legacyArchiveInputs;
+                return replayDevStandardReverseLikes(archive, targetUsername, candidates, shortlist, legacy ? ids => {
+                    try { return legacy(ids).map(parseCandidate); } catch { return archive.fail(); }
+                } : undefined);
             }
             if (candidates.length === 0) {
-                await archive?.capture(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity, { scopeHash, results: [] });
+                if (archive) await captureDevStandardReverseLikes(archive, targetUsername, candidates, shortlist, []);
                 return Object.freeze({ operationKey: null, results: Object.freeze([]) });
             }
             const isStrictFreshRequest = isRevenueCostLedgerRequest(requestContext);
@@ -683,10 +657,7 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 });
             }));
             if (archive) {
-                await archive.capture(ARCHIVE_REVERSE_COVERAGE_KIND, inputIdentity, {
-                    scopeHash,
-                    results: [...results].sort((left, right) => left.candidateId.localeCompare(right.candidateId)),
-                });
+                await captureDevStandardReverseLikes(archive, targetUsername, candidates, shortlist, results);
             }
             return Object.freeze({ operationKey, results });
         },

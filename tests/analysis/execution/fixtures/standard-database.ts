@@ -64,6 +64,7 @@ export async function createStandardDatabase() {
             'live-standard-archive-replay',
             'live-standard-archive-blite',
             'live-standard-archive-evidence',
+            'live-standard-replay-scope-note',
         ])
             await db.exec(devSql(name));
         await db.exec('INSERT INTO public.analysis_v2_gemini_leases(slot) SELECT generate_series(1,8)');

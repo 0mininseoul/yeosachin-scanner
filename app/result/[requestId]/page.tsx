@@ -701,6 +701,17 @@ export default function ResultPage({ params }: PageProps) {
                         shareUrl={shareTarget?.url ?? null}
                     />}
                 </div>
+                {devLive && data.replayScopeDelta && (
+                    <aside className="mt-4 rounded-lg border border-line-2 bg-panel p-4 text-sm">
+                        <p className="font-semibold">역방향 좋아요 확인 범위</p>
+                        <p className="mt-1">
+                            원본 보관 자료에서 확인할 수 있는 범위와 비교해 추가된 후보 {data.replayScopeDelta.added}명, 제외된 후보 {data.replayScopeDelta.removed}명,
+                            같은 후보 중 게시물·좋아요 수 등 입력 일치를 확인할 수 없는 후보 {data.replayScopeDelta.unverified}명입니다.
+                            추가된 후보와 입력 일치를 확인할 수 없는 후보의 역방향 좋아요는 미수집으로 처리해 점수에 가산하지 않았습니다.
+                            원본에서 같은 게시물의 좋아요를 확인한 기록이 있을 때만 발견 여부를 판정합니다.
+                        </p>
+                    </aside>
+                )}
                 {/* result subject header */}
                 {/* Profile lockup: the page needs a subject before it states a
                     number, and the handle confirms which account that display
