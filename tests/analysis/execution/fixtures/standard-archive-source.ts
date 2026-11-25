@@ -6,6 +6,16 @@ import {
 } from '@/lib/services/analysis/preflight';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import { APIFY_LIKERS_ACTOR_ID, APIFY_COMMENTS_ACTOR_ID } from '@/lib/services/instagram/providers/apify-interactions';
+import { createStandardDatabase } from './standard-database';
+
+const archiveDatabases = new WeakSet<PGlite>();
+
+// Only this factory can register a database; the caller cannot supply a directory or filesystem.
+export async function createStandardArchiveDatabase() {
+    const db = await createStandardDatabase();
+    archiveDatabases.add(db);
+    return db;
+}
 
 type SealedReader = {
     readFragment(input: { kind: string; inputKey: string }): Promise<{ value: unknown } | null>;
@@ -143,7 +153,7 @@ async function installReceipts(tx: Transaction, request: string, receipts: Recei
 
 /** Seed only the source lineage and successful provider references consumed by the real Dev archive RPCs. */
 export async function bootstrapStandardArchiveSource(db: PGlite, input: BootstrapInput) {
-    if (db.dataDir && db.dataDir !== 'memory://') invalid();
+    if (!archiveDatabases.has(db)) throw new Error('Unverified archive fixture database');
     let phase = 'sealed proofs';
     try {
         const { profile, blite, receipts } = await readSource(input);

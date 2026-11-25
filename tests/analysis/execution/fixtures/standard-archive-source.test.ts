@@ -1,7 +1,7 @@
+import { PGlite } from '@electric-sql/pglite';
 import { createHash, randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
-import { createStandardDatabase } from './standard-database';
-import { bootstrapStandardArchiveSource } from './standard-archive-source';
+import { bootstrapStandardArchiveSource, createStandardArchiveDatabase } from './standard-archive-source';
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const target = 'offline_target';
@@ -52,9 +52,21 @@ function referenceArchive() {
     };
 }
 
+it('rejects an unregistered database before opening sealed inputs', async () => {
+    const db = await PGlite.create();
+    const reader = { readFragment: vi.fn() };
+    try {
+        await expect(bootstrapStandardArchiveSource(db, { ownerId: randomUUID(), target, reader, profileBatches }))
+            .rejects.toThrow('Unverified archive fixture database');
+        expect(reader.readFragment).not.toHaveBeenCalled();
+    } finally {
+        await db.close();
+    }
+});
+
 it('bootstraps eight authenticated profile groups and independent source lineage without a capture run', async () => {
     vi.stubGlobal('fetch', () => { throw new Error('External network disabled'); });
-    const db = await createStandardDatabase();
+    const db = await createStandardArchiveDatabase();
     try {
         const ownerId = randomUUID();
         const email = 'offline@example.invalid';
