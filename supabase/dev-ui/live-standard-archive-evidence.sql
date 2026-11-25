@@ -9,7 +9,10 @@ BEGIN
        OR pg_catalog.to_regclass('dev_ui.orders') IS NULL
        OR pg_catalog.to_regclass('dev_ui.runs') IS NULL
        OR pg_catalog.to_regclass('dev_live_budget.standard_archive_replay_grants') IS NULL
-       OR pg_catalog.to_regprocedure('public.dev_live_owner_start_lookup_v2(uuid,uuid,text)') IS NULL THEN
+       OR pg_catalog.to_regprocedure('public.dev_live_owner_start_lookup_v2(uuid,uuid,text)') IS NULL
+       OR pg_catalog.to_regprocedure('dev_live_budget.standard_archive_source_target_matches_v1(public.analysis_preflights,public.analysis_requests,uuid,text)') IS NULL
+       OR pg_catalog.to_regclass('public.analysis_v2_dag_scopes') IS NULL
+       OR pg_catalog.to_regprocedure('public.analysis_v2_dag_hash_json(jsonb)') IS NULL THEN
         RAISE EXCEPTION 'DEV_STANDARD_ARCHIVE_EVIDENCE_WRONG_DATABASE';
     END IF;
 END;
@@ -46,14 +49,11 @@ AS $fn$
      AND source_start.target_instagram_id = destination.target_instagram_id
     JOIN public.analysis_preflights AS source_preflight
       ON source_preflight.user_id = source_start.user_id
-     AND source_preflight.target_instagram_id = source_start.target_instagram_id
      AND source_preflight.idempotency_key = 'dev-live:owner:standard:' || source_start.grant_id::text
     JOIN public.analysis_requests AS source
       ON source.id = source_preflight.consumed_request_id
      AND source.preflight_id = source_preflight.id
      AND source.user_id = destination.user_id
-     AND source.target_instagram_id = destination.target_instagram_id
-     AND source.excluded_instagram_id IS NOT DISTINCT FROM destination.excluded_instagram_id
     WHERE destination.id = p_request_id
       AND binding.expires_at > pg_catalog.clock_timestamp()
       AND public.dev_live_owner_start_lookup_v2(
@@ -74,6 +74,21 @@ AS $fn$
       AND destination.plan_access_mode_snapshot = 'test_entitlement'
       AND destination.selected_plan_id_snapshot = 'standard'
       AND destination.analysis_entry_channel = 'standard'
+      AND dev_live_budget.standard_archive_source_target_matches_v1(
+          source_preflight, source, source_start.grant_id, source_start.target_instagram_id
+      )
+      -- Terminal scrub erased the exclusion. Compare the destination with
+      -- the exclusion hash recorded at the source request's own bootstrap.
+      AND CASE WHEN source_preflight.pii_scrubbed_at IS NULL THEN
+          source.excluded_instagram_id IS NOT DISTINCT FROM destination.excluded_instagram_id
+      ELSE EXISTS (
+          SELECT 1 FROM public.analysis_v2_dag_scopes AS scope
+          WHERE scope.request_id = source.id AND scope.plan_id = 'standard'
+            AND scope.exclusion_decision_hash = public.analysis_v2_dag_hash_json(pg_catalog.jsonb_build_object(
+                'domain', 'analysis-v2-exclusion-decision-v1', 'requestId', source.id,
+                'decision', destination.exclusion_decision_snapshot, 'excludedInstagramId', destination.excluded_instagram_id
+            ))
+      ) END
       AND source_preflight.status = 'consumed'
       AND source.status = 'completed'
       AND source.pipeline_version = 'v2'

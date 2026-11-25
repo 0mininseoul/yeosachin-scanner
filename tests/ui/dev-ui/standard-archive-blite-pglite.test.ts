@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { hashAnalysisTestEntitlementJti } from '@/lib/services/analysis/test-entitlement-jti';
 
 const owner = randomUUID();
 const sourceGrant = randomUUID();
@@ -76,11 +77,13 @@ describe('sealed Dev B-lite terminal preview', () => {
             $$;
             CREATE TABLE public.analysis_requests(id uuid,preflight_id uuid,user_id uuid,target_instagram_id text,
                 status text,pipeline_version text,selected_plan_id_snapshot text,plan_access_mode_snapshot text,
-                analysis_entry_channel text DEFAULT 'standard');
+                analysis_entry_channel text DEFAULT 'standard', completed_at timestamptz,
+                exclusion_decision_snapshot text, excluded_instagram_id text, test_entitlement_jti_hash text);
             CREATE TABLE public.analysis_preflights(
                 id uuid PRIMARY KEY,user_id uuid,target_instagram_id text,idempotency_key text,status text,
                 access_mode text DEFAULT 'test_entitlement',analysis_entry_channel text DEFAULT 'standard',
                 beta_entry_provenance text,pii_scrubbed_at timestamptz,consumed_request_id uuid,
+                consumed_at timestamptz, exclusion_decision text, excluded_instagram_id text, admission_entitlement_jti_hash text,
                 precheckout_blite_cohort boolean DEFAULT false,created_at timestamptz DEFAULT now(),
                 updated_at timestamptz,precheckout_blite_deadline_seconds integer DEFAULT 90,
                 submitted_at timestamptz,deadline_at timestamptz,expires_at timestamptz DEFAULT now()+interval '30 minutes',
@@ -88,6 +91,9 @@ describe('sealed Dev B-lite terminal preview', () => {
                 target_profile_image_url text,target_followers_count integer,target_following_count integer,
                 target_is_private boolean,capacity_required_plan_id text,required_plan_id text,plan_cards_snapshot jsonb,
                 launch_status_snapshot jsonb,plan_catalog_snapshot jsonb,ready_at timestamptz
+            );
+            CREATE TABLE public.analysis_v2_test_entitlement_consumptions(
+                request_id uuid, preflight_id uuid, user_id uuid, selected_plan_id text, entitlement_jti_hash text
             );
             CREATE TABLE public.precheckout_blite_sources(preflight_id uuid);
             CREATE TABLE public.precheckout_blite_dispatches(preflight_id uuid);
@@ -98,9 +104,14 @@ describe('sealed Dev B-lite terminal preview', () => {
             'precheckout_blite_v1_has_exact_keys','precheckout_blite_v1_integer_in_range','precheckout_blite_v1_confidence_is_valid',
             'precheckout_blite_v1_copy_is_valid','precheckout_blite_v1_dto_is_valid','analysis_v2_valid_plan_cards_snapshot',
             'enforce_precheckout_blite_preflight_clock_v1','activate_precheckout_blite_cohort_v1',
-            'complete_analysis_v2_preflight','read_precheckout_blite_status_v1',
+            'complete_analysis_v2_preflight','read_precheckout_blite_status_v1','analysis_v2_scrub_terminal_request_pii',
         ]) await db.exec(definition(`CREATE FUNCTION public.${name}(`));
         await db.exec(definition('CREATE TRIGGER enforce_precheckout_blite_preflight_clock '));
+        const replay = await read('live-standard-archive-replay');
+        await db.exec(replay.slice(
+            replay.indexOf('CREATE OR REPLACE FUNCTION dev_live_budget.standard_archive_source_target_matches_v1('),
+            replay.indexOf('CREATE OR REPLACE FUNCTION public.dev_live_standard_archive_replay_start_v1('),
+        ));
         await db.exec(await read('live-standard-archive-blite'));
         await db.exec(await read('live-standard-archive-blite'));
         await db.query(`
@@ -134,6 +145,36 @@ describe('sealed Dev B-lite terminal preview', () => {
         for (const table of ['precheckout_blite_sources','precheckout_blite_dispatches']) {
             expect((await db.query(`SELECT 1 FROM public.${table}`)).rows).toHaveLength(0);
         }
+    });
+
+    it('restores the B-lite outcome from a completed scrubbed source without rehydrating its target', async () => {
+        const hash = hashAnalysisTestEntitlementJti(`dev-live-${sourceGrant}`);
+        await db.query(`
+            UPDATE public.analysis_preflights
+            SET consumed_at = clock_timestamp(), admission_entitlement_jti_hash = $2
+            WHERE id = $1
+        `, [sourcePreflight, hash]);
+        await db.query('UPDATE public.analysis_requests SET completed_at = clock_timestamp(), test_entitlement_jti_hash = $2 WHERE id = $1',
+            [sourceRequest, hash]);
+        await db.query("INSERT INTO public.analysis_v2_test_entitlement_consumptions VALUES ($1,$2,$3,'standard',$4)",
+            [sourceRequest, sourcePreflight, owner, hash]);
+        await db.query('SELECT public.analysis_v2_scrub_terminal_request_pii($1, clock_timestamp())', [sourceRequest]);
+
+        const input = await destination();
+        expect(await complete(input, { state: 'complete', dto })).toBe(true);
+        expect(await status(input.preflight)).toMatchObject({ state: 'complete', dto });
+        expect((await db.query('SELECT target_instagram_id, pii_scrubbed_at IS NOT NULL AS scrubbed FROM public.analysis_preflights WHERE id=$1',
+            [sourcePreflight])).rows).toEqual([{
+            target_instagram_id: 'retained.' + sourcePreflight.replaceAll('-', '').slice(0, 20), scrubbed: true,
+        }]);
+        await db.query('UPDATE public.analysis_preflights SET target_instagram_id=$1 WHERE id=$2',
+            [fixtureTarget, sourcePreflight]);
+        await expect(complete(await destination(), { state: 'complete', dto }))
+            .rejects.toThrow('DEV_STANDARD_ARCHIVE_BLITE_UNAVAILABLE');
+        await db.query("UPDATE public.analysis_preflights SET target_instagram_id=$1, pii_scrubbed_at=NULL WHERE id=$2",
+            [fixtureTarget, sourcePreflight]);
+        await db.query('UPDATE public.analysis_requests SET target_instagram_id=$1 WHERE id=$2',
+            [fixtureTarget, sourceRequest]);
     });
 
     it('rejects invalid DTOs, claims, deadlines and lineage, with no one-sided finalization', async () => {
