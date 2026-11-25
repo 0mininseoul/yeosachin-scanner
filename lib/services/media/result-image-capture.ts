@@ -55,6 +55,13 @@ const archivedResultImageFailure = z.object({
     failureCode: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
 }).strict();
 
+// Collection projects raw CDN URLs before the result store canonicalizes them.
+const archivedProjection = z.object({
+    status: z.literal('result_source_projection_v1'),
+    originInputKey: z.string().regex(HASH_PATTERN),
+    resultFingerprint: z.string().regex(HASH_PATTERN),
+}).strict();
+
 function restoreArchivedResultImage(value: unknown, fail: () => never): NormalizedResultImage {
     const parsed = resultImageArchiveSchema.safeParse(value);
     if (!parsed.success) return fail();
@@ -280,10 +287,10 @@ function existingKey(outcome: ResultImageRegistryOutcome): string {
     return `${outcome.kind}\n${outcome.candidateLocator}`;
 }
 
-async function runBounded(
-    items: readonly ResultImageCaptureSource[],
+async function runBounded<T>(
+    items: readonly T[],
     concurrency: number,
-    worker: (item: ResultImageCaptureSource) => Promise<void>
+    worker: (item: T) => Promise<void>
 ): Promise<void> {
     let nextIndex = 0;
     const failures: unknown[] = [];
@@ -303,6 +310,122 @@ async function runBounded(
     );
     await Promise.all(workers);
     if (failures.length) throw failures[0];
+}
+
+type ArchiveSession = NonNullable<ReturnType<typeof currentDevStandardArchive>>;
+type ArchiveIdentity = ReturnType<typeof resultImageArchiveIdentity>;
+type ProfileImageSource = Pick<ResultImageCaptureSource, 'candidateLocator' | 'sourceUrl'> & { kind: 'female' | 'private' };
+
+async function normalizedSource(
+    url: string,
+    download: NonNullable<ResultImageCaptureInput['download']>,
+    normalize: NonNullable<ResultImageCaptureInput['normalize']>,
+) {
+    const input = await download(url, {
+        allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+        maxBytes: SOURCE_DOWNLOAD_MAX_BYTES,
+        timeoutMs: SOURCE_DOWNLOAD_TIMEOUT_MS,
+        maxRedirects: 3,
+    });
+    return normalize(input.bytes);
+}
+
+function archiveWebp(image: NormalizedResultImage, archive: ArchiveSession) {
+    const value = { webp: image.bytes.toString('base64'), width: image.width, height: image.height, sha256: image.sha256 };
+    restoreArchivedResultImage(value, archive.fail);
+    return value;
+}
+
+// A speculative failure must never occupy the final source key. A later live
+// mandatory capture retains its usual retry budget and may observe a ready image.
+function observedFailureKey(identity: ArchiveIdentity) {
+    return [...identity, 'profile-input-failure-v1'];
+}
+async function readImageObservation(archive: ArchiveSession, identity: ArchiveIdentity) {
+    if (archive.mode !== 'replay' || identity[0] !== 'female' || identity[2] === null) {
+        return archive.load(RESULT_IMAGE_ARCHIVE_KIND, identity);
+    }
+    const final = await archive.find(RESULT_IMAGE_ARCHIVE_KIND, identity);
+    if (final) return final.value;
+    const observed = await archive.load(RESULT_IMAGE_ARCHIVE_KIND, observedFailureKey(identity));
+    if (!archivedResultImageFailure.safeParse(observed).success) return archive.fail();
+    return observed;
+}
+
+async function readArchivedImage(archive: ArchiveSession, identity: ArchiveIdentity) {
+    const value = await readImageObservation(archive, identity);
+    const alias = archivedProjection.safeParse(value);
+    if (!alias.success) return value;
+    const [kind, locator, fingerprint] = identity;
+    if (archive.mode !== 'replay' || kind === 'target' || !fingerprint
+        || alias.data.originInputKey !== sha256(JSON.stringify(identity))
+        || alias.data.resultFingerprint === fingerprint) return archive.fail();
+    // The second record must be a concrete WebP or recorded failure, never another projection.
+    return readImageObservation(archive, [kind, locator, alias.data.resultFingerprint]);
+}
+
+/** Called on a bounded producer batch. This stores no result-registry row or R2 object. */
+export async function retainDevStandardResultProfiles(
+    sources: readonly ProfileImageSource[],
+    options: Pick<ResultImageCaptureInput, 'download' | 'normalize'> = {},
+) {
+    const archive = currentDevStandardArchive();
+    if (archive?.mode !== 'capture') return;
+    await runBounded(sources, DEFAULT_CONCURRENCY, async source => {
+        const original = { ...source, sortOrdinal: 1 };
+        validateSource(original);
+        const origin = resultImageArchiveIdentity(original);
+        const url = source.sourceUrl === null ? null : canonicalSourceUrl(source.sourceUrl);
+        const result = resultImageArchiveIdentity({ ...original, sourceUrl: url });
+        if (origin[2] !== result[2]) {
+            const alias = { status: 'result_source_projection_v1', originInputKey: sha256(JSON.stringify(origin)),
+                resultFingerprint: result[2] };
+            const prior = await archive.find(RESULT_IMAGE_ARCHIVE_KIND, origin);
+            if (!prior) await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, origin, alias);
+            else {
+                const observed = archivedProjection.safeParse(prior.value);
+                if (!observed.success || observed.data.originInputKey !== alias.originInputKey
+                    || observed.data.resultFingerprint !== alias.resultFingerprint) return archive.fail();
+            }
+        }
+        // Every private row is already captured at finalize. Only public identities
+        // can disappear when the gender, feature or scoring branch changes.
+        if (source.kind !== 'female') return;
+        const prior = await archive.find(RESULT_IMAGE_ARCHIVE_KIND, result);
+        if (prior) {
+            if (url === null) {
+                if (prior.value !== 'source_missing') archive.fail();
+            } else if (!archivedResultImageFailure.safeParse(prior.value).success) {
+                restoreArchivedResultImage(prior.value, archive.fail);
+            }
+            return;
+        }
+        if (url === null) {
+            await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, result, 'source_missing');
+            return;
+        }
+        const failureKey = observedFailureKey(result);
+        const previousFailure = await archive.find(RESULT_IMAGE_ARCHIVE_KIND, failureKey);
+        if (previousFailure) {
+            if (!archivedResultImageFailure.safeParse(previousFailure.value).success) archive.fail();
+            return;
+        }
+        for (let attempt = 1; attempt <= DEFAULT_CAPTURE_ATTEMPTS; attempt++) {
+            let image: NormalizedResultImage;
+            try {
+                image = await normalizedSource(url, options.download ?? downloadSecureImage, options.normalize ?? normalizeResultImage);
+            } catch (error) {
+                if (error instanceof DevStandardArchiveError || error instanceof DevStandardArchiveStorageRetryError) throw error;
+                if (attempt < DEFAULT_CAPTURE_ATTEMPTS && shouldRetry(error)) continue;
+                await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, failureKey, {
+                    status: 'capture_failed', failureCode: failureCode(error),
+                });
+                return;
+            }
+            await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, result, archiveWebp(image, archive));
+            return;
+        }
+    });
 }
 
 export async function captureResultImages(
@@ -440,7 +563,7 @@ export async function captureResultImages(
             let archivedFailureCode: string | null = null;
             if (archive && archiveIdentity) {
                 const recorded = archive.mode === 'replay' || prior?.status === 'ready' || prior?.status === 'source_missing'
-                    ? { value: await archive.load(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity) }
+                    ? { value: await readArchivedImage(archive, archiveIdentity) }
                     : await archive.find(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity);
                 if (canonicalUrl === null) {
                     // Keep explicit absent URLs distinct from absent archive entries.
@@ -516,22 +639,9 @@ export async function captureResultImages(
                 try {
                     let normalized = archivedImage;
                     if (normalized === null) {
-                        const downloaded = await download(canonicalUrl, {
-                            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-                            maxBytes: SOURCE_DOWNLOAD_MAX_BYTES,
-                            timeoutMs: SOURCE_DOWNLOAD_TIMEOUT_MS,
-                            maxRedirects: 3,
-                        });
-                        normalized = await normalize(downloaded.bytes);
+                        normalized = await normalizedSource(canonicalUrl, download, normalize);
                         if (archive?.mode === 'capture' && archiveIdentity) {
-                            const value = {
-                                webp: normalized.bytes.toString('base64'),
-                                width: normalized.width,
-                                height: normalized.height,
-                                sha256: normalized.sha256,
-                            };
-                            restoreArchivedResultImage(value, () => archive.fail());
-                            await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity, value);
+                            await archive.capture(RESULT_IMAGE_ARCHIVE_KIND, archiveIdentity, archiveWebp(normalized, archive));
                             archivedImage = normalized;
                         }
                     }

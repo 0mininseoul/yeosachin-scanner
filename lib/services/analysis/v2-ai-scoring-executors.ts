@@ -28,6 +28,7 @@ import {
 } from '@/lib/domain/analysis/risk-policy';
 import { createPartnerSafetyContactSheet } from '@/lib/services/ai/partner-contact-sheet';
 import {
+    retainDevStandardResultProfiles,
     resultImageArchiveIdentity,
     resultImageOrderedManifestHash,
     type ResultImageCaptureSource,
@@ -2137,6 +2138,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             if (results.length !== topology.itemCount) {
                 throw new Error('ANALYSIS_V2_PROFILE_AI_ITEM_COUNT_DRIFT');
             }
+            if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture') {
+                await retainDevStandardResultProfiles(results.flatMap(item => item.status === 'success' && item.profile && !item.profile.isPrivate
+                    ? [{ kind: 'female', candidateLocator: analysisV2CandidateId(item.username), sourceUrl: item.profile.profilePicUrl ?? null }]
+                    : []));
+            }
             const aiFence = aiJobFence(context);
             const profileConcurrency = analysisV2ProfilePipelineConcurrency(
                 aiFence.aiStagePolicyVersion,
@@ -2882,6 +2888,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                 context.job.batch!,
                 topology.itemCount
             );
+            if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture') {
+                await retainDevStandardResultProfiles(rows.map(row => ({
+                    kind: 'private', candidateLocator: analysisV2CandidateId(row.username), sourceUrl: row.profilePicUrl,
+                })));
+            }
             const analyzed = await dependencies.ai.privateNames(rows.map(row => ({
                 id: analysisV2CandidateId(row.username),
                 username: row.username,

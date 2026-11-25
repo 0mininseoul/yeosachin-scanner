@@ -226,7 +226,15 @@ function readonlySession(reader: ArchiveReader, target: string): DevStandardArch
         ready: () => true,
         beginPreflightCapture: async () => fail(),
         load: (kind, identity) => readArchiveInput(reader, kind, identity),
-        find: async () => fail(),
+        async find(kind, identity) {
+            // Only public image callers have two legitimate observations. The sealed
+            // reader returns null for a nonmember and throws on a damaged member.
+            if (kind !== 'result-image-v1' || identity.length !== 3 || identity[0] !== 'female'
+                || typeof identity[1] !== 'string' || typeof identity[2] !== 'string' || !POINTER_HASH.test(identity[2])) return fail();
+            try {
+                return await reader.readFragment({ kind, inputKey: inputKey(identity) });
+            } catch (error) { return fail(error); }
+        },
         capture: async () => fail(),
         seal: async () => fail(),
     };

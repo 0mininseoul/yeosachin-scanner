@@ -97,6 +97,10 @@ import {
     type V2FemaleCandidateEvidence,
 } from '../../../lib/services/analysis/v2-candidate-scoring';
 
+vi.mock('@/lib/services/media/result-image-capture', async original => ({
+    ...await original<typeof import('@/lib/services/media/result-image-capture')>(),
+    retainDevStandardResultProfiles: vi.fn(),
+}));
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal => ({
