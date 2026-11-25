@@ -2,6 +2,7 @@ import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-u
 import { describe, expect, it, vi } from 'vitest';
 import {
     ANALYSIS_V2_SCHEDULER_V1_POLICY,
+    ProcessWideAnalysisV2SchedulerArbiter,
     runAnalysisV2FairAiScheduler,
     type AnalysisV2SchedulerOperationStore,
     type AnalysisV2SchedulerTask,
@@ -45,6 +46,33 @@ function task(
 }
 
 describe('analysis V2 scheduler-v1 runtime', () => {
+    it('keeps a busy feature slot on one worker from occupying a second worker', async () => {
+        const first = new ProcessWideAnalysisV2SchedulerArbiter();
+        const second = new ProcessWideAnalysisV2SchedulerArbiter();
+        const policy = { featureAnalysisConcurrency: 1 };
+        let release!: () => void;
+        const held = new Promise<string>(resolve => { release = () => resolve('held'); });
+        const run = (key: string, arbiter: ProcessWideAnalysisV2SchedulerArbiter, execute: () => Promise<string>) =>
+            runAnalysisV2FairAiScheduler({
+                capability: 'scheduler-v1', policy, operationStore: operationStore(),
+                handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+                tasks: [{ key, stage: 'featureAnalysis', ordinal: 0, run: execute }],
+            }, arbiter);
+        const entered = vi.fn(() => held);
+        const blocked = vi.fn(async () => 'second delivery');
+        const executions = [run('first delivery', first, entered), run('second delivery', first, blocked)];
+        try {
+            const free = await run('different worker', second, async () => 'free');
+            expect(free.completed[0]?.value).toBe('free');
+            expect(entered).toHaveBeenCalledOnce();
+            expect(blocked).not.toHaveBeenCalled();
+        } finally {
+            release();
+            await Promise.all(executions);
+        }
+        expect(blocked).toHaveBeenCalledOnce();
+    });
+
     it.each(['claim', 'defer'] as const)('drains admitted siblings before continuing after a DB %s timeout', async operation => {
         const timeout = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
         const store = operationStore();

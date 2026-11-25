@@ -213,7 +213,7 @@ function boundedPolicy(
     });
 }
 
-class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
+export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
     private activeTotal = 0;
     private generation = 0;
     private sequence = 0;
@@ -354,6 +354,7 @@ schedulerProcessScope.__AI_BARAM_ANALYSIS_V2_SCHEDULER_ARBITER_V1__ =
  */
 export async function runAnalysisV2FairAiScheduler<T>(
     input: AnalysisV2SchedulerRuntimeOptions<T>,
+    arbiter: AnalysisV2SchedulerArbiter = processWideSchedulerArbiter,
 ): Promise<AnalysisV2SchedulerRunResult<T>> {
     assertTasks(input.tasks);
     if (input.capability !== 'scheduler-v1') {
@@ -363,7 +364,6 @@ export async function runAnalysisV2FairAiScheduler<T>(
         throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
     }
     const policy = boundedPolicy(input.policy);
-    const arbiter = processWideSchedulerArbiter;
     const nowMs = input.nowMs ?? (() => performance.now());
     const queues = new Map<AnalysisV2SchedulerStage, AnalysisV2SchedulerTask<T>[]>([
         ['genderTriage', []], ['featureAnalysis', []], ['privateAccountName', []],

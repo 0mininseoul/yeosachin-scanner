@@ -37,6 +37,23 @@ Dev Standard 통합 검사는 매 실행마다 빈 PGlite에 Dev 스키마와 �
 sandbox-exec -p '(version 1)(allow default)(deny network-outbound)' node node_modules/vitest/vitest.mjs run tests/analysis/execution/standard-admission-result-pglite.test.ts
 ```
 
+### Standard 동시 접수 16건
+
+PostgreSQL 17의 `postgres`, `initdb`, `pg_ctl`을 PATH에 둔다. macOS와 네트워크 네임스페이스를 지원하는 Linux에서 아래 러너가 외부 IP 연결을 차단하고 전용 Unix 소켓으로 새 DB를 만든다. 실제 계정 자료와 클라우드 자격 증명은 필요하지 않다. 네 번째 인자는 새로 만들 집계 파일의 절대 경로다.
+
+```sh
+node scripts/standard-shared-capacity.mjs 2 8 normal /tmp/standard-webhook.json 4 fast
+node scripts/standard-shared-capacity.mjs 16 56 recovery /tmp/standard-recovery.json 30 fast
+node scripts/standard-shared-capacity.mjs 16 48 normal /tmp/standard-observed.json 4 observed
+```
+
+- 2명은 서명된 합성 결제 웹훅을 처리한다. 16명은 한정판매 재고 10건을 보존하기 위해 각 소유자의 실제 체크아웃에 합성 결제 확인과 이행 작업을 기록한다. 두 방식 모두 사전 점검, 정식 접수, 같은 DB와 큐를 사용하는 워커, 발행, 소유자 페이지와 WebP 열람을 거친다.
+- 두 번째 인자 8·48·56·64·80은 전체 Vertex 슬롯이다. 대응하는 유료 큐 동시 작업 수는 8·16·20·24·32, 특징 판독 한도는 6·32·40·48·70이다. 한 Node 프로세스에서 워커별 수집·판독 동시성 제한을 독립적으로 유지한다. 48·56·64·80용 SQL은 비어 있는 로컬 클러스터에서만 실행된다.
+- 다섯 번째 인자로 요청당 공개 후보를 1~240명 지정한다. 비공개 후보는 1명이다. `fast`는 모델 응답과 재전달 대기를 단축한다. `observed`는 이전 유료 실행의 단계별 모델 평균과 수집 예약 시간을 사용한다. 수집 대기는 Actor 1회당 약 25초로 균등 배분한 값이다. Dev 유료 큐의 재시도 간격 40~300초를 적용하며 관리형 서비스의 부하 조절은 재현하지 않는다.
+- `recovery`는 워커 진입 전 HTTP 429 한 번, 프로필 체크포인트 조회에서 SQLSTATE 57014 한 번을 주입하고 고정 응답 지연을 25% 늘린다. 공개 후보가 4명 이상이면 묶음 분류의 일부 응답에 중간 확신도를 사용해 추가 판독도 요청한다.
+- 정식 작업 중 5분마다 운영 코드로 만료된 공급자 예약과 슬롯을 회복하고 주문 이행을 조정한다. 마지막 작업 직후에도 한 번 수행한다. SDK 응답의 사용량을 끝내 받지 못한 시도의 비용은 미확정으로 보존한다.
+- 집계에 각 소유자의 결제·접수부터 발행까지, 이행 완료까지의 시간, 결과·이미지 권한과 원본 일치, 합성 사용량·정산, PostgreSQL 블록 통계를 남긴다. 발행 후 정산 불일치가 있으면 소유자의 열람과 이미지 확인을 마치고 원인별 건수를 기록한 뒤 검사를 실패시킨다. 60분을 넘긴 경우에도 작업과 열람 검사를 끝까지 진행해 완료 영수증과 초과 인원 수를 남긴다. 실제 공급자 과금과 Dev Free 디스크 잔량은 이 검사의 측정 범위 밖이다.
+
 ## 유지할 검증, 합치지 않을 검증
 
 - 유지: 결제/claim 경합, owner·공개 권한, 익명 target-excluded 매핑, 중복 provider 실행, 비용 예약·정산, job lease/recovery.

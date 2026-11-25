@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { validModelResponse } from '../../../commerce/precheckout/fixtures/blite-model';
 
 type Generation = {
@@ -24,6 +25,7 @@ export function syntheticGeneration(
     input: Generation,
     triageGender: 'female' | 'male' = 'female',
     featureGender: 'female' | 'male' = 'female',
+    includeResolverCandidates = false,
 ) {
     const schema = input.config.responseJsonSchema.properties;
     const contents = Array.isArray(input.contents) ? input.contents : [input.contents];
@@ -31,11 +33,13 @@ export function syntheticGeneration(
         .flatMap((content) => content.parts)
         .map((p) => p.text ?? '')
         .join('\n');
-    const match = (pattern: RegExp) => {
-        const value = prompt.match(pattern)?.[0];
-        if (!value) throw new Error('Missing synthetic prompt reference ' + pattern.source);
-        return value;
-    };
+    const manifest = z.array(z.object({ selectionId: z.string().min(1), kind: z.enum(['profile', 'feed']) })).min(1);
+    function data(label: string): unknown {
+        const prefix = label + '(JSON): ';
+        const line = prompt.split('\n').findLast(row => row.startsWith(prefix));
+        if (!line) throw new Error('Missing synthetic prompt manifest for ' + label);
+        return JSON.parse(line.slice(prefix.length));
+    }
     let output;
     const privateNames = fixedPrivateNameResults(input);
     if (privateNames) {
@@ -43,34 +47,31 @@ export function syntheticGeneration(
     } else if ('persona' in schema) {
         output = validModelResponse();
     } else if ('accounts' in schema) {
-        const accountId = match(/account:[a-f0-9]{64}/);
-        const evidence = 'batch-media:' + accountId.slice(-16) + ':1';
-        const ids = [evidence, 'batch-media:' + accountId.slice(-16) + ':2'];
-        output = {
-            accounts: [
-                {
-                    accountId,
-                    status: 'ok',
-                    accountContext: 'personal',
-                    assessment: {
-                        inferredGender: triageGender,
-                        confidence: 'high',
-                        ownerConsistency: 'same_person',
-                        evidenceSelectionIds: ids,
-                    },
-                },
-            ],
-        };
+        const accounts = z.array(z.object({ accountId: z.string(), mediaManifest: manifest })).min(1).parse(data('accounts'));
+        output = { accounts: accounts.map(({ accountId, mediaManifest }, index) => ({
+            accountId, status: 'ok', accountContext: 'personal',
+            assessment: { inferredGender: triageGender, confidence: includeResolverCandidates && index % 4 === 0 ? 'medium' : 'high', ownerConsistency: 'same_person',
+                evidenceSelectionIds: mediaManifest.slice(0, 2).map(item => item.selectionId) },
+        })) };
     } else if ('inferredGender' in schema) {
+        // Optional single-account resolution uses anonymous image aliases. The single-account
+        // triage stage instead supplies its own selection manifest.
+        const allowed = prompt.split('\n').find(line => line.startsWith('사용 가능한 selectionId: '));
+        const choices = allowed
+            ? allowed.slice('사용 가능한 selectionId: '.length).split(', ').filter(Boolean)
+            : manifest.parse(data('mediaManifest')).map(item => item.selectionId);
+        if (!choices.length) throw new Error('Missing synthetic resolution evidence');
         output = {
             inferredGender: triageGender,
             confidence: 'high',
             ownerConsistency: 'same_person',
-            evidenceSelectionIds: ['post:201:thumbnail'],
+            evidenceSelectionIds: [choices.find(id => id.startsWith('post:')) ?? choices[0]],
         };
     } else if ('gender' in schema) {
-        const profile = match(/profile:[^"\s,\]]+/);
-        const post = match(/post:201:thumbnail/);
+        const { mediaManifest } = z.object({ mediaManifest: manifest }).parse(data('evidence'));
+        const profile = mediaManifest.find(item => item.kind === 'profile')?.selectionId;
+        const post = mediaManifest.find(item => item.kind === 'feed')?.selectionId;
+        if (!profile || !post) throw new Error('Synthetic feature fixture requires its own profile and feed evidence');
         output = {
             gender: featureGender,
             genderConfidence: 'high',

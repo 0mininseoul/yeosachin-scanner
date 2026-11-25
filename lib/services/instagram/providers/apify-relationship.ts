@@ -1,4 +1,5 @@
 import { ApifyApiError, ApifyClient } from 'apify-client';
+import { AnalysisProviderAdmissionCapacityPendingError } from '@/lib/services/analysis/provider-admission-store';
 import { createHash } from 'node:crypto';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
 import type { InstagramFollower } from '@/lib/types/instagram';
@@ -14,6 +15,7 @@ import {
     isApifyCredentialSlot,
 } from './types';
 import { isInstagramUsername } from '../username';
+import { getApifyActorSemaphore } from './apify-actor-semaphore';
 
 export type ApifyClientLike = Pick<ApifyClient, 'actor' | 'dataset' | 'run'>;
 export type ApifyRelationshipKind = 'followers' | 'following';
@@ -83,7 +85,7 @@ function durableProviderCallbackCode(error: unknown): string | undefined {
 }
 
 export function isApifyProviderLifecycleError(error: unknown): boolean {
-    return durableProviderCallbackCode(error) !== undefined;
+    return error instanceof AnalysisProviderAdmissionCapacityPendingError || durableProviderCallbackCode(error) !== undefined;
 }
 
 export function isApifyQueuedStartCancellation(error: unknown): boolean {
@@ -164,46 +166,6 @@ export interface ApifyRelationshipActorDefinition {
     ): InstagramFollower[];
 }
 
-interface ActorWaiter {
-    limit: number;
-    resolve(): void;
-}
-
-class SharedActorSemaphore {
-    private active = 0;
-    private readonly queue: ActorWaiter[] = [];
-
-    async run<T>(limit: number, task: () => Promise<T>): Promise<T> {
-        await this.acquire(limit);
-        try {
-            return await task();
-        } finally {
-            this.active--;
-            this.drain();
-        }
-    }
-
-    private acquire(limit: number): Promise<void> {
-        if (this.queue.length === 0 && this.active < limit) {
-            this.active++;
-            return Promise.resolve();
-        }
-        return new Promise((resolve) => {
-            this.queue.push({ limit, resolve });
-        });
-    }
-
-    private drain(): void {
-        while (this.queue.length > 0 && this.active < this.queue[0].limit) {
-            const waiter = this.queue.shift();
-            if (!waiter) return;
-            this.active++;
-            waiter.resolve();
-        }
-    }
-}
-
-const sharedActorSemaphore = new SharedActorSemaphore();
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 async function withinInvocationDeadline<T>(
@@ -269,7 +231,7 @@ export function runWithApifyActorSlot<T>(
     concurrency: number,
     task: () => Promise<T>
 ): Promise<T> {
-    return sharedActorSemaphore.run(concurrency, task);
+    return getApifyActorSemaphore().run(concurrency, task);
 }
 
 function assertLimit(limit: number, maximum: number): void {
@@ -467,6 +429,8 @@ export async function startOrResumeApifyActor(
                 maxChargeUsd: maxTotalChargeUsd,
             });
         } catch (error) {
+            // The DB explicitly declined admission before recording a start or calling the Actor.
+            if (error instanceof AnalysisProviderAdmissionCapacityPendingError) throw error;
             throw sanitizedProviderCallbackError(
                 error,
                 PROVIDER_RUN_RESERVATION_PERSISTENCE_ERROR

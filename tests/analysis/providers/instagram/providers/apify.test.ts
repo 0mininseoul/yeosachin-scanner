@@ -28,6 +28,7 @@ import {
     makeApifyProvider,
     parseApifyRelationshipDataset,
 } from '../../../../../lib/services/instagram/providers/apify';
+import { AnalysisProviderAdmissionCapacityPendingError } from '@/lib/services/analysis/provider-admission-store';
 import type { ApifyClientLike } from '../../../../../lib/services/instagram/providers/apify-relationship';
 import {
     selectAnalysisV2ApifyCredentialSlot,
@@ -1027,6 +1028,17 @@ describe('apifyProvider', () => {
             'ANALYSIS_V2_PROVIDER_RUN_COST_START_PERSISTENCE_ERROR'
         ));
         expect(waitForFinish).not.toHaveBeenCalled();
+    });
+
+    it('preserves a pre-start capacity wait without starting the Actor', async () => {
+        const { client, call } = mockClient([]);
+        const capacity = new AnalysisProviderAdmissionCapacityPendingError();
+        await expect(startOrResumeApifyActor(client, APIFY_RELATIONSHIP_ACTOR_ID, {}, {
+            logicalProvider: 'apify', credentialSlot: 'primary', timeoutSecs: 120, maxItems: 1, maxTotalChargeUsd: 0.1,
+        }, {
+            onBeforeRunStart: vi.fn().mockRejectedValue(capacity), recordUsage: vi.fn(),
+        })).rejects.toBe(capacity);
+        expect(call).not.toHaveBeenCalled();
     });
 
     it('does not start an Actor when the start-intent reservation fails', async () => {
