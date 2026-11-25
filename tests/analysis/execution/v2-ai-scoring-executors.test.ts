@@ -938,7 +938,8 @@ describe('V2 AI and scoring executors', () => {
         ]);
     });
 
-    it('captures the unused feature remainder before unusable triage can skip all model calls', async () => {
+    it.each([AI_STAGE_POLICY_V211_VERSION, 'ai-stage-policy-v2.6'])(
+        'preserves %s archive policy when unusable triage skips all model calls', async version => {
         const records = new Map<string, unknown>();
         vi.mocked(currentDevStandardArchive).mockReturnValue({
             mode: 'capture', ready: () => true, beginPreflightCapture: vi.fn(), seal: vi.fn(), load: vi.fn(),
@@ -967,15 +968,16 @@ describe('V2 AI and scoring executors', () => {
             }),
         });
         await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(context('profile_ai', {
-            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:version,
             state:state({ planId:'standard' }),
         }));
         expect(memoryState.outcomes[0]).toMatchObject({ status:'media_unavailable', mediaCoverage:{selectedCount:triageSelection.size} });
         expect(deps.ai.gender).not.toHaveBeenCalled();
         expect(deps.ai.features).not.toHaveBeenCalled();
         expect(vi.mocked(deps.normalizeMedia).mock.calls.map(([item]) => item.selectionId).sort())
-            .toEqual([...plan.feature.selectionIds].sort());
-        expect([...records.keys()].filter(k => k.includes('ai-image-selection-v1'))).toHaveLength(2);
+            .toEqual([...(version === AI_STAGE_POLICY_V211_VERSION ? plan.feature.selectionIds : plan.triage.selectionIds)].sort());
+        expect([...records.keys()].filter(k => k.includes('ai-image-selection-v1')))
+            .toHaveLength(version === AI_STAGE_POLICY_V211_VERSION ? 2 : 1);
     });
 
     it.each(['triage', 'feature_remainder'] as const)('does not start dependent models or checkpoint if the %s archive write fails', async stage => {
@@ -6066,7 +6068,7 @@ describe('v2.11 profile AI redelivery', () => {
         });
         const baseline = state();
         const job = context('profile_ai', {
-            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:AI_STAGE_POLICY_V211_VERSION,
+            jobKey:'track:profile-ai:batch:0', batch:0, aiStagePolicyVersion:version,
             state:state({
                 planId:'standard', relationships:{...baseline.relationships!,profileBatches:[{
                     ...baseline.relationships!.profileBatches[0]!,itemCount:count,

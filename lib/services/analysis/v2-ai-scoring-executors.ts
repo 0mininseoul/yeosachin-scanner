@@ -2270,7 +2270,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         : await normalizeAnalysisV2MediaSelections(
                             policy.triage.media, dependencies.normalizeMedia, aiFence.aiStagePolicyVersion,
                         );
-                    if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture') {
+                    if (context.state.planId === 'standard' && currentDevStandardArchive()?.mode === 'capture'
+                        && policySupports(aiFence.aiStagePolicyVersion, 'partialMediaCoverage')) {
                         // A later model can choose features even when this capture skips them.
                         // Only the archive observes these extra inputs. The normal stage keeps
                         // its own coverage, checkpoints and model admission.
