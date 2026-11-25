@@ -93,7 +93,7 @@ vi.mock('@google/genai/node', async original => ({
             this.models = {
                 generateContent: async (input: unknown) => {
                     const signal = (input as { config?: { abortSignal?: AbortSignal } }).config?.abortSignal;
-            await transport('https://vertex.fixture.invalid', { signal });
+                    await transport('https://vertex.fixture.invalid', { signal });
                     return boundary.model(input);
                 }
             };

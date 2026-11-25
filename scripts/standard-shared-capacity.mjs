@@ -11,7 +11,7 @@ const capacity = sharedStandardCapacity(slots);
 if (rest.length || !['2', '16'].includes(owners) || !['normal', 'recovery'].includes(scenario)
     || !/^[1-9][0-9]{0,2}$/.test(publicCount) || Number(publicCount) > 240
     || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
-    throw new Error('Usage: node scripts/standard-shared-capacity.mjs [2|16] [8|48|56|64] [normal|recovery] '
+    throw new Error('Usage: node scripts/standard-shared-capacity.mjs [2|16] [8|48|56|64|80] [normal|recovery] '
         + '[absolute-new-receipt.json] [1..240 public candidates] [fast|observed]');
 }
 

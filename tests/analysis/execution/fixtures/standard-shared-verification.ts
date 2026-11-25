@@ -175,13 +175,17 @@ export async function sharedStandardLedgerStages(db: Database, requestId: string
         'attempts' | 'cutoffs' | 'unknown_cost_cutoffs' | 'priced_cutoffs_missing_attempt_cost' | 'cutoffs_missing_tokens'
         | 'unsettled_attempts' | 'other_cost_mismatches' | 'unknown_settlements' | 'unknown_reserved_estimate_micros'
         | 'known_settled_micros' | 'wrong_order' | 'open_reservations' | 'duplicate_settlements' | 'unmatched_settlements'
-        | 'unreleased_leases' | 'expired_leases', number>;
+        | 'cutoffs_cancelled_only' | 'cutoffs_without_budget_row' | 'cutoffs_with_unexpired_admission'
+        | 'cutoffs_with_expired_admission' | 'cutoffs_with_recovery_required_admission'
+        | 'cutoffs_with_unexpired_slot' | 'cutoffs_with_expired_slot' | 'cutoffs_with_quarantined_slot'
+        | 'unreleased_leases' | 'unexpired_leases' | 'expired_leases' | 'recovery_required_leases', number>;
     const { rows } = await db.query<Stage>(`
         WITH attempts AS (SELECT * FROM analysis_v2_ai_attempts WHERE request_id=$1),
         charges AS (
             SELECT operation_key,attempt,count(*)::int AS holds,
                 count(*) FILTER (WHERE order_id IS DISTINCT FROM $2::uuid::text)::int AS wrong_order,
                 count(*) FILTER (WHERE state='reserved')::int AS open_reservations,
+                count(*) FILTER (WHERE state='cancelled')::int AS cancelled,
                 count(*) FILTER (WHERE state='settled')::int AS settlements,
                 count(*) FILTER (WHERE state='settled' AND usage_unknown AND actual_cost_usd IS NULL)::int AS settled_unknown,
                 sum(actual_cost_usd) FILTER (WHERE state='settled') AS actual_cost,
@@ -189,15 +193,30 @@ export async function sharedStandardLedgerStages(db: Database, requestId: string
             FROM vertex_ai_budget_reservations WHERE run_id=$1::uuid::text GROUP BY operation_key,attempt
         ), leases AS (
             SELECT job_key,job_claim_token,operation_key,count(*) FILTER (WHERE state<>'released')::int AS unreleased,
-                count(*) FILTER (WHERE state='leased' AND expires_at <= statement_timestamp())::int AS expired
+                count(*) FILTER (WHERE state='leased' AND expires_at > statement_timestamp())::int AS unexpired,
+                count(*) FILTER (WHERE state='leased' AND expires_at <= statement_timestamp())::int AS expired,
+                count(*) FILTER (WHERE state='recovery_required')::int AS recovery_required
             FROM analysis_provider_admission_leases WHERE request_id=$1 AND workload_role='paid' AND logical_provider='gemini'
             GROUP BY job_key,job_claim_token,operation_key
+        ), physical_slots AS (
+            SELECT job_key,operation_key,attempt,stage, bool_or(expires_at > statement_timestamp()) AS unexpired,
+                bool_or(expires_at <= statement_timestamp()) AS expired, bool_or(state='quarantined') AS quarantined
+            FROM analysis_v2_gemini_leases WHERE request_id=$1 AND state IN ('leased','quarantined')
+            GROUP BY job_key,operation_key,attempt,stage
         )
         SELECT CASE WHEN a.stage=ANY($3::text[]) THEN a.stage ELSE 'unattributed' END AS stage,
             count(a.operation_key)::int AS attempts, count(*) FILTER (WHERE a.status='cutoff')::int AS cutoffs,
             count(*) FILTER (WHERE a.status='cutoff' AND c.settled_unknown>0)::int AS unknown_cost_cutoffs,
             count(*) FILTER (WHERE a.status='cutoff' AND c.actual_cost>0 AND a.estimated_cost_usd IS NULL)::int AS priced_cutoffs_missing_attempt_cost,
             count(*) FILTER (WHERE a.status='cutoff' AND a.total_tokens IS NULL)::int AS cutoffs_missing_tokens,
+            count(*) FILTER (WHERE a.status='cutoff' AND c.holds=c.cancelled)::int AS cutoffs_cancelled_only,
+            count(*) FILTER (WHERE a.status='cutoff' AND c.holds IS NULL)::int AS cutoffs_without_budget_row,
+            count(*) FILTER (WHERE a.status='cutoff' AND l.unexpired>0)::int AS cutoffs_with_unexpired_admission,
+            count(*) FILTER (WHERE a.status='cutoff' AND l.expired>0)::int AS cutoffs_with_expired_admission,
+            count(*) FILTER (WHERE a.status='cutoff' AND l.recovery_required>0)::int AS cutoffs_with_recovery_required_admission,
+            count(*) FILTER (WHERE a.status='cutoff' AND s.unexpired)::int AS cutoffs_with_unexpired_slot,
+            count(*) FILTER (WHERE a.status='cutoff' AND s.expired)::int AS cutoffs_with_expired_slot,
+            count(*) FILTER (WHERE a.status='cutoff' AND s.quarantined)::int AS cutoffs_with_quarantined_slot,
             count(*) FILTER (WHERE a.operation_key IS NOT NULL AND coalesce(c.settlements,0)=0)::int AS unsettled_attempts,
             count(*) FILTER (WHERE a.status<>'cutoff' AND c.settlements=1 AND c.actual_cost IS DISTINCT FROM a.estimated_cost_usd)::int AS other_cost_mismatches,
             coalesce(sum(c.settled_unknown),0)::int AS unknown_settlements,
@@ -206,10 +225,12 @@ export async function sharedStandardLedgerStages(db: Database, requestId: string
             coalesce(sum(c.wrong_order),0)::int AS wrong_order, coalesce(sum(c.open_reservations),0)::int AS open_reservations,
             coalesce(sum(greatest(c.settlements-1,0)),0)::int AS duplicate_settlements,
             coalesce(sum(c.settlements) FILTER (WHERE a.operation_key IS NULL),0)::int AS unmatched_settlements,
-            coalesce(sum(l.unreleased),0)::int AS unreleased_leases,coalesce(sum(l.expired),0)::int AS expired_leases
+            coalesce(sum(l.unreleased),0)::int AS unreleased_leases, coalesce(sum(l.unexpired),0)::int AS unexpired_leases,
+            coalesce(sum(l.expired),0)::int AS expired_leases, coalesce(sum(l.recovery_required),0)::int AS recovery_required_leases
         FROM attempts a FULL JOIN charges c USING (operation_key,attempt)
         LEFT JOIN leases l ON l.job_key=a.job_key AND l.job_claim_token=a.job_claim_token
             AND l.operation_key='gemini:'||a.operation_key||':attempt:'||a.attempt::text
+        LEFT JOIN physical_slots s ON s.job_key=a.job_key AND s.operation_key=a.operation_key AND s.attempt=a.attempt AND s.stage=a.stage
         GROUP BY 1 ORDER BY 1`, [requestId, orderId, [...ANALYSIS_V2_AI_STAGES]]);
     return rows;
 }

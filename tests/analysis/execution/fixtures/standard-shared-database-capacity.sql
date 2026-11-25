@@ -27,7 +27,7 @@ DECLARE
     installed text;
     revised text;
 BEGIN
-    IF slots NOT IN (48,56,64) OR feature_cap <> slots-16
+    IF (slots, feature_cap) NOT IN ((48,32), (56,40), (64,48), (80,70))
         OR current_setting('listen_addresses') <> '' OR inet_server_addr() IS NOT NULL
         OR to_regclass('dev_live_budget.standard_owner_policy') IS NULL
         OR EXISTS (SELECT FROM public.analysis_requests)
@@ -38,7 +38,8 @@ BEGIN
     END IF;
     credential_pattern := CASE slots WHEN 48 THEN '([1-9]|[1-3][0-9]|4[0-8])'
         WHEN 56 THEN '([1-9]|[1-4][0-9]|5[0-6])'
-        WHEN 64 THEN '([1-9]|[1-5][0-9]|6[0-4])' END;
+        WHEN 64 THEN '([1-9]|[1-5][0-9]|6[0-4])'
+        WHEN 80 THEN '([1-9]|[1-7][0-9]|80)' END;
 
     FOR patch IN SELECT * FROM (VALUES
         ('acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)',

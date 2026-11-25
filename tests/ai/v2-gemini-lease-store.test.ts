@@ -48,10 +48,13 @@ describe('deployment-wide Gemini lease store', () => {
     it.each([
         { env: { NODE_ENV: 'production', STANDARD_SHARED_VERTEX_SLOTS: '56' }, slot: 9 },
         { env: { NODE_ENV: 'production', STANDARD_SHARED_VERTEX_SLOTS: '64' }, slot: 64 },
+        { env: { NODE_ENV: 'production', STANDARD_SHARED_VERTEX_SLOTS: '80' }, slot: 9 },
+        { env: { NODE_ENV: 'production', STANDARD_SHARED_VERTEX_SLOTS: '80' }, slot: 80 },
         { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '8' }, slot: 9 },
         { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '48' }, slot: 49 },
         { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '56' }, slot: 57 },
         { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '64' }, slot: 65 },
+        { env: { NODE_ENV: 'test', STANDARD_SHARED_VERTEX_SLOTS: '80' }, slot: 81 },
     ])('rejects slots outside the selected physical pool ($slot)', async ({ env, slot }) => {
         const rpc = vi.fn(async () => ({ data: [{ outcome: 'acquired', slot, lease_claim_token: claimToken,
             fence: 1, expires_at: expiresAt }], error: null }));

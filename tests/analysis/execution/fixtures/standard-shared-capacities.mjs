@@ -4,6 +4,7 @@ export const sharedStandardCapacities = /** @type {const} */ ([
     { slots: 48, workers: 16, features: 32 },
     { slots: 56, workers: 20, features: 40 },
     { slots: 64, workers: 24, features: 48 },
+    { slots: 80, workers: 32, features: 70 },
 ]);
 
 /** @param {string | number} slots */

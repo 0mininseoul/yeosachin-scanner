@@ -103,6 +103,9 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
             };
             const feature = await acquireStage('featureAnalysis', sharedStandardCapacity(slots).features);
             await expect(acquire('featureAnalysis')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+            // Leave room for twelve triage leases and the subsequent six-resolver mix
+            // after independently testing the feature ceiling (70 in the 80-slot pool).
+            for (const lease of feature.splice(slots - 16)) await store.release(lease);
             const triage = await acquireStage('genderTriage', 12);
             await expect(acquire('genderTriage')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
             const privateNames = await acquireStage('privateAccountName', 2);
@@ -119,6 +122,18 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
             });
             const high = resolver.at(-1)!;
             expect(high.slot).toBe(slots);
+            await expect(db.query('SELECT * FROM public.release_analysis_v2_gemini_lease($1,$2,$3)',
+                [slots + 1, high.claimToken, high.fence])).rejects.toMatchObject({
+                code: 'P0001', message: 'ANALYSIS_V2_GEMINI_LEASE_INVALID',
+            });
+            const nextCredential = 'gemini-' + (slots + 1);
+            await expect(db.query(`SELECT public.acquire_analysis_provider_admission(
+                    public.analysis_provider_admission_expected_id('paid','gemini',$1,$2,$3,$4),
+                    'paid','gemini',$1,'paid:gemini:global',$2,$3,$4,$5,$6,$7,gen_random_uuid(),240)`,
+            [nextCredential, job.requestId, job.jobKey, high.providerAdmissionLease!.operationKey,
+                job.jobClaimToken, high.claimToken, high.fence])).rejects.toMatchObject({
+                code: 'P0001', message: 'ANALYSIS_PROVIDER_ADMISSION_CREDENTIAL_FORBIDDEN',
+            });
             const metadata = (identity: AnalysisV2AiResultIdentity) => ({
                 requestId: job.requestId, jobKey: job.jobKey, claimToken: job.jobClaimToken,
                 operationKey: identity.operationKey, stage: identity.stage, attempt: 1, retryCount: 0,
