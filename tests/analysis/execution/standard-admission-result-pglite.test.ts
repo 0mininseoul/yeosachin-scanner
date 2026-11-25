@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { expect, it, vi, afterEach } from 'vitest';
 import { writeSync } from 'node:fs';
+import { describePrivate90Failure, emptyPrivate90Failure } from './fixtures/private90-worker-failure.mjs';
 import { private90VertexLedger } from './fixtures/private90-vertex-ledger';
 import { verifyPrivate90Images } from './fixtures/private90-result-images';
 import { createRequire } from 'node:module';
@@ -23,7 +24,7 @@ import { createAnalysisV2ProductionExecutorRegistry } from '@/lib/services/analy
 import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { createAnalysisV2ProgressReporter } from '@/lib/services/analysis/v2-progress-reporter';
 import { assertOwnerPage } from './fixtures/standard-result-page';
-import { classifyAnalysisV2JobFailure, processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import { type AnalysisV2JobHandler, classifyAnalysisV2JobFailure, executeAnalysisV2DagJob, processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
 import { SyntheticApify, target, candidate } from './fixtures/standard-providers';
 import { POST as start } from '@/app/api/analysis/preflight/route';
@@ -534,6 +535,18 @@ async function runStandardRequest(
             reloadState: (id) => stateStore.load(id),
         }),
     };
+    // Observe the actual error before the worker maps it to a stable public code.
+    const diagnosticHandler: AnalysisV2JobHandler = async claim => {
+        try {
+            return await executeAnalysisV2DagJob(claim, {
+                ...worker, onPhase: phase => { if (observed) observed.executorPhase = phase; },
+            });
+        } catch (error) {
+            if (observed) Object.assign(observed, describePrivate90Failure(error));
+            throw error;
+        }
+    };
+    const deliveryDependencies = observed ? { ...worker, handler: diagnosticHandler } : worker;
     while (runtime.queue.length) {
         if (observed) observed.assertion = 'queue_limit';
         if (++steps > 24 + (privateReplay?.profileBatches.length ?? 0) * 36) throw new Error('Unexpected repeated task delivery');
@@ -547,7 +560,8 @@ async function runStandardRequest(
         }
         const [payload] = runtime.queue.splice(next, 1);
         if (observed) {
-            Object.assign(observed, private90Job(payload!.jobKey));
+            Object.assign(observed, emptyPrivate90Failure(), private90Job(payload!.jobKey));
+            observed.executorPhase = 'handler';
             observed.assertion = 'task_parse';
             observed.deliveryStatus = 'running';
             observed.disposition = 'none';
@@ -560,7 +574,7 @@ async function runStandardRequest(
             privateReplay.observed.cause = 'worker_stage';
         }
         if (observed) observed.assertion = 'worker_return';
-        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, worker)).catch(error => {
+        const outcome = await runDelivery(() => processAnalysisV2TaskDelivery(delivery, deliveryDependencies)).catch(error => {
             if (observed) {
                 const failure = classifyAnalysisV2JobFailure(error);
                 observed.deliveryStatus = 'threw';
@@ -724,7 +738,7 @@ async function runStandardRequest(
         expect(sentIds.length).toBe(observed.fixedVertexCalls);
         expect(new Set(sentIds).size).toBe(sentIds.length);
         const ledger = await private90VertexLedger(db, approval.id, sentIds);
-        Object.assign(observed, { positiveSettlements: ledger.positive, unusedHolds: ledger.unused,
+        Object.assign(observed, { ledgerChecked: 1, positiveSettlements: ledger.positive, unusedHolds: ledger.unused,
             unresolvedHolds: ledger.unresolved, duplicatePositive: ledger.duplicate, orphanPositive: ledger.orphan });
         expect(ledger).toMatchObject({ positive: observed.fixedVertexCalls, unresolved: 0, duplicate: 0, orphan: 0 });
         expect(await totals()).toMatchObject({

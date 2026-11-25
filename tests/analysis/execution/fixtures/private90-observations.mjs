@@ -1,3 +1,4 @@
+import { emptyPrivate90Failure, sourceEnums } from './private90-worker-failure.mjs';
 import { createRequire } from 'node:module';
 const { isAnalysisV2WorkerErrorCode } = createRequire(import.meta.url)('../../../../lib/services/analysis/v2-worker-error-codes.ts');
 
@@ -22,6 +23,7 @@ const modelErrors = new Set(['none','other', ...['PROMPT_SHAPE','MODEL_INPUT_SHA
     'UNKNOWN_BATCH_ACCOUNT','UNSUPPORTED_SCHEMA','ACCOUNT_ROUTE_AMBIGUOUS'].map(s => 'OFFLINE_STANDARD_VERTEX_' + s)]);
 export const safePrivate90ModelError = value => modelErrors.has(value) ? value : 'other';
 const workerEnums = {
+    ...sourceEnums,
     jobStage: ['none','unknown','profiles','profile_ai','private_names',...Object.values(jobStages)],
     deliveryStatus: ['none','running','threw','retry','failed','completed','already_terminal','continuation'],
     disposition: ['none','other','transient','permanent','fence','deferred','exhausted','already_terminal','completed'],
@@ -46,9 +48,10 @@ const causes = ['none', 'reader_verification', 'source_receipts', 'source_admiss
 
 export function newPrivate90Observations() {
     return {
+        ...emptyPrivate90Failure(),
         jobStage: 'none', jobBatch: null, deliveryStatus: 'none', disposition: 'none', assertion: 'none',
         workerCode: 'none', sqlState: 'none', modelStage: 'none', modelError: 'none', retries: 0, continuations: 0,
-        positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
+        ledgerChecked: 0, positiveSettlements: 0, unusedHolds: 0, unresolvedHolds: 0, duplicatePositive: 0, orphanPositive: 0,
         phase: 'reader', cause: 'reader_verification', profileBatches: 0, completedProfileBatches: 0, publicProfilesInspected: 0, missingFeatureInputs: 0,
         targetImages: 0, publicRows: 0, privateRows: 0, publicImages: 0, privateImages: 0,
         resultPages: 0, imageGets: 0, webpVerified: 0, sourceReceipts: 0, workerJobs: 0, duplicateDeliveries: 0,
