@@ -35,6 +35,7 @@ vi.mock('@/lib/services/identity/account-principal-store', () => ({
 }));
 vi.mock('next/navigation', () => ({
     redirect: vi.fn(),
+    notFound: () => { throw new Error('NOT_FOUND'); },
 }));
 vi.mock('@/components/case-ui', () => ({
     TopBar: () => createElement('div', null, 'top'),
@@ -113,6 +114,32 @@ describe('earlybird status page', () => {
             if (table === 'earlybird_orders') return orderQuery;
             throw new Error(`unexpected table: ${table}`);
         });
+    });
+
+    it.each([ORDER_ID, ORDER_ID.toUpperCase()])('reloads only the signed-in owner, plan and order selected by this return page', async orderId => {
+        const page = await EarlybirdPage({ searchParams: Promise.resolve({ plan: 'basic', orderId }) });
+        expect(renderToStaticMarkup(page)).toContain(ORDER_ID);
+        const query = mocks.from.mock.results[0].value;
+        expect(query.eq.mock.calls).toEqual([['user_id', USER_ID], ['plan_id', 'basic'], ['id', ORDER_ID]]);
+    });
+
+    it('returns 404 for a missing or foreign exact order without trying the latest purchase', async () => {
+        const unavailable = queryBuilder(null);
+        mocks.from.mockReturnValue(unavailable);
+        await expect(EarlybirdPage({ searchParams: Promise.resolve({ plan: 'basic', orderId: ORDER_ID }) }))
+            .rejects.toThrow('NOT_FOUND');
+        expect(mocks.from).toHaveBeenCalledTimes(1);
+        expect(unavailable.eq.mock.calls).toEqual([['user_id', USER_ID], ['plan_id', 'basic'], ['id', ORDER_ID]]);
+    });
+
+    it.each([
+        { plan: 'basic', orderId: 'invalid' },
+        { plan: 'standard', orderId: [ORDER_ID, ORDER_ID] },
+        { plan: 'plus', orderId: ORDER_ID },
+        { orderId: ORDER_ID },
+    ])('rejects an invalid exact address without a broad lookup', async params => {
+        await expect(EarlybirdPage({ searchParams: Promise.resolve(params) })).rejects.toThrow('NOT_FOUND');
+        expect(mocks.from).not.toHaveBeenCalled();
     });
 
     it('renders a paid zero-KRW coupon order instead of the no-history branch', async () => {

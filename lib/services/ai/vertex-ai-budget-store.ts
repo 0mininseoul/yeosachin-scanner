@@ -2,17 +2,19 @@ import {
     estimateVertexAiPreDispatchCost,
     vertexAiBudgetLimitsFromEnv,
     VERTEX_AI_BUDGET_RPC_NAMES,
+    VertexAiBudgetCapacityPendingError,
     VertexAiBudgetExceededError,
     type VertexAiBudgetLimits,
     type VertexAiBudgetReservation,
     type VertexAiBudgetSnapshot,
     type VertexAiBudgetStore,
 } from './vertex-ai-cost-policy';
+import { paidStandardBudgetWaitEnabled } from '../analysis/paid-standard-capacity';
 
 /** Minimal structural interface so this adapter works with Supabase without importing its client. */
 export interface VertexAiBudgetRpcResponse {
     data: unknown;
-    error: { message?: string; code?: string } | null;
+    error: { message?: string; code?: string; hint?: string | null } | null;
 }
 
 export interface VertexAiBudgetRpcClient {
@@ -102,8 +104,15 @@ async function callRpc(
     client: VertexAiBudgetRpcClient,
     functionName: string,
     args: Readonly<Record<string, unknown>>,
+    reservationRunId?: string,
 ): Promise<unknown> {
     const response = await client.rpc(functionName, args);
+    if (reservationRunId && response.error?.code === 'P0001'
+        && response.error.hint === 'VERTEX_AI_BUDGET_CAPACITY_PENDING'
+        && /^VERTEX_AI_BUDGET_EXCEEDED:(run|order|day):/.test(response.error.message ?? '')
+        && await paidStandardBudgetWaitEnabled(reservationRunId)) {
+        throw new VertexAiBudgetCapacityPendingError();
+    }
     if (response.error) throwRpcError(response.error);
     return response.data;
 }
@@ -138,7 +147,7 @@ export function createSupabaseVertexAiBudgetStore(
                 p_per_run_limit_usd: limits.perRunUsd,
                 p_per_order_limit_usd: limits.perOrderUsd,
                 p_daily_limit_usd: limits.dailyUsd,
-            });
+            }, input.runId);
             return reservationFromRpc(data);
         },
 

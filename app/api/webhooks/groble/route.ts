@@ -408,18 +408,24 @@ async function handlePOST(
             const internalSellerReference = parseGrobleSellerReference(
                 payment.sellerReference
             );
-            persistence = internalSellerReference
-                ? await supabaseAdmin.rpc(
-                    'finalize_earlybird_groble_payment_by_reference',
-                    {
-                        p_seller_reference: internalSellerReference,
-                        ...params,
-                    }
-                )
-                : await supabaseAdmin.rpc(
-                    'finalize_earlybird_groble_payment',
-                    params
-                );
+            if (autoAdmissionEligible) {
+                persistence = await supabaseAdmin.rpc('finalize_automatic_paid_analysis_v1', {
+                    ...params, p_seller_reference: internalSellerReference,
+                });
+            } else {
+                persistence = internalSellerReference
+                    ? await supabaseAdmin.rpc(
+                        'finalize_earlybird_groble_payment_by_reference',
+                        {
+                            p_seller_reference: internalSellerReference,
+                            ...params,
+                        }
+                    )
+                    : await supabaseAdmin.rpc(
+                        'finalize_earlybird_groble_payment',
+                        params
+                    );
+            }
         } catch {
             return reject(
                 500,

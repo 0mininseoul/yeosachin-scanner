@@ -22,10 +22,10 @@ function connection(database: Pool | PoolClient): StandardConnection {
 // No connection string or archive input is accepted. Concurrent requests share
 // one fresh cluster, its actual Dev fences, eight Vertex leases and provider budgets.
 export async function createSharedStandardDatabase(
-    slots: ReturnType<typeof sharedStandardCapacity>['slots'] = 8,
+    preset: string | number = 8,
     schemaOptions?: Parameters<typeof installStandardFixtureSchema>[1],
 ) {
-    const capacity = sharedStandardCapacity(slots);
+    const { slots, features, resolvers } = sharedStandardCapacity(preset);
     const env = { PATH: process.env.PATH, LC_ALL: 'C', NODE_ENV: 'test' as const };
     if (!/^postgres \(PostgreSQL\) 17\./.test(execFileSync('postgres', ['--version'], { env, encoding: 'utf8' }))) {
         throw new Error('Shared Standard fixture requires PostgreSQL 17 on PATH');
@@ -60,7 +60,8 @@ export async function createSharedStandardDatabase(
             await installStandardFixtureSchema(connection(installer), schemaOptions);
             if (slots !== 8) {
                 await installer.query(`SELECT set_config('standard_shared.vertex_slots', $1, false),
-                    set_config('standard_shared.feature_slots', $2, false)`, [String(slots), String(capacity.features)]);
+                    set_config('standard_shared.feature_slots', $2, false),
+                    set_config('standard_shared.resolver_slots', $3, false)`, [String(slots), String(features), String(resolvers)]);
                 const sql = readFileSync(new URL('./standard-shared-database-capacity.sql', import.meta.url), 'utf8');
                 await installer.query(sql);
             }

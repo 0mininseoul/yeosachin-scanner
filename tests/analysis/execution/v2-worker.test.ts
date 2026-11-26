@@ -1,3 +1,5 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { paidStandardExpandedCapacityEnabled } from '../../../lib/services/analysis/paid-standard-capacity';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { VertexDispatchWindow } from '@/lib/services/ai/vertex-dispatch-window';
 import { createHash, randomUUID } from 'node:crypto';
@@ -306,6 +308,71 @@ describe('analysis V2 progress failure isolation', () => {
 });
 
 describe('analysis V2 durable DAG worker', () => {
+    it('binds production expansion and its final dispatch decision to the current claimed handler', async () => {
+        const settings = {
+            NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+            PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+        };
+        for (const [key, value] of Object.entries(settings)) vi.stubEnv(key, value);
+        try {
+            dispatchFenceRpc.mockImplementation(async name => ({ data: name !== 'authorize_paid_standard_vertex_dispatch_v1', error: null }));
+            const callsBefore = dispatchFenceRpc.mock.calls.length;
+            await processAnalysisV2TaskDelivery(delivery, {
+                store: store(bootstrapClaim),
+                handler: async claim => {
+                    expect(await paidStandardExpandedCapacityEnabled('ai-stage-policy-v2.11', claim)).toBe(true);
+                    expect(await paidStandardExpandedCapacityEnabled('ai-stage-policy-v2.11', claim)).toBe(true);
+                    expect(await paidStandardExpandedCapacityEnabled('ai-stage-policy-v2.11', { ...claim, claimToken: reservationToken })).toBe(false);
+                    await expect(new VertexDispatchWindow(10_000).prepareFetch()).rejects.toThrow('ANALYSIS_V2_DAG_STATE_FENCE_MISMATCH');
+                    return [];
+                },
+            });
+            const calls = dispatchFenceRpc.mock.calls.slice(callsBefore);
+            expect(calls.filter(([name]) => name === 'paid_standard_capacity_approved_v1')).toEqual([
+                ['paid_standard_capacity_approved_v1', { p_request_id: requestId, p_job_key: delivery.jobKey, p_job_claim_token: claimToken }],
+            ]);
+            expect(calls.map(([name]) => name)).toContain('authorize_paid_standard_vertex_dispatch_v1');
+            expect(await paidStandardExpandedCapacityEnabled('ai-stage-policy-v2.11', bootstrapClaim)).toBe(false);
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it.each([
+        { name: 'refunded Standard', lineage: true, error: null, denial: 'closed' },
+        { name: 'unavailable eligibility', lineage: null, error: { code: 'NETWORK' }, denial: 'db_contention' },
+        { name: 'another plan', lineage: false, error: null, denial: null },
+    ])('routes a fresh opt-in delivery for $name before reaching the SDK', async ({ lineage, error, denial }) => {
+        const settings = {
+            NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+            PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+        };
+        for (const [key, value] of Object.entries(settings)) vi.stubEnv(key, value);
+        try {
+            dispatchFenceRpc.mockImplementation(async name => {
+                if (name === 'paid_standard_capacity_approved_v1') return { data: false, error };
+                if (name === 'paid_standard_capacity_lineage_v1') return { data: lineage, error: null };
+                return { data: true, error: null };
+            });
+            const before = dispatchFenceRpc.mock.calls.length;
+            const handler = vi.fn(async () => {
+                const window = new VertexDispatchWindow(10_000);
+                if (denial) {
+                    await expect(window.prepareFetch()).rejects.toMatchObject({ reason: denial });
+                } else {
+                    await window.prepareFetch();
+                    window.markSent();
+                }
+                expect(window.hasSent).toBe(denial === null);
+                return [];
+            });
+            await processAnalysisV2TaskDelivery(delivery, { store: store(bootstrapClaim), handler });
+            expect(handler).toHaveBeenCalledOnce();
+            const names = dispatchFenceRpc.mock.calls.slice(before).map(([name]) => name);
+            expect(names.includes('authorize_analysis_v2_vertex_dispatch_v1')).toBe(denial === null);
+        } finally { vi.unstubAllEnvs(); }
+    });
+
     it('passes the route-selected durable lease to the exact claim', async () => {
         const legacyStore = store(bootstrapClaim);
         await processAnalysisV2TaskDelivery(delivery, {
@@ -2015,6 +2082,7 @@ describe('analysis V2 durable DAG worker', () => {
     it.each([
         { error: new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 37), delay: 37 },
         { error: new DevLiveVertexBudgetReservationPendingError(), delay: 5 },
+        { error: new VertexAiBudgetCapacityPendingError(), delay: 5 },
     ])('enqueues a delayed continuation for $error.name', async ({ error, delay }) => {
         const claimed = { ...bootstrapClaim, attemptCount: 3 };
         const jobStore = store(claimed);

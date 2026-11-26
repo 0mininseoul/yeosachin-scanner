@@ -1,3 +1,4 @@
+import { channel } from 'node:diagnostics_channel';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -1394,7 +1395,8 @@ describe('analysis V2 Gemini audit adapter', () => {
         )).resolves.toBeUndefined();
     });
 
-    it('durably cuts off a pending resolver and fences its late success checkpoint', async () => {
+    it.each(['before-setup', 'reserve-in-flight'] as const)(
+        'allows only the first resolver setup across a batch or continuation and fences it at cutoff (%s)', async mode => {
         const resolverIdentity = identity({
             stage: 'genderResolution',
             modelName: 'gemini-3-flash-preview',
@@ -1455,8 +1457,44 @@ describe('analysis V2 Gemini audit adapter', () => {
         });
 
         await adapter.prepare();
-        await adapter.onBeforeAttempt(resolverStart);
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(false);
+        if (mode === 'reserve-in-flight') {
+            const pending = Promise.withResolvers<void>();
+            reserve.mockImplementationOnce(async () => { await pending.promise; return reservation({
+                operationKey: resolverIdentity.operationKey, stage: 'genderResolution',
+                modelName: resolverStart.modelName, thinkingLevel: resolverStart.thinkingLevel,
+                mediaResolution: resolverStart.mediaResolution, promptVersion: resolverStart.promptVersion,
+                schemaVersion: resolverStart.schemaVersion, maxOutputTokens: resolverStart.maxOutputTokens,
+            }); });
+            const observations = channel('yeosachin.standard.resolver-continuation');
+            const received = vi.fn();
+            observations.subscribe(received);
+            const setup = adapter.onBeforeAttempt(resolverStart);
+            await vi.waitFor(() => expect(reserve).toHaveBeenCalledOnce());
+            expect(adapter.holdActiveResolverAttempt?.()).toBe(false);
+            expect(received).not.toHaveBeenCalled();
+            try {
+                expect(adapter.holdActiveResolverAttempt?.(true)).toBe(true);
+                expect(adapter.holdActiveResolverAttempt?.(true)).toBe(true);
+                expect(received.mock.calls.map(([event]) => event)).toEqual([{ phase: 'reserve_attempt' }]);
+            } finally {
+                observations.unsubscribe(received);
+            }
+            await expect(adapter.onBeforeAttempt({ ...resolverStart, attempt: 2, retryCount: 1 }))
+                .rejects.toThrow('unexpected attempt reservation');
+            pending.resolve();
+            await setup;
+        } else {
+            expect(adapter.holdActiveResolverAttempt?.(true)).toBe(false);
+            adapter.finishCurrentOrFirstResolverAttempt?.();
+            await adapter.onBeforeAttempt(resolverStart);
+        }
+        await expect(adapter.onBeforeAttempt({ ...resolverStart, attempt: 2, retryCount: 1 }))
+            .rejects.toThrow('unexpected attempt reservation');
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(true);
+        expect(leaseMocks.acquire).toHaveBeenCalledOnce();
         await adapter.cutoff?.();
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(false);
         await adapter.onAttemptTelemetry(
             lateSuccess,
             { value: 'female', confidence: 0.9 }

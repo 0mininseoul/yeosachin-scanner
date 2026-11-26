@@ -1,4 +1,7 @@
+import { localStandardResolverGraceMs, preferredAiSiblingFailure } from './v2-ai-scheduler-continuation';
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
+import { paidStandardFourthFeatureEnabled, type PaidStandardCapacityJob } from './paid-standard-capacity';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
@@ -110,6 +113,7 @@ export type AnalysisV2SchedulerRunResult<T> = Readonly<{
 
 export interface AnalysisV2SchedulerRuntimeOptions<T> {
     capability: AiSchedulerCapability;
+    featureJob?: PaidStandardCapacityJob & { aiStagePolicyVersion: string };
     tasks: readonly AnalysisV2SchedulerTask<T>[];
     operationStore: AnalysisV2SchedulerOperationStore<T>;
     handlerDeadlineAtMs: number;
@@ -132,6 +136,7 @@ export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
     constructor(
         readonly reason: SchedulerAdmissionReason,
         readonly notBeforeAtMs: number,
+        readonly confirmedCapacityOnly = false,
     ) {
         super(reason);
         this.name = 'AnalysisV2SchedulerAdmissionDeferredError';
@@ -141,7 +146,9 @@ export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
 function schedulerAdmissionReason(error: unknown): SchedulerAdmissionReason | null {
     // The operation RPC verifies the claim and absence of an unresolved AI attempt
     // before releasing it with the existing five-second admission delay.
-    if (error instanceof DevLiveVertexBudgetReservationPendingError) return 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+    if (error instanceof DevLiveVertexBudgetReservationPendingError || error instanceof VertexAiBudgetCapacityPendingError) {
+        return 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+    }
     if (!(error instanceof Error)) return null;
     switch (error.message) {
     case 'ANALYSIS_V2_AI_CAPACITY_PENDING':
@@ -177,8 +184,12 @@ function assertTasks(tasks: readonly AnalysisV2SchedulerTask<unknown>[]): void {
     }
 }
 
+// Only an immutable policy created after verification can raise a process arbiter limit.
+const fourthFeaturePolicies = new WeakSet<Readonly<AnalysisV2SchedulerRuntimePolicy>>();
+
 function boundedPolicy(
     override: Partial<AnalysisV2SchedulerRuntimePolicy> | undefined,
+    fourthFeature: boolean,
 ): Readonly<AnalysisV2SchedulerRuntimePolicy> {
     if (
         override
@@ -189,7 +200,8 @@ function boundedPolicy(
         throw new Error('ANALYSIS_V2_SCHEDULER_INVALID_POLICY');
     }
     const hard = ANALYSIS_V2_SCHEDULER_V1_POLICY;
-    return Object.freeze({
+    const featureLimit = fourthFeature ? 4 : hard.featureAnalysisConcurrency;
+    const policy = Object.freeze({
         sharedConcurrency: Math.min(
             hard.sharedConcurrency,
             override?.sharedConcurrency ?? hard.sharedConcurrency,
@@ -199,8 +211,7 @@ function boundedPolicy(
             override?.genderTriageConcurrency ?? hard.genderTriageConcurrency,
         ),
         featureAnalysisConcurrency: Math.min(
-            hard.featureAnalysisConcurrency,
-            override?.featureAnalysisConcurrency ?? hard.featureAnalysisConcurrency,
+            featureLimit, override?.featureAnalysisConcurrency ?? featureLimit,
         ),
         privateAccountNameConcurrency: Math.min(
             hard.privateAccountNameConcurrency,
@@ -211,19 +222,19 @@ function boundedPolicy(
             override?.admissionReserveMs ?? hard.admissionReserveMs,
         ),
     });
+    if (fourthFeature) fourthFeaturePolicies.add(policy);
+    return policy;
 }
 
 export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
     private activeTotal = 0;
     private generation = 0;
-    private sequence = 0;
     private stageCursor = 0;
     private readonly activeByStage = new Map<AnalysisV2SchedulerStage, number>();
     private readonly waiters = new Set<() => void>();
     private readonly pending = new Map<object, Readonly<{
         stage: AnalysisV2SchedulerStage;
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>;
-        sequence: number;
     }>>();
     private readonly stages: readonly AnalysisV2SchedulerStage[] = [
         'genderTriage',
@@ -245,7 +256,7 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
         return this.activeTotal < Math.min(8, limits.sharedConcurrency)
             && (this.activeByStage.get(stage) ?? 0) < Math.min(
                 stageLimit(stage, limits),
-                stageLimit(stage, ANALYSIS_V2_SCHEDULER_V1_POLICY),
+                stage === 'featureAnalysis' && fourthFeaturePolicies.has(limits) ? 4 : stageLimit(stage, ANALYSIS_V2_SCHEDULER_V1_POLICY),
             );
     }
 
@@ -254,13 +265,19 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
         for (let offset = 0; offset < this.stages.length; offset++) {
             const stageIndex = (this.stageCursor + offset) % this.stages.length;
             const stage = this.stages[stageIndex]!;
-            const candidate = [...this.pending.entries()]
-                .filter(([, pending]) => (
-                    pending.stage === stage
-                    && this.canAcquire(pending.stage, pending.limits)
-                ))
-                .sort((left, right) => left[1].sequence - right[1].sequence)[0];
-            if (candidate) return candidate[0];
+            // Map insertion order is FIFO. An older three-slot feature waits for
+            // a second release when four are occupied. New four-slot callers
+            // cannot refill the slot ahead of it, and other stages still run.
+            let earlierFeatureBlocked = false;
+            for (const [waiter, pending] of this.pending) {
+                if (pending.stage !== stage) continue;
+                if (!this.canAcquire(stage, pending.limits)) {
+                    if (stage === 'featureAnalysis') earlierFeatureBlocked = true;
+                    continue;
+                }
+                if (earlierFeatureBlocked && fourthFeaturePolicies.has(pending.limits)) continue;
+                return waiter;
+            }
         }
         return null;
     }
@@ -274,7 +291,6 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
             this.pending.set(waiter, Object.freeze({
                 stage,
                 limits,
-                sequence: this.sequence++,
             }));
             this.signalChange();
         }
@@ -363,7 +379,10 @@ export async function runAnalysisV2FairAiScheduler<T>(
     if (!Number.isFinite(input.handlerDeadlineAtMs) || input.handlerDeadlineAtMs < 0) {
         throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
     }
-    const policy = boundedPolicy(input.policy);
+    const job = input.featureJob;
+    const fourthFeature = !!job && input.tasks.some(task => task.stage === 'featureAnalysis')
+        && await paidStandardFourthFeatureEnabled(job.aiStagePolicyVersion, job.requestId, job);
+    const policy = boundedPolicy(input.policy, fourthFeature);
     const nowMs = input.nowMs ?? (() => performance.now());
     const queues = new Map<AnalysisV2SchedulerStage, AnalysisV2SchedulerTask<T>[]>([
         ['genderTriage', []], ['featureAnalysis', []], ['privateAccountName', []],
@@ -388,6 +407,12 @@ export async function runAnalysisV2FairAiScheduler<T>(
     let cursor = 0;
     const active = new Set<Promise<void>>();
     let fatalError: unknown;
+    let onlyRequiredCapacity = localStandardResolverGraceMs() === 50_000;
+    const fail = (error: unknown, requiredCapacity = false) => {
+        if (!requiredCapacity) onlyRequiredCapacity = false;
+        // A skipped new reservation must never hide a sibling's hard failure or uncertain charge.
+        fatalError = fatalError === undefined ? error : preferredAiSiblingFailure(fatalError, error);
+    };
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
 
     const admitOne = async (): Promise<
@@ -419,10 +444,11 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 // Other operations may still be receiving a paid response. Do
                 // not move the parent job fence until their writes have drained.
-                fatalError ??= error;
+                fail(error);
                 return { status: 'blocked', generation: null };
             }
             if (claim.decision === 'deferred') {
+                onlyRequiredCapacity = false;
                 queue.shift();
                 arbiter.cancel(waiter);
                 recoveryPending.add(task.key);
@@ -454,12 +480,17 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 throw new Error('ANALYSIS_V2_SCHEDULER_RECOVERY_HANDLER_MISSING');
             }
+            if (claim.terminalUnavailable || claim.recoveryOnly) onlyRequiredCapacity = false;
             const operation = claim.terminalUnavailable
                 ? task.terminalFallback!
                 : claim.recoveryOnly ? task.recover! : task.run;
-            const execution = Promise.resolve()
-                .then(operation)
-                .then(async value => {
+            let requiredOperationCapacity = false;
+            const started = Promise.resolve().then(operation);
+            const observed = onlyRequiredCapacity ? started.catch(error => {
+                requiredOperationCapacity = error instanceof Error && error.message === 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+                throw error;
+            }) : started;
+            const execution = observed.then(async value => {
                     await input.operationStore.commitReady({
                         key: task.key,
                         stage: task.stage,
@@ -487,16 +518,16 @@ export async function runAnalysisV2FairAiScheduler<T>(
                                 claimToken: claim.claimToken,
                                 reason,
                             });
-                            fatalError ??= new AnalysisV2SchedulerAdmissionDeferredError(
-                                reason,
-                                notBeforeAtMs,
-                            );
+                            // Keep this typed rollback until the parent has drained its paid siblings.
+                            // The durable operation already has the five-second capacity not-before.
+                            if (error instanceof VertexAiBudgetCapacityPendingError) fail(error);
+                            else fail(new AnalysisV2SchedulerAdmissionDeferredError(reason, notBeforeAtMs), requiredOperationCapacity);
                         } catch (deferralError) {
-                            fatalError ??= deferralError;
+                            fail(deferralError);
                         }
                         return;
                     }
-                    fatalError ??= error;
+                    fail(error);
                 })
                 .finally(() => {
                     lease.release();
@@ -524,7 +555,12 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 await Promise.race(active);
                 continue;
             }
-            if (fatalError !== undefined) throw fatalError;
+            if (fatalError !== undefined) {
+                if (onlyRequiredCapacity && fatalError instanceof AnalysisV2SchedulerAdmissionDeferredError) {
+                    throw new AnalysisV2SchedulerAdmissionDeferredError(fatalError.reason, fatalError.notBeforeAtMs, true);
+                }
+                throw fatalError;
+            }
             if (!mayAdmit()) break;
             if (!admittedOrHandled) {
                 if (blockedGeneration === null) break;

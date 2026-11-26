@@ -11,6 +11,9 @@ const fenceMigration = readFileSync(new URL(
     '20260902091000_add_vertex_ai_cost_policy_fences.sql',
     migrationsDirectory,
 ), 'utf8');
+const budgetDenialMigration = readFileSync(new URL(
+    '20261126100004_classify_open_vertex_budget_reservations.sql', migrationsDirectory,
+), 'utf8');
 
 const REQUEST_ID = '11111111-1111-4111-8111-111111111111';
 const REQUEST_ID_V24 = '55555555-5555-4555-8555-555555555555';
@@ -194,6 +197,7 @@ async function reserve(
     reservationKey: string,
     options: {
         runId?: string;
+        orderId?: string;
         operationKey?: string;
         dayKey?: string | null;
         estimatedCost?: number;
@@ -209,7 +213,7 @@ async function reserve(
         [
             reservationKey,
             options.runId ?? `run-${reservationKey}`,
-            `order-${reservationKey}`,
+            options.orderId ?? `order-${reservationKey}`,
             options.operationKey ?? 'operation-1',
             1,
             'default',
@@ -234,6 +238,7 @@ describe('Vertex AI cost migrations in PGlite', () => {
         db = await PGlite.create();
         await db.exec(currentDefinitions);
         await db.exec(budgetMigration);
+        await db.exec(budgetDenialMigration);
         await db.exec(fenceMigration);
         await query(
             `INSERT INTO public.test_v2_policy_requests(id, policy_versions_snapshot)
@@ -249,6 +254,63 @@ describe('Vertex AI cost migrations in PGlite', () => {
 
     afterAll(async () => {
         await db?.close();
+    });
+
+    it('defers only open holds at the original limits and settles the retried operation once', async () => {
+        const c = { runId: 'six-run', orderId: 'six-order', dayKey: '1998-11-01', perRun: 2, perOrder: 5, daily: 100 };
+        const settle = async (row: ReservationRow, actual: number | null) => asService(
+            'SELECT * FROM public.settle_vertex_ai_budget($1,$2,$3)', [row.reservation_key, row.reservation_id, actual],
+        );
+        const base = await reserve('six-base', { ...c, estimatedCost: 0.1 });
+        await settle(base, 0.05);
+        const holds: ReservationRow[] = [];
+        for (let i = 0; i < 30; i++) holds.push(await reserve('six-held-' + i, { ...c, estimatedCost: 0.065 }));
+        const next = () => reserve('six-next', { ...c, estimatedCost: 0.065 });
+        const denied = await next().then(() => null, (error: {code: string; hint?: string; detail: string}) => error);
+        expect(denied).toMatchObject({ code: 'P0001', hint: 'VERTEX_AI_BUDGET_CAPACITY_PENDING' });
+        expect(JSON.parse(denied!.detail)).toEqual({
+            scope: 'run', limitUsd: 2, settledUsd: 0.05, freshReservedUsd: 1.95, staleReservedUsd: 0, requestedUsd: 0.065,
+        });
+        const count = async () => (await query<{n: number}>(
+            "SELECT count(*)::int AS n FROM public.vertex_ai_budget_reservations WHERE reservation_key='six-next'",
+        )).rows[0].n;
+        expect(await count()).toBe(0);
+        await settle(holds[0], null);
+        await expect(next()).rejects.toMatchObject({ hint: 'VERTEX_AI_BUDGET_CAPACITY_PENDING' });
+        await settle(holds[1], 0.000126);
+        await asService('SELECT public.cancel_vertex_ai_budget($1,$2)', [holds[2].reservation_key, holds[2].reservation_id]);
+        const granted = await next();
+        expect((await next()).reservation_id).toBe(granted.reservation_id);
+        await settle(granted, 0.000126);
+        expect(Number((await next()).actual_cost_usd)).toBe(0.000126);
+        expect(await count()).toBe(1);
+    });
+
+    it.each(['order', 'day'] as const)('gives a hard %s limit priority over a temporarily blocked run', async scope => {
+        const c = { runId: 'cross-' + scope, orderId: 'cross-order-' + scope, dayKey: scope === 'order' ? '1998-11-02' : '1998-11-03',
+            perRun: 2, perOrder: scope === 'order' ? 2 : 5, daily: scope === 'day' ? 2 : 100 };
+        const other = await reserve('settled-' + scope, { ...c, runId: 'different-' + scope, estimatedCost: 1.9 });
+        await asService('SELECT * FROM public.settle_vertex_ai_budget($1,$2,$3)', [other.reservation_key, other.reservation_id, null]);
+        const first = await reserve('fresh-' + scope, { ...c, estimatedCost: 1.9, perOrder: 10, daily: 100 });
+        await expect(reserve('again-' + scope, { ...c, estimatedCost: 0.2 })).rejects.toMatchObject({
+            code: 'P0001', message: 'VERTEX_AI_BUDGET_EXCEEDED:run:' + c.runId, hint: undefined,
+        });
+        expect((await reserve('fresh-' + scope, { ...c, estimatedCost: 1.9 })).reservation_id).toBe(first.reservation_id);
+    });
+
+    it.each(['old', 'future'] as const)('keeps %s open reservations charged without rescheduling indefinitely', async when => {
+        const c = { runId: 'expired-' + when, dayKey: '1998-11-04', perRun: 2, daily: 100 };
+        const held = await reserve('age-' + when, { ...c, estimatedCost: 1.99 });
+        const interval = when === 'old' ? '-241 seconds' : '1 hour';
+        await query(`UPDATE public.vertex_ai_budget_reservations SET created_at=clock_timestamp()+$2::interval,
+            updated_at=clock_timestamp()+$2::interval WHERE reservation_id=$1`, [held.reservation_id, interval]);
+        const failure = await reserve('age-next-' + when, { ...c, estimatedCost: 0.02 })
+            .then(() => null, (error: {hint?: string; detail: string}) => error);
+        expect(failure?.hint).toBeUndefined();
+        expect(JSON.parse(failure!.detail)).toMatchObject({ freshReservedUsd: 0, staleReservedUsd: 1.99 });
+        expect((await asService<{ allowed: boolean }>(
+            "SELECT has_function_privilege(current_user,'public.vertex_ai_budget_denial_detail_v1(text,text,text,date,numeric,numeric,numeric,numeric)','EXECUTE') AS allowed",
+        )).rows[0].allowed).toBe(false);
     });
 
     it('applies both migrations and exercises ACL/RLS plus dynamic v2.12 fence rewrites', async () => {

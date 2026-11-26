@@ -1,3 +1,5 @@
+import { capturePaidStandardDispatchSelection, withPaidStandardCapacityJob } from './paid-standard-capacity';
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { VertexDispatchAuthorizationError, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
 import { observableAnalysisV2JobKey, sanitizeOperationalEvent } from '@/lib/observability/schema';
@@ -1245,24 +1247,43 @@ export async function processAnalysisV2TaskDelivery(
     const activeClaim = claim;
     let successors: readonly AnalysisV2JobSuccessor[];
     try {
-        successors = await withVertexDispatchAuthorization(async () => {
-            const { data, error } = await retryPostgresAbortedRpc(() => supabaseAdmin.rpc(
-                'authorize_analysis_v2_vertex_dispatch_v1', {
-                    p_request_id: activeClaim.requestId,
-                    p_job_key: activeClaim.jobKey,
-                    p_claim_token: activeClaim.claimToken,
-                    p_job_input_hash: activeClaim.inputHash,
-                },
-            ), { retryLockTimeout: true });
-            if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
-                throw new VertexDispatchAuthorizationError('db_contention');
-            }
-            if (error || typeof data !== 'boolean') throw new Error('ANALYSIS_V2_VERTEX_DISPATCH_AUTHORIZATION_UNAVAILABLE');
-            return data;
-        }, () => handler(activeClaim));
+        successors = await withPaidStandardCapacityJob({ ...activeClaim, handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs }, async job => {
+            const { data, error } = await supabaseAdmin.rpc('paid_standard_capacity_approved_v1', {
+                p_request_id: job.requestId,
+                p_job_key: job.jobKey,
+                p_job_claim_token: job.claimToken,
+            });
+            // A failed read has no provider side effects and can be scheduled again.
+            if (error || typeof data !== 'boolean') throw new VertexDispatchAuthorizationError('db_contention');
+            if (data) return true;
+            const lineage = await supabaseAdmin.rpc('paid_standard_capacity_lineage_v1', { p_request_id: job.requestId });
+            if (lineage.error || typeof lineage.data !== 'boolean') throw new VertexDispatchAuthorizationError('db_contention');
+            if (lineage.data) throw new VertexDispatchAuthorizationError('closed');
+            return false;
+        }, () => {
+            const expanded = capturePaidStandardDispatchSelection();
+            return withVertexDispatchAuthorization(async () => {
+                const authorizationRpc = await expanded()
+                    ? 'authorize_paid_standard_vertex_dispatch_v1' : 'authorize_analysis_v2_vertex_dispatch_v1';
+                const { data, error } = await retryPostgresAbortedRpc(() => supabaseAdmin.rpc(
+                    authorizationRpc, {
+                        p_request_id: activeClaim.requestId,
+                        p_job_key: activeClaim.jobKey,
+                        p_claim_token: activeClaim.claimToken,
+                        p_job_input_hash: activeClaim.inputHash,
+                    },
+                ), { retryLockTimeout: true });
+                if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
+                    throw new VertexDispatchAuthorizationError('db_contention');
+                }
+                if (error || typeof data !== 'boolean') throw new Error('ANALYSIS_V2_VERTEX_DISPATCH_AUTHORIZATION_UNAVAILABLE');
+                return data;
+            }, () => handler(activeClaim));
+        });
     } catch (error) {
         // Some durable stages run directly without the per-operation scheduler.
-        const continuation = error instanceof DevLiveVertexBudgetReservationPendingError
+        const continuation = error instanceof VertexAiBudgetCapacityPendingError
+            || error instanceof DevLiveVertexBudgetReservationPendingError
             || (error instanceof VertexDispatchAuthorizationError && error.reason === 'db_contention')
             ? new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5)
             : error;

@@ -102,28 +102,25 @@ describe('earlybird support fallback', () => {
 });
 
 describe('earlybird paid delivery notice', () => {
-    it.each(['paid', 'analysis_in_progress'] as const)(
-        'shows the same progress shell for %s while the request is materializing',
-        systemStatus => {
-            const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
-                order: {
-                    ...cancelledOrder(),
-                    systemStatus,
-                    displayStatus: '판독 대기',
-                    deliveryMode: 'automatic',
-                    actualAmountKrw: 990,
-                    acceptedAt: '2026-08-08T12:41:11.649881+00:00',
-                },
-            }));
+    it('shows the active shell while the progress link is materializing', () => {
+        const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
+            order: {
+                ...cancelledOrder(),
+                systemStatus: 'analysis_in_progress',
+                displayStatus: '판독 대기',
+                deliveryMode: 'automatic',
+                actualAmountKrw: 990,
+                acceptedAt: '2026-08-08T12:41:11.649881+00:00',
+            },
+        }));
 
-            expect(markup).toContain('판독 진행 중');
-            expect(markup).toContain('준비 중');
-            expect(markup).toContain('판독을 자동으로 준비하고 있습니다.');
-            expect(markup).not.toContain('2일 이내');
-            expect(markup).not.toContain('결제가 완료되었어요');
-            expect(markup).not.toContain('잠시만 기다리면 진행 화면으로 이어집니다');
-        }
-    );
+        expect(markup).toContain('판독 진행 중');
+        expect(markup).toContain('준비 중');
+        expect(markup).toContain('판독을 자동으로 준비하고 있습니다.');
+        expect(markup).not.toContain('2일 이내');
+        expect(markup).not.toContain('결제가 완료되었어요');
+        expect(markup).not.toContain('잠시만 기다리면 진행 화면으로 이어집니다');
+    });
 
     it('keeps the return shell navigation-only when a validated progress path is available', () => {
         const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
@@ -189,24 +186,19 @@ describe('earlybird paid delivery notice', () => {
         expect(markup).not.toContain('결제 확인 후 판독이 자동으로 시작됩니다');
     });
 
-    it('shows the analysis progress shell while automatic fulfillment is materializing a request', () => {
+    it.each(['basic', 'standard'] as const)('renders a paid %s wait on server reload without analysis or checkout controls', planId => {
         const markup = renderToStaticMarkup(createElement(EarlybirdStatus, {
             order: {
-                ...cancelledOrder(),
-                systemStatus: 'paid',
-                displayStatus: '판독 대기',
-                deliveryMode: 'automatic',
-                actualAmountKrw: 990,
-                acceptedAt: '2026-08-30T12:41:11.649881+00:00',
-                progressUrl: null,
+                ...cancelledOrder(), planId, planName: planId === 'standard' ? 'Standard' : 'Basic',
+                systemStatus: 'paid', displayStatus: '판독 대기', deliveryMode: 'automatic',
+                capacityWaitStatus: 'waiting', actualAmountKrw: 990,
             },
         }));
-
-            expect(markup).toContain('판독 진행 중');
-            expect(markup).toContain('준비 중');
-            expect(markup).toContain('판독을 자동으로 준비하고 있습니다.');
-            expect(markup).not.toContain('0%');
-            expect(markup).not.toContain('결제가 완료되었어요');
+        expect(markup).toContain('결제 완료');
+        expect(markup).toContain('지금은 분석 대기 중이에요');
+        expect(markup).toContain('화면을 나가도 순서가 되면 자동으로 분석을 시작해요.');
+        expect(markup).not.toContain('이메일');
+        expect(markup).not.toMatch(/판독 진행 중|[0-9]+(?:분|시간)|결제 계속하기|target\.account|진행 화면으로 이동/);
     });
 });
 
@@ -388,17 +380,118 @@ describe('earlybird mounted payment return recovery', () => {
         );
     });
 
-    it('mounts the analysis progress bridge before a request id exists', async () => {
+    it('shows payment confirmation before an analysis start or capacity decision exists', async () => {
         render(automaticPendingOrder({ systemStatus: 'paid' }));
 
-        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeTruthy();
-        expect(container.textContent).toContain('준비 중');
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeNull();
+        expect(container.textContent).toContain('판독 접수를 확인하고 있어요');
+        expect(container.textContent).not.toContain('분석 대기 중');
         expect(container.textContent).not.toContain('0%');
 
         await act(async () => {
             await vi.advanceTimersByTimeAsync(2_999);
         });
-        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeTruthy();
+        expect(container.querySelector('[data-earlybird-progress-bridge]')).toBeNull();
+    });
+
+    it.each(['processing', 'completed'] as const)('resumes a waiting order and follows only its owner %s path', async stage => {
+        const waiting = automaticPendingOrder({
+            systemStatus: 'paid', capacityWaitStatus: 'waiting', resultEmailNotificationAvailable: true,
+        });
+        const id = '123e4567-e89b-42d3-a456-426614174000';
+        const path = stage === 'completed' ? '/result/' + id : '/progress/' + id;
+        const updated = automaticPendingOrder(stage === 'completed'
+            ? { systemStatus: 'completed', resultUrl: path }
+            : { systemStatus: 'analysis_in_progress', progressUrl: path });
+        const response = (order: EarlybirdOrderStatusDto) =>
+            new Response(JSON.stringify({ order }), { status: 200 });
+        fetchMock
+            .mockResolvedValueOnce(response(waiting))
+            .mockResolvedValueOnce(response({ ...updated, orderId: '123e4567-e89b-42d3-a456-426614174005' }))
+            .mockResolvedValueOnce(response({ ...waiting, progressUrl: '/progress/' + id }))
+            .mockResolvedValueOnce(response(updated));
+        render(waiting);
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(container.textContent).toContain('지금은 분석 대기 중이에요');
+        expect(container.textContent).toContain('분석이 끝나면 이메일로 알려드릴게요.');
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/earlybird/orders/latest?plan=standard&orderId=' + waiting.orderId);
+        expect(routerMock.replace).not.toHaveBeenCalled();
+        expect(analyticsMocks.trackEvent).not.toHaveBeenCalled();
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        expect(routerMock.replace).toHaveBeenCalledOnce();
+        expect(routerMock.replace).toHaveBeenCalledWith(path);
+    });
+
+    it('pins the owner return address for a hard refresh and preserves its other parameters and history entry', async () => {
+        const previous = window.location.href;
+        const previousState = window.history.state;
+        try {
+            window.history.replaceState({ fixture: true }, '', '/earlybird?resume=0&via=return&via=mail#status');
+            const historyLength = window.history.length;
+            const waiting = automaticPendingOrder({ systemStatus: 'paid', capacityWaitStatus: 'waiting' });
+            render(waiting);
+            const url = new URL(window.location.href);
+            expect(url.searchParams.get('orderId')).toBe(waiting.orderId);
+            expect(url.searchParams.get('plan')).toBe(waiting.planId);
+            expect(url.searchParams.get('resume')).toBe('0');
+            expect(url.searchParams.getAll('via')).toEqual(['return', 'mail']);
+            expect(url.hash).toBe('#status');
+            expect(window.history.length).toBe(historyLength);
+            expect(window.history.state).toEqual({ fixture: true });
+            await act(async () => { await Promise.resolve(); });
+        } finally {
+            window.history.replaceState(previousState, '', previous);
+        }
+    });
+
+    it('keeps both same-plan purchases on their own order from the first return-page read', async () => {
+        const first = automaticPendingOrder({ systemStatus: 'payment_pending' });
+        const second = automaticPendingOrder({
+            orderId: '123e4567-e89b-42d3-a456-426614174002', systemStatus: 'paid',
+        });
+        const firstProgress = '/progress/123e4567-e89b-42d3-a456-426614174000';
+        const nextByOrder = new Map([
+            [first.orderId, { ...first, systemStatus: 'analysis_in_progress', progressUrl: firstProgress }],
+            [second.orderId, { ...second, capacityWaitStatus: 'waiting' }],
+        ]);
+        fetchMock.mockImplementation(async input => {
+            const selected = new URL(String(input), 'https://example.test').searchParams.get('orderId');
+            const updated = nextByOrder.get(selected ?? second.orderId);
+            return new Response(JSON.stringify({ order: updated }), { status: 200 });
+        });
+        const secondContainer = document.createElement('div');
+        const secondRoot = createRoot(secondContainer);
+        try {
+            render(first);
+            await act(async () => { secondRoot.render(createElement(EarlybirdStatus, { order: second })); });
+            expect(fetchMock.mock.calls.map(([input]) => input)).toEqual([first, second].map(
+                order => '/api/earlybird/orders/latest?plan=standard&orderId=' + order.orderId,
+            ));
+            expect(routerMock.replace).toHaveBeenCalledExactlyOnceWith(firstProgress);
+            expect(secondContainer.textContent).toContain('지금은 분석 대기 중이에요');
+        } finally {
+            act(() => secondRoot.unmount());
+        }
+    });
+
+    it('stops reading after the owner leaves and opens the published result when they return', async () => {
+        const waiting = automaticPendingOrder({
+            systemStatus: 'paid', capacityWaitStatus: 'waiting', resultEmailNotificationAvailable: true,
+        });
+        render(waiting);
+        expect(container.textContent).toContain('분석이 끝나면 이메일로 알려드릴게요.');
+        await act(async () => { await Promise.resolve(); });
+        act(() => root.unmount());
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(fetchMock).toHaveBeenCalledOnce();
+        const path = '/result/123e4567-e89b-42d3-a456-426614174000';
+        root = createRoot(container);
+        render(automaticPendingOrder({ systemStatus: 'completed', resultUrl: path }));
+        await act(async () => { await Promise.resolve(); });
+        expect(routerMock.replace).toHaveBeenCalledWith(path);
+        expect(container.textContent).not.toContain('분석 대기');
+        expect(container.textContent).toContain('판독 결과로 이동하고 있어요');
+        expect(container.textContent).not.toContain('자동으로 시작하고 있어요');
     });
 
     it('stops polling and navigates once when the progress path materializes', async () => {
@@ -491,7 +584,7 @@ describe('earlybird mounted payment return recovery', () => {
         act(() => vi.advanceTimersByTime(60_000));
 
         expect(fetchMock).toHaveBeenCalledOnce();
-        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/earlybird/orders/latest?plan=standard');
+        expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/earlybird/orders/latest?plan=standard&orderId=' + automaticPendingOrder().orderId);
 
         await act(async () => {
             resolveRequest?.(new Response(JSON.stringify({

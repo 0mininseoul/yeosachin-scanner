@@ -128,6 +128,8 @@ export type EarlybirdFulfillmentReconciliation = Readonly<{
 }>;
 
 export interface EarlybirdFulfillmentStore {
+    recoverSignedAdmissions(limit: number): Promise<void>;
+    claimCapacity(orderId: string): Promise<'ready' | 'waiting' | 'ineligible' | 'retry'>;
     admit(orderId: string): Promise<EarlybirdFulfillmentIdentity>;
     autoAdmitEligible(limit: number): Promise<readonly EarlybirdFulfillmentIdentity[]>;
     listRecoverable(limit: number): Promise<readonly EarlybirdFulfillmentIdentity[]>;
@@ -412,6 +414,29 @@ export function createEarlybirdFulfillmentStore(
     };
 
     return {
+        async recoverSignedAdmissions(limit) {
+            const listed = await dependencies.rpc('list_signed_paid_analysis_admissions_v1', { p_limit: limit });
+            const orders = z.array(z.object({ order_id: uuidSchema })).max(100).safeParse(listed.data);
+            if (listed.error || !orders.success) persistenceError(listed.error);
+            let failed = false;
+            for (const { order_id: orderId } of orders.data) {
+                const params = { p_order_id: orderId, p_defer: false };
+                const recovered = await dependencies.rpc('recover_signed_paid_analysis_admission_v1', params);
+                if (recovered.error) {
+                    failed = true;
+                    await dependencies.rpc('recover_signed_paid_analysis_admission_v1', { ...params, p_defer: true });
+                }
+            }
+            if (failed) persistenceError();
+        },
+        async claimCapacity(orderId) {
+            const { data, error } = await dependencies.rpc('claim_paid_analysis_capacity_v1', {
+                p_order_id: validatedOrderId(orderId),
+            });
+            if (error || (data !== 'ready' && data !== 'waiting' && data !== 'ineligible' && data !== 'retry')) persistenceError(error);
+            return data;
+        },
+
         async admit(orderId) {
             const { data, error } = await dependencies.rpc(
                 'admit_earlybird_fulfillment',
@@ -639,6 +664,9 @@ export type EarlybirdFulfillmentAdvanceResult = Readonly<{
     status: EarlybirdFulfillmentStatus;
     requestId: string | null;
     nextAction:
+        | 'wait_for_capacity'
+        | 'retry_handoff'
+        | 'no_longer_eligible'
         | 'wait_for_fresh_admission'
         | 'monitor_analysis'
         | 'completed'
@@ -808,6 +836,13 @@ export async function advanceAdmittedEarlybirdFulfillment(
         throw new EarlybirdFulfillmentError(
             'EARLYBIRD_FULFILLMENT_OPERATOR_ADMISSION_REQUIRED'
         );
+    }
+
+    const capacity = await dependencies.store.claimCapacity(identity.orderId);
+    if (capacity === 'retry') return result(identity.orderId, identity.status, identity.requestId, 'retry_handoff');
+    if (capacity !== 'ready') {
+        return result(identity.orderId, identity.status, identity.requestId,
+            capacity === 'waiting' ? 'wait_for_capacity' : 'no_longer_eligible');
     }
 
     const admissionInput = (preflightId: string) => ({
@@ -1067,6 +1102,19 @@ export async function admitAndAdvanceEarlybirdFulfillment(
     return advanceAdmittedEarlybirdFulfillment(admitted, dependencies);
 }
 
+// The database binds the ready delivery to its signed payment, existing FIFO slot and exact
+// production owner. A stale/unrelated delivery cannot reserve another profile lookup.
+export async function handoffReadySignedPaidFulfillment(delivery: {
+    preflightId: string; generation: number; dispatchGeneration: number; dispatchToken: string;
+}) {
+    const { data, error } = await supabaseAdmin.rpc('handoff_ready_signed_paid_fulfillment_v1', {
+        p_preflight_id: delivery.preflightId, p_generation: delivery.generation,
+        p_dispatch_generation: delivery.dispatchGeneration, p_dispatch_token: delivery.dispatchToken,
+    });
+    if (error) persistenceError(error);
+    if (data !== null) await dispatchAnalysisV2Job(uuidSchema.parse(data), 'coordinator:bootstrap');
+}
+
 export const supabaseEarlybirdFulfillmentOperator = Object.freeze({
     async bindCredentialSlot(orderId: string, credentialSlot: ApifyCredentialSlot): Promise<void> {
         const { error } = await supabaseAdmin.rpc(
@@ -1152,6 +1200,11 @@ export async function recoverEarlybirdFulfillments(
         );
     }
     let failed = 0;
+    try {
+        await fulfillmentStore.recoverSignedAdmissions(limit);
+    } catch {
+        failed += 1;
+    }
     if (
         dependencies.automaticFulfillmentEnabled
         ?? isEarlybirdAutomaticFulfillmentEnabled()
@@ -1176,8 +1229,8 @@ export async function recoverEarlybirdFulfillments(
         while (cursor < rows.length) {
             const row = rows[cursor++];
             try {
-                await advance(row);
-                advanced += 1;
+                const outcome = await advance(row);
+                if (!['wait_for_capacity','no_longer_eligible','retry_handoff'].includes(outcome.nextAction)) advanced += 1;
             } catch (error) {
                 failed += 1;
                 // This counter is the only thing a swallowed advance used to

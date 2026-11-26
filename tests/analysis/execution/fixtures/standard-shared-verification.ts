@@ -11,7 +11,7 @@ import { PREFLIGHT_PROVIDER_FINISH_STABILITY_MS, reconcileSettledPreflightProvid
 import { reconcileAnalysisV2ProviderUsage } from '@/lib/services/analysis/v2-provider-lifecycle';
 import { analysisV2RevenueCostProviderRunSettlement } from '@/lib/services/analysis/revenue-cost-provider-run-reconciliation';
 import { ANALYSIS_V2_AI_STAGES, type AnalysisV2AiStage } from '@/lib/services/analysis/v2-ai-attempt-store';
-import type { StandardConnection } from './standard-database';
+import type { StandardConnection, StandardDatabase } from './standard-database';
 import { assertOwnerPage } from './standard-result-page';
 import { matchesSharedResultImage } from './standard-shared-image-source';
 import { target, type SyntheticActorStart } from './standard-providers';
@@ -152,12 +152,12 @@ export async function sharedStandardEffects(db: Database, requestId: string, ord
     return rows[0]!;
 }
 
-export function sharedStandardLedgerIssues(e: Record<string, number>, modelCalls: number) {
-    // Preserve the strict accounting criteria even for an optional resolver cutoff.
+export function sharedStandardLedgerIssues(e: Record<string, number>, modelCalls: number, provenUnsentCutoffs = 0) {
+    // A single cancelled hold matched to a proven unsent cutoff needs no usage or charge.
     // The caller records every owner's functional proof before failing the combined run.
     const expected: Record<string, number> = {
-        ai_attempts: modelCalls, usage_rows: modelCalls, settlements: modelCalls, duplicate_attempts: 0,
-        open_reservations: 0, wrong_order: 0, unpriced: 0, unsettled_attempts: 0, unmatched_settlements: 0,
+        ai_attempts: modelCalls + provenUnsentCutoffs, usage_rows: modelCalls, settlements: modelCalls, duplicate_attempts: 0,
+        open_reservations: 0, wrong_order: 0, unpriced: 0, unsettled_attempts: provenUnsentCutoffs, unmatched_settlements: 0,
         duplicate_settlements: 0, mismatched_settlement_costs: 0, open_provider_leases: 0, open_model_slots: 0,
         unlinked_attempts: 0, usage_tokens: e.attempt_tokens, reservations: e.settlements + e.cancelled,
     };
@@ -244,6 +244,7 @@ interface SharedVerification {
     orderId: string;
     asUser: AsUser;
     modelCalls: number;
+    provenUnsentCutoffs: number;
     paidActorStarts: SyntheticActorStart[];
     preflightActorStarts: SyntheticActorStart[];
     paymentMode: 'webhook' | 'fixture';
@@ -258,7 +259,9 @@ function readPage(requestId: string, femaleCursor?: string | null, privateCursor
     return result(new Request(url), { params: Promise.resolve({ requestId }) });
 }
 
-async function verifyOwner(input: SharedVerification, scorePolicy: string) {
+type OwnerReadInput = Pick<SharedVerification, 'db' | 'requestId' | 'expectedPublic' | 'expectedPrivate'>;
+
+async function readOwnerResult(input: OwnerReadInput, scorePolicy: string) {
     const { db, requestId, expectedPublic, expectedPrivate } = input;
     const { rows: objects } = await db.query<{
         kind: string; candidate_locator: string; sha256: string; byte_size: number; member: string | null;
@@ -273,6 +276,7 @@ async function verifyOwner(input: SharedVerification, scorePolicy: string) {
     `, [requestId]);
     const expected = new Map(objects.map(obj => [obj.kind + '/' + obj.candidate_locator, obj]));
     const urls: URL[] = [];
+    let lastImageTime: { startToLastOwnerWebpMs: number | null; paidToLastOwnerWebpMs: number } | undefined;
     async function verifyImage(path: string | null, kind: 'target' | 'female' | 'private', member: string | null = null) {
         if (!path) throw new Error('Published synthetic row lacks its required image');
         const url = new URL(path, origin);
@@ -286,6 +290,18 @@ async function verifyOwner(input: SharedVerification, scorePolicy: string) {
         expect(response.status).toBe(200);
         expect(response.headers.get('content-type')).toBe('image/webp');
         const bytes = Buffer.from(await response.arrayBuffer());
+        if (expected.size === 1) {
+            // The byte stream is complete. Sample the same PG clock as the paid/slot timestamps
+            // before the subsequent digest, image decoding, rendering and negative-access checks.
+            const { rows } = await db.query<NonNullable<typeof lastImageTime>>(`
+                SELECT round(1000 * extract(epoch FROM (statement_timestamp() - f.capacity_first_started_at)))::int AS "startToLastOwnerWebpMs",
+                    round(1000 * extract(epoch FROM (statement_timestamp() - o.paid_at)))::int AS "paidToLastOwnerWebpMs"
+                FROM earlybird_fulfillments f JOIN earlybird_orders o ON o.id=f.order_id
+                WHERE f.request_id=$1 AND f.status='completed' AND o.result_request_id=f.request_id
+            `, [requestId]);
+            expect(rows).toHaveLength(1);
+            lastImageTime = rows[0];
+        }
         expect(bytes.length).toBe(object.byte_size);
         expect(createHash('sha256').update(bytes).digest('hex') === object.sha256).toBe(true);
         expect((await sharp(bytes).metadata()).format).toBe('webp');
@@ -328,8 +344,57 @@ async function verifyOwner(input: SharedVerification, scorePolicy: string) {
     } while (femaleCursor || privateCursor);
     expect([publicRows, privateRows, expected.size]).toEqual([expectedPublic, expectedPrivate, 0]);
 
-    // The JSDOM helper renders the actual ResultPage, switches tabs and reads its
-    // image src. Call the per-owner verifier serially after all dispatches drain.
+    if (!lastImageTime) throw new Error('SHARED_OWNER_LAST_WEBP_TIME_MISSING');
+    return { urls, pages, publicRows, privateRows, firstPublic, firstPrivate, objects, scorePolicy, ...lastImageTime };
+}
+
+type OwnerRead = Awaited<ReturnType<typeof readOwnerResult>>;
+
+// A reconciliation may finish several orders. Begin every eligible owner's HTTP reads immediately
+// in their own auth context. The result-page renderer below uses a shared DOM and stays serial.
+export function observeSharedOwnerReads(
+    db: Database, orders: { requestId: string; owner: { id: string } }[], asUser: AsUser,
+    expectedPublic: number, expectedPrivate: number,
+) {
+    const pending = new Map(orders.map(order => [order.requestId, order.owner.id]));
+    const reads = new Map<string, Promise<OwnerRead>>();
+    async function scan() {
+        if (!pending.size) return;
+        const { rows } = await db.query<{ request_id: string; score_policy_version: string }>(`
+            SELECT f.request_id, s.score_policy_version FROM earlybird_fulfillments f
+            JOIN analysis_v2_result_summaries s ON s.request_id=f.request_id
+            WHERE f.request_id=ANY($1::uuid[]) AND f.status='completed' AND f.completed_at IS NOT NULL
+        `, [[...pending.keys()]]);
+        for (const row of rows) {
+            const ownerId = pending.get(row.request_id);
+            if (!ownerId) continue;
+            pending.delete(row.request_id);
+            const read = asUser(ownerId, () => readOwnerResult(
+                { db, requestId: row.request_id, expectedPublic, expectedPrivate }, row.score_policy_version));
+            reads.set(row.request_id, read);
+            // A worker or the periodic sweep can launch this well before the test joins the proof.
+            void read.catch(() => undefined);
+        }
+    }
+    return { scan, get remaining() { return pending.size; },
+        async finish() {
+            await scan();
+            if (pending.size) throw new Error('SHARED_OWNER_FULFILLMENT_INCOMPLETE');
+            return new Map(await Promise.all([...reads].map(async ([id, read]) => [id, await read] as const)));
+        },
+        async stop() {
+            const settled = await Promise.allSettled(orders.map(order => reads.get(order.requestId)));
+            return settled.flatMap((result, index) => {
+                if (result.status !== 'fulfilled' || !result.value) return [];
+                const read = result.value;
+                return [{ owner: index + 1, images: read.urls.length,
+                    fromSeatMs: read.startToLastOwnerWebpMs, fromPaymentMs: read.paidToLastOwnerWebpMs }];
+            });
+        },
+    };
+}
+
+export async function verifyRenderedOwner(requestId: string, { firstPublic, firstPrivate, objects }: OwnerRead) {
     const pageUrl = origin + '/result/' + requestId + '?pipeline=v2';
     for (const [member, kind] of [[firstPublic, 'public'], [firstPrivate, 'private']] as const) {
         if (!member) continue;
@@ -340,10 +405,40 @@ async function verifyOwner(input: SharedVerification, scorePolicy: string) {
             && objects.some(object => object.kind === signed.kind && object.member === member
                 && object.candidate_locator === signed.candidateId)).toBe(true);
     }
-    return { urls, pages, publicRows, privateRows };
 }
 
-export async function verifySharedStandardRequest(input: SharedVerification) {
+// Exercise the real notification claim against the published synthetic orders without sending
+// mail or leaving an outstanding delivery. Only aggregate counts go into the receipt.
+export async function countVerifiedResultEmailClaims(db: StandardDatabase, requestIds: string[]) {
+    return db.transaction(async tx => {
+        await tx.exec('SAVEPOINT verify_result_email');
+        try {
+            let verified = 0;
+            for (let attempt = 0; attempt < requestIds.length + 1; attempt++) {
+                const { rows: [row] } = await tx.query<{ claimed: number; matched: number }>(`
+                    SELECT count(*)::int AS claimed, count(*) FILTER (
+                        WHERE mail.request_id=ANY($1::uuid[]) AND mail.order_id=o.id
+                          AND mail.recipient=lower(trim(a.email)) AND mail.target=s.target_instagram_id
+                          AND mail.target=o.target_instagram_id
+                    )::int AS matched
+                    FROM public.claim_paid_result_email(gen_random_uuid()) mail
+                    LEFT JOIN public.earlybird_orders o ON o.id=mail.order_id AND o.result_request_id=mail.request_id
+                    LEFT JOIN auth.users a ON a.id=o.user_id
+                    LEFT JOIN public.analysis_v2_result_summaries s ON s.request_id=mail.request_id
+                `, [requestIds]);
+                expect(row?.claimed).toBe(attempt < requestIds.length ? 1 : 0);
+                expect(row?.matched).toBe(row?.claimed);
+                verified += row!.matched;
+            }
+            return verified;
+        } finally {
+            await tx.exec('ROLLBACK TO SAVEPOINT verify_result_email');
+            await tx.exec('RELEASE SAVEPOINT verify_result_email');
+        }
+    });
+}
+
+export async function verifySharedStandardRequest(input: SharedVerification, owner: OwnerRead) {
     const { db, requestId, orderId, ownerId, preflightId, asUser, modelCalls } = input;
     expect(input.otherOwnerId !== ownerId).toBe(true);
     const effects = await sharedStandardEffects(db, requestId, orderId, ownerId);
@@ -382,7 +477,7 @@ export async function verifySharedStandardRequest(input: SharedVerification) {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ published: true, complete: true, consumed: true, paid: true, fulfilled: true, receipt: true });
     expect(rows[0]!.ai_policy).toBe('ai-stage-policy-v2.11');
-    const owner = await asUser(ownerId, () => verifyOwner(input, rows[0]!.score_policy));
+    expect(owner.scorePolicy).toBe(rows[0]!.score_policy);
     for (const [viewer, expectedStatus] of [[input.otherOwnerId, 404], [null, 401]] as const) {
         await asUser(viewer, async () => {
             expect((await readPage(requestId)).status).toBe(expectedStatus);
@@ -392,9 +487,9 @@ export async function verifySharedStandardRequest(input: SharedVerification) {
     expect(await sharedStandardEffects(db, requestId, orderId, ownerId)).toEqual(effects);
     const actorReceipts = await verifyActorReceipts(db, requestId, preflightId, input.paidActorStarts, input.preflightActorStarts);
     const ledgerByStage = await sharedStandardLedgerStages(db, requestId, orderId);
-    const ledgerIssues = [...sharedStandardLedgerIssues(effects, modelCalls), ...actorReceipts.ledgerIssues];
+    const ledgerIssues = [...sharedStandardLedgerIssues(effects, modelCalls, input.provenUnsentCutoffs), ...actorReceipts.ledgerIssues];
     return {
-        ...effects, modelCalls, actorReceipts, ledgerIssues, ledgerByStage, pages: owner.pages, publicRows: owner.publicRows, privateRows: owner.privateRows,
+        ...effects, modelCalls, provenUnsentCutoffs: input.provenUnsentCutoffs, actorReceipts, ledgerIssues, ledgerByStage, pages: owner.pages, publicRows: owner.publicRows, privateRows: owner.privateRows,
         ownerWebp: owner.urls.length, originalImagesMatched: owner.urls.length, otherImageDenied: owner.urls.length, anonymousImageDenied: owner.urls.length,
         payments: 1, paymentMode: input.paymentMode, ownerResult: 200, otherResult: 404, anonymousResult: 401, pipelineVersion: 'v2',
         resultSchemaVersion: ANALYSIS_V2_SCHEMA_VERSION, policy: rows[0]!.ai_policy, scorePolicy: rows[0]!.score_policy

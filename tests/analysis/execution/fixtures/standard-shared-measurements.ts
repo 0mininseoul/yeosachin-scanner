@@ -1,14 +1,22 @@
 import type { StandardConnection } from './standard-database';
+import { readSharedResolverLedger, type SharedResolverObservation } from './standard-shared-resolver-observation';
 
 export async function sharedStandardMeasurements(db: StandardConnection, requestIds: string[]) {
     // Ordinals keep per-owner latencies auditable without exporting identifiers.
-    const times = await db.query<{ owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number; publishedWithinHour: boolean; withinHour: boolean }>(`
+    const times = await db.query<{
+        owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number;
+        queueWaitMs: number | null; startToPublicationMs: number | null; startToFulfillmentMs: number | null;
+        publishedWithinHour: boolean; paidToFulfillmentWithinHour: boolean;
+    }>(`
         SELECT n::int AS owner,
+            round(1000 * extract(epoch FROM (f.capacity_first_started_at - o.paid_at)))::int AS "queueWaitMs",
+            round(1000 * extract(epoch FROM (e.occurred_at - f.capacity_first_started_at)))::int AS "startToPublicationMs",
+            round(1000 * extract(epoch FROM (greatest(e.occurred_at,f.completed_at) - f.capacity_first_started_at)))::int AS "startToFulfillmentMs",
             round(1000 * extract(epoch FROM (e.occurred_at - r.created_at)))::int AS "admissionMs",
             round(1000 * extract(epoch FROM (e.occurred_at - o.paid_at)))::int AS "paymentMs",
             round(1000 * extract(epoch FROM (greatest(e.occurred_at, f.completed_at) - o.paid_at)))::int AS "ownerReadyMs",
             e.occurred_at <= o.paid_at + interval '1 hour' AS "publishedWithinHour",
-            greatest(e.occurred_at, f.completed_at) <= o.paid_at + interval '1 hour' AS "withinHour"
+            greatest(e.occurred_at, f.completed_at) <= o.paid_at + interval '1 hour' AS "paidToFulfillmentWithinHour"
         FROM unnest($1::uuid[]) WITH ORDINALITY owner(id,n)
         JOIN analysis_requests r USING (id)
         JOIN earlybird_orders o ON o.result_request_id = r.id
@@ -46,6 +54,42 @@ export async function sharedStandardMeasurements(db: StandardConnection, request
             coalesce(sum(terminal_unavailable_count),0)::int AS unavailable
         FROM analysis_v2_gender_resolution_metrics WHERE request_id=ANY($1::uuid[])
     `, [requestIds]);
+    const resolutionByOwner = await db.query(`
+        SELECT n::int AS owner, m.request_id IS NOT NULL AS recorded, m.metrics_finalized_at IS NOT NULL AS finalized,
+            m.screened_count AS screened, m.resolver_eligible_count AS eligible, m.baseline_unknown_count AS "baselineUnknown",
+            m.final_unknown_count AS "finalUnknown", m.ready_count AS ready, m.applied_count AS applied,
+            m.applied_with_fenced_result_count AS "appliedWithProof", m.verified_baseline_mutation_count AS "verifiedBaselineMutations",
+            m.inconclusive_count AS inconclusive, m.cutoff_count AS cutoffs, m.capacity_skipped_count AS skipped,
+            m.terminal_unavailable_count AS unavailable, m.resolver_attempt_count AS attempts,
+            m.resolver_usage_complete_count AS "usageComplete", m.resolver_usage_missing_count AS "usageMissing",
+            m.resolver_cost_known_count AS "costKnown", m.resolver_nonterminal_attempt_count AS "nonterminalAttempts"
+        FROM unnest($1::uuid[]) WITH ORDINALITY owner(id,n)
+        LEFT JOIN analysis_v2_gender_resolution_metrics m ON m.request_id=owner.id ORDER BY n
+    `, [requestIds]);
+    const tokenLogs = await db.query(`
+        WITH owners AS (SELECT * FROM unnest($1::uuid[]) WITH ORDINALITY AS o(id,n)),
+        attempts AS (
+            SELECT o.n, a.stage, count(*)::int AS rows, sum(a.total_tokens)::int AS tokens
+            FROM owners o JOIN analysis_v2_ai_attempts a ON a.request_id=o.id
+            WHERE a.terminalized_at IS NOT NULL AND a.usage_complete GROUP BY o.n,a.stage
+        ), logs AS (
+            SELECT o.n, CASE u.analysis_type
+                WHEN 'private_name_batch' THEN 'privateAccountName'
+                WHEN 'v2_gender_triage_microbatch' THEN 'genderTriage'
+                WHEN 'v2_gender_triage' THEN 'genderTriage'
+                WHEN 'v2_feature_analysis' THEN 'featureAnalysis'
+                WHEN 'v2_gender_resolution' THEN 'genderResolution'
+                WHEN 'v2_partner_safety' THEN 'partnerSafety'
+                WHEN 'v2_high_risk_narrative' THEN 'highRiskNarrative'
+                ELSE 'other' END AS stage,
+                count(*)::int AS rows,sum(u.total_tokens)::int AS tokens
+            FROM owners o JOIN gemini_token_usage u ON u.request_id=o.id GROUP BY 1,2
+        )
+        SELECT n::int AS owner, stage, coalesce(a.rows,0) AS "completedAttempts",
+            coalesce(l.rows,0) AS "tokenLogRows",coalesce(a.tokens,0) AS "attemptTokens",
+            coalesce(l.tokens,0) AS "loggedTokens"
+        FROM attempts a FULL JOIN logs l USING(n,stage) ORDER BY n,stage
+    `, [requestIds]);
     const providerTimes = await db.query(`
         SELECT a.stage,p.release_reason AS "releaseReason",count(*)::int AS attempts,
             round(avg(a.latency_ms))::int AS "meanReportedLatencyMs",
@@ -59,7 +103,7 @@ export async function sharedStandardMeasurements(db: StandardConnection, request
     `, [requestIds]);
     return {
         times: times.rows, stageTimes: stages.rows, capacity: capacity.rows[0], resolution: resolution.rows[0],
-        providerTimes: providerTimes.rows
+        providerTimes: providerTimes.rows, tokenLogsByOwnerAndStage: tokenLogs.rows, resolutionByOwner: resolutionByOwner.rows
     };
 }
 
@@ -108,6 +152,36 @@ export async function sharedStandardFailureSummary(db: StandardConnection) {
     return {
         paymentTimingAtStop: timing.rows[0], requests: requests.rows, unfinished: jobs.rows, leases: leases.rows,
         attempts: attempts.rows, holds: holds.rows, actors: actors.rows
+    };
+}
+
+// A failed admission can leave only a subset of the requests. This database belongs
+// exclusively to the current synthetic wave. Read diagnostics independently of its workers.
+export async function sharedStandardStopEvidence(db: StandardConnection, observation: SharedResolverObservation) {
+    const [summary, resolver, unknown] = await Promise.allSettled([
+        sharedStandardFailureSummary(db),
+        readSharedResolverLedger(db, null).then(rows => observation.report(rows)),
+        db.query<{
+            count: number; estimatedMicros: number; resolverCount: number; resolverEstimatedMicros: number;
+        }>(`
+            SELECT count(*)::int AS count, coalesce(round(sum(estimated_cost_usd)*1000000),0)::int AS "estimatedMicros",
+                count(*) FILTER (WHERE operation_key LIKE 'gender-resolution:%')::int AS "resolverCount",
+                coalesce(round(sum(estimated_cost_usd) FILTER (WHERE operation_key LIKE 'gender-resolution:%')*1000000),0)::int
+                    AS "resolverEstimatedMicros"
+            FROM vertex_ai_budget_reservations WHERE state='settled' AND usage_unknown AND actual_cost_usd IS NULL
+        `).then(({ rows }) => rows[0]),
+    ]);
+    const diagnosticsUnavailable: string[] = [];
+    if (summary.status === 'rejected') diagnosticsUnavailable.push('pipeline_summary');
+    if (resolver.status === 'rejected') diagnosticsUnavailable.push('resolver_ledger');
+    if (unknown.status === 'rejected' || !unknown.value) diagnosticsUnavailable.push('unknown_budget');
+    return {
+        ...(summary.status === 'fulfilled' ? summary.value : {}),
+        diagnosticsUnavailable,
+        resolverEvidence: resolver.status === 'fulfilled'
+            ? { coverage: 'database_and_sdk' as const, ...resolver.value }
+            : { coverage: 'sdk_only' as const, ...observation.sdkSnapshot() },
+        settledUnknownBudget: unknown.status === 'fulfilled' ? unknown.value ?? null : null,
     };
 }
 

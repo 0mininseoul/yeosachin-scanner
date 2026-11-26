@@ -19,11 +19,10 @@ describe('analysis duration UI calibration contract', () => {
         expect(analyze).not.toContain('preflightDurationEstimate');
     });
 
-    it('shows no real-workload numeric range or delay claim on progress', () => {
+    it('keeps the progress view free of live countdown and overdue claims', () => {
         const progress = source('app/progress/[requestId]/page.tsx');
         const hook = source('hooks/useAnalysisProgress.ts');
 
-        expect(progress).toContain('analysisDurationProgressCopy(isDevUiPresentation() && !devLive)');
         expect(progress).not.toContain('useAnalysisDurationEstimate');
         expect(progress).not.toContain('analysisDurationRangeLabel');
         expect(progress).not.toContain('hasAnalysisDurationExceeded');
@@ -33,8 +32,14 @@ describe('analysis duration UI calibration contract', () => {
         expect(hook).toContain("demo: response.headers.get('x-analytics-eligible') === '0'");
     });
 
-    it('limits synthetic timing to Dev and makes no production duration promise', () => {
+    it('displays only a positive whole-minute admission estimate or the separate synthetic timing', () => {
         expect(analysisDurationProgressCopy(true)).toBe('테스트 분석은 약 45초 동안 진행돼요');
+        expect(analysisDurationProgressCopy(false, 60)).toBe('분석 시작 후 완료까지 최대 1시간이 걸릴 수 있어요.');
+        expect(analysisDurationProgressCopy(false, 52)).toBe('분석 시작 후 완료까지 최대 52분 정도 걸릴 수 있어요.');
+        expect(analysisDurationProgressCopy(true, 52)).toBe('테스트 분석은 약 45초 동안 진행돼요');
         expect(analysisDurationProgressCopy(false)).toBe('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
+        for (const invalid of [null, -1, 0, 1.5, Infinity]) {
+            expect(analysisDurationProgressCopy(false, invalid)).toBe(analysisDurationProgressCopy(false));
+        }
     });
 });

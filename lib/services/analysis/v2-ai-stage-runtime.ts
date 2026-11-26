@@ -1,3 +1,8 @@
+import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
+import { AnalysisV2AiCapacityPendingError } from './v2-gemini-lease-store';
+import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
+import { LocalResolverPermitTimeoutError } from '@/lib/services/ai/gemini-generation-limiter';
+import { AI_GEMINI_MIN_REMAINING_MS } from '@/lib/services/ai/stage-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { z } from 'zod';
 import {
@@ -5,7 +10,7 @@ import {
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
-import type { VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { VertexAiBudgetCapacityPendingError, VertexAiBudgetExceededError, type VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchIdentity,
@@ -64,6 +69,7 @@ import {
 } from './v2-ai-result-store';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import {
+    ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS,
     AnalysisV2SchedulerAdmissionDeferredError,
     runAnalysisV2FairAiScheduler,
     type AnalysisV2SchedulerStage,
@@ -74,6 +80,7 @@ import {
 } from './v2-ai-scheduler-operation-store';
 import {
     AnalysisV2SchedulerContinuationError,
+    AnalysisV2ConfirmedCapacityContinuation,
     schedulerContinuationReason,
 } from './v2-ai-scheduler-continuation';
 
@@ -95,6 +102,9 @@ export interface AnalysisV2AiJobFence {
     schedulerRecoveryOnly?: boolean;
     /** Internal terminal safe-fallback fence; production callers must not set it. */
     schedulerTerminalUnavailable?: boolean;
+    admittedStandardResolver?: true;
+    /** The exact candidate's feature checkpoint was reused without a new reservation. */
+    cachedFeatureForResolver?: true;
     /**
      * Strict revenue cohorts reserve a request-scoped resolver slot before
      * constructing the external Gemini call. The callback is intentionally
@@ -135,7 +145,8 @@ export interface AnalysisV2AiStageRuntime {
     ): AnalysisV2GenderResolutionHandle;
     features(
         input: FeatureAnalysisInput,
-        fence: AnalysisV2AiJobFence
+        fence: AnalysisV2AiJobFence,
+        onAttemptReserved?: () => void,
     ): Promise<AnalysisV2AuditedResult<FeatureAnalysisResult>>;
     privateNames(
         input: readonly PrivateNameAccountInput[],
@@ -159,18 +170,29 @@ export type AnalysisV2GenderResolutionState =
     }
     | { status: 'cutoff' }
     | { status: 'recovery_pending' }
-    | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError }
-    | { status: 'capacity_skipped' }
+    | { status: 'blocking_error'; error: Error }
+    | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError | VertexAiBudgetCapacityPendingError }
+    | { status: 'capacity_skipped'; localFirstAttemptTimedOut?: true }
+    | { status: 'deadline_pending' }
+    | { status: 'unsent_capacity_pending' }
     | {
         status: 'terminal_unavailable';
         budgetError?: 'DEV_LIVE_BUDGET_EXCEEDED' | 'DEV_LIVE_BUDGET_UNAVAILABLE';
     };
 
+export type ResolverCutoffReason = 'resolver_handler_deadline' | 'resolver_capacity_continuation'
+    | 'resolver_deadline_continuation' | 'resolver_required_error' | 'resolver_batch_barrier';
+
 export interface AnalysisV2GenderResolutionHandle {
     operationKey: string;
     completion: Promise<void>;
+    /** The single cutoff write for this delivery can still be running after peek() becomes cutoff. */
+    readonly cutoffCompletion?: Promise<void> | null;
+    holdActiveAttempt?(includeStartedSetup?: boolean): boolean;
+    finishCurrentOrFirstAttempt?(): void;
+    readonly recoveredCutoffFromAudit?: boolean;
     peek(): AnalysisV2GenderResolutionState;
-    cutoff(): Promise<void>;
+    cutoff(reason?: ResolverCutoffReason): Promise<void>;
 }
 
 type AuditFactory = <T>(options: Parameters<typeof createAnalysisV2AiAuditAdapter<T>>[0]) =>
@@ -200,7 +222,8 @@ export class AnalysisV2GenderResolutionCutoffPersistenceError extends Error {
 }
 
 async function waitForCutoffBookkeeping(
-    operation: () => Promise<void> | undefined
+    operation: () => Promise<void> | undefined,
+    maxWaitMs: number,
 ): Promise<void> {
     const handled = Promise.resolve()
         .then(operation)
@@ -214,7 +237,7 @@ async function waitForCutoffBookkeeping(
         new Promise<{ status: 'timed_out' }>(resolve => {
             timer = setTimeout(
                 () => resolve({ status: 'timed_out' }),
-                GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS
+                maxWaitMs
             );
         }),
     ]);
@@ -389,6 +412,7 @@ function createSchedulerMicrobatch(
                 terminalFallback: plan.terminalFallback,
             }));
             const result = await runScheduler<unknown>({
+                featureJob: group.fence,
                 capability: 'scheduler-v1',
                 tasks,
                 operationStore,
@@ -421,7 +445,9 @@ function createSchedulerMicrobatch(
                     Math.ceil((error.notBeforeAtMs - performance.now()) / 1_000),
                 ));
                 plans.forEach(plan => plan.reject(
-                    new AnalysisV2SchedulerContinuationError(error.reason, delaySeconds),
+                    error.confirmedCapacityOnly && error.reason === 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+                        ? new AnalysisV2ConfirmedCapacityContinuation(delaySeconds)
+                        : new AnalysisV2SchedulerContinuationError(error.reason, delaySeconds),
                 ));
                 return;
             }
@@ -700,8 +726,10 @@ export function createDurableAnalysisV2AiStageRuntime(
             );
             const controller = new AbortController();
             let state: AnalysisV2GenderResolutionState = { status: 'pending' };
+            let recoveredCutoffFromAudit = false;
             let cutoffStarted: Promise<void> | null = null;
             const completion = (async () => {
+                let auditStarted = false;
                 try {
                     if (fence.reserveGenderResolutionCapacity) {
                         const admission = await fence.reserveGenderResolutionCapacity(
@@ -713,14 +741,28 @@ export function createDurableAnalysisV2AiStageRuntime(
                             return;
                         }
                     }
-                    const result = await runGenderResolution(
-                        input,
-                        audit,
-                        {
-                            abortSignal: controller.signal,
-                            aiStagePolicyVersion: policyVersion,
-                        },
-                    );
+                    auditStarted = true;
+                    const run = () => runGenderResolution(input, audit, {
+                        abortSignal: controller.signal,
+                        aiStagePolicyVersion: policyVersion,
+                    });
+                    if (fence.admittedStandardResolver && fence.handlerDeadlineAtMs !== undefined
+                        && fence.handlerDeadlineAtMs - performance.now() < AI_GEMINI_MIN_REMAINING_MS) {
+                        // Reuse a finished decision even near the deadline. A fresh delivery can
+                        // perform the first paid attempt if this one cannot safely admit it.
+                        const saved = await audit.prepare();
+                        if (state.status !== 'pending') return;
+                        if (!saved.result) {
+                            state = { status: 'deadline_pending' };
+                            return;
+                        }
+                    }
+                    const cached = fence.cachedFeatureForResolver && fence.handlerDeadlineAtMs !== undefined
+                        ? { requestId: fence.requestId, jobKey: fence.jobKey, claimToken: fence.claimToken,
+                            aiStagePolicyVersion: policyVersion, operationKey: identity.operationKey, handlerDeadlineAtMs: fence.handlerDeadlineAtMs }
+                        : undefined;
+                    const result = fence.admittedStandardResolver
+                        ? await withStandardResolverAdmission(controller.signal, run, cached) : await run();
                     if (state.status !== 'pending') return;
                     state = {
                         status: 'ready',
@@ -738,8 +780,33 @@ export function createDurableAnalysisV2AiStageRuntime(
                     };
                 } catch (error) {
                     if (state.status !== 'pending') return;
-                    if (error instanceof DevLiveVertexBudgetReservationPendingError) {
+                    if (fence.admittedStandardResolver && (
+                        error instanceof AnalysisV2AiCapacityPendingError
+                        || (error instanceof VertexDispatchAuthorizationError && error.reason === 'db_contention')
+                    )) {
+                        // The gate rolled back before reserving the attempt or sending a request.
+                        state = { status: 'unsent_capacity_pending' };
+                        return;
+                    }
+                    if (fence.admittedStandardResolver && error instanceof Error
+                        && error.message === 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT') {
+                        state = { status: 'deadline_pending' };
+                        return;
+                    }
+                    if (error instanceof DevLiveVertexBudgetReservationPendingError || error instanceof VertexAiBudgetCapacityPendingError) {
                         state = { status: 'budget_reservation_pending', error };
+                        return;
+                    }
+                    // Only the admitted Standard path drains paid siblings across a continuation.
+                    if (fence.admittedStandardResolver && error instanceof Error && (
+                        error instanceof VertexAiBudgetExceededError
+                        || error.message.endsWith('_FENCE_MISMATCH')
+                        || error.message === 'ANALYSIS_V2_JOB_LEASE_LOST'
+                        || error.message === 'DEV_LIVE_BUDGET_EXCEEDED'
+                        || error.message === 'DEV_LIVE_BUDGET_UNAVAILABLE'
+                        || error.message.startsWith('VERTEX_AI_BUDGET_RPC_')
+                    )) {
+                        state = { status: 'blocking_error', error };
                         return;
                     }
                     if (error instanceof Error && (
@@ -749,32 +816,52 @@ export function createDurableAnalysisV2AiStageRuntime(
                         state = { status: 'terminal_unavailable', budgetError: error.message };
                         return;
                     }
+                    if (error instanceof AnalysisV2AiResultRecoveredCutoffError) {
+                        // Only the audited resolver can report an exact terminal attempt from prepare().
+                        recoveredCutoffFromAudit = auditStarted;
+                        state = { status: 'cutoff' };
+                        return;
+                    }
+                    if (fence.admittedStandardResolver && error instanceof LocalResolverPermitTimeoutError && error.attempt === 1) {
+                        state = { status: 'capacity_skipped', localFirstAttemptTimedOut: true };
+                        return;
+                    }
                     state = {
                         status: error instanceof AnalysisV2AiResultRecoveryPendingError
                             ? 'recovery_pending'
-                            : error instanceof AnalysisV2AiResultRecoveredCutoffError
-                                ? 'cutoff'
-                                : error instanceof Error
-                                    && error.message
-                                        === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
-                                    ? 'capacity_skipped'
-                                    : 'terminal_unavailable',
+                            : error instanceof Error
+                                && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
+                                ? 'capacity_skipped'
+                                : 'terminal_unavailable',
                     };
                 }
             })();
             return {
                 operationKey: identity.operationKey,
                 completion,
+                holdActiveAttempt: audit.holdActiveResolverAttempt,
+                finishCurrentOrFirstAttempt: audit.finishCurrentOrFirstResolverAttempt,
+                get recoveredCutoffFromAudit() { return recoveredCutoffFromAudit; },
+                get cutoffCompletion() { return cutoffStarted; },
                 peek: () => state,
-                cutoff() {
+                cutoff(reason) {
                     if (cutoffStarted) return cutoffStarted;
                     cutoffStarted = (async () => {
                         if (state.status !== 'pending') return;
                         state = { status: 'cutoff' };
-                        controller.abort();
+                        controller.abort(reason);
                         try {
-                            await waitForCutoffBookkeeping(() => audit.cutoff?.());
+                            const maxWaitMs = fence.admittedStandardResolver
+                                ? Math.min(ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS, Math.max(0,
+                                    (fence.handlerDeadlineAtMs ?? Infinity) - performance.now()))
+                                : GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS;
+                            await waitForCutoffBookkeeping(() => audit.cutoff?.(), maxWaitMs);
                         } catch (error) {
+                            if (fence.admittedStandardResolver && error instanceof AnalysisV2GenderResolutionCutoffPersistenceError) {
+                                // The write may still commit. Only a fenced recovery can decide the outcome.
+                                state = { status: 'recovery_pending' };
+                                return;
+                            }
                             if (error instanceof AnalysisV2AiResultRecoveryPendingError) {
                                 state = { status: 'recovery_pending' };
                             }
@@ -790,7 +877,7 @@ export function createDurableAnalysisV2AiStageRuntime(
             };
         },
 
-        async features(input, fence) {
+        async features(input, fence, onAttemptReserved) {
             const policyVersion = assertAiStagePolicyVersion(fence);
             const identity = createFeatureAnalysisResultIdentity(input, policyVersion);
             const execute = async (
@@ -802,7 +889,14 @@ export function createDurableAnalysisV2AiStageRuntime(
                     identity,
                     featureAnalysisModelResponseSchema
                 );
-                const result = await runFeatures(input, audit, {
+                const featureAudit = onAttemptReserved ? {
+                    ...audit,
+                    async onBeforeAttempt(telemetry: Parameters<typeof audit.onBeforeAttempt>[0]) {
+                        await audit.onBeforeAttempt(telemetry);
+                        onAttemptReserved();
+                    },
+                } : audit;
+                const result = await runFeatures(input, featureAudit, {
                     aiStagePolicyVersion: policyVersion,
                 });
                 return {

@@ -3,7 +3,8 @@ export function isPostgresStatementTimeout(error: { code?: string; message?: str
 }
 
 export function isPostgresLockTimeout(error: { code?: string; message?: string } | null): boolean {
-    return error?.code === '55P03' && error.message === 'canceling statement due to lock timeout';
+    return error?.code === '55P03' && (error.message === 'canceling statement due to lock timeout'
+        || error.message === 'PAID_STANDARD_CAPACITY_LOCK_BUSY');
 }
 
 /** Repeat the same database statement after a confirmed PostgreSQL rollback. */

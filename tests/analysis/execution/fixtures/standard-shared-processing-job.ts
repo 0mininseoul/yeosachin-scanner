@@ -19,7 +19,7 @@ export async function seedProcessingJob(db: Awaited<ReturnType<typeof createShar
     }]));
     const policy = { pipeline: 'v2', risk: 'risk-policy-v2.5', aiStage: 'ai-stage-policy-v2.11', scheduler: 'ai-scheduler-v1' };
     await db.transaction(async tx => {
-        await tx.query("INSERT INTO public.users(id,email,provider) VALUES ($1,'fixture@example.invalid','kakao')", [owner]);
+        await tx.query("INSERT INTO public.users(id,email,provider) VALUES ($1,$2,'kakao')", [owner, owner + '@example.invalid']);
         const { rows: [preflight] } = await tx.query<{ id: string }>(`INSERT INTO public.analysis_preflights(user_id,
             idempotency_key,target_instagram_id,access_mode,created_at,expires_at,launch_status_snapshot,plan_catalog_snapshot,
             pricing_version,pricing_snapshot,policy_versions_snapshot) VALUES ($1,'capacity-fixture',$2,

@@ -1,3 +1,6 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { paidStandardExpandedCapacityEnabled, type PaidStandardCapacityJob } from './paid-standard-capacity';
+import { devStandardExpandedCapacityEnabled } from '@/lib/services/ai/standard-resolver-admission';
 import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
 import type { ReplayScopeDelta } from '@/lib/contracts/dev-standard-replay';
 import { checkpointDevReplayScope } from '@/lib/services/dev-ui/standard-replay-scope-note';
@@ -118,8 +121,11 @@ import {
     type AnalysisV2AiStageRuntime,
     type AnalysisV2GenderResolutionHandle,
     type AnalysisV2GenderResolutionState,
+    type ResolverCutoffReason,
 } from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
+import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError, localStandardResolverGraceMs, preferredAiSiblingFailure } from './v2-ai-scheduler-continuation';
+import { ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS } from './v2-ai-scheduler-runtime';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
 import { emitAnalysisLifecycleEvent } from '@/lib/services/analytics-server';
 import {
@@ -285,13 +291,36 @@ function analysisUnavailableOutcome(
     };
 }
 
+function resolverBlockingError(state: AnalysisV2GenderResolutionState | null): Error | undefined {
+    if (state?.status === 'blocking_error') return state.error;
+    if (state?.status === 'recovery_pending') return new AnalysisV2AiResultRecoveryPendingError();
+}
+
+/** Wait for each outstanding cutoff even if another one loses its fence. */
+async function drainResolverCleanup<T>(updates: readonly Promise<T>[]): Promise<T[]> {
+    const values = new Array<T>(updates.length);
+    let failed = false;
+    let failure: unknown;
+    await Promise.all(updates.map(async (update, index) => {
+        try {
+            values[index] = await update;
+        } catch (error) {
+            failure = failed ? preferredAiSiblingFailure(failure, error) : error;
+            failed = true;
+        }
+    }));
+    if (failed) throw failure;
+    return values;
+}
+
 async function settleOptionalGenderResolution(
-    handle: AnalysisV2GenderResolutionHandle | null
+    handle: AnalysisV2GenderResolutionHandle | null,
+    reason?: ResolverCutoffReason,
 ): Promise<AnalysisV2GenderResolutionState | null> {
     if (!handle) return null;
-    if (handle.peek().status !== 'pending') return handle.peek();
     try {
-        await handle.cutoff();
+        if (handle.cutoffCompletion) await handle.cutoffCompletion;
+        else if (handle.peek().status === 'pending') await handle.cutoff(reason);
     } catch (error) {
         // cutoff() already fences the optional provider call before bounded audit
         // bookkeeping. A slow ledger write must not discard the required analysis;
@@ -303,9 +332,97 @@ async function settleOptionalGenderResolution(
     return handle.peek();
 }
 
+// The approved resolver policy cuts off immediately. Only the offline Standard experiment
+// may finish previously reserved attempts under a common deadline.
+async function waitForLocalResolverTrial(
+    handles: readonly AnalysisV2GenderResolutionHandle[],
+    handlerDeadlineAtMs: number | undefined,
+    graceMs: number,
+): Promise<void> {
+    if (graceMs === 0 || handlerDeadlineAtMs === undefined || !Number.isFinite(handlerDeadlineAtMs)) return;
+    const remaining = Math.floor(handlerDeadlineAtMs - performance.now() - ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS);
+    if (remaining <= 0) return;
+
+    const states = handles.map(handle => handle.peek().status);
+    if (states.some((status, index) => {
+        if (graceMs === 50_000 && status === 'cutoff' && handles[index].recoveredCutoffFromAudit) return false;
+        return status !== 'ready' && status !== 'pending' && status !== 'capacity_skipped';
+    })) return;
+    const pending = handles.filter((_, index) => states[index] === 'pending');
+    const admitted = pending.filter(handle => handle.holdActiveAttempt?.());
+    if (!admitted.length) return;
+    let endGrace!: () => void;
+    const grace = new Promise<void>(resolve => { endGrace = resolve; });
+    const timer = setTimeout(endGrace, Math.min(graceMs, remaining));
+    try {
+        // Stop any pre-admission work immediately; no new intent may start during this window.
+        const cutoffUnadmitted = pending.filter(handle => !admitted.includes(handle)).map(async handle => {
+            const result = await settleOptionalGenderResolution(handle);
+            if (result?.status === 'recovery_pending' || result?.status === 'budget_reservation_pending'
+                || result?.status === 'terminal_unavailable') endGrace();
+        });
+        const finished = Promise.all(admitted.map(async handle => {
+            await handle.completion;
+            if (handle.peek().status !== 'ready') endGrace();
+        }));
+        await Promise.all([...cutoffUnadmitted, Promise.race([grace, finished])]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function admittedStandardResolverEnabled(
+    policyVersion: string | undefined,
+    job: PaidStandardCapacityJob,
+): Promise<boolean> {
+    if (await paidStandardExpandedCapacityEnabled(policyVersion, job)) return true;
+    if (process.env.DEV_LIVE_STANDARD_RESOLVER_MODE !== 'admitted') return false;
+    if (process.env.NODE_ENV === 'test') return true;
+    return devStandardExpandedCapacityEnabled(policyVersion);
+}
+
+function resolverContinuationReason(error: unknown): ResolverCutoffReason | undefined {
+    if (error instanceof VertexAiBudgetCapacityPendingError) return 'resolver_capacity_continuation';
+    if (!(error instanceof AnalysisV2SchedulerContinuationError)) return;
+    if (error.reason === 'ANALYSIS_V2_AI_CAPACITY_PENDING') return 'resolver_capacity_continuation';
+    if (error.reason === 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT') return 'resolver_deadline_continuation';
+}
+
+/** The delivery still owns its claim until it returns. During a continuation, only
+ * the already reserved attempts from this delivery may finish; on the normal path
+ * queued candidates may also finish their first attempt. Never issue a new retry. */
+async function finishAdmittedResolvers(
+    handles: readonly AnalysisV2GenderResolutionHandle[],
+    deadline: number,
+    continuation?: ResolverCutoffReason,
+): Promise<void> {
+    const pending = handles.filter(handle => handle.peek().status === 'pending');
+    if (!pending.length) return;
+    const remaining = deadline - performance.now() - ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS;
+    if (remaining <= 0) {
+        await drainResolverCleanup(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
+        return;
+    }
+    const completions = pending.map(handle => {
+        if (continuation && !handle.holdActiveAttempt?.(true)) return settleOptionalGenderResolution(handle, continuation);
+        handle.finishCurrentOrFirstAttempt?.();
+        return handle.completion;
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        const timeout = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), remaining); });
+        if (await Promise.race([drainResolverCleanup<unknown>(completions).then(() => false), timeout])) {
+            await drainResolverCleanup(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
+        }
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 interface AnalysisV2DeferredProfileAiOutcome {
     kind: 'resolver_pending';
     resolverHandle: AnalysisV2GenderResolutionHandle | null;
+    featureReservedThisDelivery?: boolean;
     finalize(
         resolverState: AnalysisV2GenderResolutionState | null
     ): Promise<AnalysisV2ProfileAiOutcome>;
@@ -372,6 +489,7 @@ function profileTriageLoader(
 async function runProfileGroups<T>(
     groups: readonly T[], concurrency: number, memberCount: (group: T) => number,
     run: (group: T, slots: number) => Promise<void>,
+    onError?: (error: unknown) => void,
 ) {
     const active = new Set<Promise<void>>();
     let occupied = 0;
@@ -383,10 +501,9 @@ async function runProfileGroups<T>(
         if (failed) break;
         occupied += slots;
         const task = run(group, slots).catch(error => {
-            if (!failed) {
-                failed = true;
-                failure = error;
-            }
+            onError?.(error);
+            failure = failed ? preferredAiSiblingFailure(failure, error) : error;
+            failed = true;
         }).finally(() => {
             occupied -= slots;
             active.delete(task);
@@ -807,7 +924,8 @@ type AnalysisV2StageIdSubset =
 async function runBounded<T, R>(
     values: readonly T[],
     concurrency: number,
-    task: (value: T, index: number) => Promise<R>
+    task: (value: T, index: number) => Promise<R>,
+    onError?: (error: unknown) => void,
 ): Promise<R[]> {
     if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) {
         throw new Error('ANALYSIS_V2_STAGE_INVALID_CONCURRENCY');
@@ -822,10 +940,9 @@ async function runBounded<T, R>(
             try {
                 results[index] = await task(values[index], index);
             } catch (error) {
-                if (!failed) {
-                    failed = true;
-                    firstError = error;
-                }
+                onError?.(error);
+                firstError = failed ? preferredAiSiblingFailure(firstError, error) : error;
+                failed = true;
             }
         }
     }
@@ -2174,8 +2291,40 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             // marker is checked locally, so non-strict profile work gains no
             // context-store or revenue-admission dependency call.
             const strictRevenueResolverDeferred = hasStrictRevenueRelationshipSelection(context);
-            const resolverFence = aiFence;
+            const admittedResolver = context.state.planId === 'standard' && !strictRevenueResolverDeferred
+                && genderResolutionEnabled && await admittedStandardResolverEnabled(aiFence.aiStagePolicyVersion, context.claim);
+            if (admittedResolver && !Number.isFinite(context.handlerDeadlineAtMs)) {
+                throw new Error('ANALYSIS_V2_AI_HANDLER_DEADLINE_INVALID');
+            }
+            const resolverFence = admittedResolver ? { ...aiFence, admittedStandardResolver: true as const } : aiFence;
             const startedResolverHandles: AnalysisV2GenderResolutionHandle[] = [];
+            let requiredFallbackOrFailure = false;
+            const graceMs = context.state.planId === 'standard' ? localStandardResolverGraceMs() : 0;
+            let blockedCapacityTrial = false;
+            let earlyCleanup: Promise<void> | undefined;
+            let deferringAdmitted = false;
+            let freshFeatureAttempt = false;
+            const cutOffDuringExecution = (handles: AnalysisV2GenderResolutionHandle[], reason?: ResolverCutoffReason) => {
+                earlyCleanup = drainResolverCleanup<unknown>([Promise.resolve(earlyCleanup), ...handles.map(handle =>
+                    settleOptionalGenderResolution(handle, reason))]).then(() => {});
+                void earlyCleanup.catch(() => {});
+            };
+            // The first error returned by bounded workers can hide a later sibling fence failure.
+            // On observing any other failure, fence all current handles before waiting for siblings.
+            const stopOnOtherError = graceMs === 50_000 || admittedResolver ? (error: unknown) => {
+                const continuation = admittedResolver && resolverContinuationReason(error);
+                if (continuation) {
+                    if (!deferringAdmitted) {
+                        deferringAdmitted = true;
+                        cutOffDuringExecution(startedResolverHandles.filter(handle =>
+                            handle.peek().status === 'pending' && !handle.holdActiveAttempt?.(true)), continuation);
+                    }
+                    return;
+                }
+                if (blockedCapacityTrial || error instanceof AnalysisV2ConfirmedCapacityContinuation) return;
+                blockedCapacityTrial = true;
+                cutOffDuringExecution(startedResolverHandles, admittedResolver ? 'resolver_required_error' : undefined);
+            } : undefined;
             const requiresGenderPlan = context.state.planId === 'standard'
                 && aiFence.aiStagePolicyVersion === AI_STAGE_POLICY_V211_VERSION
                 && aiFence.schedulerCapability === 'scheduler-v1';
@@ -2379,6 +2528,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         gender = await evaluate();
                     } catch (error) {
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
+                            if (graceMs === 50_000) requiredFallbackOrFailure = true;
                             return analysisUnavailableOutcome(
                                 candidateId,
                                 username,
@@ -2551,16 +2701,35 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const featureKey = inputStore
                         ? createFeatureAnalysisResultIdentity(featureInput, inputQualityPolicyVersion).operationKey : null;
                     const featureRemainderSha256 = await pinProfileFeatureMedia(featureMedia, featureKey, true);
-                    const resolverHandle = shouldStartResolver
-                        ? dependencies.ai.startGenderResolution({ media: resolverMedia }, resolverFence)
-                        : null;
-                    if (resolverHandle) {
+                    let resolverHandle: AnalysisV2GenderResolutionHandle | null = null;
+                    let featureReservedThisDelivery = false;
+                    const startResolver = (cachedFeature = false) => {
+                        if (!shouldStartResolver || blockedCapacityTrial || deferringAdmitted || resolverHandle) return;
+                        resolverHandle = dependencies.ai.startGenderResolution({ media: resolverMedia },
+                            cachedFeature ? { ...resolverFence, cachedFeatureForResolver: true } : resolverFence);
                         startedResolverHandles.push(resolverHandle);
-                    }
+                    };
+                    if (!admittedResolver) startResolver();
                     let features: Awaited<ReturnType<AnalysisV2AiStageRuntime['features']>>;
                     try {
-                        features = await dependencies.ai.features(featureInput, scheduledProfileFence);
+                        features = admittedResolver
+                            ? await dependencies.ai.features(featureInput, scheduledProfileFence, () => {
+                                freshFeatureAttempt = true;
+                                featureReservedThisDelivery = true;
+                                startResolver();
+                            })
+                            : await dependencies.ai.features(featureInput, scheduledProfileFence);
+                        // A reused feature has no fresh dispatch boundary. Its resolver still
+                        // reads the exact checkpoint before deciding whether to call the provider.
+                        if (admittedResolver && shouldStartResolver && !resolverHandle) {
+                            const expectedKey = featureKey ?? createFeatureAnalysisResultIdentity(featureInput, inputQualityPolicyVersion).operationKey;
+                            startResolver(!featureReservedThisDelivery && features.source === 'checkpoint'
+                                && !!features.resultHash && features.operationKey === expectedKey);
+                        }
                     } catch (error) {
+                        if (admittedResolver && resolverContinuationReason(error)) throw error;
+                        if (graceMs === 50_000 && error instanceof AnalysisV2ConfirmedCapacityContinuation) throw error;
+                        requiredFallbackOrFailure = true;
                         if (isAnalysisV2AiDeterministicFallbackError(error)) {
                             return {
                                 kind: 'resolver_pending',
@@ -2572,7 +2741,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                             : null;
                                     const resolverFailureStatus =
                                         !resolverHandle
-                                            ? defaultGenderResolutionStatus
+                                            ? admittedResolver && shouldStartResolver
+                                                ? 'terminal_unavailable' as const : defaultGenderResolutionStatus
                                             : resolverState?.status === 'ready'
                                                 ? 'ready_not_needed' as const
                                                 : resolverState?.status === 'capacity_skipped'
@@ -2592,11 +2762,15 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 },
                             };
                         }
-                        const resolverState = await settleOptionalGenderResolution(
-                            resolverHandle
-                        );
-                        if (resolverState?.status === 'recovery_pending') {
-                            throw new AnalysisV2AiResultRecoveryPendingError();
+                        stopOnOtherError?.(error);
+                        try {
+                            const state = await settleOptionalGenderResolution(
+                                resolverHandle, admittedResolver ? 'resolver_required_error' : undefined,
+                            );
+                            const blockingError = resolverBlockingError(state);
+                            if (blockingError) throw blockingError;
+                        } catch (cleanupError) {
+                            throw preferredAiSiblingFailure(error, cleanupError);
                         }
                         throw error;
                     }
@@ -2669,6 +2843,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     return {
                         kind: 'resolver_pending',
                         resolverHandle,
+                        featureReservedThisDelivery,
                         finalize: async settledResolverState => {
                             const readyResolver =
                                 settledResolverState?.status === 'ready'
@@ -2765,7 +2940,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         },
                     };
                 }
-                const prepared = await runBounded(results, profileConcurrency, prepareProfile);
+                const prepared = await runBounded(results, profileConcurrency, prepareProfile, stopOnOtherError);
                 preparedOutcomes = new Array(prepared.length);
                 const byAccount = new Map<string, { index: number; work: PlannedProfile }[]>();
                 const accounts: GenderTriagePlanAccount[] = [];
@@ -2817,8 +2992,8 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                                 if (!(error instanceof DeferredProfileFeatureInput)) throw error;
                                 deferred.push({ work, index, gender: await evaluate(), receipt: error.receipt });
                             }
-                        });
-                    });
+                        }, stopOnOtherError);
+                    }, stopOnOtherError);
                     // A historical feature key may belong to a later group. Only its exact owner can
                     // adopt it. Keep the earlier candidates' archive references while that owner runs.
                     if (saved.hasUnownedFeatureHistory || deferred.length) {
@@ -2829,28 +3004,70 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             preparedOutcomes[index] = await analyzePreparedProfile(
                                 work.evidence, await work.load(), async () => gender, receipt,
                             );
-                        });
+                        }, stopOnOtherError);
                     }
                 }
-            } catch (error) {
-                const cleanupStates = await Promise.all(
-                    startedResolverHandles.map(settleOptionalGenderResolution)
-                );
-                if (cleanupStates.some(state => state?.status === 'recovery_pending')) {
-                    throw new AnalysisV2AiResultRecoveryPendingError();
+                if (earlyCleanup) await earlyCleanup;
+                if (admittedResolver && !blockedCapacityTrial) {
+                    await finishAdmittedResolvers(startedResolverHandles, context.handlerDeadlineAtMs!);
+                } else if (graceMs && !requiredFallbackOrFailure && !blockedCapacityTrial && startedResolverHandles.length) {
+                    await waitForLocalResolverTrial(startedResolverHandles, context.handlerDeadlineAtMs, graceMs);
                 }
-                throw error;
+            } catch (error) {
+                let failure = error;
+                const continuation = admittedResolver && resolverContinuationReason(error);
+                try {
+                    if (continuation && !blockedCapacityTrial) {
+                        await finishAdmittedResolvers(startedResolverHandles, context.handlerDeadlineAtMs!, continuation);
+                    } else if (graceMs === 50_000 && error instanceof AnalysisV2ConfirmedCapacityContinuation
+                        && !requiredFallbackOrFailure && !blockedCapacityTrial) {
+                        await waitForLocalResolverTrial(startedResolverHandles, context.handlerDeadlineAtMs, graceMs);
+                    }
+                } catch (drainError) {
+                    failure = preferredAiSiblingFailure(failure, drainError);
+                }
+                const reason = admittedResolver ? continuation || 'resolver_required_error' : undefined;
+                try {
+                    await drainResolverCleanup([Promise.resolve(earlyCleanup), ...startedResolverHandles.map(async handle => {
+                        const state = await settleOptionalGenderResolution(handle, reason);
+                        const blockingError = resolverBlockingError(state);
+                        if (blockingError) throw blockingError;
+                    })]);
+                } catch (cleanupError) {
+                    failure = preferredAiSiblingFailure(failure, cleanupError);
+                }
+                throw failure;
             }
-            const resolverStates = await Promise.all(preparedOutcomes.map(outcome => (
-                isDeferredProfileAiOutcome(outcome)
-                    ? settleOptionalGenderResolution(outcome.resolverHandle)
-                    : Promise.resolve(null)
-            )));
-            if (resolverStates.some(state => state?.status === 'recovery_pending')) {
-                throw new AnalysisV2AiResultRecoveryPendingError();
+            const resolverStates = await drainResolverCleanup(preparedOutcomes.map(async outcome => {
+                if (!isDeferredProfileAiOutcome(outcome)) return null;
+                const state = await settleOptionalGenderResolution(outcome.resolverHandle, admittedResolver ? 'resolver_batch_barrier' : undefined);
+                const blockingError = resolverBlockingError(state);
+                if (blockingError) throw blockingError;
+                return state;
+            }));
+            if (resolverStates.some(state => state?.status === 'unsent_capacity_pending')) {
+                // Reuse completed feature/resolver checkpoints. Only the unstarted resolver
+                // can obtain its first attempt after the next delivery checks its deadline.
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
             }
             const budgetWait = resolverStates.find(state => state?.status === 'budget_reservation_pending');
             if (budgetWait?.status === 'budget_reservation_pending') throw budgetWait.error;
+            // Only the affected candidate's newly completed feature earns this delivery.
+            // Its immutable feature checkpoint has no reservation callback when replayed.
+            const retryLocalPermit = preparedOutcomes.some((outcome, index) => {
+                const state = resolverStates[index];
+                return isDeferredProfileAiOutcome(outcome) && outcome.featureReservedThisDelivery
+                    && state?.status === 'capacity_skipped' && state.localFirstAttemptTimedOut;
+            });
+            if (retryLocalPermit && await paidStandardExpandedCapacityEnabled(aiFence.aiStagePolicyVersion, context.claim)) {
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            }
+            // A fresh feature checkpoint makes redelivery cheaper. If a cached-only
+            // delivery is still too short, seal the unsent optional result as cutoff
+            // rather than repeatedly deferring the same immutable checkpoint.
+            if (freshFeatureAttempt && resolverStates.some(state => state?.status === 'deadline_pending')) {
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 1);
+            }
             const outcomes = await runBounded(
                 preparedOutcomes,
                 profileConcurrency,

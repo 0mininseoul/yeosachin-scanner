@@ -89,9 +89,9 @@ function leaseHarness(
     return { rpc, providerAdmissionStore, store, identities, acquire };
 }
 
-it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities.filter(c => c.slots !== 8).map(c => c.slots))(
-    'runs high-numbered slot admission, stage limits, dispatch fencing and quarantine recovery with %i physical slots', async slots => {
-        const db = await createSharedStandardDatabase(slots);
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities.filter(c => c.slots !== 8))(
+    'runs high-numbered slot admission, stage limits, dispatch fencing and quarantine recovery with $preset', async ({ slots, features, resolvers, preset }) => {
+        const db = await createSharedStandardDatabase(preset);
         try {
             const job = await seedProcessingJob(db);
             const { rpc, providerAdmissionStore, store, identities, acquire } = leaseHarness(db, slots, job);
@@ -101,17 +101,16 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
                 for (let i = 0; i < count; i++) leases.push(await acquire(stage));
                 return leases;
             };
-            const feature = await acquireStage('featureAnalysis', sharedStandardCapacity(slots).features);
+            const feature = await acquireStage('featureAnalysis', features);
             await expect(acquire('featureAnalysis')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
-            // Leave room for twelve triage leases and the subsequent six-resolver mix
-            // after independently testing the feature ceiling (70 in the 80-slot pool).
-            for (const lease of feature.splice(slots - 16)) await store.release(lease);
+            // Keep ten triage leases active alongside the full resolver pool.
+            for (const lease of feature.splice(slots - resolvers - 10)) await store.release(lease);
             const triage = await acquireStage('genderTriage', 12);
             await expect(acquire('genderTriage')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
             const privateNames = await acquireStage('privateAccountName', 2);
             await expect(acquire('privateAccountName')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
             for (const lease of [...privateNames, ...triage.splice(-2)]) await store.release(lease);
-            const resolver = await acquireStage('genderResolution', 6);
+            const resolver = await acquireStage('genderResolution', resolvers);
             await expect(acquire('genderResolution')).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
             await expect(acquire('partnerSafety')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
 
@@ -165,6 +164,11 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
             await expect(store.renew(high)).rejects.toThrow('ANALYSIS_V2_GEMINI_LEASE_FENCE');
             for (const lease of [...feature, ...triage, ...resolver.slice(0, -1), reused]) await store.release(lease);
 
+            // The first wave spent starts in its own minute. Begin the independent full-pool
+            // proof in a fresh local window; both waves together may exceed 240 starts.
+            await db.exec(`UPDATE analysis_provider_admission_budgets
+                SET window_started_at=now()-interval '61 seconds'
+                WHERE logical_provider='gemini' AND workload_role='paid'`);
             // A single ungated-by-stage operation type exercises every physical slot with the same model schema.
             const resultStore = createAnalysisV2AiResultStore({ rpc });
             const publishing = await acquireStage('partnerSafety', slots);
@@ -230,9 +234,9 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
     }, 60_000,
 );
 
-it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities.map(c => c.slots))(
-    'compares the sixteenth serial acquire with a fresh and spent minute on %i slots', async slots => {
-        const db = await createSharedStandardDatabase(slots);
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStandardCapacities)(
+    'compares the sixteenth serial acquire with a fresh and spent minute on $preset', async ({ slots, preset }) => {
+        const db = await createSharedStandardDatabase(preset);
         try {
             const job = await seedProcessingJob(db);
             const { acquire, store } = leaseHarness(db, slots, job);

@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
+import { safeStandardBudgetRpcFields } from './standard-shared-budget-evidence';
+
 const migrationVersions = [
     '20261120160000',
     '20261120161000',
@@ -27,6 +29,11 @@ const migrationVersions = [
     '20261124191000',
     '20261126031000',
     '20261126032000',
+    '20261126100000',
+    '20261126100001',
+    '20261126100002',
+    '20261126100003',
+    '20261126100004',
 ];
 
 export interface StandardConnection {
@@ -55,7 +62,7 @@ export async function createStandardDatabase() {
 // The baseline changes session settings. Keep every script on the same connection.
 export async function installStandardFixtureSchema(
     db: Pick<StandardConnection, 'exec'>,
-    { providerRecoveryParentFence = true }: { providerRecoveryParentFence?: boolean } = {},
+    { providerRecoveryParentFence = true, production = false }: { providerRecoveryParentFence?: boolean; production?: boolean } = {},
 ) {
     const devSql = (name: string) => readFileSync('supabase/dev-ui/' + name + '.sql', 'utf8');
     await db.exec(`
@@ -68,7 +75,7 @@ export async function installStandardFixtureSchema(
         CREATE FUNCTION extensions.uuid_generate_v4() RETURNS uuid LANGUAGE SQL VOLATILE AS $$ SELECT gen_random_uuid() $$;
         CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE SQL STABLE AS $$ SELECT nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $$;
         CREATE FUNCTION auth.role() RETURNS text LANGUAGE SQL STABLE AS $$ SELECT current_setting('role') $$;
-        CREATE TABLE auth.users(id uuid PRIMARY KEY, email text, raw_app_meta_data jsonb, raw_user_meta_data jsonb, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+        CREATE TABLE auth.users(id uuid PRIMARY KEY, email text, raw_app_meta_data jsonb, raw_user_meta_data jsonb, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(), email_confirmed_at timestamptz, deleted_at timestamptz);
         CREATE TABLE auth.identities(user_id uuid, provider text, identity_data jsonb);
         GRANT USAGE ON SCHEMA auth, extensions TO anon, authenticated, service_role;
         CREATE PUBLICATION supabase_realtime;
@@ -78,7 +85,7 @@ export async function installStandardFixtureSchema(
         devSql('production-baseline').replace(/^CREATE EXTENSION IF NOT EXISTS pg_graphql .*;$/m, ''),
     );
     await db.exec('SET search_path TO public, extensions; SET row_security TO on');
-    for (const name of [
+    for (const name of production ? [] : [
         'control-plane',
         'live-budget',
         'live-owner-start',
@@ -120,7 +127,7 @@ export async function installStandardFixtureSchema(
         if (matches.length !== 1) throw new Error('Expected one migration for ' + version);
         await db.exec(readFileSync('supabase/migrations/' + matches[0], 'utf8'));
     }
-    for (const name of [
+    for (const name of production ? [] : [
         'live-standard-provider-recovery',
         'live-standard-feature-concurrency',
         'live-standard-profile-media-ready',
@@ -181,10 +188,10 @@ export function localDatabaseClient(db: StandardDatabase, subject?: string | nul
             );
             return { data: value, error: null };
         } catch (cause) {
-            const error = cause as { code: string; message: string; constraint?: string };
+            const error = cause as { code: string; message: string; constraint?: string; hint?: string; detail?: string };
             const constraint = error.code === '23514' && /^[a-z][a-z0-9_]{0,62}$/.test(error.constraint ?? '')
                 ? error.constraint : undefined;
-            return { data: null, error: { code: error.code, message: error.message, constraint } };
+            return { data: null, error: { code: error.code, message: error.message, constraint, ...safeStandardBudgetRpcFields(name, error) } };
         }
     }
     function from(table: string) {

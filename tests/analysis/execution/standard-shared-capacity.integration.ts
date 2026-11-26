@@ -1,7 +1,10 @@
+import { channel } from 'node:diagnostics_channel';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { expect, it, vi } from 'vitest';
+import * as operationalEvents from '@/lib/observability/schema';
+import { isAiStageName } from '@/lib/services/ai/stage-policy';
 import { createGeminiGenerationLimiter } from '@/lib/services/ai/gemini-generation-limiter';
 import { ProcessWideAnalysisV2SchedulerArbiter, type AnalysisV2SchedulerRuntimeOptions } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
 import { ApifyActorSemaphore } from '@/lib/services/instagram/providers/apify-actor-semaphore';
@@ -9,10 +12,13 @@ import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
 import { startSharedStandardMaintenance } from './fixtures/standard-shared-maintenance';
 import { POST as paidWorker } from '@/app/api/analysis/v2/worker/route';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION, ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER } from '@/lib/services/analysis/v2-worker-task-contract';
-import { databaseCounters, sharedStandardFailureSummary, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
+import { databaseCounters, sharedStandardStopEvidence, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
 import { createSharedStandardDatabase } from './fixtures/standard-shared-database';
+import { readSharedResolverLedger, SharedResolverObservation } from './fixtures/standard-shared-resolver-observation';
 import { sharedStandardCapacity } from './fixtures/standard-shared-capacities.mjs';
 import { configureSharedStandard } from './fixtures/standard-shared-environment';
+import { SharedBudgetPressureProbe } from './fixtures/standard-shared-budget-probe';
+import { StandardSharedBudgetEvidence } from './fixtures/standard-shared-budget-evidence';
 import { StandardSharedQueue } from './fixtures/standard-shared-queue';
 import { createFixtureObjects, createFixtureR2 } from './fixtures/standard-media';
 import { createSharedImageSource } from './fixtures/standard-shared-image-source';
@@ -21,14 +27,15 @@ import { syntheticGeneration } from './fixtures/standard-vertex';
 import { SyntheticApify, target, type SyntheticActorStart } from './fixtures/standard-providers';
 import {
     seedSharedStandardOwners, startSharedStandardPreflight, prepareSharedStandardOrder, admitSharedStandard,
+    prepareSharedAutomaticOrders, readSharedAutomaticOrders, checkSharedReadyHandoffFences, sharedPublicProfile, captureSharedPaymentAfter, completeWave,
     processSharedStandardPreflight, processSharedStandardBlite, processSharedStandardFresh,
     sharedStandardAdmissionEnv, type SharedStandardOwner
 } from './fixtures/standard-shared-admission';
-import { settleSharedActorReceipts, verifySharedStandardRequest, sharedStandardEffects } from './fixtures/standard-shared-verification';
+import { countVerifiedResultEmailClaims, observeSharedOwnerReads, settleSharedActorReceipts, verifySharedStandardRequest, verifyRenderedOwner, sharedStandardEffects } from './fixtures/standard-shared-verification';
 
 const boundary = vi.hoisted(() => ({
     rpc: vi.fn(), from: vi.fn(), session: vi.fn(), queue: vi.fn(), apify: vi.fn(), objects: vi.fn(),
-    r2: vi.fn(), source: vi.fn(), model: vi.fn(),
+    r2: vi.fn(), source: vi.fn(), model: vi.fn(), freshProfile: vi.fn(),
 }));
 // Each local queue worker has the same process-local semaphores as a Cloud Run instance.
 vi.mock('@/lib/services/ai/gemini-generation-limiter', async original => {
@@ -48,9 +55,19 @@ vi.mock('@/lib/services/instagram/providers/apify-actor-semaphore', async origin
 });
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: boundary.rpc, from: boundary.from } }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: boundary.session }));
+vi.mock('next/server', async original => {
+    const actual = await original<typeof import('next/server')>();
+    return { ...actual, after: (task: Parameters<typeof actual.after>[0]) => {
+        if (!captureSharedPaymentAfter(task)) actual.after(task);
+    } };
+});
 vi.mock('@/lib/services/analysis/background-tasks', async original => ({
     ...await original<typeof import('@/lib/services/analysis/background-tasks')>(),
     createCloudTasksClient: () => boundary.queue(),
+}));
+vi.mock('@/lib/services/instagram/providers/selfhosted', async original => ({
+    ...await original<typeof import('@/lib/services/instagram/providers/selfhosted')>(),
+    getSelfHostedAdmissionProfileSummary: (username: string) => boundary.freshProfile(username),
 }));
 vi.mock('apify-client', async original => ({ ...await original<typeof import('apify-client')>(), ApifyClient: class { constructor() { return boundary.apify(); } } }));
 vi.mock('@/lib/services/analysis/v2-media-artifact-store', async original => {
@@ -91,10 +108,13 @@ vi.mock('@google/genai/node', async original => ({
         constructor(options: { fetch: typeof fetch }) {
             const transport = options.fetch;
             this.models = {
-                generateContent: async (input: unknown) => {
+                generateContent: (input: unknown) => {
                     const signal = (input as { config?: { abortSignal?: AbortSignal } }).config?.abortSignal;
-                    await transport('https://vertex.fixture.invalid', { signal });
-                    return boundary.model(input);
+                    const generate = async () => {
+                        await transport('https://vertex.fixture.invalid', { signal });
+                        return boundary.model(input);
+                    };
+                    return private90ModelStage(input) === 'resolver' ? resolverObservation.sdk(signal, generate) : generate();
                 }
             };
         }
@@ -133,48 +153,138 @@ vi.mock('next/navigation', async original => {
 });
 
 function createWorkerCapacity() {
-    return { gemini: createGeminiGenerationLimiter(), scheduler: new ProcessWideAnalysisV2SchedulerArbiter(), apify: new ApifyActorSemaphore() };
+    return { gemini: createGeminiGenerationLimiter(), scheduler: new ProcessWideAnalysisV2SchedulerArbiter(),
+        apify: new ApifyActorSemaphore(), activeModels: 0, activeFeatures: 0 };
 }
 const workerCapacity = new AsyncLocalStorage<ReturnType<typeof createWorkerCapacity>>();
 const auth = new AsyncLocalStorage<SharedStandardOwner | null>();
 const requestScope = new AsyncLocalStorage<string>();
 const activeTask = new AsyncLocalStorage<Record<string, unknown>>();
+let resolverObservation: SharedResolverObservation;
 function safeCode(value: unknown) {
     const word = value instanceof Error ? value.message.split(/[:\s]/)[0] : '';
     return /^[A-Z][A-Z0-9_]{1,95}$/.test(word) ? word : 'UNCLASSIFIED';
 }
 function marker(label: string, data: object) { console.info(label, JSON.stringify(data)); }
 
-async function completeWave<T>(tasks: Promise<T>[]) {
-    const results = await Promise.allSettled(tasks);
-    return results.map(result => {
-        if (result.status === 'rejected') throw result.reason;
-        return result.value;
-    });
-}
-
 it('publishes simultaneous paid Standard requests through one database and queue', async () => {
+    resolverObservation = new SharedResolverObservation();
+    const budgetTimeline = new StandardSharedBudgetEvidence();
+    const deliveryScope = new AsyncLocalStorage<object>();
+    const incidentContext = () => ({ owner: requestScope.getStore(), delivery: deliveryScope.getStore() });
     configureSharedStandard();
     for (const [key, value] of Object.entries(sharedStandardAdmissionEnv)) vi.stubEnv(key, value);
     vi.stubGlobal('fetch', async (url: unknown) => {
-        if (url === 'https://vertex.fixture.invalid') return new Response();
+        if (url === 'https://vertex.fixture.invalid') {
+            resolverObservation.wire();
+            return new Response();
+        }
         throw new Error('SHARED_STANDARD_EGRESS_DENIED');
     });
     const publicCount = Number(process.env.SHARED_STANDARD_PUBLIC ?? 1);
     const observedTiming = process.env.SHARED_STANDARD_TIMING === 'observed';
     const ownersCount = Number(process.env.SHARED_STANDARD_OWNERS ?? 16);
-    const { slots, workers } = sharedStandardCapacity(process.env.STANDARD_SHARED_VERTEX_SLOTS ?? '8');
-    expect([2, 16]).toContain(ownersCount);
+    const capacity = sharedStandardCapacity(process.env.SHARED_STANDARD_PRESET ?? '8');
+    const { slots, workers } = capacity;
+    expect(Number.isInteger(ownersCount) && ownersCount >= 1 && ownersCount <= 16).toBe(true);
     if (process.env.SHARED_STANDARD_WORKERS !== undefined) expect(Number(process.env.SHARED_STANDARD_WORKERS)).toBe(workers);
     const recovery = process.env.SHARED_STANDARD_SCENARIO === 'recovery';
-    const db = await createSharedStandardDatabase(slots);
+    const productionPaid = process.env.SHARED_STANDARD_DELIVERY === 'production-paid';
+    const automaticPayments = productionPaid && ownersCount <= 10;
+    const checkoutEvidence = automaticPayments ? 'signed_webhook_automatic_fulfillment'
+        : ownersCount <= 10 ? 'signed_webhook_operator_admission' : 'synthetic_paid_receipt_operator_admission';
+    if (automaticPayments) {
+        vi.stubEnv('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED', 'true');
+        vi.stubEnv('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE', new Date(Date.now() - 60_000).toISOString());
+    }
+    const coverage99 = productionPaid || process.env.DEV_LIVE_STANDARD_RESOLVER_MODE === 'admitted';
+    const approvedOwners = new Set<string>();
+    const expandedOwners = new Set<string>();
+    const logicalLeaseOwners = new Set<string>();
+    const dispatchAuthorizedOwners = new Set<string>();
+    const tokenLogEvents: Record<string, number> = {};
+    const tokenLogChannel = channel('yeosachin.gemini-token-log');
+    function observeTokenLog(message: unknown) {
+        const event = message as { stage?: unknown; outcome?: string } | undefined;
+        if (!event || !isAiStageName(event.stage)
+            || !['audit_committed_then_aborted', 'audit_committed_fenced', 'insert_acknowledged',
+                'insert_error_response', 'insert_threw'].includes(event.outcome ?? '')) return;
+        const key = event.stage + '.' + event.outcome;
+        tokenLogEvents[key] = (tokenLogEvents[key] ?? 0) + 1;
+    }
+    const cachedResolverLocal = { entered: 0, within_5s: 0, after_5s: 0, timeout: 0, aborted: 0, deadline: 0, error: 0 };
+    const cachedChannel = channel('yeosachin.standard.cached-resolver-local');
+    function observeCachedLocal(message: unknown) {
+        if (typeof message === 'string' && Object.hasOwn(cachedResolverLocal, message)) {
+            cachedResolverLocal[message as keyof typeof cachedResolverLocal]++;
+        }
+    }
+    const admissionEvents: Record<string, number> = {};
+    const continuationSetups = { acquire_lease: 0, reserve_attempt: 0 };
+    const continuationChannel = channel('yeosachin.standard.resolver-continuation');
+    function observeContinuation(message: unknown) {
+        const phase = (message as { phase?: unknown } | undefined)?.phase;
+        if (phase === 'acquire_lease' || phase === 'reserve_attempt') continuationSetups[phase]++;
+    }
+    const admissionChannel = channel('yeosachin.standard.resolver-admission');
+    function observeAdmission(message: unknown) {
+        const event = message as { reason?: string; outcome?: string } | undefined;
+        if (!event || !['worker_stage', 'worker_shared', 'global_resolver', 'global_shared'].includes(event.reason ?? '')
+            || !['contended', 'skipped', 'admitted_after_wait'].includes(event.outcome ?? '')) return;
+        const key = event.reason + '.' + event.outcome;
+        admissionEvents[key] = (admissionEvents[key] ?? 0) + 1;
+    }
+    // The production database retains its legacy entry points. Only the explicitly
+    // approved paid handler may call the expanded allocator.
+    const db = productionPaid
+        ? await createSharedStandardDatabase(8, { production: true })
+        : await createSharedStandardDatabase(capacity.preset);
+    let restoreBudgetObserver: (() => void) | undefined;
+    cachedChannel.subscribe(observeCachedLocal);
+    tokenLogChannel.subscribe(observeTokenLog);
+    admissionChannel.subscribe(observeAdmission);
+    continuationChannel.subscribe(observeContinuation);
     try {
+        if (productionPaid) {
+            await db.exec(readFileSync('supabase/operations/20261126_expand_paid_standard_vertex.sql', 'utf8'));
+        }
+        if (automaticPayments) {
+            await db.query(`UPDATE paid_analysis_capacity_policy SET max_active=$1, validation_ref='automatic-webhook-offline'`,
+                [ownersCount]);
+        }
+        const probeMode = process.env.SHARED_STANDARD_BUDGET_PROBE;
+        if (probeMode && (!['held', 'spent'].includes(probeMode) || !automaticPayments || observedTiming || ownersCount !== 1 || publicCount !== 4))
+            throw new Error('SHARED_BUDGET_PROBE_REQUIRES_SMALL_SIGNED_FIXTURE');
+        const budgetProbe = probeMode === 'held' || probeMode === 'spent' ? new SharedBudgetPressureProbe(db, probeMode) : null;
+        if (budgetProbe) {
+            const sanitize = operationalEvents.sanitizeOperationalEvent;
+            const observer = vi.spyOn(operationalEvents, 'sanitizeOperationalEvent').mockImplementation(event => {
+                budgetProbe.observeWorkerEvent(event, deliveryScope.getStore());
+                return sanitize(event);
+            });
+            restoreBudgetObserver = () => observer.mockRestore();
+        }
         const { rpc, from } = db.client();
         const errors: Record<string, number> = {};
         let injectedTimeouts = 0;
         let timeoutRequest: string | undefined;
         let resumedTimedOutRead = false;
         let injectedWorker429s = 0;
+        // Exercise a lost commercial handoff separately from the full-size throughput trial.
+        const injectFreshHandoffLoss = recovery && automaticPayments && ownersCount <= 2;
+        let lostFreshDelivery: string | undefined;
+        let probedFreshHandoff = false;
+        let freshProbeFailure: Error | undefined;
+        const publishedHandoffs = new Set<string>();
+        let publishedHandoffCalls = 0;
+        const readyHandoffs = new Set<string>();
+        const freshProfileReads = new Set<string>();
+        boundary.freshProfile.mockImplementation((username: string) => {
+            const preflight = requestScope.getStore();
+            if (!preflight || freshProfileReads.has(preflight)) throw new Error('SHARED_DUPLICATE_FRESH_PROFILE_READ');
+            freshProfileReads.add(preflight);
+            return sharedPublicProfile(username);
+        });
         boundary.rpc.mockImplementation(async (name, args) => {
             if (recovery && injectedTimeouts === 0 && name === 'load_analysis_v2_profile_fetch_for_consumer'
                 && args.p_consumer_job_key === 'track:profile-ai:batch:0') {
@@ -182,7 +292,50 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 timeoutRequest = requestScope.getStore();
                 return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
             }
+            if (name === 'handoff_ready_signed_paid_fulfillment_v1' && automaticPayments && ownersCount <= 2 && !probedFreshHandoff) {
+                probedFreshHandoff = true;
+                try {
+                    await checkSharedReadyHandoffFences(db, args);
+                } catch (error) {
+                    const problem = error as { code?: string; constraint?: string };
+                    const detail = [problem.code, problem.constraint].filter(part => part && /^[a-zA-Z0-9_]+$/.test(part)).join(':');
+                    freshProbeFailure = new Error('SHARED_FRESH_HANDOFF_NEGATIVE_PROBE:' + detail);
+                    throw freshProbeFailure;
+                }
+            }
+            if (budgetProbe) await budgetProbe.beforeRpc(name, args);
             const reply = await rpc(name, args);
+            budgetTimeline.rpc(name, args, reply.error, incidentContext());
+            if (budgetProbe) await budgetProbe.afterRpc(name, args, reply.error, deliveryScope.getStore());
+            if (name === 'complete_published_capacity_order_v1') {
+                publishedHandoffCalls++;
+                if (reply.data === true) publishedHandoffs.add(args.p_request_id);
+            }
+            if (name === 'handoff_ready_signed_paid_fulfillment_v1' && !reply.error && typeof reply.data === 'string') {
+                readyHandoffs.add(reply.data);
+                if (injectFreshHandoffLoss && !lostFreshDelivery) {
+                    lostFreshDelivery = args.p_preflight_id;
+                    return { data: null, error: { code: '08006', message: 'synthetic response loss after commit' } };
+                }
+            }
+            if (name === 'paid_standard_capacity_approved_v1' && reply.data === true) {
+                approvedOwners.add(args.p_request_id);
+            }
+            if (name === 'acquire_paid_standard_gemini_lease_v1' && !reply.error
+                && Array.isArray(reply.data) && reply.data.some(row => row.outcome === 'acquired')) {
+                expandedOwners.add(args.p_request_id);
+            }
+            if (name === 'acquire_paid_standard_provider_admission_v1' && !reply.error && reply.data
+                && typeof reply.data === 'object' && 'outcome' in reply.data && reply.data.outcome === 'acquired') {
+                logicalLeaseOwners.add(args.p_request_id);
+            }
+            if (name === 'authorize_paid_standard_vertex_dispatch_v1' && !reply.error && reply.data === true) {
+                dispatchAuthorizedOwners.add(args.p_request_id);
+            }
+            if ((name === 'reserve_analysis_v2_ai_attempt' || name === 'reserve_paid_standard_ai_attempt_v1') && !reply.error && reply.data && typeof reply.data === 'object'
+                && 'created' in reply.data && reply.data.created === true) {
+                resolverObservation.bindReservation(args.p_request_id, args.p_operation_key, args.p_attempt);
+            }
             if (timeoutRequest && timeoutRequest === requestScope.getStore() && !reply.error
                 && name === 'load_analysis_v2_profile_fetch_for_consumer'
                 && args.p_consumer_job_key === 'track:profile-ai:batch:0') resumedTimedOutRead = true;
@@ -197,7 +350,8 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const user = auth.getStore() ?? null;
             return { ...db.client(user?.id ?? null), auth: { getUser: async () => ({ data: { user }, error: null }) } };
         });
-        const owners = await seedSharedStandardOwners(db, ownersCount, target);
+        const identities = await seedSharedStandardOwners(db, Math.max(2, ownersCount), target);
+        const owners = identities.slice(0, ownersCount);
         const asOwner = <T>(owner: SharedStandardOwner | null, run: () => Promise<T>) => auth.run(owner, run);
         const queue = new StandardSharedQueue(observedTiming);
         boundary.queue.mockReturnValue(queue.client);
@@ -225,6 +379,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         const models = new Map<string, number>();
         let activeModels = 0;
         let peakModels = 0;
+        const processModelPeaks = { all: 0, features: 0 };
         const duplicatedDuringModel = new Set<string>();
         boundary.model.mockImplementation(async input => {
             const scope = requestScope.getStore();
@@ -237,10 +392,18 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 partner: 5797, narrative: 21595, private_names: 12316
             };
             const stage = private90ModelStage(input);
+            budgetProbe?.observeModelCall(stage);
             const delay = observedTiming ? observedMs[stage] : 100;
             if (!delay) throw new Error('SHARED_UNCALIBRATED_MODEL_STAGE');
             activeModels++;
             peakModels = Math.max(peakModels, activeModels);
+            const instance = workerCapacity.getStore();
+            if (instance) {
+                instance.activeModels++;
+                if (stage === 'features') instance.activeFeatures++;
+                processModelPeaks.all = Math.max(processModelPeaks.all, instance.activeModels);
+                processModelPeaks.features = Math.max(processModelPeaks.features, instance.activeFeatures);
+            }
             try {
                 const task = activeTask.getStore();
                 if (task && !duplicatedDuringModel.has(scope)) {
@@ -249,17 +412,34 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     expect(duplicate.status).toBe(409);
                     expect((await duplicate.json()).code).toBe('JOB_LEASE_BUSY');
                 }
-                await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
-                return syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4);
+                try {
+                    await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
+                } catch (error) {
+                    resolverObservation.waitRejected(error);
+                    throw error;
+                }
+                return resolverObservation.response(syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4));
             } finally {
                 activeModels--;
+                if (instance) {
+                    instance.activeModels--;
+                    if (stage === 'features') instance.activeFeatures--;
+                }
             }
         });
         const ioBefore = await databaseCounters(db);
         const firstAt = performance.now();
+        const proofs: Awaited<ReturnType<typeof verifySharedStandardRequest>>[] = [];
+        let resolutionBeforeStop: Awaited<ReturnType<typeof sharedStandardMeasurements>>['resolutionByOwner'] | null = null;
+        let emailClaimsBeforeStop: number | null = null;
+        let renderedOwners = 0;
         let lateOwners = 0;
         let ownersWithLedgerIssues = 0;
         let sharedLedgerIssues: string[] = [];
+        let belowCoverage = false;
+        let ownerReadOverHour = false;
+        let directPublicationMissing = false;
+        let ownerObserver: ReturnType<typeof observeSharedOwnerReads> | undefined;
         let maintenance: ReturnType<typeof startSharedStandardMaintenance> | undefined;
         try {
             const runs = await completeWave(owners.map(owner => startSharedStandardPreflight(owner, asOwner)));
@@ -273,14 +453,46 @@ it('publishes simultaneous paid Standard requests through one database and queue
             });
             marker('preflight-ready', { count: ownersCount });
             const paidStart = performance.now();
-            const payment = ownersCount === 2 ? 'webhook' : 'fixture';
-            const orders = await completeWave(runs.map(run => prepareSharedStandardOrder(run, asOwner, { db, payment })));
-            const paidWorkers = Array.from({ length: workers }, createWorkerCapacity);
+            const periodicFulfillment = productionPaid && observedTiming;
+            const payment = ownersCount <= 10 ? 'webhook' : 'fixture';
+            const automatic = automaticPayments ? await prepareSharedAutomaticOrders(runs, asOwner, db) : null;
+            const orders = automatic?.orders ?? await completeWave(runs.map(run => prepareSharedStandardOrder(run, asOwner, { db, payment })));
+            const instanceCount = 'instances' in capacity ? capacity.instances : workers;
+            const instances = Array.from({ length: instanceCount }, createWorkerCapacity);
+            // Round-robin request lanes, with an independent limiter only per instance.
+            const paidWorkers = Array.from({ length: workers }, (_, lane) => instances[lane % instances.length]!);
+            const enablePaidWorker = () => {
+                vi.stubEnv('NODE_ENV', 'production');
+                vi.stubEnv('K_SERVICE', 'analysis-paid-worker');
+                vi.stubEnv('ANALYSIS_WORKLOAD_ROLE', 'paid');
+                vi.stubEnv('PAID_STANDARD_VERTEX_CAPACITY_MODE', 'expanded128');
+                if ('processFeatureSlots' in capacity) vi.stubEnv('PAID_STANDARD_PROCESS_FEATURE_SLOTS', String(capacity.processFeatureSlots));
+            };
+            if (automatic) enablePaidWorker();
             await queue.drain(p => p.kind === 'fresh_admission', workers, async (payload, worker) => {
-                await workerCapacity.run(paidWorkers[worker]!, () =>
-                    requestScope.run(String(payload.preflightId), () => processSharedStandardFresh(payload)));
+                await workerCapacity.run(paidWorkers[worker]!, () => requestScope.run(String(payload.preflightId), async () => {
+                    if (!automatic) { await processSharedStandardFresh(payload); return; }
+                    const reply = await deliverPaid(payload);
+                    if (freshProbeFailure) throw freshProbeFailure;
+                    if (!reply.ok && lostFreshDelivery === payload.preflightId && queue.retryCount(payload) === 0) {
+                        queue.retry(payload);
+                        return;
+                    }
+                    expect(reply.status).toBe(200);
+                    expect(['ready','noop']).toContain((await reply.json()).status);
+                    const duplicate = await deliverPaid(payload);
+                    expect(duplicate.status).toBe(200);
+                    expect((await duplicate.json()).status).toBe('noop');
+                }));
             });
-            const admitted = await completeWave(orders.map(admitSharedStandard));
+            const admitted = automatic ? await readSharedAutomaticOrders(orders, db) : await completeWave(orders.map(admitSharedStandard));
+            if (productionPaid && !automatic) enablePaidWorker();
+            if (automatic) {
+                expect(readyHandoffs.size).toBe(orders.length);
+                expect(freshProfileReads.size).toBe(orders.length);
+                expect(Boolean(lostFreshDelivery)).toBe(injectFreshHandoffLoss);
+                expect(probedFreshHandoff).toBe(ownersCount <= 2);
+            }
             expect(new Set(admitted.map(run => run.requestId)).size).toBe(ownersCount);
             const paidRequests = new Set(admitted.map(run => run.requestId));
             marker('accepted', { count: ownersCount, queue: queue.size });
@@ -289,7 +501,12 @@ it('publishes simultaneous paid Standard requests through one database and queue
             let continuations = 0;
             let queueRetries = 0;
             const retryCodes: Record<string, number> = {};
-            maintenance = startSharedStandardMaintenance();
+            const asUser = <T>(id: string | null, fn: () => Promise<T>) =>
+                asOwner(id ? identities.find(owner => owner.id === id) ?? null : null, fn);
+            const observer = observeSharedOwnerReads(db, admitted, asUser, publicCount, 1);
+            ownerObserver = observer;
+            const recoveryClock = startSharedStandardMaintenance(observer.scan, paidStart);
+            maintenance = recoveryClock;
             const deliveries = await queue.drain(() => true, workers, async (payload, worker) => {
                 const task = parseAnalysisV2TaskPayload(payload);
                 if (!paidRequests.has(task.requestId)) throw new Error('SHARED_UNEXPECTED_OWNER');
@@ -299,9 +516,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     // A Cloud Run 429 refuses the delivery before the handler acquires a job.
                     const rejectAtIngress = recovery && injectedWorker429s === 0 && task.jobKey === 'coordinator:bootstrap';
                     if (rejectAtIngress) injectedWorker429s++;
+                    const deliveryIdentity = {};
                     const response = rejectAtIngress
                         ? Response.json({ code: 'WORKER_INGRESS_429' }, { status: 429 })
-                        : await workerCapacity.run(paidWorkers[worker]!, () => activeTask.run(payload, () => deliverPaid(payload)));
+                        : await workerCapacity.run(paidWorkers[worker]!, () => deliveryScope.run(deliveryIdentity, () => activeTask.run(payload, () => deliverPaid(payload))));
                     const result = await response.json();
                     const waitForCapacity = response.status === 503 && ['ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING', 'ANALYSIS_V2_AI_CAPACITY_PENDING'].includes(result.code);
                     const waitForDispatch = response.status === 409 && ['JOB_DISPATCH_NOT_READY', 'JOB_LEASE_BUSY'].includes(result.code);
@@ -315,22 +533,54 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     if (result.status === 'continuation') { continuations++; return; }
                     if (result.status === 'stale_delivery' || result.status === 'already_terminal') return;
                     if (!response.ok || result.status !== 'completed') {
+                        budgetTimeline.terminalWorkerResponse({ owner: task.requestId, delivery: deliveryIdentity });
                         throw new Error('SHARED_WORKER_' + stage + ':' + (result.errorCode ?? result.code ?? result.status));
                     }
                     if (task.jobKey === 'track:profile-ai:batch:0') sample.set(task.requestId, payload);
+                    if (task.jobKey === 'coordinator:finalize') {
+                        if (periodicFulfillment) await observer.scan();
+                        else await recoveryClock.reconcile();
+                    }
                 });
             });
+            const finishedMs = Math.round(performance.now() - paidStart);
+            const requestIds = admitted.map(run => run.requestId);
+            if (periodicFulfillment) {
+                const waitUntil = performance.now() + 6 * 60_000;
+                // A completed first order already reads while other owners' workers continue.
+                // This guard only bounds the final periodic handoff after all workers drain.
+                while (observer.remaining > 0) {
+                    await observer.scan();
+                    if (!observer.remaining) break;
+                    if (performance.now() >= waitUntil) throw new Error('SHARED_PERIODIC_FULFILLMENT_INCOMPLETE');
+                    await sleep(2_000);
+                }
+            } else {
+                await recoveryClock.reconcile();
+            }
+            const postDrainFulfillmentWaitMs = Math.round(performance.now() - paidStart) - finishedMs;
             await maintenance.stop();
+            const ownerReads = await observer.finish();
+            if (productionPaid) {
+                expect(approvedOwners.size).toBe(admitted.length);
+                for (const owners of [expandedOwners, logicalLeaseOwners, dispatchAuthorizedOwners]) {
+                    expect(owners.size).toBe(admitted.length);
+                    expect(admitted.every(({ requestId }) => owners.has(requestId))).toBe(true);
+                }
+                expect(admitted.every(({ requestId }) => approvedOwners.has(requestId))).toBe(true);
+                // Owner page rendering uses the test React bundle.
+                vi.stubEnv('NODE_ENV', 'test');
+            }
             expect(queue.size).toBe(0);
             expect(sample.size).toBe(ownersCount);
             expect(duplicatedDuringModel.size).toBe(ownersCount);
             const startsBeforeReplay = provider.starts.length;
             const modelsBeforeReplay = boundary.model.mock.calls.length;
-            const finishedMs = Math.round(performance.now() - paidStart);
             await maintenance.sweep();
             sharedLedgerIssues = await settleSharedActorReceipts(db);
             if (maintenance.passes.some(pass => pass.failed > 0)) sharedLedgerIssues.push('provider_recovery_failed');
-            const proofs = [];
+            const resolverEvidence = resolverObservation.report(await readSharedResolverLedger(db, requestIds), requestIds);
+            if (Object.values(resolverEvidence.issues).some(count => count > 0)) sharedLedgerIssues.push('resolver_sdk_ledger_mismatch');
             for (const [i, run] of admitted.entries()) {
                 const before = await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id);
                 const duplicate = await deliverPaid(sample.get(run.requestId)!);
@@ -338,21 +588,53 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 expect(await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id)).toEqual(before);
                 proofs.push(await verifySharedStandardRequest({
                     db, requestId: run.requestId, orderId: run.orderId, preflightId: run.preflightId,
-                    paymentMode: ownersCount <= 2 ? 'webhook' : 'fixture', ownerId: run.owner.id, otherOwnerId: owners[(i + 1) % owners.length]?.id,
+                    paymentMode: payment, ownerId: run.owner.id, otherOwnerId: identities[(i + 1) % identities.length]!.id,
+                    provenUnsentCutoffs: coverage99 ? resolverEvidence.unsentCancelledByOwner[i] : 0,
                     modelCalls: models.get(run.requestId) ?? 0, expectedPublic: publicCount, expectedPrivate: 1,
                     paidActorStarts: actorStarts.get(run.requestId) ?? [], preflightActorStarts: actorStarts.get(run.preflightId) ?? [],
-                    asUser: (id, fn) => asOwner(id ? owners.find(o => o.id === id) ?? null : null, fn),
-                }));
+                    asUser,
+                }, ownerReads.get(run.requestId)!));
             }
             ownersWithLedgerIssues = proofs.filter(proof => proof.ledgerIssues.length > 0).length;
             expect(provider.starts.length).toBe(startsBeforeReplay);
             const matchedActorStarts = proofs.reduce((n, proof) => n + proof.actorReceipts.paid.matched + proof.actorReceipts.preflight.matched, 0);
             if (matchedActorStarts !== provider.starts.length) sharedLedgerIssues.push('actor_start_count_mismatch');
             expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
-            const measurements = await sharedStandardMeasurements(db, admitted.map(run => run.requestId));
+            const verifiedResultEmailClaims = automaticPayments ? await countVerifiedResultEmailClaims(db, requestIds) : 0;
+            emailClaimsBeforeStop = verifiedResultEmailClaims;
+            const measurements = await sharedStandardMeasurements(db, requestIds);
+            resolutionBeforeStop = measurements.resolutionByOwner;
             expect(measurements.times).toHaveLength(ownersCount);
+            if (measurements.tokenLogsByOwnerAndStage.some(row =>
+                row.completedAttempts !== row.tokenLogRows || row.attemptTokens !== row.loggedTokens)) {
+                sharedLedgerIssues.push('token_log_stage_mismatch');
+            }
+            if (coverage99) {
+                expect(measurements.resolutionByOwner).toHaveLength(ownersCount);
+                for (const owner of measurements.resolutionByOwner) {
+                    expect(owner).toMatchObject({ recorded: true, finalized: true, verifiedBaselineMutations: 0 });
+                    expect(owner.appliedWithProof).toBe(owner.applied);
+                }
+            }
             expect(measurements.times.every(t => t.admissionMs >= 0 && t.paymentMs >= t.admissionMs && t.ownerReadyMs >= t.paymentMs)).toBe(true);
-            lateOwners = measurements.times.filter(t => !t.withinHour).length;
+            if (automaticPayments) {
+                expect(measurements.times.every(t => t.queueWaitMs !== null && t.queueWaitMs >= 0
+                    && t.startToPublicationMs !== null && t.startToPublicationMs >= t.admissionMs
+                    && t.startToFulfillmentMs !== null && t.startToFulfillmentMs >= t.startToPublicationMs
+                    && Math.abs(t.queueWaitMs + t.startToFulfillmentMs - t.ownerReadyMs) <= 1)).toBe(true);
+            }
+            const times = measurements.times.map((time, i) => {
+                const { startToLastOwnerWebpMs, paidToLastOwnerWebpMs } = ownerReads.get(requestIds[i]!)!;
+                expect(paidToLastOwnerWebpMs).toBeGreaterThanOrEqual(time.ownerReadyMs);
+                if (automaticPayments) {
+                    expect(startToLastOwnerWebpMs).not.toBeNull();
+                    expect(startToLastOwnerWebpMs!).toBeGreaterThanOrEqual(time.startToFulfillmentMs!);
+                    expect(Math.abs(paidToLastOwnerWebpMs - time.queueWaitMs! - startToLastOwnerWebpMs!)).toBeLessThanOrEqual(2);
+                }
+                const withinHour = (automaticPayments ? startToLastOwnerWebpMs! : paidToLastOwnerWebpMs) <= 3_600_000;
+                return { ...time, startToOwnerReadyMs: startToLastOwnerWebpMs, paidToLastOwnerWebpMs, withinHour };
+            });
+            lateOwners = times.filter(time => !time.withinHour).length;
             expect(injectedTimeouts).toBe(recovery ? 1 : 0);
             expect(resumedTimedOutRead).toBe(recovery);
             expect(injectedWorker429s).toBe(recovery ? 1 : 0);
@@ -363,39 +645,147 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 FROM analysis_lifecycle_events WHERE request_id=ANY($1::uuid[])
             `, [admitted.map(run => run.requestId)]);
             expect(lifecycle.rows[0]).toEqual({ started: ownersCount, completed: ownersCount });
+            // Keep the independent HTTP, access and ledger proofs even if a later
+            // serial JSDOM render fails for one of the owners.
+            for (const run of admitted) {
+                const beforeRender = await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id);
+                await asUser(run.owner.id, () => verifyRenderedOwner(run.requestId, ownerReads.get(run.requestId)!));
+                expect(await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id)).toEqual(beforeRender);
+                renderedOwners++;
+            }
+            expect(provider.starts.length).toBe(startsBeforeReplay);
+            expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
             const ioAfter = await databaseCounters(db);
             const pgDelta = {
                 blocksRead: ioAfter.read - ioBefore.read, bufferHits: ioAfter.hit - ioBefore.hit,
                 tempBytes: ioAfter.tempBytes - ioBefore.tempBytes, deadlocks: ioAfter.deadlocks - ioBefore.deadlocks
             };
+            if (coverage99) {
+                const { rows: features } = await db.query<{ completed: number }>(`
+                    SELECT count(a.operation_key)::int AS completed
+                    FROM unnest($1::uuid[]) AS owner(id)
+                    LEFT JOIN analysis_v2_ai_attempts a ON a.request_id=owner.id AND a.stage='featureAnalysis'
+                        AND a.status='success' AND a.usage_complete AND a.terminalized_at IS NOT NULL
+                    GROUP BY owner.id
+                `, [requestIds]);
+                expect(features.map(row => row.completed)).toEqual(Array(ownersCount).fill(publicCount));
+            }
+            const eligible = Number(measurements.resolution.eligible);
+            const ready = Number(measurements.resolution.ready);
+            const expectedEligiblePerOwner = recovery && [240, 600].includes(publicCount) ? publicCount / 2 : null;
+            const ownersBelowCoverage = coverage99 ? measurements.resolutionByOwner.filter(owner => {
+                const count = Number(owner.eligible);
+                return count <= 0 || (expectedEligiblePerOwner !== null && count !== expectedEligiblePerOwner)
+                    || Number(owner.ready) * 100 < count * 99;
+            }).length : 0;
+            const coverageBelowTarget = coverage99 && (eligible <= 0 || ready * 100 < eligible * 99
+                || ownersBelowCoverage > 0);
+            // Also retain the older whole-harness bound, including the serial DOM/negative checks.
+            const paidStartToLastReadMs = Math.round(performance.now() - paidStart);
+            ownerReadOverHour = coverage99 && lateOwners > 0;
+            directPublicationMissing = automaticPayments && publishedHandoffs.size !== ownersCount;
+            const { entered, ...cachedOutcomes } = cachedResolverLocal;
+            expect(Object.values(cachedOutcomes).reduce((sum, count) => sum + count, 0)).toBe(entered);
+            if ('processFeatureSlots' in capacity) {
+                expect(processModelPeaks.all).toBeLessThanOrEqual(8);
+                expect(processModelPeaks.features).toBeGreaterThan(0);
+                expect(processModelPeaks.features).toBeLessThanOrEqual(capacity.processFeatureSlots);
+            }
+            const budgetProbeEvidence = budgetProbe ? await budgetProbe.receipt() : undefined;
+            if (budgetProbeEvidence) {
+                expect(budgetProbeEvidence).toMatchObject({ mode: 'held', cancelled: 1, spent: 0, signedOrderMatches: 1, fixtureModelAttempts: 0,
+                    budgetTerminalCauses: 0, otherTerminalCauses: 0 });
+                expect(budgetProbeEvidence.triageModelCalls).toBeGreaterThan(0);
+                expect(budgetProbeEvidence.deniedReservationKeys).toBeGreaterThan(0);
+                expect(budgetProbeEvidence.admittedAfterDenial).toBe(budgetProbeEvidence.deniedReservationKeys);
+                expect(budgetProbeEvidence.settledAfterDenial).toBe(budgetProbeEvidence.deniedReservationKeys);
+                expect(budgetProbeEvidence.deniedDeliveries).toBeGreaterThanOrEqual(2);
+                expect(budgetProbeEvidence.continuations).toBeGreaterThanOrEqual(2);
+                const firstBudget = budgetTimeline.receipt().firstByKind.find(event => event.kind === 'budget_denied')?.budget;
+                expect(firstBudget).toMatchObject({ scope: 'run', capacityPending: true, transactionTotals: { scope: 'run', limitUsd: 2 } });
+                const totals = firstBudget?.transactionTotals;
+                if (!totals) throw new Error('SHARED_BUDGET_PROBE_TOTALS_MISSING');
+                const fixedExposure = totals.settledUsd + totals.staleReservedUsd + totals.requestedUsd;
+                expect(fixedExposure).toBeLessThanOrEqual(totals.limitUsd);
+                expect(fixedExposure + totals.freshReservedUsd).toBeGreaterThan(totals.limitUsd);
+            }
             const report = {
-                status: ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners ? 'completed_over_target' : 'verified',
-                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
-                paidStartToDrainMs: finishedMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
+                status: directPublicationMissing ? 'completed_without_direct_order_handoff' : ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners || ownerReadOverHour ? 'completed_over_target' : coverageBelowTarget ? 'completed_below_coverage' : 'verified',
+                hourMeasurement: automaticPayments ? 'capacity_start_to_last_owner_webp' : 'payment_to_last_owner_webp',
+                productionPaid, checkoutEvidence, renderedOwners, verifiedResultEmailClaims, ...(automatic ? { automaticPayment: automatic.evidence } : {}),
+                approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
+                logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
+                tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
+                paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
+                lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
-                peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
+                resolverEvidence, ...(budgetProbeEvidence ? { budgetProbeEvidence } : {}), budgetTimeline: budgetTimeline.receipt(), peakModels, processModelPeaks, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
             };
             marker('shared-standard-complete', report);
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(report, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+            belowCoverage = coverageBelowTarget;
         } catch (error) {
             // Preserve the original failure and the state left by any in-flight maintenance.
             await maintenance?.stop().catch(() => undefined);
+            const ownerHttpReads = await ownerObserver?.stop() ?? [];
             const reason = error instanceof Error && /^SHARED_WORKER_[a-z0-9:.-]+:[A-Z_0-9]+$/.test(error.message)
                 ? error.message : safeCode(error);
             const failure = {
-                status: 'failed', maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots,
+                status: 'failed', ownerHttpReads, verifiedRequestsBeforeStop: proofs, renderedOwners,
+                resolutionBeforeStop, emailClaimsBeforeStop, sharedLedgerIssues,
+                productionPaid, checkoutEvidence, approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
+                logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
+                tokenLogEvents, cachedResolverLocal, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
-                errors, ...await sharedStandardFailureSummary(db)
+                errors, processModelPeaks, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
             };
+            let expectedHardDenial = false;
+            if (budgetProbe?.mode === 'spent') {
+                const probe = await budgetProbe.receipt().catch(() => null);
+                const first = failure.budgetTimeline.firstByKind.find(event => event.kind === 'budget_denied');
+                const terminal = failure.budgetTimeline.firstAfterDenialByKind.find(event => event.kind === 'terminal_worker_response');
+                const budget = first?.budget;
+                expectedHardDenial = !!probe && probe.spent === 1 && probe.cancelled === 0 && probe.continuations === 0
+                    && probe.budgetTerminalCauses === 1 && probe.otherTerminalCauses === 0
+                    && probe.signedOrderMatches === 1 && probe.fixtureModelAttempts === 0 && probe.triageModelCalls === 0
+                    && probe.deniedReservationKeys > 0 && probe.admittedAfterDenial === 0 && probe.settledAfterDenial === 0
+                    && probe.deniedDeliveries > 0 && budget?.scope === 'run' && !budget.capacityPending
+                    && budget.transactionTotals?.scope === 'run' && budget.transactionTotals.limitUsd === 2
+                    && budget.transactionTotals.settledUsd + budget.transactionTotals.requestedUsd > 2
+                    && terminal?.sameOwnerAsFirstDenial === true && terminal.sameDeliveryAsFirstDenial === true
+                    && reason === 'SHARED_WORKER_track:profile-ai:batch:batch:ANALYSIS_V2_JOB_HANDLER_FAILED'
+                    && failure.requests?.length === 1 && failure.requests[0]?.status === 'failed' && failure.requests[0].n === 1
+                    && failure.paymentTimingAtStop?.paid === 1 && failure.paymentTimingAtStop.published === 0;
+                Object.assign(failure, { budgetProbeEvidence: probe });
+                if (expectedHardDenial) failure.status = 'verified_expected_hard_denial';
+            }
             marker('shared-standard-stopped', failure);
-            if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+            if (process.env.SHARED_STANDARD_RECEIPT) {
+                try {
+                    writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+                } catch (writeError) {
+                    marker('shared-standard-receipt-write-failed', { reason });
+                    if (expectedHardDenial) throw writeError;
+                }
+            }
+            if (expectedHardDenial) return;
             throw error;
         }
         // Keep all owner and cost proofs even when the measured deadline was missed.
+        expect(directPublicationMissing, 'SHARED_DIRECT_PUBLISHED_ORDER_HANDOFF_MISSING').toBe(false);
         expect(sharedLedgerIssues, 'SHARED_ACCOUNTING_UNRESOLVED').toEqual([]);
         expect(ownersWithLedgerIssues, 'SHARED_ACCOUNTING_UNRESOLVED').toBe(0);
+        expect(belowCoverage, 'SHARED_RESOLVER_COVERAGE_BELOW_99_PERCENT').toBe(false);
+        expect(ownerReadOverHour, 'SHARED_OWNER_READ_HOUR_EXCEEDED').toBe(false);
         expect(lateOwners, 'SHARED_OWNER_HOUR_EXCEEDED').toBe(0);
     } finally {
+        restoreBudgetObserver?.();
+        cachedChannel.unsubscribe(observeCachedLocal);
+        tokenLogChannel.unsubscribe(observeTokenLog);
+        admissionChannel.unsubscribe(observeAdmission);
+        continuationChannel.unsubscribe(observeContinuation);
+        resolverObservation.dispose();
         await db.close();
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();

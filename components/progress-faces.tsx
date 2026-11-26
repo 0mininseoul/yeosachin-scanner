@@ -3,6 +3,7 @@
 import Image from 'next/image';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
+    ProgressPhotoVisits,
     activeCandidateMediaKey,
     candidateTileKey,
     flattenScreenedCandidateMedia,
@@ -26,37 +27,17 @@ const FACE_TILE_RETRY_DELAY_MS = 1_000;
 
 interface RailImageState {
     src: string;
+    photoKey: string;
     status: 'ready' | 'recovering' | 'recovered' | 'unavailable';
 }
 
-/**
- * Size the repeated rail copies so the max-width progress viewport can scroll
- * through at least one whole copy before the browser reaches its clamp.
- * Larger histories naturally need only the default three copies.
- */
-export function progressRailCopyGeometry(tileCount: number) {
-    const normalizedTileCount = Math.max(1, Math.floor(tileCount));
-    const copyWidth = normalizedTileCount * TILE_PX
-        + Math.max(0, normalizedTileCount - 1) * RAIL_GAP_PX;
-    const copyDistance = copyWidth + RAIL_GAP_PX;
-    const minimumCopySpan = PROGRESS_RAIL_MAX_WIDTH_PX
-        + copyDistance
-        + RAIL_GAP_PX
-        - RAIL_HORIZONTAL_PADDING_PX;
-    const copyCount = Math.max(
-        DEFAULT_PROGRESS_COPY_COUNT,
-        Math.ceil(minimumCopySpan / copyDistance),
-    );
-    const scrollWidth = RAIL_HORIZONTAL_PADDING_PX
-        + copyCount * copyWidth
-        + Math.max(0, copyCount - 1) * RAIL_GAP_PX;
-
-    return {
-        copyCount,
-        copyDistance,
-        scrollWidth,
-        maxScrollLeft: scrollWidth - PROGRESS_RAIL_MAX_WIDTH_PX,
-    };
+// One copy is enough while the same photo could appear at both edges.
+export function progressRailCopyGeometry(tileCount: number, viewportWidth = PROGRESS_RAIL_MAX_WIDTH_PX) {
+    const stride = TILE_PX + RAIL_GAP_PX;
+    const copyDistance = Math.max(1, tileCount) * stride;
+    const copyCount = copyDistance >= viewportWidth + TILE_PX ? DEFAULT_PROGRESS_COPY_COUNT : 1;
+    const maxScrollLeft = Math.max(0, copyDistance * copyCount - RAIL_GAP_PX + RAIL_HORIZONTAL_PADDING_PX - viewportWidth);
+    return { copyCount, copyDistance, maxScrollLeft };
 }
 
 // Slow enough to read a face, fast enough that the row is never still.
@@ -153,31 +134,31 @@ function FaceTileProbe({
  * Yields while a finger is held down, the way the review strip does; scrolling
  * by hand is a reasonable thing to want and fighting it is not.
  */
-function useFaceDrift(hasVisibleRail: boolean) {
+function useFaceDrift(copyCount: number, bounceDistance: number) {
     const ref = useRef<HTMLDivElement>(null);
+    const pressed = useRef(false);
 
     useEffect(() => {
         const el = ref.current;
-        if (!el || !hasVisibleRail) return;
+        if (!el || (copyCount === 1 && bounceDistance === 0)) return;
         if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
         const copyElements = el.querySelectorAll<HTMLElement>('[data-progress-copy]');
-        if (copyElements.length < 2) return;
+        let direction = 1;
 
         let frame = 0;
         let last = 0;
         let carry = 0;
-        let pressed = false;
 
-        const onPressStart = () => { pressed = true; };
+        const onPressStart = () => { pressed.current = true; };
         const onPressEnd = () => {
-            pressed = false;
+            pressed.current = false;
             last = 0;
             carry = 0;
         };
 
         const tick = (now: number) => {
             frame = requestAnimationFrame(tick);
-            if (pressed || document.visibilityState !== 'visible') {
+            if (pressed.current || document.visibilityState !== 'visible') {
                 last = now;
                 carry = 0;
                 return;
@@ -190,11 +171,14 @@ function useFaceDrift(hasVisibleRail: boolean) {
             if (whole <= 0) return;
             carry -= whole;
 
-            const copyDistance = progressCopyDistance(
-                copyElements[0].offsetLeft,
-                copyElements[1].offsetLeft,
-            );
-            el.scrollLeft = nextDriftOffset(el.scrollLeft, whole, copyDistance);
+            if (copyCount > 1) {
+                const distance = progressCopyDistance(copyElements[0].offsetLeft, copyElements[1].offsetLeft);
+                el.scrollLeft = nextDriftOffset(el.scrollLeft, whole, distance);
+            } else {
+                if (el.scrollLeft >= bounceDistance - 0.5) direction = -1;
+                if (el.scrollLeft <= 0.5) direction = 1;
+                el.scrollLeft = Math.max(0, Math.min(bounceDistance, el.scrollLeft + direction * whole));
+            }
         };
 
         el.addEventListener('pointerdown', onPressStart, { passive: true });
@@ -214,9 +198,97 @@ function useFaceDrift(hasVisibleRail: boolean) {
             }
             document.removeEventListener('visibilitychange', onPressEnd);
         };
-    }, [hasVisibleRail]);
+    }, [copyCount, bounceDistance]);
 
     return ref;
+}
+
+function useBalancedRail(keys: readonly string[]) {
+    const [preferred, setPreferred] = useState<readonly string[]>([]);
+    const [width, setWidth] = useState(PROGRESS_RAIL_MAX_WIDTH_PX);
+    const visits = useRef(new ProgressPhotoVisits());
+    const previousOrder = useRef<readonly string[]>([]);
+    const ordered = useMemo(() => {
+        const available = new Set(keys);
+        const kept = preferred.filter(key => available.delete(key));
+        return [...kept, ...available];
+    }, [keys, preferred]);
+    const { copyCount, maxScrollLeft } = progressRailCopyGeometry(keys.length, width);
+    const railRef = useFaceDrift(copyCount, copyCount === 1 ? maxScrollLeft : 0);
+    const hasImages = keys.length > 0;
+
+    useLayoutEffect(() => {
+        const rail = railRef.current;
+        if (!rail) return;
+        const resize = () => { if (rail.clientWidth) setWidth(rail.clientWidth); };
+        resize();
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(resize) : null;
+        observer?.observe(rail);
+        return () => observer?.disconnect();
+    }, [railRef, hasImages]);
+
+    useLayoutEffect(() => {
+        const rail = railRef.current;
+        if (!rail || ordered.length === 0) return;
+        const step = TILE_PX + RAIL_GAP_PX;
+        const prior = previousOrder.current;
+        previousOrder.current = ordered;
+        const available = new Set(ordered);
+        // At the wrap, appending a newly decoded tile between the last and first
+        // photos would move the user's visible strip even during a held drag.
+        // Rebase on the leading photo before paint, retaining its pixel offset.
+        if (prior.length > 0 && rail.scrollLeft >= step
+            && (prior.length !== ordered.length || prior.some(key => !available.has(key)))) {
+            const lead = Math.floor((rail.scrollLeft - RAIL_HORIZONTAL_PADDING_PX / 2) / step);
+            const index = lead % prior.length;
+            const kept = [...prior.slice(index), ...prior.slice(0, index)].filter(key => available.delete(key));
+            const rebased = [...kept, ...available];
+            rail.scrollLeft -= lead * step;
+            if (rebased.some((key, i) => key !== ordered[i])) {
+                previousOrder.current = rebased;
+                setPreferred(rebased);
+                return;
+            }
+        }
+        let priorWindow = '';
+        let onscreen = typeof IntersectionObserver !== 'function';
+        const update = () => {
+            if (!onscreen || document.visibilityState !== 'visible') return;
+            const left = rail.scrollLeft - RAIL_HORIZONTAL_PADDING_PX / 2;
+            const right = left + (rail.clientWidth || width);
+            const startIndex = Math.max(0, Math.floor((left - TILE_PX) / step) + 1);
+            const end = Math.min(ordered.length * copyCount, Math.ceil(right / step));
+            const windowKey = [startIndex, end, Math.ceil((left - TILE_PX / 2) / step),
+                Math.ceil((right - TILE_PX / 2) / step)].join(':');
+            if (windowKey === priorWindow) return;
+            priorWindow = windowKey;
+            const visible: number[] = [];
+            const centered: number[] = [];
+            for (let i = startIndex; i < end; i++) {
+                const start = i * step;
+                const position = i % ordered.length;
+                visible.push(position);
+                const center = start + TILE_PX / 2;
+                if (center >= left && center < right) centered.push(position);
+            }
+            const next = visits.current.arrange(ordered, visible, centered);
+            if (next !== ordered) setPreferred(next);
+        };
+        const observer = typeof IntersectionObserver === 'function' ? new IntersectionObserver(([entry]) => {
+            onscreen = entry?.isIntersecting === true;
+            update();
+        }) : null;
+        observer?.observe(rail);
+        update();
+        rail.addEventListener('scroll', update, { passive: true });
+        document.addEventListener('visibilitychange', update);
+        return () => {
+            observer?.disconnect();
+            rail.removeEventListener('scroll', update);
+            document.removeEventListener('visibilitychange', update);
+        };
+    }, [railRef, ordered, width, copyCount]);
+    return { ordered, railRef, copyCount };
 }
 
 /* The accounts already screened.
@@ -240,6 +312,8 @@ export function ProgressFaces({
     publicationLagReset?: boolean;
     allowLocalAssets?: boolean;
 }) {
+    const identities = useRef(new Map<string, string>());
+    const lastSource = useRef(new Map<string, string>());
     const [candidates, setCandidates] = useState<readonly ScreenedCandidate[]>([]);
     const [lastSnapshotKey, setLastSnapshotKey] = useState<string | null>(null);
     const [imageStates, setImageStates] = useState<ReadonlyMap<string, RailImageState>>(() => new Map());
@@ -276,30 +350,49 @@ export function ProgressFaces({
         // The production flattener deliberately excludes synthetic avatars.
         // Dev uses an explicit local pool without weakening that default.
         const pool = allowLocalAssets ? candidates.flatMap(({ candidateKey, username, occurrence, imageUrl, feedImageUrls }) => [imageUrl, ...feedImageUrls]
-            .filter((url): url is string => Boolean(safeProgressImageUrl(url ?? undefined, true)))
-            .map((imageUrl, mediaIndex) => ({ ...(candidateKey !== undefined ? { candidateKey } : {}), username,
-                occurrence, mediaIndex, imageUrl }))) : flattenScreenedCandidateMedia(candidates);
+            .flatMap((imageUrl, mediaIndex) => safeProgressImageUrl(imageUrl ?? undefined, true)
+                ? [{ candidateKey, username, occurrence, mediaIndex, imageUrl }] : [])) : flattenScreenedCandidateMedia(candidates);
         return pool.flatMap(tile => {
             const src = safeProgressImageUrl(tile.imageUrl ?? undefined, allowLocalAssets);
-            return src ? [{ ...tile, src, key: `${tile.occurrence}:${tile.mediaIndex}` }] : [];
+            return src ? [{ ...tile, src, key: `${tile.candidateKey ?? tile.occurrence}:${tile.mediaIndex}` }] : [];
         });
     }, [allowLocalAssets, candidates]);
     const tileKeys = useMemo(() => new Set(mediaTiles.map(tile => tile.key)), [mediaTiles]);
-    const displayedTiles = mediaTiles.flatMap(tile => {
-        const image = imageStates.get(tile.key);
-        const displaySrc = image?.status === 'ready' || image?.status === 'recovered'
-            ? safeProgressImageUrl(image.src, allowLocalAssets)
-            : undefined;
-        return displaySrc ? [{ ...tile, displaySrc }] : [];
-    });
+    const displayedTiles = useMemo(() => {
+        const sources = new Set<string>();
+        return mediaTiles.flatMap(tile => {
+            const image = imageStates.get(tile.key);
+            const displaySrc = image?.status === 'ready' || image?.status === 'recovered'
+                ? safeProgressImageUrl(image.src, allowLocalAssets)
+                : undefined;
+            if (!displaySrc || !image || sources.has(image.photoKey)) return [];
+            sources.add(image.photoKey);
+            return [{ ...tile, displaySrc, photoKey: image.photoKey }];
+        });
+    }, [mediaTiles, imageStates, allowLocalAssets]);
     // A source uses its last successfully decoded image while a new signature
     // is loading. All copies share that image and omit pending or failed tiles.
     const hasVisibleRail = displayedTiles.length >= MIN_SCREENED_CANDIDATES_TO_SHOW;
-    const railRef = useFaceDrift(hasVisibleRail);
-    const { copyCount } = progressRailCopyGeometry(displayedTiles.length);
+    const keys = useMemo(() => displayedTiles.map(tile => tile.photoKey), [displayedTiles]);
+    const { ordered, railRef, copyCount } = useBalancedRail(keys);
+    const byKey = new Map(displayedTiles.map(tile => [tile.photoKey, tile]));
+    const orderedTiles = ordered.map(key => byKey.get(key)!);
     const newestOccurrence = candidates.at(-1)?.occurrence;
 
     function recordImageState(key: string, src: string, loaded: boolean) {
+        let photoKey = identities.current.get(src);
+        if (loaded) {
+            if (!photoKey) {
+                const prior = lastSource.current.get(key);
+                const expires = (url: string) => new URLSearchParams(url.split('?')[1]).get('expires');
+                // The proxy token is deterministic within its signing window. A
+                // different token in that window identifies genuinely new media.
+                const rotated = prior && (expires(src) === null || expires(src) !== expires(prior));
+                photoKey = (rotated ? identities.current.get(prior) : undefined) ?? src;
+                identities.current.set(src, photoKey);
+            }
+            lastSource.current.set(key, src);
+        }
         setImageStates(current => {
             const existing = current.get(key);
             let status: RailImageState['status'];
@@ -314,7 +407,7 @@ export function ProgressFaces({
                 }
                 status = existing.status === 'ready' ? 'recovering' : 'unavailable';
             }
-            return new Map([...current].filter(([key]) => tileKeys.has(key))).set(key, { src, status });
+            return new Map([...current].filter(([key]) => tileKeys.has(key))).set(key, { src, status, photoKey: photoKey ?? src });
         });
     }
 
@@ -352,7 +445,7 @@ export function ProgressFaces({
                             data-progress-copy
                             className="flex shrink-0 gap-2.5"
                         >
-                            {displayedTiles.map(tile => (
+                            {orderedTiles.map(tile => (
                                 <FaceTile
                                     key={candidateTileKey(tile.occurrence, copyIndex, tile.mediaIndex)}
                                     displaySrc={tile.displaySrc}

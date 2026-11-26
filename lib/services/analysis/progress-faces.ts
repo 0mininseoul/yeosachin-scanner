@@ -51,19 +51,18 @@ export function signedProgressCandidateMedia(
 export function flattenScreenedCandidateMedia(
     candidates: readonly ScreenedCandidate[],
 ): readonly ScreenedCandidateMediaTile[] {
-    return candidates.flatMap(candidate => {
-        const media = signedProgressCandidateMedia(candidate);
-        if (media.length === 0) return [];
-        return media.map<ScreenedCandidateMediaTile>((imageUrl, mediaIndex) => ({
-            ...(candidate.candidateKey !== undefined
-                ? { candidateKey: candidate.candidateKey }
-                : {}),
-            username: candidate.username,
-            occurrence: candidate.occurrence,
-            mediaIndex,
-            imageUrl,
-        }));
-    });
+    return candidates.flatMap(candidate =>
+        [candidate.imageUrl, ...candidate.feedImageUrls].flatMap<ScreenedCandidateMediaTile>((imageUrl, mediaIndex) => {
+            if (!imageUrl?.startsWith('/api/image-proxy?')) return [];
+            return [{
+                ...(candidate.candidateKey !== undefined ? { candidateKey: candidate.candidateKey } : {}),
+                username: candidate.username,
+                occurrence: candidate.occurrence,
+                mediaIndex,
+                imageUrl,
+            }];
+        }),
+    );
 }
 
 function matchingScreenedCandidateIndex(
@@ -273,4 +272,35 @@ function mergeActiveCandidate(
         imageUrl: active.imageUrl,
         feedImageUrls: feedImages(active),
     }];
+}
+
+// Keep tiles already on screen in place. Rank the positions ahead of the
+// viewport by visits, then by how long ago a photo was last seen.
+export class ProgressPhotoVisits {
+    private readonly visits = new Map<string, { count: number; last: number }>();
+    private visible = new Set<string>();
+    private serial = 0;
+
+    arrange(keys: readonly string[], visible: readonly number[], centered: readonly number[]): readonly string[] {
+        const entered = new Set(centered.map(index => keys[index]!));
+        for (const key of entered) {
+            if (!this.visible.has(key)) {
+                this.visits.set(key, { count: (this.visits.get(key)?.count ?? 0) + 1, last: ++this.serial });
+            }
+        }
+        this.visible = entered;
+        if (visible.length === 0 || visible.length >= keys.length - 1) return keys;
+
+        const firstOffscreen = (visible[visible.length - 1]! + 1) % keys.length;
+        const positions = Array.from({ length: keys.length - visible.length }, (_, i) => (firstOffscreen + i) % keys.length);
+        const ranked = positions.map(index => keys[index]!).sort((a, b) => {
+            const left = this.visits.get(a);
+            const right = this.visits.get(b);
+            return (left?.count ?? 0) - (right?.count ?? 0) || (left?.last ?? 0) - (right?.last ?? 0);
+        });
+        if (positions.every((index, i) => keys[index] === ranked[i])) return keys;
+        const next = [...keys];
+        positions.forEach((index, i) => { next[index] = ranked[i]!; });
+        return next;
+    }
 }

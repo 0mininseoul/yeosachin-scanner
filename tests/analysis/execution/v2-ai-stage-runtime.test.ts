@@ -1,3 +1,7 @@
+import { VertexAiBudgetCapacityPendingError, VertexAiBudgetExceededError } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
+import { LocalResolverPermitTimeoutError } from '@/lib/services/ai/gemini-generation-limiter';
+import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -238,6 +242,64 @@ describe('durable V2 AI stage runtime', () => {
         expect(onCutoff).not.toHaveBeenCalled();
     });
 
+    it.each([
+        [new AnalysisV2AiCapacityPendingError(), 'unsent_capacity_pending'],
+        [new VertexDispatchAuthorizationError('db_contention'), 'unsent_capacity_pending'],
+        [new VertexDispatchAuthorizationError('closed'), 'blocking_error'],
+        [new VertexDispatchAuthorizationError('unavailable'), 'terminal_unavailable'],
+        [new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'), 'terminal_unavailable'],
+    ] as const)('classifies only confirmed pre-dispatch contention for preserved checkpoints', async (error, expected) => {
+        const runGenderResolution = vi.fn().mockRejectedValue(error);
+        const runtime = createDurableAnalysisV2AiStageRuntime({ runGenderResolution });
+        const handle = runtime.startGenderResolution({media:[]}, {
+            ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, admittedStandardResolver: true,
+            handlerDeadlineAtMs: performance.now()+300_000,
+        });
+        await handle.completion;
+        expect(handle.peek().status).toBe(expected);
+        expect(runGenderResolution).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        [new LocalResolverPermitTimeoutError(1), true, true],
+        [new LocalResolverPermitTimeoutError(2), true, false],
+        [new LocalResolverPermitTimeoutError(1), false, false],
+        [new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'), true, false],
+    ] as const)('identifies only a local timeout before the first admitted send', async (error, admitted, eligible) => {
+        const runtime = createDurableAnalysisV2AiStageRuntime({ runGenderResolution: vi.fn().mockRejectedValue(error) });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            ...(admitted ? { admittedStandardResolver: true as const } : {}),
+            handlerDeadlineAtMs: performance.now() + 300_000,
+        });
+        await handle.completion;
+        expect(handle.peek()).toEqual(eligible
+            ? { status: 'capacity_skipped', localFirstAttemptTimedOut: true }
+            : { status: 'capacity_skipped' });
+    });
+
+    it('defers an uncached admitted resolver without starting an attempt when its delivery is too short', async () => {
+        const prepare = vi.fn().mockResolvedValue({ result: null, startingAttempt: 1, source: null });
+        const onBeforeAttempt = vi.fn();
+        const runGenderResolution = vi.fn();
+        const createAudit: NonNullable<AnalysisV2AiStageRuntimeDependencies['createAudit']> = options => ({
+            requestId: options.requestId, operationKey: options.resultIdentity.operationKey,
+            resultIdentity: options.resultIdentity, resultSchema: options.resultSchema,
+            prepare, onBeforeAttempt, onAttemptTelemetry: vi.fn(),
+        });
+        const runtime = createDurableAnalysisV2AiStageRuntime({ createAudit, runGenderResolution });
+        const handle = runtime.startGenderResolution({ media: [] }, { ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, admittedStandardResolver: true,
+            handlerDeadlineAtMs: performance.now() + 224_999,
+        });
+        await handle.completion;
+        expect(handle.peek()).toEqual({ status: 'deadline_pending' });
+        expect(prepare).toHaveBeenCalledOnce();
+        expect(onBeforeAttempt).not.toHaveBeenCalled();
+        expect(runGenderResolution).not.toHaveBeenCalled();
+    });
+
     it('uses the durable resolver admission before its external model boundary', async () => {
         const reserveResolverCapacity = vi.fn(async () => 'capacity_skipped' as const);
         const runGenderResolution = vi.fn();
@@ -351,6 +413,7 @@ describe('durable V2 AI stage runtime', () => {
 
         expect(handle.peek()).toEqual({ status: 'cutoff' });
         expect(onCutoff).toHaveBeenCalledOnce();
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
         await handle.completion;
     });
 
@@ -416,6 +479,35 @@ describe('durable V2 AI stage runtime', () => {
         await handle.completion;
     });
 
+    it('preserves the uncertain admitted cutoff when the handler has insufficient time for the ledger write', async () => {
+        vi.useFakeTimers();
+        try {
+            const cutoff = vi.fn(() => new Promise<void>(() => {}));
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: options => ({
+                    requestId: options.requestId, operationKey: options.resultIdentity.operationKey,
+                    resultIdentity: options.resultIdentity, resultSchema: options.resultSchema,
+                    prepare: vi.fn(), onBeforeAttempt: vi.fn(), onAttemptTelemetry: vi.fn(), cutoff,
+                }),
+                runGenderResolution: () => new Promise<never>(() => {}),
+            });
+            const handle = runtime.startGenderResolution({ media: [] }, {
+                ...fence, admittedStandardResolver: true, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                handlerDeadlineAtMs: performance.now() + 400,
+            });
+            const writing = handle.cutoff();
+            expect(handle.cutoff()).toBe(writing);
+            await vi.advanceTimersByTimeAsync(399);
+            expect(handle.peek().status).toBe('cutoff');
+            await vi.advanceTimersByTimeAsync(1);
+            await writing;
+            expect(handle.peek().status).toBe('recovery_pending');
+            expect(cutoff).toHaveBeenCalledOnce();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('preserves an immediate resolver cutoff bookkeeping rejection', async () => {
         const persistenceFailure = new Error('DATABASE_FENCE_REJECTED');
         const createAudit = vi.fn(options => ({
@@ -450,6 +542,7 @@ describe('durable V2 AI stage runtime', () => {
 
         await expect(handle.cutoff()).rejects.toBe(persistenceFailure);
         expect(handle.peek()).toEqual({ status: 'cutoff' });
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
         await handle.completion;
     });
 
@@ -486,23 +579,55 @@ describe('durable V2 AI stage runtime', () => {
 
         await handle.completion;
         expect(handle.peek()).toEqual({ status: scenario.status });
+        expect(handle.recoveredCutoffFromAudit).toBe(scenario.status === 'cutoff');
         await expect(handle.cutoff()).resolves.toBeUndefined();
         expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
     });
 
-    it('retains the typed budget rollback when a resolver has yet to dispatch', async () => {
-        const error = new DevLiveVertexBudgetReservationPendingError();
+    it('distinguishes an admission rejection from recovery of a resolver attempt', async () => {
+        const runGenderResolution = vi.fn();
         const runtime = createDurableAnalysisV2AiStageRuntime({
-            createAudit: cachedAuditFactory({}).createAudit,
-            runGenderResolution: vi.fn().mockRejectedValue(error),
+            createAudit: cachedAuditFactory({}).createAudit, runGenderResolution,
         });
         const handle = runtime.startGenderResolution({ media: [] }, {
             ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            reserveGenderResolutionCapacity: vi.fn().mockRejectedValue(new AnalysisV2AiResultRecoveredCutoffError()),
         });
         await handle.completion;
-        await handle.cutoff();
-        expect(handle.peek()).toEqual({ status: 'budget_reservation_pending', error });
+        expect(handle.peek()).toEqual({ status: 'cutoff' });
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
+        expect(runGenderResolution).not.toHaveBeenCalled();
     });
+
+    it.each([new DevLiveVertexBudgetReservationPendingError(), new VertexAiBudgetCapacityPendingError()])(
+        'retains the typed budget rollback when a resolver has yet to dispatch (%s)', async error => {
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: cachedAuditFactory({}).createAudit,
+                runGenderResolution: vi.fn().mockRejectedValue(error),
+            });
+            const handle = runtime.startGenderResolution({ media: [] }, {
+                ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            });
+            await handle.completion;
+            await handle.cutoff();
+            expect(handle.peek()).toEqual({ status: 'budget_reservation_pending', error });
+        },
+    );
+
+    it.each([new VertexAiBudgetExceededError('run', 'fixture', 18, 18, 1), new VertexDispatchAuthorizationError('closed')])(
+        'returns the hard resolver failure only for admitted Standard (%s)', async error => {
+            const runGenderResolution = vi.fn().mockRejectedValue(error);
+            const runtime = createDurableAnalysisV2AiStageRuntime({ createAudit: cachedAuditFactory({}).createAudit, runGenderResolution });
+            for (const admittedStandardResolver of [true, undefined] as const) {
+                const handle = runtime.startGenderResolution({ media: [] }, {
+                    ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, admittedStandardResolver,
+                });
+                await handle.completion;
+                expect(handle.peek()).toEqual(admittedStandardResolver ? { status: 'blocking_error', error } : { status: 'terminal_unavailable' });
+            }
+            expect(runGenderResolution).toHaveBeenCalledTimes(2);
+        },
+    );
 
     it.each(['DEV_LIVE_BUDGET_EXCEEDED', 'DEV_LIVE_BUDGET_UNAVAILABLE'])(
         'preserves %s when the resolver cannot start', async budgetError => {

@@ -42,6 +42,13 @@ export function withDevLiveProviderApproval<T>(approval: DevLiveApproval | null,
     return approval ? workerApproval.run(approval, operation) : operation();
 }
 
+/** The worker route binds this owner grant to the authenticated delivery. */
+export function hasDevStandardOwnerDelivery(): boolean {
+    const grant = workerApproval.getStore();
+    return grant?.planId === 'standard' && grant.expiresAt === null && devLiveOwnerStartEnabled()
+        && requireDevLiveProviderApproval().planId === 'standard';
+}
+
 /** Only the registered paid worker's current Standard delivery can use the Dev SQL overlay. */
 export function devStandardProfileReadyReuseEnabled(): boolean {
     return process.env.DEV_LIVE_STANDARD_PROFILE_READY_REUSE_ENABLED === 'true'

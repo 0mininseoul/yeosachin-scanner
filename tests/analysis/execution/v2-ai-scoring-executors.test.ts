@@ -1,6 +1,8 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import * as devBudget from '@/lib/services/dev-ui/live-budget';
+import { withPaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
 import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
-import { AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
+import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
@@ -112,6 +114,7 @@ vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal =
 }));
 
 afterEach(() => {
+    vi.unstubAllEnvs();
     vi.mocked(currentDevStandardArchive).mockReturnValue(null);
     vi.mocked(sealDevStandardArchive).mockReset().mockResolvedValue(undefined);
 });
@@ -1247,7 +1250,18 @@ describe('V2 AI and scoring executors', () => {
         expect(publicRows[3].feature).not.toBeNull();
     });
 
-    it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {
+    it.each([
+        { mode: 'default', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'production', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'admitted', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'admitted', baseline: 'verified_non_female', status: 'verified_non_female', disposition: 'ready_not_needed' },
+    ] as const)('applies only a ready resolver to $baseline under $mode', async ({ mode, baseline, status, disposition }) => {
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', mode === 'production' ? 'admitted' : mode);
+        if (mode === 'production') {
+            vi.stubEnv('NODE_ENV', 'production');
+            vi.stubEnv('STANDARD_SHARED_VERTEX_SLOTS', '128');
+            vi.stubEnv('DEV_LIVE_WORKLOAD', undefined);
+        }
         const memoryState = memory();
         const account = profile('resolver.ready');
         const deps = dependencies(memoryState, {
@@ -1267,7 +1281,8 @@ describe('V2 AI and scoring executors', () => {
         >) => void;
         deps.ai.features = vi.fn<
             AnalysisV2AiStageRuntime['features']
-        >(() => new Promise(resolve => {
+        >((_input, _fence, onReserved) => new Promise(resolve => {
+            onReserved?.();
             releaseFeature = resolve;
         }));
         let resolverState: ReturnType<
@@ -1284,11 +1299,12 @@ describe('V2 AI and scoring executors', () => {
         }));
         const base = state();
         const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
-            context('profile_ai', {
+            { ...context('profile_ai', {
                 jobKey: 'track:profile-ai:batch:0',
                 batch: 0,
-                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                aiStagePolicyVersion: mode === 'production' ? AI_STAGE_POLICY_V211_VERSION : AI_STAGE_POLICY_LATEST_VERSION,
                 state: state({
+                    planId: 'standard',
                     relationships: {
                         ...base.relationships!,
                         profileBatches: [{
@@ -1305,15 +1321,16 @@ describe('V2 AI and scoring executors', () => {
                         resultHash: digest('resolver-ready-result'),
                     }],
                 }),
-            }),
+            }), handlerDeadlineAtMs: performance.now() + 300_000 },
         );
 
         await vi.waitFor(() => {
             expect(deps.ai.features).toHaveBeenCalledOnce();
             expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
         });
-        expect(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0])
-            .toBeLessThan(vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!);
+        const featureOrder = vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!;
+        const resolverOrder = vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0]!;
+        expect(resolverOrder < featureOrder).toBe(mode !== 'admitted');
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
         resolverState = {
             status: 'ready',
@@ -1339,7 +1356,7 @@ describe('V2 AI and scoring executors', () => {
         releaseFeature({
             result: feature(
                 featureInput.media.map(row => row.selectionId),
-                'unresolved',
+                baseline,
             ),
             operationKey: `feature-analysis:${digest('resolver-ready-feature')}`,
             resultHash: digest('resolver-ready-feature-result'),
@@ -1349,10 +1366,10 @@ describe('V2 AI and scoring executors', () => {
         await execution;
 
         expect(memoryState.outcomes[0]).toMatchObject({
-            status: 'verified_female',
-            baselineClassification: 'unresolved',
-            classificationSource: 'gender_resolution',
-            genderResolutionStatus: 'ready_applied',
+            status,
+            baselineClassification: baseline,
+            classificationSource: baseline === 'unresolved' ? 'gender_resolution' : 'feature',
+            genderResolutionStatus: disposition,
             genderResolutionOperationKey: resolverOperationKey,
             genderResolutionResultHash: resolverResultHash,
         });
@@ -1756,6 +1773,378 @@ describe('V2 AI and scoring executors', () => {
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
+    it.each([true, false])('gives only the affected candidate one local timeout continuation under paid approval=%s', async approved => {
+        const accounts = ['local.timeout', 'other.fresh'].map(username => profile(username));
+        const data = memory();
+        const deps = dependencies(data, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({
+                        username: account.username, status: 'success' as const, profile: account,
+                    })),
+                })),
+            },
+        });
+        const ctx = context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            state: state({
+                planId: 'standard',
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 2, inputHash: digest('local-permit-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: 2, producerInputHash: digest('producer'), revision: 1, resultHash: digest('result'),
+                }],
+            }),
+        });
+        const freshlyReserved: string[] = [];
+        let delivery = 1;
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+            const selections = input.media.map(row => row.selectionId);
+            const owner = selections.some(id => id.includes('local.timeout')) ? 'local.timeout' : 'other.fresh';
+            // On redelivery an unrelated feature may be freshly reserved while the affected one is replayed.
+            if ((delivery === 1 && owner === 'local.timeout') || (delivery === 2 && owner === 'other.fresh')) {
+                freshlyReserved.push(owner);
+                onReserved?.();
+            }
+            return {
+                result: feature(selections), operationKey: createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V211_VERSION).operationKey,
+                resultHash: digest(owner), source: 'checkpoint',
+            };
+        });
+        const cacheMarks: { delivery: number; owner: string }[] = [];
+        deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>((input, fence) => {
+            const affected = input.media.some(row => row.selectionId.includes('local.timeout'));
+            if (fence.cachedFeatureForResolver) cacheMarks.push({ delivery, owner: affected ? 'local.timeout' : 'other.fresh' });
+            return {
+                operationKey: 'gender-resolution:' + digest(String(affected)), completion: Promise.resolve(),
+                peek: () => affected
+                    ? { status: 'capacity_skipped', localFirstAttemptTimedOut: true }
+                    : { status: 'capacity_skipped' },
+                cutoff: vi.fn(),
+            };
+        });
+        const execute = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!;
+        const run = () => withPaidStandardCapacityJob(ctx.claim, async () => approved,
+            () => execute({ ...ctx, handlerDeadlineAtMs: performance.now() + 300_000 }), {
+                NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            });
+        if (approved) {
+            await expect(run()).rejects.toMatchObject({ reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING', delaySeconds: 5 });
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            delivery++;
+        }
+        await run();
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
+        expect(data.outcomes.find(row => row.instagramId === 'local.timeout')).toMatchObject({
+            baselineClassification: 'verified_female', genderResolutionStatus: 'capacity_skipped',
+        });
+        expect(cacheMarks).toEqual(approved ? [{ delivery: 1, owner: 'other.fresh' }, { delivery: 2, owner: 'local.timeout' }] : []);
+        expect(freshlyReserved).toEqual(approved ? ['local.timeout', 'other.fresh'] : ['local.timeout']);
+    });
+
+    it.each([
+        'capacity-before-feature', 'capacity-reserved', 'deadline-reserved', 'capacity-unreserved',
+        'lost-fence', 'deadline-fresh-feature', 'deadline-cached-feature', 'capacity-cached-feature-unsent',
+        'paid-budget-reserved', 'paid-budget-resolver-fence', 'paid-budget-resolver-recovery', 'fence-with-resolver-recovery',
+    ] as const)('fences opted-in Standard resolver dispatch for %s', async mode => {
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        const accounts = [profile('resolver.admitted')];
+        if (mode.startsWith('paid-budget')) accounts.push(profile('waiting.budget'));
+        let resolverStarted!: () => void;
+        const sent = new Promise<void>(resolve => { resolverStarted = resolve; });
+        const data = memory();
+        const deps = dependencies(data, { profileAiConcurrency: 2, profileBatches: { loadExactBatch: vi.fn(async () => ({
+            requestedUsernames: accounts.map(account => account.username),
+            results: accounts.map(account => ({ username: account.username, status: 'success' as const, profile: account })),
+        })) } });
+        const deadline = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 1);
+        const capacity = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+        const lostFence = new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+        const paidBudget = new VertexAiBudgetCapacityPendingError();
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+            if (mode === 'capacity-before-feature') throw capacity;
+            if (mode.startsWith('paid-budget') && input.media.some(row => row.selectionId.includes('waiting.budget'))) {
+                await sent;
+                throw paidBudget;
+            }
+            if (mode !== 'deadline-cached-feature' && mode !== 'capacity-cached-feature-unsent') onReserved!();
+            if (mode === 'lost-fence' || mode === 'fence-with-resolver-recovery') throw lostFence;
+            if (mode === 'capacity-reserved' || mode === 'capacity-unreserved') throw capacity;
+            if (mode === 'deadline-reserved') throw deadline;
+            return {
+                result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+                operationKey: `feature-analysis:${digest('optional-feature')}`,
+                resultHash: digest('optional-feature-result'), source: 'checkpoint',
+            };
+        });
+        type ResolverState = ReturnType<ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']>;
+        let progress: ResolverState = { status: 'pending' };
+        let finish!: () => void;
+        const completion = new Promise<void>(resolve => { finish = resolve; });
+        const cutoff = vi.fn(async () => { progress = { status: 'cutoff' }; finish(); });
+        const holdActiveAttempt = vi.fn(() => mode !== 'capacity-unreserved');
+        deps.ai.startGenderResolution = vi.fn((_input, fence) => {
+            expect(fence.admittedStandardResolver).toBe(true);
+            resolverStarted();
+            if (mode === 'fence-with-resolver-recovery') {
+                progress = { status: 'recovery_pending' };
+                finish();
+            }
+            if (mode === 'capacity-cached-feature-unsent') {
+                progress = { status: 'unsent_capacity_pending' };
+                finish();
+            }
+            if (mode === 'deadline-fresh-feature' || mode === 'deadline-cached-feature') {
+                progress = { status: 'deadline_pending' };
+                finish();
+            }
+            return { operationKey: `gender-resolution:${digest('optional-resolver')}`,
+                peek: () => progress, completion, cutoff, holdActiveAttempt };
+        });
+        const base = state();
+        const ctx = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            state: state({ planId: 'standard', relationships: { ...base.relationships!, profileBatches: [
+                { batch: 0, itemCount: accounts.length, inputHash: digest('admitted-topology') },
+            ] }, profileFetchBatches: [{ batch: 0, itemCount: accounts.length, producerInputHash: digest('admitted-producer'),
+                revision: 1, resultHash: digest('admitted-fetch') }] }),
+        });
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+            ...ctx, handlerDeadlineAtMs: performance.now() + 300_000,
+        });
+        const assertResult = mode === 'deadline-cached-feature' ? expect(execution).resolves.toBeDefined()
+            : expect(execution).rejects.toThrow(mode.includes('fence') ? lostFence.message
+                : mode === 'paid-budget-resolver-recovery' ? 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING'
+                : mode === 'paid-budget-reserved' ? paidBudget.message : mode.startsWith('deadline') ? deadline.message : capacity.message);
+        if (mode === 'capacity-reserved' || mode === 'deadline-reserved' || mode.startsWith('paid-budget')) {
+            await vi.waitFor(() => expect(holdActiveAttempt).toHaveBeenCalled());
+            expect(cutoff).not.toHaveBeenCalled();
+            progress = mode === 'paid-budget-resolver-fence' ? { status: 'blocking_error', error: lostFence }
+                : mode === 'paid-budget-resolver-recovery' ? { status: 'recovery_pending' } : { status: 'terminal_unavailable' };
+            finish();
+        }
+        await assertResult;
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(mode === 'capacity-before-feature' ? 0 : 1);
+        if (mode === 'lost-fence') expect(cutoff).toHaveBeenCalledWith('resolver_required_error');
+        else if (mode === 'capacity-unreserved') expect(cutoff).toHaveBeenCalledWith('resolver_capacity_continuation');
+        else expect(cutoff).not.toHaveBeenCalled();
+        if (mode === 'deadline-cached-feature') {
+            expect(data.outcomes[0]).toMatchObject({ baselineClassification: 'unresolved', genderResolutionStatus: 'cutoff' });
+        } else expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it('waits for a sibling cutoff write after an immediate fence rejection at the Standard handler deadline', async () => {
+        vi.useFakeTimers();
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        try {
+            const accounts = [profile('cutoff.first'), profile('cutoff.second')];
+            const deps = dependencies(memory(), {
+                profileAiConcurrency: 2, profileBatches: { loadExactBatch: async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({ username: account.username, status: 'success', profile: account })),
+                }) },
+            });
+            const failure = new Error('ANALYSIS_V2_AI_RESULT_FENCE_MISMATCH');
+            let finishWrite!: () => void;
+            const delayedWrite = new Promise<void>(resolve => { finishWrite = resolve; });
+            const cutoff = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockReturnValueOnce(delayedWrite);
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: options => ({
+                    requestId: options.requestId, operationKey: options.resultIdentity.operationKey,
+                    resultIdentity: options.resultIdentity, resultSchema: options.resultSchema,
+                    prepare: vi.fn(), onBeforeAttempt: vi.fn(), onAttemptTelemetry: vi.fn(), cutoff,
+                }),
+                runGenderResolution: (_input, _audit, options) => new Promise<never>((_, reject) => {
+                    options?.abortSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+                }),
+            });
+            deps.ai.startGenderResolution = vi.fn(runtime.startGenderResolution);
+            deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+                onReserved!();
+                const ids = input.media.map(row => row.selectionId);
+                return { result: feature(ids, 'unresolved'), operationKey: 'feature-analysis:' + digest(ids[0]),
+                    resultHash: digest('feature'), source: 'checkpoint' };
+            });
+            const job = context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0', batch: 0, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                state: state({ planId: 'standard', relationships: { ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 2, inputHash: digest('cutoff-topology') }] },
+                    profileFetchBatches: [{ batch: 0, itemCount: 2, producerInputHash: digest('producer'), revision: 1,
+                        resultHash: digest('fetch') }] }),
+            });
+            const done = vi.fn();
+            const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+                ...job, handlerDeadlineAtMs: performance.now() + 300_000,
+            }).then(done, done);
+            await vi.advanceTimersByTimeAsync(285_100);
+            expect(cutoff).toHaveBeenCalledTimes(2);
+            expect(done).not.toHaveBeenCalled();
+            const handle = vi.mocked(deps.ai.startGenderResolution).mock.results[1]!.value;
+            expect(handle.peek().status).toBe('cutoff');
+            expect(handle.cutoff()).toBe(handle.cutoffCompletion);
+            finishWrite();
+            await execution;
+            expect(done).toHaveBeenCalledExactlyOnceWith(failure);
+            expect(cutoff).toHaveBeenCalledTimes(2);
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it.each([
+        { mode: 'trial', expectedWait: 8000 },
+        { mode: 'normal50', expectedWait: 50000 },
+        { mode: 'recovered50', expectedWait: 50000 },
+        { mode: 'recovered8', expectedWait: 0 },
+        { mode: 'current-cutoff50', expectedWait: 0 },
+        { mode: 'fallback50', expectedWait: 0 },
+        { mode: 'capacity50', expectedWait: 50000 },
+        { mode: 'unconfirmed50', expectedWait: 0 },
+        { mode: 'capacity8', expectedWait: 0 },
+        { mode: 'mixed50', expectedWait: 100 },
+        { mode: 'all-ready', expectedWait: 100 },
+        { mode: 'near-deadline', expectedWait: 1000 },
+        { mode: 'deadline-reached', expectedWait: 0 },
+        { mode: 'late-fence-failure', expectedWait: 100 },
+        { mode: 'off', expectedWait: 0 },
+        { mode: 'production', expectedWait: 0 },
+        { mode: 'required-failure', expectedWait: 0 },
+    ] as const)('bounds the offline Standard resolver window for $mode', async ({ mode, expectedWait }) => {
+        vi.useFakeTimers();
+        vi.stubEnv('STANDARD_SHARED_RESOLVER_GRACE_MS', mode.endsWith('50') ? '50000' : mode === 'off' ? '' : '8000');
+        if (mode === 'production') vi.stubEnv('NODE_ENV', 'production');
+        try {
+            const hasCutoffSibling = mode === 'recovered50' || mode === 'recovered8' || mode === 'current-cutoff50';
+            const members = ['timely', 'slow', 'unadmitted'].map(name => profile(name));
+            if (hasCutoffSibling) members.push(profile('closed'));
+            const data = memory();
+            const deps = dependencies(data, {
+                profileAiConcurrency: mode === 'fallback50' ? 1 : 3,
+                profileBatches: { loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: members.map(row => row.username),
+                    results: members.map(row => ({ username: row.username, status: 'success' as const, profile: row })),
+                })) },
+            });
+            const confirmed = new AnalysisV2ConfirmedCapacityContinuation(5);
+            const uncertain = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => {
+                if ((mode === 'capacity50' || mode === 'capacity8' || mode === 'mixed50')
+                    && input.media.some(m => m.selectionId.includes('timely'))) throw confirmed;
+                if (mode === 'mixed50' && input.media.some(m => m.selectionId.includes('slow'))) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    throw new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+                }
+                if (mode === 'fallback50' && input.media.some(m => m.selectionId.includes('timely'))) {
+                    throw new AnalysisV2AiResultRateLimitExhaustedError();
+                }
+                if (mode === 'unconfirmed50') throw uncertain;
+                if (mode === 'required-failure') throw new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+                return {
+                    result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+                    operationKey: `feature-analysis:${digest(input.media[0].selectionId)}`,
+                    resultHash: digest('feature-result'), source: 'checkpoint' as const,
+                };
+            });
+            const timedOut: { name: string; at: number }[] = [];
+            const held = vi.fn((name: string) => name !== 'unadmitted');
+            deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>(input => {
+                const name = members.find(row => input.media.some(m => m.selectionId.includes(row.username)))!.username;
+                const key = `gender-resolution:${digest(name)}`;
+                if (name === 'closed') return {
+                    operationKey: key, completion: Promise.resolve(), peek: () => ({ status: 'cutoff' as const }),
+                    recoveredCutoffFromAudit: mode !== 'current-cutoff50',
+                    holdActiveAttempt: () => { throw new Error('Cannot hold a closed attempt'); },
+                    cutoff: () => { throw new Error('Cannot repeat a completed cutoff'); },
+                };
+                let progress: ReturnType<ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']> = { status: 'pending' };
+                const completion = new Promise<void>(resolve => {
+                    if (name !== 'timely' && !(mode === 'all-ready' && name === 'slow')) return;
+                    setTimeout(() => {
+                        if (progress.status === 'pending') progress = mode === 'late-fence-failure'
+                            ? { status: 'terminal_unavailable' }
+                            : { status: 'ready', value: {
+                                result: { assessment: { inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person',
+                                    evidenceSelectionIds: input.media.slice(0, 2).map(row => row.selectionId) },
+                                analyzedSelectionIds: input.media.map(row => row.selectionId) },
+                                operationKey: key, resultHash: digest('ready-resolver'), source: 'checkpoint',
+                            } };
+                        resolve();
+                    }, mode === 'late-fence-failure' || mode === 'all-ready' ? 100 : 7000);
+                });
+                return { operationKey: key, completion, peek: () => progress, holdActiveAttempt: () => held(name),
+                    cutoff: vi.fn(async () => {
+                        progress = { status: 'cutoff' };
+                        timedOut.push({ name, at: performance.now() });
+                    }),
+                };
+            });
+            const base = state();
+            const ctx = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({ planId: 'standard', relationships: { ...base.relationships!, profileBatches: [
+                    { batch: 0, itemCount: members.length, inputHash: digest('trial-topology') },
+                ] }, profileFetchBatches: [{ batch: 0, itemCount: members.length, producerInputHash: digest('trial-producer'),
+                    revision: 1, resultHash: digest('trial-fetch') }] }),
+            });
+            const start = performance.now();
+            const budget = mode === 'near-deadline' ? 16000 : mode === 'deadline-reached' ? 15000 : 120000;
+            const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+                ...ctx, handlerDeadlineAtMs: start + budget,
+            });
+            const expectContinuation = ['capacity50', 'capacity8', 'unconfirmed50'].includes(mode);
+            const checked = expectContinuation ? expect(execution).rejects.toBe(mode === 'unconfirmed50' ? uncertain : confirmed)
+                : mode === 'required-failure' || mode === 'mixed50' ? expect(execution).rejects.toThrow('ANALYSIS_V2_RESULT_FENCE_MISMATCH')
+                    : expect(execution).resolves.toBeDefined();
+            await vi.advanceTimersByTimeAsync(0);
+            if (mode === 'mixed50') {
+                expect(timedOut).toEqual([]);
+                await vi.advanceTimersByTimeAsync(100);
+                expect(held).not.toHaveBeenCalled();
+            } else if (expectedWait) {
+                expect(timedOut).toEqual([{ name: 'unadmitted', at: start }]);
+                await vi.advanceTimersByTimeAsync(expectedWait - 1);
+                expect(timedOut).toHaveLength(1);
+                await vi.advanceTimersByTimeAsync(1);
+            }
+            await checked;
+            if (mode === 'all-ready') {
+                expect(timedOut).toHaveLength(1);
+                expect(data.outcomes.map(outcome => outcome.genderResolutionStatus))
+                    .toEqual(['ready_applied', 'ready_applied', 'cutoff']);
+            } else {
+                expect(timedOut).toContainEqual({ name: 'slow', at: start + expectedWait });
+            }
+            expect(held).toHaveBeenCalledTimes(expectedWait && mode !== 'mixed50' ? 3 : 0);
+            if (hasCutoffSibling) {
+                expect(data.outcomes.map(row => row.genderResolutionStatus)).toEqual([
+                    mode === 'recovered50' ? 'ready_applied' : 'cutoff', 'cutoff', 'cutoff', 'cutoff',
+                ]);
+                expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(4);
+            }
+            if (mode === 'fallback50') {
+                expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(3);
+                expect(data.outcomes[0].status).toBe('analysis_unavailable');
+                expect(data.outcomes.map(row => row.genderResolutionStatus)).toEqual(['cutoff', 'cutoff', 'cutoff']);
+            }
+            if (expectContinuation) expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            if (mode === 'trial') expect(data.outcomes.map(outcome => outcome.genderResolutionStatus))
+                .toEqual(['ready_applied', 'cutoff', 'cutoff']);
+            if (mode === 'required-failure') expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        } finally {
+            vi.clearAllTimers();
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('cuts off a pending resolver after feature completion without waiting for it', async () => {
         const memoryState = memory();
         const account = profile('resolver.pending');
@@ -1825,6 +2214,7 @@ describe('V2 AI and scoring executors', () => {
     it.each([
         { status: { status: 'recovery_pending' }, code: 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' },
         { status: { status: 'budget_reservation_pending', error: new DevLiveVertexBudgetReservationPendingError() }, code: 'DEV_LIVE_VERTEX_BUDGET_RESERVATION_PENDING' },
+        { status: { status: 'budget_reservation_pending', error: new VertexAiBudgetCapacityPendingError() }, code: 'VERTEX_AI_BUDGET_CAPACITY_PENDING' },
     ] as const)('leaves profile outcomes uncommitted while the resolver awaits $code', async ({ status, code }) => {
         const memoryState = memory();
         const account = profile('resolver.recovery.pending');
@@ -5752,6 +6142,61 @@ function runScheduledStandardProfileBatch(deps: AnalysisV2AiScoringExecutorDepen
 }
 
 describe('v2.11 profile AI redelivery', () => {
+    it.each(['within a group', 'across groups'] as const)(
+        'propagates the first hard failure from paid v2.11 profile siblings %s', async grouping => {
+            const accounts = ['budget.member', 'deferred.member', 'fenced.member'].map(name => profile(name));
+            const deps = dependencies(memory(), {
+                profileAiConcurrency: 3, profileMediaInputs: mediaInputFixture().store,
+                sourceMediaArchive: retainedProfileArchive().archive,
+                profileBatches: { loadExactBatch: async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({ username: account.username, status: 'success', profile: account })),
+                }) },
+            });
+            deps.ai.profileGender = {
+                plan: async rows => {
+                    const groups = grouping === 'within a group' ? [rows.slice(0, 2), rows.slice(2)] : rows.map(row => [row]);
+                    return groups.map(group => ({ accountIds: group.map(row => row.accountId), operationKey: digest(group[0]!.accountId) }));
+                },
+                run: async (inputs, group) => inputs.map(input => {
+                    const ids = input.media.map(row => row.selectionId);
+                    const result = triage(ids, 'female');
+                    result.assessment.confidence = 'high';
+                    result.assessment.ownerConsistency = 'same_person';
+                    result.assessment.evidenceSelectionIds = ids.slice(0, 2);
+                    result.v29AccountContext = 'personal';
+                    return { operationKey: group.operationKey, resultHash: digest('gender'), result, source: 'checkpoint' };
+                }),
+            };
+            const rejects = new Map<string, (error: Error) => void>();
+            deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(input => new Promise((_, reject) => {
+                const account = accounts.find(person => input.media.some(row => row.selectionId.includes(person.username)))!;
+                rejects.set(account.username, reject);
+            }));
+            const job = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, state: state({ planId: 'standard' }) });
+            const execute = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!;
+            const result = withPaidStandardCapacityJob(job.claim, async () => true,
+                () => execute({ ...job, schedulerCapability: 'scheduler-v1', handlerDeadlineAtMs: performance.now() + 300_000 }),
+                { NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                    PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            ).catch(error => error);
+            await vi.waitFor(() => expect(rejects.size).toBe(3));
+            const fence = new Error('ANALYSIS_V2_AI_RESULT_FENCE_MISMATCH');
+            const budget = new VertexAiBudgetCapacityPendingError();
+            const deadline = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+            const failures = grouping === 'within a group' ? [deadline, fence, budget] : [budget, deadline, fence];
+            for (const [index, error] of failures.entries()) {
+                rejects.get(accounts[index]!.username)!(error);
+                await new Promise<void>(resolve => setImmediate(resolve));
+            }
+            expect(await result).toBe(fence);
+            expect(deps.ai.features).toHaveBeenCalledTimes(3);
+            expect(deps.ai.startGenderResolution).not.toHaveBeenCalled();
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        },
+    );
+
     it('writes one aggregate for each opted-in delivery, retaining the original success, deferral and failure', async () => {
         const job = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
             aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION, state: state({ planId: 'standard' }) });

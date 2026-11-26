@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { POST as startPreflight } from '@/app/api/analysis/preflight/route';
@@ -39,6 +40,24 @@ export interface SharedStandardOwner {
 type AsOwner = <T>(owner: SharedStandardOwner, operation: () => Promise<T>) => Promise<T>;
 type Preflight = { owner: SharedStandardOwner; preflightId: string };
 type PaymentMode = 'fixture' | 'webhook';
+type AfterCallback = () => unknown;
+const paymentAfter = new AsyncLocalStorage<AfterCallback[]>();
+
+export function captureSharedPaymentAfter(task: AfterCallback | Promise<unknown>) {
+    const callbacks = paymentAfter.getStore();
+    if (!callbacks) return false;
+    assert.ok(typeof task === 'function', 'The signed webhook must defer its work until after the HTTP response');
+    callbacks.push(AsyncLocalStorage.bind(task));
+    return true;
+}
+
+export async function completeWave<T>(tasks: Promise<T>[]) {
+    const results = await Promise.allSettled(tasks);
+    return results.map(result => {
+        if (result.status === 'rejected') throw result.reason;
+        return result.value;
+    });
+}
 
 function request(path: string, body: object, method = 'POST', headers: Record<string, string> = {}) {
     return new Request(origin + path, {
@@ -93,7 +112,7 @@ export async function startSharedStandardPreflight(owner: SharedStandardOwner, a
     return { owner, preflightId };
 }
 
-const ioProfile = async (username: string) => {
+export const sharedPublicProfile = async (username: string) => {
     const item = profileItem(username, 1, Number(process.env.SHARED_STANDARD_PUBLIC ?? 1) + 1);
     return {
         username, followersCount: item.followersCount, followingCount: item.followsCount, postsCount: item.postsCount,
@@ -107,7 +126,7 @@ export async function processSharedStandardPreflight(payload: unknown) {
     const task = fence.parse(payload);
     return processPreflight(task.preflightId, {
         dispatchFence: { generation: task.generation, reservationToken: task.reservationToken },
-        getProfile: ioProfile,
+        getProfile: sharedPublicProfile,
         enqueueBliteInference: (id, dispatchGeneration, dispatchToken) => enqueuePrecheckoutBliteTask(id, { dispatchGeneration, dispatchToken }),
     });
 }
@@ -121,7 +140,7 @@ export function processSharedStandardFresh(payload: unknown) {
     const task = parseAnalysisV2WorkerTaskPayload(payload);
     if (!('kind' in task) || task.kind !== 'fresh_admission') throw Error('Expected fresh admission delivery');
     const { preflightId, generation, dispatchGeneration, dispatchToken } = task;
-    return processAnalysisV2FreshAdmission(supabaseAdmin, { preflightId, generation, dispatchGeneration, dispatchToken }, { getProfile: ioProfile });
+    return processAnalysisV2FreshAdmission(supabaseAdmin, { preflightId, generation, dispatchGeneration, dispatchToken }, { getProfile: sharedPublicProfile });
 }
 
 async function checkoutSharedOrder(run: Preflight, asOwner: AsOwner) {
@@ -135,7 +154,7 @@ async function checkoutSharedOrder(run: Preflight, asOwner: AsOwner) {
     });
 }
 
-async function confirmPayment(run: Preflight, orderId: string, db: StandardDatabase, mode: PaymentMode) {
+async function confirmPayment(run: Preflight, orderId: string, db: StandardDatabase, mode: PaymentMode, afterResponses?: AfterCallback[][]) {
     const paidAt = new Date().toISOString();
     const paymentId = 'fixture-payment-' + orderId;
     const eventId = 'fixture-event-' + orderId;
@@ -172,14 +191,103 @@ async function confirmPayment(run: Preflight, orderId: string, db: StandardDatab
             },
         });
         const time = String(Math.floor(Date.now() / 1000));
-        const response = await paymentWebhook(new Request(origin + '/api/webhooks/groble', {
+        const deliver = () => paymentWebhook(new Request(origin + '/api/webhooks/groble', {
             method: 'POST', headers: {
                 'content-type': 'application/json', 'x-groble-timestamp': time, 'x-groble-idempotency-key': eventId,
                 'x-groble-signature': createHmac('sha256', webhookSecret).update(time + '.' + payload).digest('hex'),
             }, body: payload
         }));
-        assert.equal((await responseJson(response, 200, 'signed payment')).disposition, 'accepted');
+        const submit = () => {
+            if (!afterResponses) return deliver();
+            const callbacks: AfterCallback[] = [];
+            afterResponses.push(callbacks);
+            return paymentAfter.run(callbacks, deliver);
+        };
+        assert.equal((await responseJson(await submit(), 200, 'signed payment')).disposition, 'accepted');
+        if (afterResponses) {
+            assert.equal((await responseJson(await submit(), 200, 'signed payment redelivery')).disposition, 'duplicate_event');
+        }
     }
+}
+
+export async function prepareSharedAutomaticOrders(runs: Preflight[], asOwner: AsOwner, db: StandardDatabase) {
+    const orders = await completeWave(runs.map(async run => {
+        const orderId = await checkoutSharedOrder(run, asOwner);
+        const responses: AfterCallback[][] = [];
+        await confirmPayment(run, orderId, db, 'webhook', responses);
+        assert.equal(responses.length, 2);
+        assert.ok(responses.every(callbacks => callbacks.length > 0), 'Each webhook must schedule deferred work');
+        return { ...run, orderId, responses };
+    }));
+    const orderIds = orders.map(order => order.orderId);
+    const counts = async () => (await db.query<{ registered: number; active: number; requested: number }>(
+        `SELECT count(*) FILTER (WHERE capacity_queued_at IS NOT NULL)::int AS registered,
+            count(capacity_acquired_at)::int AS active, count(request_id)::int AS requested
+            FROM earlybird_fulfillments WHERE order_id=ANY($1::uuid[])`, [orderIds],
+    )).rows[0];
+    const beforeAfter = await counts();
+    assert.deepEqual(beforeAfter, { registered: runs.length, active: 0, requested: 0 });
+    // Keep each request's deferred effects attached to its response. Other buyers
+    // advance concurrently, including their duplicate signed delivery.
+    await completeWave(orders.map(async ({ responses }) => {
+        for (const callbacks of responses) await completeWave(callbacks.map(async callback => callback()));
+    }));
+    const afterDrain = await counts();
+    assert.deepEqual(afterDrain, { registered: runs.length, active: runs.length, requested: 0 });
+    return {
+        orders: orders.map(({ owner, preflightId, orderId }) => ({ owner, preflightId, orderId })),
+        evidence: { signed: runs.length, redeliveries: runs.length, afterResponses: orders.reduce((n, o) => n + o.responses.length, 0),
+            beforeAfter, afterDrain },
+    };
+}
+
+export async function readSharedAutomaticOrders(
+    orders: (Preflight & { orderId: string })[], db: StandardDatabase,
+) {
+    const rows = (await db.query<{ order_id: string; request_id: string }>(
+        `SELECT f.order_id, r.id AS request_id
+        FROM earlybird_fulfillments f JOIN earlybird_orders o ON o.id=f.order_id AND o.result_request_id=f.request_id
+        JOIN analysis_requests r ON r.id=f.request_id AND r.user_id=o.user_id AND r.preflight_id=o.preflight_id
+        JOIN analysis_preflights p ON p.id=r.preflight_id AND p.consumed_request_id=r.id
+            AND p.admission_generation=1 AND p.admission_dispatch_generation=1
+        WHERE f.order_id=ANY($1::uuid[]) AND f.status='analysis_in_progress'
+          AND f.capacity_acquired_at IS NOT NULL AND o.status='analysis_in_progress'`, [orders.map(order => order.orderId)],
+    )).rows;
+    const requestByOrder = new Map(rows.map(row => [row.order_id, row.request_id]));
+    assert.equal(requestByOrder.size, orders.length);
+    return orders.map(order => ({ ...order, requestId: z.string().uuid().parse(requestByOrder.get(order.orderId)) }));
+}
+
+// Probe the real callback with reversible local mutations, before consuming its one valid generation.
+export async function checkSharedReadyHandoffFences(db: StandardDatabase, args: {
+    p_preflight_id: string; p_generation: number; p_dispatch_generation: number; p_dispatch_token: string;
+}) {
+    const values = [args.p_preflight_id, args.p_generation, args.p_dispatch_generation, args.p_dispatch_token];
+    return db.transaction(async tx => {
+        const handoff = async (bindings: unknown[]) => (await tx.query<{ request: string | null }>(
+            'SELECT public.handoff_ready_signed_paid_fulfillment_v1($1,$2,$3,$4) AS request', bindings)).rows[0]!.request;
+        const acl = (await tx.query<{ allowed: boolean }>(`
+            SELECT has_function_privilege('service_role',fn,'EXECUTE') AND NOT has_function_privilege('authenticated',fn,'EXECUTE')
+                AND NOT has_function_privilege('anon',fn,'EXECUTE') AS allowed
+            FROM (VALUES ('public.handoff_ready_signed_paid_fulfillment_v1(uuid,integer,integer,uuid)')) v(fn)
+        `)).rows[0]!.allowed;
+        assert.ok(acl);
+        assert.equal(await handoff([randomUUID(), ...values.slice(1)]), null);
+        assert.equal(await handoff([values[0],args.p_generation+1,...values.slice(2)]), null);
+        assert.equal(await handoff([values[0],values[1],args.p_dispatch_generation+1,values[3]]), null);
+        assert.equal(await handoff([...values.slice(0,3),randomUUID()]), null);
+        for (const sql of [
+            "UPDATE earlybird_orders SET status='refund_pending' WHERE preflight_id=$1",
+            "UPDATE earlybird_fulfillments SET capacity_acquired_at=NULL WHERE order_id=(SELECT id FROM earlybird_orders WHERE preflight_id=$1)",
+        ]) {
+            await tx.exec('SAVEPOINT handoff_probe');
+            await tx.query(sql, [values[0]]);
+            assert.equal(await handoff(values), null);
+            await tx.exec('ROLLBACK TO SAVEPOINT handoff_probe');
+            await tx.exec('RELEASE SAVEPOINT handoff_probe');
+        }
+        return true;
+    });
 }
 
 export async function prepareSharedStandardOrder(

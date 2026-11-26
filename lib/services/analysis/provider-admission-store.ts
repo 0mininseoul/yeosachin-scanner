@@ -16,6 +16,7 @@ export const ANALYSIS_PROVIDER_ADMISSION_DATABASE_NAMES = Object.freeze({
     budgetsTable: 'analysis_provider_admission_budgets',
     leasesTable: 'analysis_provider_admission_leases',
     acquireRpc: 'acquire_analysis_provider_admission',
+    acquirePaidStandardRpc: 'acquire_paid_standard_provider_admission_v1',
     renewRpc: 'renew_analysis_provider_admission',
     releaseRpc: 'release_analysis_provider_admission',
     recoverRpc: 'recover_expired_analysis_provider_admission',
@@ -83,7 +84,7 @@ export interface AnalysisProviderAdmissionDependencies {
 }
 
 export interface AnalysisProviderAdmissionStore {
-    acquire(input: AnalysisProviderAdmissionInput): Promise<AnalysisProviderAdmissionLease>;
+    acquire(input: AnalysisProviderAdmissionInput, scope?: 'paid_standard'): Promise<AnalysisProviderAdmissionLease>;
     renew(lease: AnalysisProviderAdmissionLease): Promise<AnalysisProviderAdmissionLease>;
     release(
         lease: AnalysisProviderAdmissionLease,
@@ -366,7 +367,7 @@ export function createAnalysisProviderAdmissionStore(
         ...dependencies,
     };
     return Object.freeze({
-        async acquire(input: AnalysisProviderAdmissionInput) {
+        async acquire(input: AnalysisProviderAdmissionInput, scope?: 'paid_standard') {
             validateInput(input);
             const id = admissionId(input);
             const proposedLeaseToken = resolved.randomUuid();
@@ -379,7 +380,8 @@ export function createAnalysisProviderAdmissionStore(
             };
             try {
                 result = await resolved.rpc(
-                    ANALYSIS_PROVIDER_ADMISSION_DATABASE_NAMES.acquireRpc,
+                    scope === 'paid_standard' ? ANALYSIS_PROVIDER_ADMISSION_DATABASE_NAMES.acquirePaidStandardRpc
+                        : ANALYSIS_PROVIDER_ADMISSION_DATABASE_NAMES.acquireRpc,
                     {
                         p_admission_id: id,
                         p_workload_role: input.workloadRole,

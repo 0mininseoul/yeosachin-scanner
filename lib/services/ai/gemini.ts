@@ -1,6 +1,9 @@
-import { AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore } from './gemini-generation-limiter';
+import { currentStandardResolverAdmission } from './standard-resolver-admission';
+import { acquirePaidFeatureSlot, acquireResolverGenerationSlots, acquireCachedResolverSlots, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore, runWithMixedFeatureSlot } from './gemini-generation-limiter';
+import { paidStandardFourthFeatureEnabled, paidStandardFeaturePoolEnabled, paidStandardFeatureAdmissionDeadline } from '@/lib/services/analysis/paid-standard-capacity';
 import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import {
     ApiError,
     GoogleGenAI,
@@ -113,6 +116,8 @@ function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
+    expandedFeature: boolean,
+    attempt: number,
     task: () => Promise<T>,
     signal?: AbortSignal,
 ): Promise<T> {
@@ -130,25 +135,12 @@ async function runWithGenerationSlot<T>(
         return generationLimiterState.shared.run(guardedTask, signal);
     }
 
-    const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     if (stage === 'genderResolution') {
-        const releaseStage = stageSemaphore.tryAcquire();
-        if (!releaseStage) {
-            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
-        }
-        const releaseShared = generationLimiterState.shared.tryAcquire();
-        if (!releaseShared) {
-            releaseStage();
-            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
-        }
-        try {
-            return await guardedTask();
-        } finally {
-            releaseShared();
-            releaseStage();
-        }
+        const release = await acquireResolverGenerationSlots(generationLimiterState, policyVersion, attempt);
+        try { return await guardedTask(); } finally { release(); }
     }
-
+    const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
+    const mixedFeature = !expandedFeature && stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled();
     if (
         aiStagePolicySupports(policyVersion, 'inputQualityV28')
         && (
@@ -157,25 +149,25 @@ async function runWithGenerationSlot<T>(
             || stage === 'privateAccountName'
         )
     ) {
-        const releaseStage = stageSemaphore.tryAcquire();
+        const releaseStage = stageSemaphore.tryAcquire(expandedFeature ? 4 : undefined);
         if (!releaseStage) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
-        const releaseShared = generationLimiterState.shared.tryAcquire();
-        if (!releaseShared) {
-            releaseStage();
-            throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
-        }
+        const runShared = async () => {
+            const releaseShared = generationLimiterState.shared.tryAcquire();
+            if (!releaseShared) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+            try { return await guardedTask(); } finally { releaseShared(); }
+        };
         try {
-            return await guardedTask();
+            return mixedFeature ? await runWithMixedFeatureSlot(generationLimiterState, false, runShared) : await runShared();
         } finally {
-            releaseShared();
             releaseStage();
         }
     }
 
     // Acquire the narrower stage slot first so queued stage work cannot occupy
     // otherwise-available shared capacity.
+    const runShared = () => generationLimiterState.shared.run(guardedTask, signal);
     return stageSemaphore.run(
-        () => generationLimiterState.shared.run(guardedTask, signal),
+        () => mixedFeature ? runWithMixedFeatureSlot(generationLimiterState, true, runShared, signal) : runShared(),
         signal,
     );
 }
@@ -219,6 +211,7 @@ const AI_ADMISSION_SIGNAL_CODES = new Set([
     'ANALYSIS_V2_AI_CAPACITY_PENDING',
     'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
     'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED',
 ]);
 
@@ -348,7 +341,10 @@ export interface AnalyzeWithGeminiOptions<T> {
     onRejectedResponseTelemetry?: (telemetry: GeminiAttemptTelemetry, error: Error) => void | Promise<void>;
 }
 
+const tokenLogOutcomes = channel('yeosachin.gemini-token-log');
+
 interface TokenLogMetadata {
+    stage?: AiStageName;
     latencyMs?: number;
     location?: string;
     estimatedCostUsd?: number | null;
@@ -762,6 +758,8 @@ export async function logTokenUsage(
         cached_hit: cachedHit,
     };
 
+    let insertReturnedError = false;
+    const stage = metadata.stage ?? 'legacy';
     try {
         const { supabaseAdmin } = await import('@/lib/supabase/admin');
         if (extendedTelemetrySupported !== false) {
@@ -775,6 +773,7 @@ export async function logTokenUsage(
 
             if (!error) {
                 extendedTelemetrySupported = true;
+                if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome: 'insert_acknowledged' });
                 return;
             }
 
@@ -790,6 +789,7 @@ export async function logTokenUsage(
                     || errorText.includes('does not exist'));
 
             if (!isMissingExtendedColumn) {
+                insertReturnedError = true;
                 throw error;
             }
 
@@ -799,11 +799,16 @@ export async function logTokenUsage(
 
         const { error } = await supabaseAdmin.from('gemini_token_usage').insert(baseRow);
         if (error) {
+            insertReturnedError = true;
             throw error;
         }
-    } catch (error) {
-        // 토큰 로깅 실패는 분석 실패로 이어지지 않도록
-        console.warn('Failed to log token usage:', error);
+        if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome: 'insert_acknowledged' });
+    } catch {
+        // The legacy table has no operation/attempt key. A missing acknowledgement
+        // cannot safely be retried without risking a duplicate usage row.
+        const outcome = insertReturnedError ? 'insert_error_response' : 'insert_threw';
+        if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome });
+        console.warn('Gemini token usage insert was not confirmed', { stage, outcome });
     }
 }
 
@@ -1028,10 +1033,13 @@ export async function analyzeWithGemini<T>(
         attemptNumber <= finalAttemptNumber;
         attemptNumber++
     ) {
+        let releasePaidFeature: (() => void) | undefined;
+        let cachedResolver: Awaited<ReturnType<typeof acquireCachedResolverSlots>> | undefined;
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
         let responseReceivedBeforeAbort = false;
         let receivedCostUsd: number | null = null;
+        let committedFence: Error | undefined;
         let budgetSettled = false;
         let devUnusedSettlementFailed = false;
         let devRateLimitSettlementError: Error | null = null;
@@ -1050,6 +1058,17 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
+            if (stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled()
+                && await paidStandardFourthFeatureEnabled(resolvedPolicyVersion, requestId)) {
+                releasePaidFeature = await acquirePaidFeatureSlot(getGeminiGenerationLimiter(), paidStandardFeatureAdmissionDeadline(), abortSignal);
+            }
+            const admission = stage === 'genderResolution' && resolvedPolicyVersion === 'ai-stage-policy-v2.11'
+                && !statelessReplay && attemptNumber === 1 ? currentStandardResolverAdmission() : undefined;
+            const cached = admission?.cached;
+            if (cached && admission.signal === abortSignal && cached.requestId === requestId && cached.operationKey === budgetOperationKey) {
+                cachedResolver = await acquireCachedResolverSlots(getGeminiGenerationLimiter(), resolvedPolicyVersion,
+                    cached.handlerDeadlineAtMs, admission.signal);
+            }
             if (resolvedBudgetGuard) {
                 budgetReservation = await resolvedBudgetGuard.reserve({
                     reservationKey: `${resolvedBudgetRunId}:${resolvedBudgetOperationKey}:${attemptNumber}`,
@@ -1119,6 +1138,9 @@ export async function analyzeWithGemini<T>(
                     config,
                 };
                 const dispatch = async () => {
+                    if (cachedResolver && performance.now() >= cachedResolver.latestStart) {
+                        throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+                    }
                     if (abortSignal?.aborted) {
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
@@ -1244,15 +1266,24 @@ export async function analyzeWithGemini<T>(
                         throw error;
                     }
                 };
-                response = await runWithGenerationSlot(
+                response = cachedResolver ? await dispatch() : await runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
+                    Boolean(releasePaidFeature),
+                    attemptNumber,
                     devLiveBudget && !useDevStandardConcurrency
                         ? () => devLiveGenerationSlot.run(dispatch, abortSignal)
                         : dispatch,
                     abortSignal,
                 );
+                cachedResolver?.release();
+                cachedResolver = undefined;
+                releasePaidFeature?.();
+                releasePaidFeature = undefined;
             } catch (generationError) {
+                // The SDK no longer uses the local slots while its financial receipt is reconciled.
+                cachedResolver?.release();
+                cachedResolver = undefined;
                 if (budgetReservation && !budgetSettled) {
                     if (providerDispatchStarted) {
                         await resolvedBudgetGuard?.settle(budgetReservation, {
@@ -1384,20 +1415,35 @@ export async function analyzeWithGemini<T>(
             const terminalHook = rejectedResponse && onRejectedResponseTelemetry
                 ? (telemetry: GeminiAttemptTelemetry) => onRejectedResponseTelemetry(telemetry, rejectedResponse)
                 : onAttemptTelemetry;
-            await emitAttemptTelemetry(attemptTelemetry, terminalHook, completionError ? undefined : parsed);
-            if (abortSignal?.aborted) {
-                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            try {
+                await emitAttemptTelemetry(attemptTelemetry, terminalHook, completionError ? undefined : parsed);
+            } catch (error) {
+                // The durable store reports committed telemetry explicitly when a
+                // stale worker cannot publish the result. Other audit errors have
+                // no such proof and must leave the secondary log untouched.
+                if (!stage || !(error instanceof Error) || error.name !== 'AnalysisV2AiResultFenceError'
+                    || !('telemetryCommitted' in error) || error.telemetryCommitted !== true) throw error;
+                committedFence = error;
             }
-            emitResponseRejectionDiagnostic(attemptTelemetry);
+            if (!stage && abortSignal?.aborted) throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            if (stage && tokenLogOutcomes.hasSubscribers) {
+                if (committedFence) tokenLogOutcomes.publish({ stage, outcome: 'audit_committed_fenced' });
+                else if (abortSignal?.aborted) tokenLogOutcomes.publish({ stage, outcome: 'audit_committed_then_aborted' });
+            }
 
-            // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
+            // The SDK returned before cutoff and the V2 terminal audit committed.
+            // Cancellation may stop publication, but it cannot undo this measured usage.
             if (!skipTokenLog && !statelessReplay && usage.tokenUsage) {
                 await logTokenUsage(usage.tokenUsage, analysisType, requestId, false, modelName, {
+                    stage,
                     latencyMs: attemptTelemetry.latencyMs,
                     location: attemptTelemetry.location,
                     estimatedCostUsd: attemptTelemetry.estimatedCostUsd,
                 });
             }
+            if (committedFence) throw committedFence;
+            if (stage && abortSignal?.aborted) throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            emitResponseRejectionDiagnostic(attemptTelemetry);
 
             if (completionError) {
                 throw new Error(
@@ -1446,6 +1492,7 @@ export async function analyzeWithGemini<T>(
                 }
                 budgetSettled = true;
             }
+            if (committedFence && error === committedFence) throw committedFence;
             if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                 lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);
@@ -1466,6 +1513,9 @@ export async function analyzeWithGemini<T>(
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }
+        } finally {
+            cachedResolver?.release();
+            releasePaidFeature?.();
         }
     }
 

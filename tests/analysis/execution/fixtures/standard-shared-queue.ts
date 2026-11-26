@@ -71,6 +71,8 @@ export class StandardSharedQueue {
     }
     async drain(matches: (payload: SharedPayload) => boolean, concurrency: number, deliver: (payload: SharedPayload, worker: number) => Promise<void>) {
         const running = new Set<Promise<void>>();
+        // Preserve the 32 starts/second control rate even for larger simulated worker pools.
+        const dispatchesPerSecond = Math.min(concurrency, 32);
         const availableWorkers = Array.from({ length: concurrency }, (_, index) => index);
         let firstError: unknown;
         let deliveries = 0;
@@ -91,10 +93,10 @@ export class StandardSharedQueue {
             const queue = next.name.split('/tasks/')[0];
             const bucket = this.buckets.get(queue) ?? { tokens: this.burst, replenishedAt: now };
             this.buckets.set(queue, bucket);
-            bucket.tokens = Math.min(this.burst, bucket.tokens + (now - bucket.replenishedAt) * concurrency / 1000);
+            bucket.tokens = Math.min(this.burst, bucket.tokens + (now - bucket.replenishedAt) * dispatchesPerSecond / 1000);
             bucket.replenishedAt = now;
             if (bucket.tokens < 1) {
-                await sleep(Math.ceil((1 - bucket.tokens) * 1000 / concurrency));
+                await sleep(Math.ceil((1 - bucket.tokens) * 1000 / dispatchesPerSecond));
                 continue;
             }
             bucket.tokens--;

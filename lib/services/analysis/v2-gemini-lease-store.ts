@@ -1,4 +1,10 @@
+import { paidStandardExpandedCapacityEnabled } from './paid-standard-capacity';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import {
+    currentStandardResolverAdmission, devStandardExpandedCapacityEnabled, observeResolverAdmission,
+    remainingResolverAdmissionWait,
+} from '@/lib/services/ai/standard-resolver-admission';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -40,6 +46,9 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     acquireRpc: 'acquire_analysis_v2_gemini_lease',
     acquireV2Rpc: 'acquire_analysis_v2_gemini_lease_v2',
     acquireSchedulerV1Rpc: 'acquire_analysis_v2_scheduler_gemini_lease_v1',
+    acquirePaidStandardRpc: 'acquire_paid_standard_gemini_lease_v1',
+    acquireDevStandardRpc: 'acquire_dev_standard_gemini_lease_v1',
+    acquireDevStandardSchedulerRpc: 'acquire_dev_standard_scheduler_gemini_lease_v1',
     renewRpc: 'renew_analysis_v2_gemini_lease',
     renewV2Rpc: 'renew_analysis_v2_gemini_lease_v2',
     releaseRpc: 'release_analysis_v2_gemini_lease',
@@ -51,17 +60,25 @@ export const ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES = Object.freeze({
     reapCutoffV2Rpc: 'reap_analysis_v2_gemini_cutoff_leases_v2',
 });
 
-// The larger pools are opt-in candidates for the isolated native PostgreSQL test.
-// Production and unconfigured tests still reject every slot above eight.
-function slotMaximum(env: Record<string, string | undefined>) {
-    if (env.NODE_ENV !== 'test') return 8;
-    if (env.STANDARD_SHARED_VERTEX_SLOTS === '48') return 48;
-    if (env.STANDARD_SHARED_VERTEX_SLOTS === '56') return 56;
-    if (env.STANDARD_SHARED_VERTEX_SLOTS === '64') return 64;
-    if (env.STANDARD_SHARED_VERTEX_SLOTS === '80') return 80;
-    return 8;
+// Real expanded pools require a verified delivery. Synthetic rehearsals choose a fixture pool independently.
+async function selectGeminiPool(
+    env: Record<string, string | undefined>,
+    input: z.infer<typeof acquireInputSchema>,
+) {
+    if (!input.leaseProfile && await paidStandardExpandedCapacityEnabled(input.aiStagePolicyVersion, {
+        requestId: input.requestId, jobKey: input.jobKey, claimToken: input.jobClaimToken,
+    })) return { maximum: 128, paidStandard: true, devStandard: false };
+    if (env.NODE_ENV === 'test') {
+        const selected = env.STANDARD_SHARED_VERTEX_SLOTS;
+        const maximum = selected && ['48', '56', '64', '80', '112', '128'].includes(selected) ? Number(selected) : 8;
+        return { maximum, devStandard: false };
+    }
+    if (input.leaseProfile !== 'precheckout_blite' && await devStandardExpandedCapacityEnabled(input.aiStagePolicyVersion, env)) {
+        return { maximum: 128, devStandard: true };
+    }
+    return { maximum: 8, devStandard: false };
 }
-const slotNumber = z.number().int().min(1).max(80);
+const slotNumber = z.number().int().min(1).max(128);
 const acquiredRowSchema = z.object({
     outcome: z.literal('acquired'),
     slot: slotNumber,
@@ -188,7 +205,7 @@ export interface AnalysisV2GeminiLeaseStore {
         aiStagePolicyVersion?: AiStagePolicyVersion;
     }): Promise<AnalysisV2GeminiLease>;
     renew(lease: AnalysisV2GeminiLease): Promise<AnalysisV2GeminiLease>;
-    release(lease: AnalysisV2GeminiLease): Promise<void>;
+    release(lease: AnalysisV2GeminiLease, reason?: 'prestart_rejected'): Promise<void>;
     cutoff(lease: AnalysisV2GeminiLease): Promise<void>;
     cutoffAttempt(input: {
         lease: AnalysisV2GeminiLease;
@@ -360,6 +377,7 @@ export function createAnalysisV2GeminiLeaseStore(
     const attachProviderAdmission = async (
         lease: AnalysisV2GeminiLease,
         input: z.infer<typeof acquireInputSchema>,
+        paidStandard: boolean,
     ): Promise<AnalysisV2GeminiLease> => {
         if (!isAnalysisProviderAdmissionEnabled(dependencies.env ?? process.env)) {
             return lease;
@@ -381,9 +399,12 @@ export function createAnalysisV2GeminiLeaseStore(
                     ? ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS
                     : AI_GEMINI_LEASE_SECONDS,
             } as const;
+        const acquireAdmission = () => paidStandard
+            ? providerAdmissions().acquire(admissionInput, 'paid_standard')
+            : providerAdmissions().acquire(admissionInput);
         let providerAdmissionLease: AnalysisProviderAdmissionLease;
         try {
-            providerAdmissionLease = await providerAdmissions().acquire(admissionInput);
+            providerAdmissionLease = await acquireAdmission();
         } catch (firstError) {
             // Typed capacity/claim/identity denials are explicit no-commit
             // outcomes. Do not replay them: return the authoritative Gemini
@@ -395,7 +416,7 @@ export function createAnalysisV2GeminiLeaseStore(
             // may have committed the admission before its response was lost,
             // so the same identity/claims must be retried exactly once.
             try {
-                providerAdmissionLease = await providerAdmissions().acquire(admissionInput);
+                providerAdmissionLease = await acquireAdmission();
             } catch (secondError) {
                 // A typed denial on replay proves that this identity did not
                 // commit in the first attempt, so safely return the slot and
@@ -427,10 +448,12 @@ export function createAnalysisV2GeminiLeaseStore(
     };
     const releaseProviderAdmission = async (
         lease: AnalysisV2GeminiLease,
+        reason?: 'prestart_rejected',
     ): Promise<void> => {
         if (!lease.providerAdmissionLease) return;
         try {
-            await providerAdmissions().release(lease.providerAdmissionLease);
+            if (reason) await providerAdmissions().release(lease.providerAdmissionLease, reason);
+            else await providerAdmissions().release(lease.providerAdmissionLease);
         } catch (error) {
             if (!(error instanceof AnalysisProviderAdmissionFenceError)) throw error;
             const recovered = await providerAdmissions().recoverExpired({
@@ -475,12 +498,18 @@ export function createAnalysisV2GeminiLeaseStore(
                     || input.data.stage === 'featureAnalysis'
                     || input.data.stage === 'privateAccountName'
                 );
-            const acquireRpc = usesSchedulerV1Admission
-                ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireSchedulerV1Rpc
-                : usesV2
-                ? ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireV2Rpc
-                : ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES.acquireRpc;
+            const pool = await selectGeminiPool(dependencies.env ?? process.env, input.data);
+            const names = ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES;
+            let acquireRpc: string = usesV2 ? names.acquireV2Rpc : names.acquireRpc;
+            if (pool.paidStandard) {
+                acquireRpc = names.acquirePaidStandardRpc;
+            } else if (pool.devStandard) {
+                acquireRpc = usesSchedulerV1Admission ? names.acquireDevStandardSchedulerRpc : names.acquireDevStandardRpc;
+            } else if (usesSchedulerV1Admission) {
+                acquireRpc = names.acquireSchedulerV1Rpc;
+            }
             const acquireParams = usesV2 ? {
+                    ...(pool.paidStandard ? { p_job_claim_token: input.data.jobClaimToken } : {}),
                     p_request_id: input.data.requestId,
                     p_job_key: input.data.jobKey,
                     p_operation_key: input.data.operationKey,
@@ -499,21 +528,54 @@ export function createAnalysisV2GeminiLeaseStore(
                         ? ANALYSIS_V2_GEMINI_BLITE_LEASE_SECONDS
                         : AI_GEMINI_LEASE_SECONDS,
                 };
-            let result = await dependencies.rpc(acquireRpc, acquireParams);
-            if (result.error) {
-                // The slot RPC is idempotent by durable operation identity and
-                // proposed claim token. Replay once with the same token when
-                // the first response is unknown; this recovers a committed
-                // lease without inventing a second Gemini fence.
-                result = await dependencies.rpc(acquireRpc, acquireParams);
+            const acquirePhysicalSlot = async () => {
+                let result = await dependencies.rpc(acquireRpc, acquireParams);
+                if (result.error) {
+                    // The RPC may already have committed. Recover using the same claim token.
+                    const busy = (error: unknown) => typeof error === 'object' && error !== null
+                        && 'code' in error && error.code === '55P03' && 'message' in error
+                        && error.message === 'PAID_STANDARD_CAPACITY_LOCK_BUSY';
+                    const rolledBack = pool.paidStandard && busy(result.error);
+                    result = await dependencies.rpc(acquireRpc, acquireParams);
+                    if (rolledBack && busy(result.error)) throw new AnalysisV2AiCapacityPendingError();
+                }
+                if (result.error) throw new AnalysisV2GeminiLeasePersistenceError();
+                const parsed = acquireResultSchema.safeParse(result.data);
+                if (!parsed.success) throw new AnalysisV2GeminiLeasePersistenceError();
+                const slot = parsed.data[0].slot;
+                if (slot !== null && slot > pool.maximum) {
+                    throw new AnalysisV2GeminiLeasePersistenceError();
+                }
+                return parsed.data[0];
+            };
+            const resolver = input.data.stage === 'genderResolution';
+            const trial = resolver ? currentStandardResolverAdmission() : undefined;
+            trial?.signal.throwIfAborted();
+            let row = await acquirePhysicalSlot();
+            if (resolver && (row.outcome === 'resolver_capacity_pending' || row.outcome === 'capacity_pending')) {
+                const reason = row.outcome === 'resolver_capacity_pending' ? 'global_resolver' : 'global_shared';
+                observeResolverAdmission(reason, 'contended');
+                // Only authoritative, no-lease replies may be polled. The operation, claim
+                // token and attempt number remain identical throughout this short window.
+                for (let poll = 0; trial && poll < 5; poll++) {
+                    const remainingWait = remainingResolverAdmissionWait();
+                    if (remainingWait <= 0) break;
+                    const remainingAdmission = input.data.handlerDeadlineAtMs - dependencies.nowMs() - AI_GEMINI_MIN_REMAINING_MS;
+                    if (remainingAdmission < 1_000) throw new AnalysisV2AiDeadlineTooShortError();
+                    await delay(Math.min(remainingWait, 1_000), undefined, { signal: trial.signal });
+                    trial.signal.throwIfAborted();
+                    if (input.data.handlerDeadlineAtMs - dependencies.nowMs() < AI_GEMINI_MIN_REMAINING_MS) {
+                        throw new AnalysisV2AiDeadlineTooShortError();
+                    }
+                    row = await acquirePhysicalSlot();
+                    if (row.outcome !== 'resolver_capacity_pending' && row.outcome !== 'capacity_pending') break;
+                }
+                if (row.outcome === 'acquired') observeResolverAdmission(reason, 'admitted_after_wait');
+                if (row.outcome === 'resolver_capacity_pending' || (trial && row.outcome === 'capacity_pending')) {
+                    observeResolverAdmission(row.outcome === 'resolver_capacity_pending' ? 'global_resolver' : 'global_shared', 'skipped');
+                    throw new AnalysisV2AiResolverCapacitySkippedError();
+                }
             }
-            const { data, error } = result;
-            if (error) throw new AnalysisV2GeminiLeasePersistenceError();
-            const parsed = acquireResultSchema.safeParse(data);
-            if (!parsed.success || (parsed.data[0].slot ?? 0) > slotMaximum(dependencies.env ?? process.env)) {
-                throw new AnalysisV2GeminiLeasePersistenceError();
-            }
-            const row = parsed.data[0];
             if (row.outcome === 'capacity_pending') {
                 throw new AnalysisV2AiCapacityPendingError();
             }
@@ -526,7 +588,7 @@ export function createAnalysisV2GeminiLeaseStore(
             if (row.lease_claim_token !== proposedToken) {
                 throw new AnalysisV2GeminiLeasePersistenceError();
             }
-            return attachProviderAdmission(parseLease(row, input.data), input.data);
+            return attachProviderAdmission(parseLease(row, input.data), input.data, pool.paidStandard === true);
         },
 
         async renew(lease) {
@@ -559,8 +621,8 @@ export function createAnalysisV2GeminiLeaseStore(
             return renewProviderAdmission(Object.freeze({ ...lease, expiresAt: row.expires_at }));
         },
 
-        async release(lease) {
-            await releaseProviderAdmission(lease);
+        async release(lease, reason) {
+            await releaseProviderAdmission(lease, reason);
             // Fail closed: an uncertain admission release must retain the
             // authoritative Gemini fence. If this second step fails, the slot
             // remains leased and prevents duplicate provider execution.
