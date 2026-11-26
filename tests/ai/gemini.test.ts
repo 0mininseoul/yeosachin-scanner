@@ -7,7 +7,7 @@ import {
     acquireResolverPermit, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore,
     LocalResolverPermitTimeoutError,
 } from '@/lib/services/ai/gemini-generation-limiter';
-import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
+import { remainingResolverAdmissionWait, withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
@@ -2460,6 +2460,85 @@ describe('analyzeWithGemini process concurrency', () => {
         expect(stage.tryAcquire()).toEqual(expect.any(Function));
         expect(shared.tryAcquire()).toEqual(expect.any(Function));
     });
+
+    it.each(['ready', 'timeout', 'abort', 'deadline', 'hard', 'missing usage', 'later attempt', 'unapproved', 'other operation', 'stateless replay'] as const)(
+        'bounds a signed cached-feature resolver before reserve and dispatch (%s)', async scenario => {
+            vi.useFakeTimers();
+            const policy = 'ai-stage-policy-v2.11' as const;
+            const state = getGeminiGenerationLimiter();
+            const stage = getStageGenerationSemaphore(state, policy, 'genderResolution');
+            const stageHolds = Array.from({ length: 4 }, () => stage.tryAcquire(4)!);
+            const sharedHolds = Array.from({ length: 8 }, () => state.shared.tryAcquire()!);
+            const controller = new AbortController();
+            const audit = stageAuditOptions();
+            const budgetGuard = new InMemoryVertexAiBudgetStore();
+            const reserve = vi.spyOn(budgetGuard, 'reserve');
+            const settle = vi.spyOn(budgetGuard, 'settle');
+            const hard = new Error('VERTEX_AI_BUDGET_EXCEEDED:run');
+            if (scenario === 'hard') reserve.mockRejectedValueOnce(hard);
+            const job = { requestId: stageRequestId, jobKey: 'track:profile-ai:batch:0', claimToken: 'fixture-claim' };
+            const candidate = { ...job, operationKey: 'gender-resolution:local', aiStagePolicyVersion: policy,
+                handlerDeadlineAtMs: performance.now() + (scenario === 'deadline' ? 234_000 : 300_000) };
+            const normal = ['later attempt', 'unapproved', 'other operation', 'stateless replay'].includes(scenario);
+            const observations: string[] = [];
+            const event = channel('yeosachin.standard.cached-resolver-local');
+            const observe = (message: unknown) => { if (typeof message === 'string') observations.push(message); };
+            event.subscribe(observe);
+            let physicalWaitLeft: number | undefined;
+            mocks.generateContent.mockImplementation(async () => {
+                physicalWaitLeft = remainingResolverAdmissionWait();
+                return scenario === 'missing usage' ? responseWithText('{"value":"ok"}', null) : successfulResponse();
+            });
+            const run = withPaidStandardCapacityJob(job, async () => scenario !== 'unapproved', () =>
+                withStandardResolverAdmission(controller.signal, () => analyzeWithGemini('prompt', undefined, {
+                    ...audit, stage: 'genderResolution', aiStagePolicyVersion: policy, schema: responseSchema,
+                    budgetGuard, budgetOperationKey: scenario === 'other operation' ? 'different' : candidate.operationKey,
+                    ...(scenario === 'stateless replay' ? { replayCapability: issueReplayStatelessCapability() } : {}),
+                    abortSignal: controller.signal, startingAttempt: scenario === 'later attempt' ? 2 : 1,
+                }), candidate), {
+                NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128',
+            });
+            const error = scenario === 'deadline' ? 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+                : scenario === 'abort' ? 'AI_GENERATION_DEADLINE_EXCEEDED' : 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED';
+            const sends = scenario === 'ready' || scenario === 'missing usage';
+            const checked = sends ? expect(run).resolves.toEqual({ value: 'ok' }) : scenario === 'hard'
+                ? expect(run).rejects.toBe(hard) : expect(run).rejects.toThrow(error);
+            try {
+                await vi.advanceTimersByTimeAsync(5_000);
+                expect(reserve).toHaveBeenCalledTimes(normal ? 1 : 0);
+                expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+                expect(mocks.generateContent).not.toHaveBeenCalled();
+                await vi.advanceTimersByTimeAsync(2_000);
+                stageHolds.pop()!();
+                await vi.advanceTimersByTimeAsync(1_000);
+                if (scenario === 'abort') controller.abort();
+                if (sends || scenario === 'hard') sharedHolds.pop()!();
+                await vi.advanceTimersByTimeAsync(7_000);
+                await checked;
+                const sent = sends ? 1 : 0;
+                expect(reserve).toHaveBeenCalledTimes(normal || scenario === 'hard' ? 1 : sent);
+                expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(sent);
+                expect(audit.onAttemptTelemetry).toHaveBeenCalledTimes(sent);
+                expect(mocks.generateContent).toHaveBeenCalledTimes(sent);
+                expect(settle).toHaveBeenCalledTimes(sent);
+                if (sent) expect(physicalWaitLeft).toBe(0);
+                if (scenario === 'missing usage') expect(settle.mock.calls[0][1].actualCostUsd).toBeNull();
+                const outcome = scenario === 'abort' ? 'aborted' : scenario === 'timeout' ? 'timeout'
+                    : scenario === 'deadline' ? 'deadline' : 'after_5s';
+                expect(observations).toEqual(normal ? [] : ['entered', outcome]);
+            } finally {
+                event.unsubscribe(observe);
+                controller.abort();
+                for (const release of [...stageHolds, ...sharedHolds]) release();
+                vi.useRealTimers();
+            }
+            const free = Array.from({ length: 4 }, () => stage.tryAcquire(4));
+            const sharedFree = Array.from({ length: 8 }, () => state.shared.tryAcquire());
+            expect([...free, ...sharedFree].every(release => typeof release === 'function')).toBe(true);
+            for (const release of [...free, ...sharedFree]) release?.();
+        },
+    );
 
     it('cancels a local timeout before durable reservation and settles the same operation once on redelivery', async () => {
         const policy = 'ai-stage-policy-v2.11' as const;

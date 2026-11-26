@@ -1812,12 +1812,14 @@ describe('V2 AI and scoring executors', () => {
                 onReserved?.();
             }
             return {
-                result: feature(selections), operationKey: 'feature-analysis:' + digest(owner),
+                result: feature(selections), operationKey: createFeatureAnalysisResultIdentity(input, AI_STAGE_POLICY_V211_VERSION).operationKey,
                 resultHash: digest(owner), source: 'checkpoint',
             };
         });
-        deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>(input => {
+        const cacheMarks: { delivery: number; owner: string }[] = [];
+        deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>((input, fence) => {
             const affected = input.media.some(row => row.selectionId.includes('local.timeout'));
+            if (fence.cachedFeatureForResolver) cacheMarks.push({ delivery, owner: affected ? 'local.timeout' : 'other.fresh' });
             return {
                 operationKey: 'gender-resolution:' + digest(String(affected)), completion: Promise.resolve(),
                 peek: () => affected
@@ -1842,6 +1844,7 @@ describe('V2 AI and scoring executors', () => {
         expect(data.outcomes.find(row => row.instagramId === 'local.timeout')).toMatchObject({
             baselineClassification: 'verified_female', genderResolutionStatus: 'capacity_skipped',
         });
+        expect(cacheMarks).toEqual(approved ? [{ delivery: 1, owner: 'other.fresh' }, { delivery: 2, owner: 'local.timeout' }] : []);
         expect(freshlyReserved).toEqual(approved ? ['local.timeout', 'other.fresh'] : ['local.timeout']);
     });
 

@@ -1,4 +1,4 @@
-import { currentStandardResolverAdmission, observeResolverAdmission, remainingResolverAdmissionWait } from './standard-resolver-admission';
+import { currentStandardResolverAdmission, observeCachedResolverLocal, observeResolverAdmission, remainingResolverAdmissionWait } from './standard-resolver-admission';
 import { AI_GEMINI_MIN_REMAINING_MS, AI_GEMINI_SDK_TIMEOUT_MS, AI_SHARED_CONCURRENCY_LIMIT, getAiStagePolicy, type AiStageName, type AiStagePolicyVersion } from './stage-policy';
 
 type PermitLimit = number | (() => number);
@@ -207,6 +207,7 @@ export function acquireResolverPermit(
     semaphore: AsyncSemaphore,
     reason: 'worker_stage' | 'worker_shared',
     attempt: number,
+    localDeadline?: number,
 ): (() => void) | Promise<() => void> {
     const trial = currentStandardResolverAdmission();
     const limit = reason === 'worker_stage' && trial ? 4 : undefined;
@@ -214,7 +215,9 @@ export function acquireResolverPermit(
     const immediate = semaphore.tryAcquire(limit);
     if (immediate) return immediate;
     observeResolverAdmission(reason, 'contended');
-    const remaining = remainingResolverAdmissionWait();
+    // Physical admission keeps its original five-second contention clock.
+    const normalRemaining = remainingResolverAdmissionWait();
+    const remaining = localDeadline === undefined ? normalRemaining : Math.max(0, Math.ceil(localDeadline - performance.now()));
     if (trial && remaining > 0) {
         const timeout = new AbortController();
         const signal = AbortSignal.any([timeout.signal, trial.signal]);
@@ -232,4 +235,50 @@ export function acquireResolverPermit(
     observeResolverAdmission(reason, 'skipped');
     if (trial) throw new LocalResolverPermitTimeoutError(attempt);
     throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+}
+
+/** Acquires one local stage permit and one worker permit, unwinding both on every failure. */
+export async function acquireResolverGenerationSlots(
+    state: GeminiGenerationLimiterState, policyVersion: AiStagePolicyVersion, attempt: number, localDeadline?: number,
+): Promise<() => void> {
+    const stage = getStageGenerationSemaphore(state, policyVersion, 'genderResolution');
+    const releaseStage = await acquireResolverPermit(stage, 'worker_stage', attempt, localDeadline);
+    try {
+        const releaseShared = await acquireResolverPermit(state.shared, 'worker_shared', attempt, localDeadline);
+        return () => { releaseShared(); releaseStage(); };
+    } catch (error) {
+        releaseStage();
+        throw error;
+    }
+}
+
+/** The cached first attempt may spend fifteen seconds in both local queues together. */
+export async function acquireCachedResolverSlots(
+    state: GeminiGenerationLimiterState, policyVersion: AiStagePolicyVersion, handlerDeadline: number, signal: AbortSignal,
+) {
+    const start = performance.now();
+    const latestStart = handlerDeadline - AI_GEMINI_MIN_REMAINING_MS;
+    const deadline = Math.min(start + 15_000, latestStart);
+    let release: (() => void) | undefined;
+    observeCachedResolverLocal('entered');
+    try {
+        signal.throwIfAborted();
+        if (start >= latestStart) throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+        release = await acquireResolverGenerationSlots(state, policyVersion, 1, deadline);
+        signal.throwIfAborted();
+        const now = performance.now();
+        if (now >= latestStart) throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+        if (now >= deadline) throw new LocalResolverPermitTimeoutError(1);
+        observeCachedResolverLocal(now - start > 5_000 ? 'after_5s' : 'within_5s');
+        return { release, latestStart };
+    } catch (error) {
+        release?.();
+        if (signal.aborted) observeCachedResolverLocal('aborted');
+        else if ((error instanceof LocalResolverPermitTimeoutError && performance.now() >= latestStart)
+            || (error instanceof Error && error.message === 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT')) {
+            observeCachedResolverLocal('deadline');
+            throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+        } else observeCachedResolverLocal(error instanceof LocalResolverPermitTimeoutError ? 'timeout' : 'error');
+        throw error;
+    }
 }

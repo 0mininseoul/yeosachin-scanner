@@ -212,6 +212,13 @@ it('publishes simultaneous paid Standard requests through one database and queue
         const key = event.stage + '.' + event.outcome;
         tokenLogEvents[key] = (tokenLogEvents[key] ?? 0) + 1;
     }
+    const cachedResolverLocal = { entered: 0, within_5s: 0, after_5s: 0, timeout: 0, aborted: 0, deadline: 0, error: 0 };
+    const cachedChannel = channel('yeosachin.standard.cached-resolver-local');
+    function observeCachedLocal(message: unknown) {
+        if (typeof message === 'string' && Object.hasOwn(cachedResolverLocal, message)) {
+            cachedResolverLocal[message as keyof typeof cachedResolverLocal]++;
+        }
+    }
     const admissionEvents: Record<string, number> = {};
     const continuationSetups = { acquire_lease: 0, reserve_attempt: 0 };
     const continuationChannel = channel('yeosachin.standard.resolver-continuation');
@@ -233,6 +240,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         ? await createSharedStandardDatabase(8, { production: true })
         : await createSharedStandardDatabase(capacity.preset);
     let restoreBudgetObserver: (() => void) | undefined;
+    cachedChannel.subscribe(observeCachedLocal);
     tokenLogChannel.subscribe(observeTokenLog);
     admissionChannel.subscribe(observeAdmission);
     continuationChannel.subscribe(observeContinuation);
@@ -661,6 +669,8 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const paidStartToLastReadMs = Math.round(performance.now() - paidStart);
             ownerReadOverHour = coverage99 && lateOwners > 0;
             directPublicationMissing = automaticPayments && publishedHandoffs.size !== ownersCount;
+            const { entered, ...cachedOutcomes } = cachedResolverLocal;
+            expect(Object.values(cachedOutcomes).reduce((sum, count) => sum + count, 0)).toBe(entered);
             if ('processFeatureSlots' in capacity) {
                 expect(processModelPeaks.all).toBeLessThanOrEqual(8);
                 expect(processModelPeaks.features).toBeGreaterThan(0);
@@ -690,7 +700,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 productionPaid, checkoutEvidence, verifiedResultEmailClaims, ...(automatic ? { automaticPayment: automatic.evidence } : {}),
                 approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
-                tokenLogEvents, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
+                tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
                 ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
@@ -709,7 +719,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const failure = {
                 status: 'failed', productionPaid, checkoutEvidence, approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
-                tokenLogEvents, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
+                tokenLogEvents, cachedResolverLocal, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
                 errors, processModelPeaks, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
             };
@@ -754,6 +764,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         expect(lateOwners, 'SHARED_OWNER_HOUR_EXCEEDED').toBe(0);
     } finally {
         restoreBudgetObserver?.();
+        cachedChannel.unsubscribe(observeCachedLocal);
         tokenLogChannel.unsubscribe(observeTokenLog);
         admissionChannel.unsubscribe(observeAdmission);
         continuationChannel.unsubscribe(observeContinuation);

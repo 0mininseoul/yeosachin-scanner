@@ -1,4 +1,5 @@
-import { acquirePaidFeatureSlot, acquireResolverPermit, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore, runWithMixedFeatureSlot } from './gemini-generation-limiter';
+import { currentStandardResolverAdmission } from './standard-resolver-admission';
+import { acquirePaidFeatureSlot, acquireResolverGenerationSlots, acquireCachedResolverSlots, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore, runWithMixedFeatureSlot } from './gemini-generation-limiter';
 import { paidStandardFourthFeatureEnabled, paidStandardFeaturePoolEnabled, paidStandardFeatureAdmissionDeadline } from '@/lib/services/analysis/paid-standard-capacity';
 import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
@@ -134,23 +135,11 @@ async function runWithGenerationSlot<T>(
         return generationLimiterState.shared.run(guardedTask, signal);
     }
 
-    const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     if (stage === 'genderResolution') {
-        const stagePermit = acquireResolverPermit(stageSemaphore, 'worker_stage', attempt);
-        const releaseStage = typeof stagePermit === 'function' ? stagePermit : await stagePermit;
-        try {
-            const sharedPermit = acquireResolverPermit(generationLimiterState.shared, 'worker_shared', attempt);
-            const releaseShared = typeof sharedPermit === 'function' ? sharedPermit : await sharedPermit;
-            try {
-                return await guardedTask();
-            } finally {
-                releaseShared();
-            }
-        } finally {
-            releaseStage();
-        }
+        const release = await acquireResolverGenerationSlots(generationLimiterState, policyVersion, attempt);
+        try { return await guardedTask(); } finally { release(); }
     }
-
+    const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     const mixedFeature = !expandedFeature && stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled();
     if (
         aiStagePolicySupports(policyVersion, 'inputQualityV28')
@@ -1045,6 +1034,7 @@ export async function analyzeWithGemini<T>(
         attemptNumber++
     ) {
         let releasePaidFeature: (() => void) | undefined;
+        let cachedResolver: Awaited<ReturnType<typeof acquireCachedResolverSlots>> | undefined;
         let budgetReservation: VertexAiBudgetReservation | null = null;
         let providerDispatchStarted = false;
         let responseReceivedBeforeAbort = false;
@@ -1071,6 +1061,13 @@ export async function analyzeWithGemini<T>(
             if (stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled()
                 && await paidStandardFourthFeatureEnabled(resolvedPolicyVersion, requestId)) {
                 releasePaidFeature = await acquirePaidFeatureSlot(getGeminiGenerationLimiter(), paidStandardFeatureAdmissionDeadline(), abortSignal);
+            }
+            const admission = stage === 'genderResolution' && resolvedPolicyVersion === 'ai-stage-policy-v2.11'
+                && !statelessReplay && attemptNumber === 1 ? currentStandardResolverAdmission() : undefined;
+            const cached = admission?.cached;
+            if (cached && admission.signal === abortSignal && cached.requestId === requestId && cached.operationKey === budgetOperationKey) {
+                cachedResolver = await acquireCachedResolverSlots(getGeminiGenerationLimiter(), resolvedPolicyVersion,
+                    cached.handlerDeadlineAtMs, admission.signal);
             }
             if (resolvedBudgetGuard) {
                 budgetReservation = await resolvedBudgetGuard.reserve({
@@ -1141,6 +1138,9 @@ export async function analyzeWithGemini<T>(
                     config,
                 };
                 const dispatch = async () => {
+                    if (cachedResolver && performance.now() >= cachedResolver.latestStart) {
+                        throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+                    }
                     if (abortSignal?.aborted) {
                         throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                     }
@@ -1266,7 +1266,7 @@ export async function analyzeWithGemini<T>(
                         throw error;
                     }
                 };
-                response = await runWithGenerationSlot(
+                response = cachedResolver ? await dispatch() : await runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
                     Boolean(releasePaidFeature),
@@ -1276,6 +1276,8 @@ export async function analyzeWithGemini<T>(
                         : dispatch,
                     abortSignal,
                 );
+                cachedResolver?.release();
+                cachedResolver = undefined;
                 releasePaidFeature?.();
                 releasePaidFeature = undefined;
             } catch (generationError) {
@@ -1509,6 +1511,7 @@ export async function analyzeWithGemini<T>(
                 throw lastError;
             }
         } finally {
+            cachedResolver?.release();
             releasePaidFeature?.();
         }
     }

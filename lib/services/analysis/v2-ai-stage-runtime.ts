@@ -103,6 +103,8 @@ export interface AnalysisV2AiJobFence {
     /** Internal terminal safe-fallback fence; production callers must not set it. */
     schedulerTerminalUnavailable?: boolean;
     admittedStandardResolver?: true;
+    /** The exact candidate's feature checkpoint was reused without a new reservation. */
+    cachedFeatureForResolver?: true;
     /**
      * Strict revenue cohorts reserve a request-scoped resolver slot before
      * constructing the external Gemini call. The callback is intentionally
@@ -755,8 +757,12 @@ export function createDurableAnalysisV2AiStageRuntime(
                             return;
                         }
                     }
+                    const cached = fence.cachedFeatureForResolver && fence.handlerDeadlineAtMs !== undefined
+                        ? { requestId: fence.requestId, jobKey: fence.jobKey, claimToken: fence.claimToken,
+                            aiStagePolicyVersion: policyVersion, operationKey: identity.operationKey, handlerDeadlineAtMs: fence.handlerDeadlineAtMs }
+                        : undefined;
                     const result = fence.admittedStandardResolver
-                        ? await withStandardResolverAdmission(controller.signal, run) : await run();
+                        ? await withStandardResolverAdmission(controller.signal, run, cached) : await run();
                     if (state.status !== 'pending') return;
                     state = {
                         status: 'ready',

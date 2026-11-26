@@ -2703,9 +2703,10 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     const featureRemainderSha256 = await pinProfileFeatureMedia(featureMedia, featureKey, true);
                     let resolverHandle: AnalysisV2GenderResolutionHandle | null = null;
                     let featureReservedThisDelivery = false;
-                    const startResolver = () => {
+                    const startResolver = (cachedFeature = false) => {
                         if (!shouldStartResolver || blockedCapacityTrial || deferringAdmitted || resolverHandle) return;
-                        resolverHandle = dependencies.ai.startGenderResolution({ media: resolverMedia }, resolverFence);
+                        resolverHandle = dependencies.ai.startGenderResolution({ media: resolverMedia },
+                            cachedFeature ? { ...resolverFence, cachedFeatureForResolver: true } : resolverFence);
                         startedResolverHandles.push(resolverHandle);
                     };
                     if (!admittedResolver) startResolver();
@@ -2720,7 +2721,11 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             : await dependencies.ai.features(featureInput, scheduledProfileFence);
                         // A reused feature has no fresh dispatch boundary. Its resolver still
                         // reads the exact checkpoint before deciding whether to call the provider.
-                        if (admittedResolver) startResolver();
+                        if (admittedResolver && shouldStartResolver && !resolverHandle) {
+                            const expectedKey = featureKey ?? createFeatureAnalysisResultIdentity(featureInput, inputQualityPolicyVersion).operationKey;
+                            startResolver(!featureReservedThisDelivery && features.source === 'checkpoint'
+                                && !!features.resultHash && features.operationKey === expectedKey);
+                        }
                     } catch (error) {
                         if (admittedResolver && resolverContinuationReason(error)) throw error;
                         if (graceMs === 50_000 && error instanceof AnalysisV2ConfirmedCapacityContinuation) throw error;
