@@ -449,6 +449,7 @@ describe('SEO/GEO Search Console operations runbook', () => {
         const runbook = readRunbook();
         const allowedHosts = new Set([
             'yeosachin.com',
+            'cherry.yeosachin.com',
             'developers.google.com',
             'support.google.com',
             'search.google.com',

@@ -12,6 +12,7 @@ import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/serv
 import { KAKAO_ATTRIBUTION_COOKIE, classifyKakaoSignupAttribution, encodeKakaoSignupAttribution, normalizeKakaoReferrerOrigin } from '@/lib/services/identity/kakao-signup-attribution';
 import { ADMIN_CONSOLE_PATH, readAdminConsoleDestination } from '@/lib/contracts/admin-console';
 import { AUTH_REDIRECT_INTENT_COOKIE, readOAuthRedirectIntent } from '@/lib/services/auth/oauth-redirect-intent';
+import { cherryDomainResponse } from '@/lib/services/cherry/public-domain';
 import { isKnownAiFetcher, isLegalPagePath } from '@/lib/services/seo/legal-page-crawlers';
 
 const LEGACY_PUBLIC_HOSTNAMES = new Set([
@@ -50,6 +51,10 @@ export async function proxy(request: NextRequest) {
             status: 403,
             headers: { 'Cache-Control': 'private, no-store', Vary: 'User-Agent' },
         });
+    }
+    if (deploymentBoundary === 'production') {
+        const cherryResponse = cherryDomainResponse(request);
+        if (cherryResponse) return cherryResponse;
     }
     // Keep the old webhook/API endpoints reachable while external providers
     // switch to the canonical domain. Browser navigations are permanently
@@ -254,6 +259,7 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
     matcher: [
+        { source: '/:path*', has: [{ type: 'host', value: 'cherry\\.yeosachin\\.com' }] },
         // An encoded API prefix can also end in an image suffix. Its raw URL
         // must reach the guard before Next decodes it into a dynamic handler.
         // Next's encoded dynamic-page chunks retain the static asset bypass.

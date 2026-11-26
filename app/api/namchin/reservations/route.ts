@@ -1,3 +1,4 @@
+import { CHERRY_PUBLIC_HOST, CHERRY_PUBLIC_URL } from '@/lib/constants/cherry-public-url';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
@@ -49,7 +50,10 @@ export function GET() {
 }
 
 export async function POST(request: Request) {
-    if (request.headers.get('origin') !== new URL(request.url).origin) return reply({ error: 'origin' }, 403);
+    const requestOrigin = request.headers.get('host') === CHERRY_PUBLIC_HOST
+        ? new URL(CHERRY_PUBLIC_URL).origin
+        : new URL(request.url).origin;
+    if (request.headers.get('origin') !== requestOrigin) return reply({ error: 'origin' }, 403);
     if (request.headers.get('content-type')?.split(';')[0] !== 'application/json') {
         return reply({ error: 'content_type' }, 415);
     }

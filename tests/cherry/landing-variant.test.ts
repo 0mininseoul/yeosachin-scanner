@@ -63,6 +63,29 @@ describe('cherry landing variant', () => {
         },
     );
 
+    it.each(['', '?v=crush&utm_source=meta&fbclid=abc'])('updates only the approved search and FAQ copy on the new host: %s', async (query) => {
+        const { GET } = await import('@/app/cherry/route');
+        const { createRequire } = await import('node:module');
+        const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
+            JSDOM: new (html: string) => { window: { document: Document } };
+        };
+        const { GET: getPublicLanding } = await import('@/app/cherry-public-landing/route');
+        const oldDocument = new JSDOM(await (await GET(new NextRequest('https://yeosachin.com/cherry' + query))).text()).window.document;
+        const response = await getPublicLanding(new NextRequest('https://cherry.yeosachin.com/cherry-public-landing' + query));
+        const newDocument = new JSDOM(await response.text()).window.document;
+
+        expect(newDocument.title).toBe('체리 · 인스타 남친맞팔알리미, 짝남맞팔알리미, 전남친맞팔알리미');
+        expect(newDocument.querySelector('meta[name="description"]')?.getAttribute('content')).toContain('남친, 짝남, 전남친');
+        expect(newDocument.querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe('https://cherry.yeosachin.com/');
+        expect(newDocument.querySelector('link[rel="icon"]')?.getAttribute('href')).toBe('/cherry/logo.png');
+        const shareCard = (doc: Document) => [...doc.querySelectorAll('meta[property^="og:"], meta[name^="twitter:"]')].map(tag => tag.outerHTML);
+        expect(shareCard(newDocument)).toEqual(shareCard(oldDocument));
+        const oldQuestion = [...oldDocument.querySelectorAll('summary')].find(item => item.textContent?.endsWith('말고 다른 사람도 되나요?'));
+        expect(oldQuestion).toBeDefined();
+        oldQuestion!.textContent = '전남친, 짝남, 썸남도 맞팔 알림을 받을 수 있나요?';
+        expect(newDocument.body.innerHTML).toBe(oldDocument.body.innerHTML);
+    });
+
     it('keeps crush with ad params', async () => {
         const { GET } = await import('@/app/cherry/route');
         const response = await GET(new NextRequest('https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=abc'));
@@ -133,6 +156,21 @@ describe('cherry reservation variant', () => {
             body: JSON.stringify({ email: 'Me@Example.com', phone: '010-1234-5678', consent: true, privateAck: true, ...extra }),
         }));
     };
+
+    it.each([
+        ['cherry.yeosachin.com', 'https://cherry.yeosachin.com', 400],
+        ['cherry.yeosachin.com', 'https://external.example', 403],
+        ['yeosachin.com', 'https://cherry.yeosachin.com', 403],
+    ])('checks the browser origin for %s with %s before any reservation write', async (host, origin, status) => {
+        const { POST } = await import('@/app/api/cherry/reservations/route');
+        const response = await POST(new Request('http://localhost:3148/api/cherry/reservations', {
+            method: 'POST',
+            headers: { host, origin, 'content-type': 'application/json' },
+            body: '{}',
+        }));
+        expect(response.status).toBe(status);
+        expect(db.insert).not.toHaveBeenCalled();
+    });
 
     it('stores the variant', async () => {
         db.insert.mockResolvedValue({ error: null });
