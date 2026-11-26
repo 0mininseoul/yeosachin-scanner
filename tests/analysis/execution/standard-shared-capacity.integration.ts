@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { expect, it, vi } from 'vitest';
+import * as operationalEvents from '@/lib/observability/schema';
 import { isAiStageName } from '@/lib/services/ai/stage-policy';
 import { createGeminiGenerationLimiter } from '@/lib/services/ai/gemini-generation-limiter';
 import { ProcessWideAnalysisV2SchedulerArbiter, type AnalysisV2SchedulerRuntimeOptions } from '@/lib/services/analysis/v2-ai-scheduler-runtime';
@@ -230,6 +231,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
     const db = productionPaid
         ? await createSharedStandardDatabase(8, { production: true })
         : await createSharedStandardDatabase(capacity.preset);
+    let restoreBudgetObserver: (() => void) | undefined;
     tokenLogChannel.subscribe(observeTokenLog);
     admissionChannel.subscribe(observeAdmission);
     continuationChannel.subscribe(observeContinuation);
@@ -245,6 +247,14 @@ it('publishes simultaneous paid Standard requests through one database and queue
         if (probeMode && (!['held', 'spent'].includes(probeMode) || !automaticPayments || observedTiming || ownersCount !== 1 || publicCount !== 4))
             throw new Error('SHARED_BUDGET_PROBE_REQUIRES_SMALL_SIGNED_FIXTURE');
         const budgetProbe = probeMode === 'held' || probeMode === 'spent' ? new SharedBudgetPressureProbe(db, probeMode) : null;
+        if (budgetProbe) {
+            const sanitize = operationalEvents.sanitizeOperationalEvent;
+            const observer = vi.spyOn(operationalEvents, 'sanitizeOperationalEvent').mockImplementation(event => {
+                budgetProbe.observeWorkerEvent(event, deliveryScope.getStore());
+                return sanitize(event);
+            });
+            restoreBudgetObserver = () => observer.mockRestore();
+        }
         const { rpc, from } = db.client();
         const errors: Record<string, number> = {};
         let injectedTimeouts = 0;
@@ -639,7 +649,8 @@ it('publishes simultaneous paid Standard requests through one database and queue
             directPublicationMissing = automaticPayments && publishedHandoffs.size !== ownersCount;
             const budgetProbeEvidence = budgetProbe ? await budgetProbe.receipt() : undefined;
             if (budgetProbeEvidence) {
-                expect(budgetProbeEvidence).toMatchObject({ mode: 'held', cancelled: 1, spent: 0, signedOrderMatches: 1, fixtureModelAttempts: 0 });
+                expect(budgetProbeEvidence).toMatchObject({ mode: 'held', cancelled: 1, spent: 0, signedOrderMatches: 1, fixtureModelAttempts: 0,
+                    budgetTerminalCauses: 0, otherTerminalCauses: 0 });
                 expect(budgetProbeEvidence.triageModelCalls).toBeGreaterThan(0);
                 expect(budgetProbeEvidence.deniedReservationKeys).toBeGreaterThan(0);
                 expect(budgetProbeEvidence.admittedAfterDenial).toBe(budgetProbeEvidence.deniedReservationKeys);
@@ -690,13 +701,14 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 const terminal = failure.budgetTimeline.firstAfterDenialByKind.find(event => event.kind === 'terminal_worker_response');
                 const budget = first?.budget;
                 expectedHardDenial = !!probe && probe.spent === 1 && probe.cancelled === 0 && probe.continuations === 0
+                    && probe.budgetTerminalCauses === 1 && probe.otherTerminalCauses === 0
                     && probe.signedOrderMatches === 1 && probe.fixtureModelAttempts === 0 && probe.triageModelCalls === 0
                     && probe.deniedReservationKeys > 0 && probe.admittedAfterDenial === 0 && probe.settledAfterDenial === 0
                     && probe.deniedDeliveries > 0 && budget?.scope === 'run' && !budget.capacityPending
                     && budget.transactionTotals?.scope === 'run' && budget.transactionTotals.limitUsd === 2
                     && budget.transactionTotals.settledUsd + budget.transactionTotals.requestedUsd > 2
                     && terminal?.sameOwnerAsFirstDenial === true && terminal.sameDeliveryAsFirstDenial === true
-                    && reason.startsWith('SHARED_WORKER_track:profile-ai:batch:batch:')
+                    && reason === 'SHARED_WORKER_track:profile-ai:batch:batch:ANALYSIS_V2_JOB_HANDLER_FAILED'
                     && failure.requests?.length === 1 && failure.requests[0]?.status === 'failed' && failure.requests[0].n === 1
                     && failure.paymentTimingAtStop?.paid === 1 && failure.paymentTimingAtStop.published === 0;
                 Object.assign(failure, { budgetProbeEvidence: probe });
@@ -722,6 +734,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         expect(ownerReadOverHour, 'SHARED_OWNER_READ_HOUR_EXCEEDED').toBe(false);
         expect(lateOwners, 'SHARED_OWNER_HOUR_EXCEEDED').toBe(0);
     } finally {
+        restoreBudgetObserver?.();
         tokenLogChannel.unsubscribe(observeTokenLog);
         admissionChannel.unsubscribe(observeAdmission);
         continuationChannel.unsubscribe(observeContinuation);

@@ -1936,6 +1936,66 @@ describe('V2 AI and scoring executors', () => {
         } else expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
+    it('waits for a sibling cutoff write after an immediate fence rejection at the Standard handler deadline', async () => {
+        vi.useFakeTimers();
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        try {
+            const accounts = [profile('cutoff.first'), profile('cutoff.second')];
+            const deps = dependencies(memory(), {
+                profileAiConcurrency: 2, profileBatches: { loadExactBatch: async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({ username: account.username, status: 'success', profile: account })),
+                }) },
+            });
+            const failure = new Error('ANALYSIS_V2_AI_RESULT_FENCE_MISMATCH');
+            let finishWrite!: () => void;
+            const delayedWrite = new Promise<void>(resolve => { finishWrite = resolve; });
+            const cutoff = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockReturnValueOnce(delayedWrite);
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: options => ({
+                    requestId: options.requestId, operationKey: options.resultIdentity.operationKey,
+                    resultIdentity: options.resultIdentity, resultSchema: options.resultSchema,
+                    prepare: vi.fn(), onBeforeAttempt: vi.fn(), onAttemptTelemetry: vi.fn(), cutoff,
+                }),
+                runGenderResolution: (_input, _audit, options) => new Promise<never>((_, reject) => {
+                    options?.abortSignal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+                }),
+            });
+            deps.ai.startGenderResolution = vi.fn(runtime.startGenderResolution);
+            deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+                onReserved!();
+                const ids = input.media.map(row => row.selectionId);
+                return { result: feature(ids, 'unresolved'), operationKey: 'feature-analysis:' + digest(ids[0]),
+                    resultHash: digest('feature'), source: 'checkpoint' };
+            });
+            const job = context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0', batch: 0, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                state: state({ planId: 'standard', relationships: { ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 2, inputHash: digest('cutoff-topology') }] },
+                    profileFetchBatches: [{ batch: 0, itemCount: 2, producerInputHash: digest('producer'), revision: 1,
+                        resultHash: digest('fetch') }] }),
+            });
+            const done = vi.fn();
+            const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+                ...job, handlerDeadlineAtMs: performance.now() + 300_000,
+            }).then(done, done);
+            await vi.advanceTimersByTimeAsync(285_100);
+            expect(cutoff).toHaveBeenCalledTimes(2);
+            expect(done).not.toHaveBeenCalled();
+            const handle = vi.mocked(deps.ai.startGenderResolution).mock.results[1]!.value;
+            expect(handle.peek().status).toBe('cutoff');
+            expect(handle.cutoff()).toBe(handle.cutoffCompletion);
+            finishWrite();
+            await execution;
+            expect(done).toHaveBeenCalledExactlyOnceWith(failure);
+            expect(cutoff).toHaveBeenCalledTimes(2);
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
+    });
+
     it.each([
         { mode: 'trial', expectedWait: 8000 },
         { mode: 'normal50', expectedWait: 50000 },

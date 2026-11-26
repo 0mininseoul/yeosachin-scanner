@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { StandardSharedBudgetEvidence, safeStandardBudgetRpcFields } from './standard-shared-budget-evidence';
+import { SharedBudgetPressureProbe } from './standard-shared-budget-probe';
 
 const totals = { scope: 'order', limitUsd: '5.0000', settledUsd: 2, staleReservedUsd: 0, freshReservedUsd: 3, requestedUsd: .02 };
 
@@ -30,4 +31,27 @@ it('retains first denial and first downstream failures after the event cap witho
     expect(JSON.stringify(report)).not.toContain(id);
     expect(safeStandardBudgetRpcFields('unrelated_rpc', pg)).toEqual({});
     expect(safeStandardBudgetRpcFields(rpc, { ...pg, hint: id, detail: JSON.stringify({ ...totals, requestedUsd: id }) })).toEqual({});
+});
+
+it('measures an unexpected spent continuation and distinguishes a different terminal cause on the denied delivery', async () => {
+    const db = {
+        query: async () => ({ rows: [] }), exec: async () => undefined, close: async () => undefined,
+        transaction: async (): Promise<never> => { throw new Error('UNEXPECTED_TRANSACTION'); },
+    };
+    const probe = new SharedBudgetPressureProbe(db, 'spent');
+    const delivery = {};
+    await probe.afterRpc('reserve_vertex_ai_budget', { p_reservation_key: 'key', p_operation_key: 'gender-triage:profile' },
+        { message: 'VERTEX_AI_BUDGET_EXCEEDED:run:fixture' }, delivery);
+    const continueRpc = 'continue_analysis_v2_scheduler_job';
+    const args = { p_error_code: 'ANALYSIS_V2_AI_CAPACITY_PENDING' };
+    await probe.afterRpc(continueRpc, args, null, {});
+    await probe.afterRpc(continueRpc, args, { message: 'FAILED' }, delivery);
+    await probe.afterRpc(continueRpc, args, null, delivery);
+    const fields = { error_name: 'VertexAiBudgetExceededError', failure_reason: 'VERTEX_AI_BUDGET_EXCEEDED',
+        job_key: 'track:profile-ai:batch:0', disposition: 'permanent', retryable: false };
+    const event = { event: 'analysis_v2.worker_executor_failed', severity: 'error' as const, fields };
+    probe.observeWorkerEvent(event, {});
+    probe.observeWorkerEvent(event, delivery);
+    probe.observeWorkerEvent({ ...event, fields: { ...fields, failure_reason: 'OTHER_FAIL' } }, delivery);
+    expect(await probe.receipt()).toMatchObject({ continuations: 1, budgetTerminalCauses: 1, otherTerminalCauses: 1 });
 });

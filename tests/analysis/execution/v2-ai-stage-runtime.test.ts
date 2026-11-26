@@ -479,6 +479,35 @@ describe('durable V2 AI stage runtime', () => {
         await handle.completion;
     });
 
+    it('preserves the uncertain admitted cutoff when the handler has insufficient time for the ledger write', async () => {
+        vi.useFakeTimers();
+        try {
+            const cutoff = vi.fn(() => new Promise<void>(() => {}));
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: options => ({
+                    requestId: options.requestId, operationKey: options.resultIdentity.operationKey,
+                    resultIdentity: options.resultIdentity, resultSchema: options.resultSchema,
+                    prepare: vi.fn(), onBeforeAttempt: vi.fn(), onAttemptTelemetry: vi.fn(), cutoff,
+                }),
+                runGenderResolution: () => new Promise<never>(() => {}),
+            });
+            const handle = runtime.startGenderResolution({ media: [] }, {
+                ...fence, admittedStandardResolver: true, aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+                handlerDeadlineAtMs: performance.now() + 400,
+            });
+            const writing = handle.cutoff();
+            expect(handle.cutoff()).toBe(writing);
+            await vi.advanceTimersByTimeAsync(399);
+            expect(handle.peek().status).toBe('cutoff');
+            await vi.advanceTimersByTimeAsync(1);
+            await writing;
+            expect(handle.peek().status).toBe('recovery_pending');
+            expect(cutoff).toHaveBeenCalledOnce();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it('preserves an immediate resolver cutoff bookkeeping rejection', async () => {
         const persistenceFailure = new Error('DATABASE_FENCE_REJECTED');
         const createAudit = vi.fn(options => ({

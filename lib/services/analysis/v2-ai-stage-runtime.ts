@@ -69,6 +69,7 @@ import {
 } from './v2-ai-result-store';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import {
+    ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS,
     AnalysisV2SchedulerAdmissionDeferredError,
     runAnalysisV2FairAiScheduler,
     type AnalysisV2SchedulerStage,
@@ -183,6 +184,8 @@ export type ResolverCutoffReason = 'resolver_handler_deadline' | 'resolver_capac
 export interface AnalysisV2GenderResolutionHandle {
     operationKey: string;
     completion: Promise<void>;
+    /** The single cutoff write for this delivery can still be running after peek() becomes cutoff. */
+    readonly cutoffCompletion?: Promise<void> | null;
     holdActiveAttempt?(includeStartedSetup?: boolean): boolean;
     finishCurrentOrFirstAttempt?(): void;
     readonly recoveredCutoffFromAudit?: boolean;
@@ -217,7 +220,8 @@ export class AnalysisV2GenderResolutionCutoffPersistenceError extends Error {
 }
 
 async function waitForCutoffBookkeeping(
-    operation: () => Promise<void> | undefined
+    operation: () => Promise<void> | undefined,
+    maxWaitMs: number,
 ): Promise<void> {
     const handled = Promise.resolve()
         .then(operation)
@@ -231,7 +235,7 @@ async function waitForCutoffBookkeeping(
         new Promise<{ status: 'timed_out' }>(resolve => {
             timer = setTimeout(
                 () => resolve({ status: 'timed_out' }),
-                GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS
+                maxWaitMs
             );
         }),
     ]);
@@ -831,6 +835,7 @@ export function createDurableAnalysisV2AiStageRuntime(
                 holdActiveAttempt: audit.holdActiveResolverAttempt,
                 finishCurrentOrFirstAttempt: audit.finishCurrentOrFirstResolverAttempt,
                 get recoveredCutoffFromAudit() { return recoveredCutoffFromAudit; },
+                get cutoffCompletion() { return cutoffStarted; },
                 peek: () => state,
                 cutoff(reason) {
                     if (cutoffStarted) return cutoffStarted;
@@ -839,8 +844,17 @@ export function createDurableAnalysisV2AiStageRuntime(
                         state = { status: 'cutoff' };
                         controller.abort(reason);
                         try {
-                            await waitForCutoffBookkeeping(() => audit.cutoff?.());
+                            const maxWaitMs = fence.admittedStandardResolver
+                                ? Math.min(ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS, Math.max(0,
+                                    (fence.handlerDeadlineAtMs ?? Infinity) - performance.now()))
+                                : GENDER_RESOLUTION_CUTOFF_BOOKKEEPING_WAIT_MS;
+                            await waitForCutoffBookkeeping(() => audit.cutoff?.(), maxWaitMs);
                         } catch (error) {
+                            if (fence.admittedStandardResolver && error instanceof AnalysisV2GenderResolutionCutoffPersistenceError) {
+                                // The write may still commit. Only a fenced recovery can decide the outcome.
+                                state = { status: 'recovery_pending' };
+                                return;
+                            }
                             if (error instanceof AnalysisV2AiResultRecoveryPendingError) {
                                 state = { status: 'recovery_pending' };
                             }

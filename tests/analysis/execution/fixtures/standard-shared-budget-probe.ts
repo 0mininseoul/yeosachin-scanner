@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import type { OperationalEvent } from '@/lib/observability/schema';
 import type { StandardDatabase } from './standard-database';
 
 // Only constructed by the one-owner signed-webhook fixture in a fresh local cluster.
@@ -7,6 +8,8 @@ export class SharedBudgetPressureProbe {
     private readonly deniedDeliveries = new Set<object>();
     private readonly deniedReservationKeys = new Set<string>();
     private triageModelCalls = 0;
+    private budgetTerminalCauses = 0;
+    private otherTerminalCauses = 0;
     private released = false;
     private continuations = 0;
 
@@ -14,6 +17,15 @@ export class SharedBudgetPressureProbe {
 
     observeModelCall(stage: string) {
         if (stage === 'gender_triage') this.triageModelCalls++;
+    }
+
+    observeWorkerEvent(event: OperationalEvent, delivery?: object) {
+        if (event.event !== 'analysis_v2.worker_executor_failed' || !delivery || !this.deniedDeliveries.has(delivery)) return;
+        const fields = event.fields;
+        if (fields?.error_name === 'VertexAiBudgetExceededError' && fields.failure_reason === 'VERTEX_AI_BUDGET_EXCEEDED'
+            && fields.job_key === 'track:profile-ai:batch:0' && fields.disposition === 'permanent' && fields.retryable === false)
+            this.budgetTerminalCauses++;
+        else this.otherTerminalCauses++;
     }
 
     async beforeRpc(name: string, args: Record<string, unknown>) {
@@ -70,11 +82,11 @@ export class SharedBudgetPressureProbe {
             this.deniedDeliveries.add(delivery);
             this.deniedReservationKeys.add(args.p_reservation_key);
         }
-        if (this.mode !== 'held' || this.released || !delivery || !this.deniedDeliveries.has(delivery) || error
-            || name !== 'continue_analysis_v2_scheduler_job' || args.p_error_code !== 'ANALYSIS_V2_AI_CAPACITY_PENDING') return;
+        if (!delivery || !this.deniedDeliveries.has(delivery) || error || name !== 'continue_analysis_v2_scheduler_job') return;
         this.continuations++;
         // A denial must recur after real queue redelivery, with the financial hold still present.
-        if (this.deniedDeliveries.size < 2) return;
+        if (this.mode !== 'held' || this.released || this.deniedDeliveries.size < 2
+            || args.p_error_code !== 'ANALYSIS_V2_AI_CAPACITY_PENDING') return;
         this.released = true;
         await this.db.query(`SELECT public.cancel_vertex_ai_budget(reservation_key,reservation_id)
             FROM public.vertex_ai_budget_reservations WHERE reservation_key='fixture-competing-budget' AND state='reserved'`);
@@ -102,6 +114,7 @@ export class SharedBudgetPressureProbe {
                 (SELECT count(*)::int FROM denied WHERE state='settled' AND actual_cost_usd>0 AND NOT usage_unknown) AS "settledAfterDenial"
         `, [[...this.deniedReservationKeys]]);
         return { mode: this.mode, deniedDeliveries: this.deniedDeliveries.size, continuations: this.continuations,
-            deniedReservationKeys: this.deniedReservationKeys.size, triageModelCalls: this.triageModelCalls, ...row };
+            deniedReservationKeys: this.deniedReservationKeys.size, triageModelCalls: this.triageModelCalls,
+            budgetTerminalCauses: this.budgetTerminalCauses, otherTerminalCauses: this.otherTerminalCauses, ...row };
     }
 }

@@ -318,9 +318,9 @@ async function settleOptionalGenderResolution(
     reason?: ResolverCutoffReason,
 ): Promise<AnalysisV2GenderResolutionState | null> {
     if (!handle) return null;
-    if (handle.peek().status !== 'pending') return handle.peek();
     try {
-        await handle.cutoff(reason);
+        if (handle.cutoffCompletion) await handle.cutoffCompletion;
+        else if (handle.peek().status === 'pending') await handle.cutoff(reason);
     } catch (error) {
         // cutoff() already fences the optional provider call before bounded audit
         // bookkeeping. A slow ledger write must not discard the required analysis;
@@ -400,7 +400,7 @@ async function finishAdmittedResolvers(
     if (!pending.length) return;
     const remaining = deadline - performance.now() - ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS;
     if (remaining <= 0) {
-        await Promise.all(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
+        await drainResolverCleanup(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
         return;
     }
     const completions = pending.map(handle => {
@@ -411,8 +411,8 @@ async function finishAdmittedResolvers(
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
         const timeout = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(true), remaining); });
-        if (await Promise.race([Promise.all(completions).then(() => false), timeout])) {
-            await Promise.all(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
+        if (await Promise.race([drainResolverCleanup<unknown>(completions).then(() => false), timeout])) {
+            await drainResolverCleanup(pending.map(handle => settleOptionalGenderResolution(handle, 'resolver_handler_deadline')));
         }
     } finally {
         clearTimeout(timer);
