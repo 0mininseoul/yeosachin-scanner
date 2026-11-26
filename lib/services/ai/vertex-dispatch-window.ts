@@ -76,8 +76,7 @@ export class VertexDispatchWindow {
             try {
                 allowed = await this.authorize();
             } catch (error) {
-                this.rejectAuthorization(error instanceof VertexDispatchAuthorizationError
-                    && error.reason === 'db_contention' ? 'db_contention' : 'unavailable');
+                this.rejectAuthorization(error instanceof VertexDispatchAuthorizationError ? error.reason : 'unavailable');
             }
             this.assertCanStart();
             if (!allowed) this.rejectAuthorization('closed');

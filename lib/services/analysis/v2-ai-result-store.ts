@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import { operationalLogger } from '@/lib/observability/server';
@@ -18,6 +19,8 @@ import {
 } from '@/lib/services/ai/stage-policy';
 import {
     analysisV2AiAttemptStore,
+    PaidStandardReservationUnconfirmedError,
+    PaidStandardReservationRolledBackError,
     type AnalysisV2AiAttemptRecord,
     type AnalysisV2AiAttemptReservation,
     type AnalysisV2AiAttemptStore,
@@ -32,6 +35,8 @@ import {
     AnalysisV2AiTerminalUnavailableError,
 } from './v2-ai-fallback-policy';
 import { z } from 'zod';
+
+const resolverContinuation = channel('yeosachin.standard.resolver-continuation');
 
 export { AnalysisV2AiResultRateLimitExhaustedError } from './v2-ai-fallback-policy';
 
@@ -378,7 +383,8 @@ export interface AnalysisV2AiAuditAdapter<T> {
         repairedNarrative?: unknown
     ): Promise<void>;
     /** Keep only the exact already-reserved resolver attempt alive during a local batch grace trial. */
-    holdActiveResolverAttempt?(): boolean;
+    holdActiveResolverAttempt?(includeStartedSetup?: boolean): boolean;
+    finishCurrentOrFirstResolverAttempt?(): void;
     /** Resolver-only durable cutoff fence. Implementations must not await provider completion. */
     cutoff?(): Promise<void>;
     resultSchema: z.ZodType<T>;
@@ -1136,9 +1142,12 @@ export function createAnalysisV2AiAuditAdapter<T>(
     const attemptStartedAt = new Map<number, number>();
     let preparation: Promise<AnalysisV2AiPreparedResult<T>> | null = null;
     let attemptSetup: Promise<void> | null = null;
+    let setupPhase: 'acquire_lease' | 'reserve_attempt' = 'acquire_lease';
     let cutoffStarted: Promise<void> | null = null;
     let cutoffRequested = false;
     let holdCurrentAttemptOnly = false;
+    let finishingFirstAttempt = false;
+    let startedAnyAttempt = false;
     let expectedAttempt: number | null = null;
     let terminal = false;
     const emittedTerminalAttempts = new Set<number>();
@@ -1326,12 +1335,24 @@ export function createAnalysisV2AiAuditAdapter<T>(
             return preparation;
         },
 
-        holdActiveResolverAttempt() {
-            if (resultIdentity.stage !== 'genderResolution' || terminal || cutoffRequested || reservations.size !== 1) {
+        holdActiveResolverAttempt(includeStartedSetup = false) {
+            // A durable reserve may already have committed while its response is
+            // still in flight. Only the current delivery can finish that setup.
+            const holdingCurrent = reservations.size === 1 || (includeStartedSetup && attemptSetup !== null);
+            if (resultIdentity.stage !== 'genderResolution' || terminal || cutoffRequested || !holdingCurrent) {
                 return false;
+            }
+            if (includeStartedSetup && !holdCurrentAttemptOnly && reservations.size === 0 && resolverContinuation.hasSubscribers) {
+                resolverContinuation.publish({ phase: setupPhase });
             }
             holdCurrentAttemptOnly = true;
             return true;
+        },
+
+        finishCurrentOrFirstResolverAttempt() {
+            if (resultIdentity.stage !== 'genderResolution') return;
+            if (startedAnyAttempt) holdCurrentAttemptOnly = true;
+            else finishingFirstAttempt = true;
         },
 
         async onBeforeAttempt(telemetry) {
@@ -1350,6 +1371,9 @@ export function createAnalysisV2AiAuditAdapter<T>(
                     'ANALYSIS_V2_AI_RESULT_VALIDATION_ERROR: unexpected attempt reservation.'
                 );
             }
+            startedAnyAttempt = true;
+            if (finishingFirstAttempt) holdCurrentAttemptOnly = true;
+            setupPhase = 'acquire_lease';
             const setup = (async () => {
                 const lease = await leaseStore.acquire({
                     requestId: request.data.requestId,
@@ -1363,6 +1387,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
                 });
                 let reservation: AnalysisV2AiAttemptReservation;
                 try {
+                    setupPhase = 'reserve_attempt';
                     reservation = await attemptStore.reserve({
                         requestId: request.data.requestId,
                         jobKey: request.data.jobKey,
@@ -1384,7 +1409,15 @@ export function createAnalysisV2AiAuditAdapter<T>(
                         throw new AnalysisV2AiResultReplayBlockedError();
                     }
                 } catch (error) {
-                    await leaseStore.release(lease);
+                    if (error instanceof PaidStandardReservationUnconfirmedError) {
+                        // A committed attempt and its provider hold share one recovery path.
+                        throw new AnalysisV2AiResultRecoveryPendingError();
+                    }
+                    if (error instanceof PaidStandardReservationRolledBackError) {
+                        await leaseStore.release(lease, 'prestart_rejected');
+                    } else {
+                        await leaseStore.release(lease);
+                    }
                     throw error;
                 }
                 leases.set(telemetry.attempt, lease);

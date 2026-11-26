@@ -176,8 +176,9 @@ const PAYMENT: Record<string, NodeSpec> = {
     admission: {
         col: 0, row: 0, kind: 'infra', title: '실행 승인', subtitle: '크레딧 예약 · Cloud Tasks',
         does: [
-            '결제된 주문에 Apify 슬롯을 묶고 플랜 크레딧을 예약합니다.',
-            '분석 요청을 만들고 첫 작업을 Cloud Tasks에 등록합니다.',
+            '결제된 주문에 Apify 자격을 연결합니다. 검증된 동시 분석 한도가 설정된 경우 빈자리가 생기는 대로 결제 순서에 따라 시작합니다.',
+            '분석이 시작되면 플랜 크레딧을 예약합니다.',
+            '사전 확인이 끝나면 같은 결제 주문과 배정된 자리를 확인해 분석 요청을 만들고 첫 작업을 Cloud Tasks에 등록합니다.',
         ],
         services: 'Cloud Tasks · Apify 크레딧 풀',
         numbers: [{ label: '작업 최대 시도', value: `${n(ANALYSIS_V2_JOB_MAX_ATTEMPTS)}회` }],
@@ -230,6 +231,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
             '맞팔 계정의 성별을 판정합니다 (1차 → 트리아지 → 해결).',
             'Standard 1차 판독은 호출 전에 후보 묶음을 저장합니다. 작업이 재전달되면 처음 사용한 이미지와 같은 묶음의 호출 기록을 복구합니다.',
             'Dev Standard에서 재전달된 배치는 이미 완료한 성별·특징 판독 결과를 함께 읽고, 남은 판독부터 이어갑니다.',
+            '확장 슬롯을 사용하는 Standard는 필수 특징 판독이 슬롯을 확보하거나 이전 결과를 읽은 뒤 추가 성별 판독을 시작합니다. 운영에서는 현재 결제·소유권·작업 권한을 확인합니다.',
             '여성 후보는 외모·노출·계정 성격·파트너 근거를 분석합니다.',
         ],
         services: 'Gemini',
@@ -341,12 +343,13 @@ const RESULT: Record<string, NodeSpec> = {
         col: 2, row: 0, kind: 'infra', title: '결과 공개', subtitle: '발행 확인 · 주문 완료',
         does: [
             'DB가 주문·이행의 발행 조건을 확인한 뒤에만 유료 결과를 읽을 수 있게 합니다.',
-            '주문을 완료로 바꿉니다.',
+            '정식 워커가 결과를 확정하면 해당 결제 주문과 이행을 함께 완료합니다. 이 처리가 지연되면 정기 복구에서 다시 확인합니다.',
+            '완료 알림을 켠 운영 환경에서는 결제 소유자의 확인된 가입 이메일로 결과 링크를 보냅니다.',
         ],
-        services: '없음',
+        services: 'Resend (완료 이메일)',
         numbers: [{ label: '발행 확인', value: 'isAnalysisResultAuthoritativelyPublished' }],
-        failure: '발행 전에는 결과 화면이 대기 상태로 보입니다.',
-        code: ['lib/services/analysis/result-publication-authority.ts'],
+        failure: '발행 전에는 결과 화면이 대기 상태로 보입니다. 메일은 별도로 재시도하며, 수신자가 바뀌거나 전송 여부가 오래 불명확한 건은 확인 대기로 남깁니다.',
+        code: ['lib/services/analysis/result-publication-authority.ts', 'lib/services/earlybird/result-email.ts'],
     },
     result: {
         col: 1, row: 0, kind: 'infra', title: '결과 화면', subtitle: '/result · 이미지 보관',

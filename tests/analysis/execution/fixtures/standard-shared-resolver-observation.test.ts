@@ -127,7 +127,7 @@ it('preserves SDK evidence and exact unknown estimates even when unrelated failu
         expect(partial.resolverEvidence).toMatchObject({ coverage: 'sdk_only', sdkEntries: 1, wireSends: 1 });
         expect(partial.settledUnknownBudget).toEqual({ count: 3, estimatedMicros: 51, resolverCount: 2, resolverEstimatedMicros: 21 });
 
-        await db.exec('CREATE TABLE analysis_v2_ai_attempts(request_id uuid, operation_key text, attempt int, status text, stage text)');
+        await db.exec('CREATE TABLE analysis_v2_ai_attempts(request_id uuid, operation_key text, attempt int, status text, stage text, terminalized_at timestamptz, usage_complete boolean, estimated_cost_usd numeric, total_tokens int, prompt_tokens int, completion_tokens int, thinking_tokens int)');
         const joined = await sharedStandardStopEvidence(db, observation);
         expect(joined.diagnosticsUnavailable).toEqual(['pipeline_summary']);
         expect(joined.resolverEvidence).toMatchObject({ coverage: 'database_and_sdk', sdkEntries: 1 });
@@ -141,4 +141,26 @@ it('preserves SDK evidence and exact unknown estimates even when unrelated failu
         observation.dispose();
         await db.close();
     }
+});
+
+it('counts only a unique uncosted cutoff rejected before wire for its own request', async () => {
+    const observation = new SharedResolverObservation();
+    const owner = 'synthetic';
+    const rows = [];
+    for (const operation of ['cancel', 'sent', 'unproven', 'duplicate-hold']) {
+        const controller = new AbortController();
+        await expect(observation.sdk(controller.signal, async () => {
+            observation.bindReservation(owner, operation, 1);
+            if (operation === 'sent') observation.wire();
+            controller.abort('resolver_handler_deadline');
+            throw aborted();
+        })).rejects.toThrow();
+        rows.push({ ...ledger(operation, 'cancelled'), requestId: owner, uncostedTerminal: operation !== 'unproven',
+            holds: operation === 'duplicate-hold' ? 2 : 1 });
+    }
+    const evidence = observation.report(rows, ['other', owner]);
+    expect(evidence.unsentCancelledByOwner).toEqual([0, 1]);
+    expect(evidence.issues.inconsistentSettlement).toBeGreaterThan(0);
+    expect(evidence.cutoffReasonsByCost['cancelled.resolver_handler_deadline']).toBeGreaterThan(0);
+    observation.dispose();
 });

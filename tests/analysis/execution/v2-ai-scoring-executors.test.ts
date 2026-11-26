@@ -112,6 +112,7 @@ vi.mock('@/lib/services/dev-ui/standard-archive-runtime', async importOriginal =
 }));
 
 afterEach(() => {
+    vi.unstubAllEnvs();
     vi.mocked(currentDevStandardArchive).mockReturnValue(null);
     vi.mocked(sealDevStandardArchive).mockReset().mockResolvedValue(undefined);
 });
@@ -1247,7 +1248,18 @@ describe('V2 AI and scoring executors', () => {
         expect(publicRows[3].feature).not.toBeNull();
     });
 
-    it('starts feature and eligible resolver in the same turn and applies only a ready resolver', async () => {
+    it.each([
+        { mode: 'default', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'production', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'admitted', baseline: 'unresolved', status: 'verified_female', disposition: 'ready_applied' },
+        { mode: 'admitted', baseline: 'verified_non_female', status: 'verified_non_female', disposition: 'ready_not_needed' },
+    ] as const)('applies only a ready resolver to $baseline under $mode', async ({ mode, baseline, status, disposition }) => {
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', mode === 'production' ? 'admitted' : mode);
+        if (mode === 'production') {
+            vi.stubEnv('NODE_ENV', 'production');
+            vi.stubEnv('STANDARD_SHARED_VERTEX_SLOTS', '128');
+            vi.stubEnv('DEV_LIVE_WORKLOAD', undefined);
+        }
         const memoryState = memory();
         const account = profile('resolver.ready');
         const deps = dependencies(memoryState, {
@@ -1267,7 +1279,8 @@ describe('V2 AI and scoring executors', () => {
         >) => void;
         deps.ai.features = vi.fn<
             AnalysisV2AiStageRuntime['features']
-        >(() => new Promise(resolve => {
+        >((_input, _fence, onReserved) => new Promise(resolve => {
+            onReserved?.();
             releaseFeature = resolve;
         }));
         let resolverState: ReturnType<
@@ -1284,11 +1297,12 @@ describe('V2 AI and scoring executors', () => {
         }));
         const base = state();
         const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
-            context('profile_ai', {
+            { ...context('profile_ai', {
                 jobKey: 'track:profile-ai:batch:0',
                 batch: 0,
-                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                aiStagePolicyVersion: mode === 'production' ? AI_STAGE_POLICY_V211_VERSION : AI_STAGE_POLICY_LATEST_VERSION,
                 state: state({
+                    planId: 'standard',
                     relationships: {
                         ...base.relationships!,
                         profileBatches: [{
@@ -1305,15 +1319,16 @@ describe('V2 AI and scoring executors', () => {
                         resultHash: digest('resolver-ready-result'),
                     }],
                 }),
-            }),
+            }), handlerDeadlineAtMs: performance.now() + 300_000 },
         );
 
         await vi.waitFor(() => {
             expect(deps.ai.features).toHaveBeenCalledOnce();
             expect(deps.ai.startGenderResolution).toHaveBeenCalledOnce();
         });
-        expect(vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0])
-            .toBeLessThan(vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!);
+        const featureOrder = vi.mocked(deps.ai.features).mock.invocationCallOrder[0]!;
+        const resolverOrder = vi.mocked(deps.ai.startGenderResolution).mock.invocationCallOrder[0]!;
+        expect(resolverOrder < featureOrder).toBe(mode !== 'admitted');
         const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
         resolverState = {
             status: 'ready',
@@ -1339,7 +1354,7 @@ describe('V2 AI and scoring executors', () => {
         releaseFeature({
             result: feature(
                 featureInput.media.map(row => row.selectionId),
-                'unresolved',
+                baseline,
             ),
             operationKey: `feature-analysis:${digest('resolver-ready-feature')}`,
             resultHash: digest('resolver-ready-feature-result'),
@@ -1349,10 +1364,10 @@ describe('V2 AI and scoring executors', () => {
         await execution;
 
         expect(memoryState.outcomes[0]).toMatchObject({
-            status: 'verified_female',
-            baselineClassification: 'unresolved',
-            classificationSource: 'gender_resolution',
-            genderResolutionStatus: 'ready_applied',
+            status,
+            baselineClassification: baseline,
+            classificationSource: baseline === 'unresolved' ? 'gender_resolution' : 'feature',
+            genderResolutionStatus: disposition,
             genderResolutionOperationKey: resolverOperationKey,
             genderResolutionResultHash: resolverResultHash,
         });
@@ -1754,6 +1769,81 @@ describe('V2 AI and scoring executors', () => {
         expect(cutoffs.get('feature.fatal')).toHaveBeenCalledOnce();
         expect(memoryState.outcomes).toEqual([]);
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        'capacity-before-feature', 'capacity-reserved', 'deadline-reserved', 'capacity-unreserved',
+        'lost-fence', 'deadline-fresh-feature', 'deadline-cached-feature', 'capacity-cached-feature-unsent',
+    ] as const)('fences opted-in Standard resolver dispatch for %s', async mode => {
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        const account = profile('resolver.admitted');
+        const data = memory();
+        const deps = dependencies(data, { profileBatches: { loadExactBatch: vi.fn(async () => ({
+            requestedUsernames: [account.username],
+            results: [{ username: account.username, status: 'success' as const, profile: account }],
+        })) } });
+        const deadline = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT', 1);
+        const capacity = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+        const lostFence = new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+            if (mode === 'capacity-before-feature') throw capacity;
+            if (mode !== 'deadline-cached-feature' && mode !== 'capacity-cached-feature-unsent') onReserved!();
+            if (mode === 'lost-fence') throw lostFence;
+            if (mode === 'capacity-reserved' || mode === 'capacity-unreserved') throw capacity;
+            if (mode === 'deadline-reserved') throw deadline;
+            return {
+                result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+                operationKey: `feature-analysis:${digest('optional-feature')}`,
+                resultHash: digest('optional-feature-result'), source: 'checkpoint',
+            };
+        });
+        type ResolverState = ReturnType<ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']>;
+        let progress: ResolverState = { status: 'pending' };
+        let finish!: () => void;
+        const completion = new Promise<void>(resolve => { finish = resolve; });
+        const cutoff = vi.fn(async () => { progress = { status: 'cutoff' }; finish(); });
+        const holdActiveAttempt = vi.fn(() => mode !== 'capacity-unreserved');
+        deps.ai.startGenderResolution = vi.fn((_input, fence) => {
+            expect(fence.admittedStandardResolver).toBe(true);
+            if (mode === 'capacity-cached-feature-unsent') {
+                progress = { status: 'unsent_capacity_pending' };
+                finish();
+            }
+            if (mode === 'deadline-fresh-feature' || mode === 'deadline-cached-feature') {
+                progress = { status: 'deadline_pending' };
+                finish();
+            }
+            return { operationKey: `gender-resolution:${digest('optional-resolver')}`,
+                peek: () => progress, completion, cutoff, holdActiveAttempt };
+        });
+        const base = state();
+        const ctx = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+            aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            state: state({ planId: 'standard', relationships: { ...base.relationships!, profileBatches: [
+                { batch: 0, itemCount: 1, inputHash: digest('admitted-topology') },
+            ] }, profileFetchBatches: [{ batch: 0, itemCount: 1, producerInputHash: digest('admitted-producer'),
+                revision: 1, resultHash: digest('admitted-fetch') }] }),
+        });
+        const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+            ...ctx, handlerDeadlineAtMs: performance.now() + 300_000,
+        });
+        const assertResult = mode === 'deadline-cached-feature' ? expect(execution).resolves.toBeDefined()
+            : expect(execution).rejects.toThrow(mode === 'lost-fence' ? lostFence.message
+                : mode.startsWith('deadline') ? deadline.message : capacity.message);
+        if (mode === 'capacity-reserved' || mode === 'deadline-reserved') {
+            await vi.waitFor(() => expect(holdActiveAttempt).toHaveBeenCalled());
+            expect(cutoff).not.toHaveBeenCalled();
+            progress = { status: 'terminal_unavailable' };
+            finish();
+        }
+        await assertResult;
+        expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(mode === 'capacity-before-feature' ? 0 : 1);
+        if (mode === 'lost-fence') expect(cutoff).toHaveBeenCalledWith('resolver_required_error');
+        else if (mode === 'capacity-unreserved') expect(cutoff).toHaveBeenCalledWith('resolver_capacity_continuation');
+        else expect(cutoff).not.toHaveBeenCalled();
+        if (mode === 'deadline-cached-feature') {
+            expect(data.outcomes[0]).toMatchObject({ baselineClassification: 'unresolved', genderResolutionStatus: 'cutoff' });
+        } else expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
     });
 
     it.each([

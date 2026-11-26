@@ -7,7 +7,11 @@ export const sharedStandardCapacities = /** @type {const} */ ([
     { preset: '80', resolvers: 6, slots: 80, workers: 32, features: 70 },
     { preset: '80-r12', resolvers: 12, slots: 80, workers: 32, features: 70 },
     { preset: '112-r40', resolvers: 40, slots: 112, workers: 32, features: 70 },
+    { preset: '8w-128-r48', resolvers: 48, slots: 128, workers: 8, features: 80 },
     { preset: '128-r48', resolvers: 48, slots: 128, workers: 40, features: 80 },
+    // More than one HTTP delivery can share one instance. Its three process limiters remain shared.
+    { preset: '8i-40q', resolvers: 48, slots: 128, workers: 40, instances: 8, cpu: 2, features: 80 },
+    { preset: '18i-40q', resolvers: 48, slots: 128, workers: 40, instances: 18, cpu: 1, features: 80 },
 ]);
 
 /** @param {string | number} preset */

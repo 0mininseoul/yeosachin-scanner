@@ -1,8 +1,10 @@
+import { currentStandardResolverAdmission, observeResolverAdmission, remainingResolverAdmissionWait } from './standard-resolver-admission';
 import { AI_SHARED_CONCURRENCY_LIMIT, getAiStagePolicy, type AiStageName, type AiStagePolicyVersion } from './stage-policy';
 
 interface GeminiSemaphoreWaiter {
     resolve: () => void;
     reject: (error: unknown) => void;
+    limit: number;
     signal?: AbortSignal;
     onAbort?: () => void;
 }
@@ -22,9 +24,18 @@ export class AsyncSemaphore {
         }
     }
 
-    tryAcquire(): (() => void) | null {
-        if (this.active >= this.limit) return null;
+    tryAcquire(limit = this.limit): (() => void) | null {
+        if (this.active >= limit || this.queue.length) return null;
         this.active++;
+        return this.releaseOnce();
+    }
+
+    async acquirePermit(signal: AbortSignal, limit = this.limit): Promise<() => void> {
+        await this.acquire(signal, limit);
+        return this.releaseOnce();
+    }
+
+    private releaseOnce() {
         let released = false;
         return () => {
             if (released) return;
@@ -33,11 +44,11 @@ export class AsyncSemaphore {
         };
     }
 
-    private acquire(signal?: AbortSignal): Promise<void> {
+    private acquire(signal?: AbortSignal, limit = this.limit): Promise<void> {
         if (signal?.aborted) {
             return Promise.reject(signal.reason ?? new Error('ABORTED'));
         }
-        if (this.active < this.limit) {
+        if (this.active < limit && !this.queue.length) {
             this.active++;
             return Promise.resolve();
         }
@@ -45,12 +56,14 @@ export class AsyncSemaphore {
         return new Promise<void>((resolve, reject) => {
             const waiter: GeminiSemaphoreWaiter = {
                 resolve,
+                limit,
                 reject,
                 signal,
             };
             const onAbort = () => {
                 const index = this.queue.indexOf(waiter);
                 if (index >= 0) this.queue.splice(index, 1);
+                this.admitWaiters();
                 signal?.removeEventListener('abort', onAbort);
                 reject(signal?.reason ?? new Error('ABORTED'));
             };
@@ -62,7 +75,12 @@ export class AsyncSemaphore {
     }
 
     private release(): void {
-        while (this.queue.length > 0) {
+        this.active--;
+        this.admitWaiters();
+    }
+
+    private admitWaiters(): void {
+        while (this.queue.length && this.active < this.queue[0].limit) {
             const next = this.queue.shift();
             if (!next) break;
             next.signal?.removeEventListener('abort', next.onAbort as EventListener);
@@ -70,11 +88,9 @@ export class AsyncSemaphore {
                 next.reject(next.signal.reason ?? new Error('ABORTED'));
                 continue;
             }
+            this.active++;
             next.resolve();
-            return;
         }
-
-        this.active--;
     }
 }
 
@@ -107,4 +123,35 @@ export function getStageGenerationSemaphore(
     const semaphore = new AsyncSemaphore(getAiStagePolicy(policyVersion, stage).concurrency);
     state.stages.set(key, semaphore);
     return semaphore;
+}
+
+// A worker still shares one eight-call semaphore. At most four of those permits
+// can be used by the admitted Standard resolver, including existing legacy calls.
+export function acquireResolverPermit(
+    semaphore: AsyncSemaphore,
+    reason: 'worker_stage' | 'worker_shared',
+): (() => void) | Promise<() => void> {
+    const trial = currentStandardResolverAdmission();
+    const limit = reason === 'worker_stage' && trial ? 4 : undefined;
+    trial?.signal.throwIfAborted();
+    const immediate = semaphore.tryAcquire(limit);
+    if (immediate) return immediate;
+    observeResolverAdmission(reason, 'contended');
+    const remaining = remainingResolverAdmissionWait();
+    if (trial && remaining > 0) {
+        const timeout = new AbortController();
+        const signal = AbortSignal.any([timeout.signal, trial.signal]);
+        const timer = setTimeout(() => timeout.abort(), remaining);
+        return semaphore.acquirePermit(signal, limit).then(release => {
+            observeResolverAdmission(reason, 'admitted_after_wait');
+            return release;
+        }, error => {
+            trial.signal.throwIfAborted();
+            if (!timeout.signal.aborted) throw error;
+            observeResolverAdmission(reason, 'skipped');
+            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        }).finally(() => clearTimeout(timer));
+    }
+    observeResolverAdmission(reason, 'skipped');
+    throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
 }

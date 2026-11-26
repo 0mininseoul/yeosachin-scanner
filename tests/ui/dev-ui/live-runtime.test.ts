@@ -1,4 +1,10 @@
+import { devStandardExpandedCapacityEnabled } from '@/lib/services/ai/standard-resolver-admission';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { createAnalysisV2GeminiLeaseStore } from '@/lib/services/analysis/v2-gemini-lease-store';
+import { analysisProviderAdmissionStore, type AnalysisProviderAdmissionInput } from '@/lib/services/analysis/provider-admission-store';
+import { withDevLiveProviderApproval } from '@/lib/services/dev-ui/live-budget';
+import { parseDevLiveStandardApproval, parseDevLiveOwnerApproval } from '@/lib/services/dev-ui/live-approval';
 import registry from '@/config/dev-ui-deployment.json';
 import { assertDevLiveWebRuntime, devLiveWorkerRequestBoundary } from '@/lib/services/dev-ui/live-runtime';
 
@@ -263,6 +269,87 @@ describe('Dev live analysis runtime placement', () => {
         expect(devLiveWorkerRequestBoundary(request(paidEndpoint), {
             ...ownerStart, VERTEX_AI_DAILY_BUDGET_USD: '2.01',
         })).toBe('invalid');
+    });
+
+    it('accepts physical slot 128 only inside the configured paid Standard delivery', async () => {
+        for (const [key, value] of Object.entries(paidWorker)) vi.stubEnv(key, value);
+        vi.stubEnv('NODE_ENV', 'production');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_MODE', 'owner_start');
+        vi.stubEnv('DEV_LIVE_ANALYSIS_APPROVAL', undefined);
+        vi.stubEnv('STANDARD_SHARED_VERTEX_SLOTS', '128');
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        const identity = { id: randomUUID(), approvedAt: new Date().toISOString(), targetInstagramId: 'synthetic' };
+        const standard = parseDevLiveStandardApproval({
+            ...identity, expiresAt: null, apifyMaxCents: 600, aiMaxCents: 1_800, planId: 'standard',
+        }, identity.targetInstagramId);
+        const basic = parseDevLiveOwnerApproval({
+            ...identity, expiresAt: new Date(Date.now() + 60_000).toISOString(), apifyMaxCents: 500, aiMaxCents: 200,
+        });
+        expect(standard?.planId).toBe('standard');
+        expect(basic?.planId).toBe('basic');
+        const limited = parseDevLiveStandardApproval({ ...identity, expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            apifyMaxCents: 600, aiMaxCents: 1_800, planId: 'standard' }, identity.targetInstagramId);
+        expect(limited?.expiresAt).toBeTruthy();
+        const allowed = () => devStandardExpandedCapacityEnabled('ai-stage-policy-v2.11');
+        await expect(allowed()).resolves.toBe(false);
+        await expect(withDevLiveProviderApproval(basic, allowed)).resolves.toBe(false);
+        await expect(withDevLiveProviderApproval(limited, allowed)).resolves.toBe(false);
+        await expect(withDevLiveProviderApproval(standard, () => devStandardExpandedCapacityEnabled('ai-stage-policy-v2.8'))).resolves.toBe(false);
+        await expect(withDevLiveProviderApproval(standard, () => devStandardExpandedCapacityEnabled(
+            'ai-stage-policy-v2.11', { ...process.env, K_SERVICE: 'production-paid' },
+        ))).resolves.toBe(false);
+        await expect(withDevLiveProviderApproval(standard, allowed)).resolves.toBe(true);
+        const token = randomUUID();
+        const expiresAt = new Date(Date.now() + 240_000).toISOString();
+        const rpc = vi.fn(async (name: string) => {
+            if (name === 'renew_analysis_v2_gemini_lease_v2') {
+                return { data: [{ renewed: true, lease_state: 'leased', expires_at: expiresAt }], error: null };
+            }
+            if (name === 'release_analysis_v2_gemini_lease_v2') {
+                return { data: [{ released: true, lease_state: 'available', fence: 1 }], error: null };
+            }
+            return { data: [{ outcome: 'acquired', slot: 128, lease_claim_token: token, fence: 1, expires_at: expiresAt }], error: null };
+        });
+        const acquireProvider = vi.fn(async (input: AnalysisProviderAdmissionInput) => ({
+            ...input, outcome: 'acquired' as const, fence: 1, admissionId: 'a'.repeat(64), expiresAt,
+            leaseToken: token, activeCount: 1, maxActive: 1,
+        }));
+        const store = createAnalysisV2GeminiLeaseStore({
+            rpc, nowMs: () => 1_000, randomUuid: () => token,
+            providerAdmissionStore: {
+                ...analysisProviderAdmissionStore, acquire: acquireProvider,
+                renew: async lease => lease, release: vi.fn().mockResolvedValue(undefined),
+            },
+        });
+        const stages = {
+            genderTriage: ['gender-triage', 'acquire_dev_standard_scheduler_gemini_lease_v1'],
+            featureAnalysis: ['feature-analysis', 'acquire_dev_standard_scheduler_gemini_lease_v1'],
+            privateAccountName: ['private-account-name', 'acquire_dev_standard_scheduler_gemini_lease_v1'],
+            genderResolution: ['gender-resolution', 'acquire_dev_standard_gemini_lease_v1'],
+            highRiskNarrative: ['high-risk-narrative', 'acquire_dev_standard_gemini_lease_v1'],
+            partnerSafety: ['partner-safety', 'acquire_dev_standard_gemini_lease_v1'],
+        } as const;
+        const acquire = (stage: keyof typeof stages = 'featureAnalysis') => store.acquire({
+            requestId: randomUUID(), jobKey: 'track:profile-ai:batch:0', jobClaimToken: randomUUID(),
+            attempt: 1, handlerDeadlineAtMs: 300_000, operationKey: `${stages[stage][0]}:${'a'.repeat(64)}`,
+            stage, aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+        });
+        for (const stage of Object.keys(stages) as (keyof typeof stages)[]) {
+            const lease = await withDevLiveProviderApproval(standard, () => acquire(stage));
+            expect(lease).toMatchObject({ slot: 128, providerAdmissionLease: { credentialSlot: 'gemini-128', providerFence: 1 } });
+            expect(rpc).toHaveBeenLastCalledWith(stages[stage][1], expect.objectContaining({ p_stage: stage }));
+            await expect(store.renew(lease)).resolves.toMatchObject({ slot: 128, fence: 1 });
+            await expect(store.release(lease)).resolves.toBeUndefined();
+        }
+        await expect(withDevLiveProviderApproval(basic, acquire)).rejects.toThrow('GEMINI_LEASE_PERSISTENCE_ERROR');
+        expect(rpc).toHaveBeenLastCalledWith('acquire_analysis_v2_scheduler_gemini_lease_v1', expect.anything());
+        await expect(acquire()).rejects.toThrow('GEMINI_LEASE_PERSISTENCE_ERROR');
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', undefined);
+        await expect(withDevLiveProviderApproval(standard, acquire)).rejects.toThrow('GEMINI_LEASE_PERSISTENCE_ERROR');
+        vi.stubEnv('DEV_LIVE_STANDARD_RESOLVER_MODE', 'admitted');
+        vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'https://unregistered.supabase.co');
+        await expect(withDevLiveProviderApproval(standard, acquire)).rejects.toThrow('DEV_LIVE_BUDGET_UNAVAILABLE');
+        expect(acquireProvider).toHaveBeenCalledTimes(6);
     });
 
     it('stops accepting workers after the approval expires', () => {

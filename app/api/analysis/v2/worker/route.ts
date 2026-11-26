@@ -10,6 +10,7 @@ import {
     classifyPreflightWorkerFailure,
 } from '@/lib/services/analysis/preflight';
 import { preflightWorkerErrorCode } from '@/lib/observability/preflight-events';
+import { handoffReadySignedPaidFulfillment } from '@/lib/services/earlybird/fulfillment-store';
 import { settleBlockedFreshAdmission } from '@/lib/services/analysis/fresh-admission-worker-runtime';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
@@ -37,6 +38,7 @@ import {
 import {
     rearmAnalysisV2FreshAdmissionDispatch,
 } from '@/lib/services/analysis/fresh-plan-admission';
+import { ANALYSIS_V2_FINALIZE_JOB_KEY } from '@/lib/services/analysis/v2-dag-planner';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
 import { bindDevStandardEvalRun } from '@/lib/services/dev-ui/standard-eval-capture';
 import {
@@ -314,6 +316,12 @@ async function handlePOST(
                     { status: 503 },
                 );
             }
+            if (!approval && process.env.NODE_ENV === 'production' && process.env.K_SERVICE === 'analysis-paid-worker'
+                && (outcome === 'ready' || outcome === 'noop')) {
+                // A redelivery after commit may observe noop. The exact delivery fence and
+                // deterministic bootstrap also recover a lost response without another collection.
+                await handoffReadySignedPaidFulfillment(delivery);
+            }
             if (outcome === 'blocked') {
                 await runWithApproval(() => settleBlockedFreshAdmission(
                     supabaseAdmin,
@@ -408,6 +416,17 @@ async function handlePOST(
                 errorCode,
             });
             return NextResponse.json({ status: 'failed', errorCode });
+        }
+        if (!approval && process.env.NODE_ENV === 'production' && process.env.K_SERVICE === 'analysis-paid-worker'
+            && paidDelivery.jobKey === ANALYSIS_V2_FINALIZE_JOB_KEY
+            && (outcome.status === 'completed' || outcome.status === 'already_terminal')) {
+            try {
+                // Commit the commercial projection before the owner's next poll.
+                // The existing recovery sweep handles a busy row or lost response.
+                await supabaseAdmin.rpc('complete_published_capacity_order_v1', { p_request_id: analysisRequestId });
+            } catch {
+                // The result is already durable. Retrying the analysis would duplicate work.
+            }
         }
         emitWorkerOutcome({
             context,

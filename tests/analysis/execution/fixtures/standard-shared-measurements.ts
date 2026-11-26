@@ -3,13 +3,20 @@ import { readSharedResolverLedger, type SharedResolverObservation } from './stan
 
 export async function sharedStandardMeasurements(db: StandardConnection, requestIds: string[]) {
     // Ordinals keep per-owner latencies auditable without exporting identifiers.
-    const times = await db.query<{ owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number; publishedWithinHour: boolean; withinHour: boolean }>(`
+    const times = await db.query<{
+        owner: number; admissionMs: number; paymentMs: number; ownerReadyMs: number;
+        queueWaitMs: number | null; startToPublicationMs: number | null; startToFulfillmentMs: number | null;
+        publishedWithinHour: boolean; paidToFulfillmentWithinHour: boolean;
+    }>(`
         SELECT n::int AS owner,
+            round(1000 * extract(epoch FROM (f.capacity_first_started_at - o.paid_at)))::int AS "queueWaitMs",
+            round(1000 * extract(epoch FROM (e.occurred_at - f.capacity_first_started_at)))::int AS "startToPublicationMs",
+            round(1000 * extract(epoch FROM (greatest(e.occurred_at,f.completed_at) - f.capacity_first_started_at)))::int AS "startToFulfillmentMs",
             round(1000 * extract(epoch FROM (e.occurred_at - r.created_at)))::int AS "admissionMs",
             round(1000 * extract(epoch FROM (e.occurred_at - o.paid_at)))::int AS "paymentMs",
             round(1000 * extract(epoch FROM (greatest(e.occurred_at, f.completed_at) - o.paid_at)))::int AS "ownerReadyMs",
             e.occurred_at <= o.paid_at + interval '1 hour' AS "publishedWithinHour",
-            greatest(e.occurred_at, f.completed_at) <= o.paid_at + interval '1 hour' AS "withinHour"
+            greatest(e.occurred_at, f.completed_at) <= o.paid_at + interval '1 hour' AS "paidToFulfillmentWithinHour"
         FROM unnest($1::uuid[]) WITH ORDINALITY owner(id,n)
         JOIN analysis_requests r USING (id)
         JOIN earlybird_orders o ON o.result_request_id = r.id
@@ -59,6 +66,30 @@ export async function sharedStandardMeasurements(db: StandardConnection, request
         FROM unnest($1::uuid[]) WITH ORDINALITY owner(id,n)
         LEFT JOIN analysis_v2_gender_resolution_metrics m ON m.request_id=owner.id ORDER BY n
     `, [requestIds]);
+    const tokenLogs = await db.query(`
+        WITH owners AS (SELECT * FROM unnest($1::uuid[]) WITH ORDINALITY AS o(id,n)),
+        attempts AS (
+            SELECT o.n, a.stage, count(*)::int AS rows, sum(a.total_tokens)::int AS tokens
+            FROM owners o JOIN analysis_v2_ai_attempts a ON a.request_id=o.id
+            WHERE a.terminalized_at IS NOT NULL AND a.usage_complete GROUP BY o.n,a.stage
+        ), logs AS (
+            SELECT o.n, CASE u.analysis_type
+                WHEN 'private_name_batch' THEN 'privateAccountName'
+                WHEN 'v2_gender_triage_microbatch' THEN 'genderTriage'
+                WHEN 'v2_gender_triage' THEN 'genderTriage'
+                WHEN 'v2_feature_analysis' THEN 'featureAnalysis'
+                WHEN 'v2_gender_resolution' THEN 'genderResolution'
+                WHEN 'v2_partner_safety' THEN 'partnerSafety'
+                WHEN 'v2_high_risk_narrative' THEN 'highRiskNarrative'
+                ELSE 'other' END AS stage,
+                count(*)::int AS rows,sum(u.total_tokens)::int AS tokens
+            FROM owners o JOIN gemini_token_usage u ON u.request_id=o.id GROUP BY 1,2
+        )
+        SELECT n::int AS owner, stage, coalesce(a.rows,0) AS "completedAttempts",
+            coalesce(l.rows,0) AS "tokenLogRows",coalesce(a.tokens,0) AS "attemptTokens",
+            coalesce(l.tokens,0) AS "loggedTokens"
+        FROM attempts a FULL JOIN logs l USING(n,stage) ORDER BY n,stage
+    `, [requestIds]);
     const providerTimes = await db.query(`
         SELECT a.stage,p.release_reason AS "releaseReason",count(*)::int AS attempts,
             round(avg(a.latency_ms))::int AS "meanReportedLatencyMs",
@@ -72,7 +103,7 @@ export async function sharedStandardMeasurements(db: StandardConnection, request
     `, [requestIds]);
     return {
         times: times.rows, stageTimes: stages.rows, capacity: capacity.rows[0], resolution: resolution.rows[0],
-        providerTimes: providerTimes.rows, resolutionByOwner: resolutionByOwner.rows
+        providerTimes: providerTimes.rows, tokenLogsByOwnerAndStage: tokenLogs.rows, resolutionByOwner: resolutionByOwner.rows
     };
 }
 

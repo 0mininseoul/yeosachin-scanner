@@ -1,6 +1,9 @@
+import { channel } from 'node:diagnostics_channel';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { vertexDispatchFetch, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
+import { acquireResolverPermit, AsyncSemaphore } from '@/lib/services/ai/gemini-generation-limiter';
+import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
 import { z, type ZodType } from 'zod';
@@ -1071,6 +1074,55 @@ describe('analyzeWithGemini generation retry policy', () => {
             },
         }));
     });
+
+    it.each(['abort', 'committed fence', 'abort and committed fence', 'uncommitted fence', 'insert error', 'lost acknowledgement'] as const)(
+        'mirrors only measured and committed V2 usage on %s, without redispatch', async scenario => {
+            const controller = new AbortController();
+            const audit = stageAuditOptions();
+            const finished = vi.fn();
+            const outcomes = vi.fn();
+            const diagnostics = channel('yeosachin.gemini-token-log');
+            diagnostics.subscribe(outcomes);
+            try {
+                audit.onAttemptTelemetry.mockImplementationOnce(async () => {
+                    if (scenario.startsWith('abort')) controller.abort();
+                    if (scenario.endsWith('fence')) throw Object.assign(new Error('fixture audit fence'), {
+                        name: 'AnalysisV2AiResultFenceError', telemetryCommitted: scenario !== 'uncommitted fence',
+                    });
+                });
+                if (scenario === 'insert error') mocks.tokenUsageInsert.mockResolvedValueOnce({error:{code:'57014'}});
+                if (scenario === 'lost acknowledgement') mocks.tokenUsageInsert.mockRejectedValueOnce(new Error('fixture connection closed'));
+                mocks.generateContent.mockResolvedValueOnce(successfulResponse());
+                const result = analyzeWithGemini('prompt', undefined, {
+                    ...audit, stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+                    schema: responseSchema, model: 'gemini-3.1-flash-lite', maxOutputTokens: 128,
+                    abortSignal: controller.signal, onTelemetry: finished,
+                });
+                if (scenario === 'abort') await expect(result).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+                else if (scenario.endsWith('fence')) await expect(result).rejects.toThrow('fixture audit fence');
+                else await expect(result).resolves.toEqual({value:'ok'});
+
+                expect(audit.onAttemptTelemetry).toHaveBeenCalledTimes(1);
+                expect(mocks.generateContent).toHaveBeenCalledTimes(1);
+                expect(finished).toHaveBeenCalledTimes(scenario === 'insert error' || scenario === 'lost acknowledgement' ? 1 : 0);
+                const expected = {
+                    'abort': ['audit_committed_then_aborted','insert_acknowledged'],
+                    'committed fence': ['audit_committed_fenced','insert_acknowledged'],
+                    'abort and committed fence': ['audit_committed_fenced','insert_acknowledged'],
+                    'uncommitted fence': [],
+                    'insert error': ['insert_error_response'],
+                    'lost acknowledgement': ['insert_threw'],
+                }[scenario];
+                expect(outcomes.mock.calls.map(([payload]) => payload)).toEqual(
+                    expected.map(outcome => ({stage:'genderResolution',outcome})),
+                );
+                if (scenario === 'uncommitted fence') expect(mocks.tokenUsageInsert).not.toHaveBeenCalled();
+                else expect(mocks.tokenUsageInsert).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({total_tokens:14}));
+            } finally {
+                diagnostics.unsubscribe(outcomes);
+            }
+        },
+    );
 
     it('does not log token usage or invoke later telemetry after B-lite aborts during attempt telemetry', async () => {
         vi.useFakeTimers();
@@ -2282,6 +2334,68 @@ describe('analyzeWithGemini process concurrency', () => {
             expect(deferred.maximumActive()).toBe(concurrency);
         },
     );
+
+    it('shares one five-second wait across the worker stage and shared slots', async () => {
+        vi.useFakeTimers();
+        const stage = new AsyncSemaphore(2);
+        const shared = new AsyncSemaphore(1);
+        const holders = Array.from({ length: 4 }, () => stage.tryAcquire(4)!);
+        const releaseShared = shared.tryAcquire()!;
+        try {
+            const wait = withStandardResolverAdmission(new AbortController().signal, async () => {
+                const releaseStage = await acquireResolverPermit(stage, 'worker_stage');
+                try {
+                    const release = await acquireResolverPermit(shared, 'worker_shared');
+                    release();
+                } finally {
+                    releaseStage();
+                }
+            });
+            const rejected = expect(wait).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            await vi.advanceTimersByTimeAsync(3_000);
+            holders.shift()!();
+            await vi.advanceTimersByTimeAsync(2_000);
+            await rejected;
+        } finally {
+            releaseShared();
+            holders.forEach(release => release());
+            vi.useRealTimers();
+        }
+        expect(stage.tryAcquire()).toEqual(expect.any(Function));
+        expect(shared.tryAcquire()).toEqual(expect.any(Function));
+    });
+
+    it('admits four opted-in resolvers and removes cancelled work before dispatch', async () => {
+        const deferred = deferredGenerations();
+        const audit = stageAuditOptions();
+        const options = {
+            schema: responseSchema,
+            stage: 'genderResolution' as const,
+            aiStagePolicyVersion: 'ai-stage-policy-v2.11' as const,
+            ...audit,
+        };
+        const start = (signal: AbortSignal) => withStandardResolverAdmission(signal, () =>
+            analyzeWithGemini('prompt', undefined, options));
+        const signal = new AbortController().signal;
+        const active = Array.from({ length: 4 }, () => start(signal));
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(4));
+
+        const timeout = new AbortController();
+        const cancelled = start(timeout.signal);
+        const fifth = start(signal);
+        const rejected = expect(cancelled).rejects.toThrow();
+        timeout.abort();
+        await rejected;
+        await expect(analyzeWithGemini('prompt', undefined, options))
+            .rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(4);
+        deferred.releases.shift()!();
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(5));
+        deferred.releases.splice(0).forEach(release => release());
+        await expect(Promise.all([...active, fifth])).resolves.toHaveLength(5);
+        expect(audit.onBeforeAttempt).toHaveBeenCalledTimes(5);
+        expect(deferred.maximumActive()).toBe(4);
+    });
 
     it('never queues a resolver when either bounded slot is unavailable', async () => {
         const deferred = deferredGenerations();

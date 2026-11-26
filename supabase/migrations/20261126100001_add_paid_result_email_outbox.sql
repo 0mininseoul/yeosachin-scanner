@@ -29,6 +29,17 @@ ALTER TABLE public.paid_result_email_rollout ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.paid_result_email_outbox ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.paid_result_email_rollout, public.paid_result_email_outbox FROM PUBLIC, anon, authenticated, service_role;
 
+-- Terminal cleanup may replace only the request's target with its own retained ID.
+-- The purchase and the published result must still agree on the original target.
+CREATE FUNCTION public.paid_result_target_matches_v1(
+    p_request_id uuid, p_request_target text, p_summary_target text, p_order_target text
+) RETURNS boolean LANGUAGE sql IMMUTABLE STRICT SET search_path='' AS $$
+    SELECT p_summary_target=p_order_target AND p_request_target IN (
+        p_order_target, 'retained.' || substr(replace(p_request_id::text,'-',''),1,20)
+    );
+$$;
+REVOKE ALL ON FUNCTION public.paid_result_target_matches_v1(uuid,text,text,text) FROM PUBLIC, anon, authenticated, service_role;
+
 CREATE FUNCTION public.paid_result_email_recipient(p_order_id uuid, p_owner_id uuid)
 RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     SELECT lower(btrim(a.email))
@@ -40,6 +51,8 @@ RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
       AND o.payment_id IS NOT NULL AND o.paid_at IS NOT NULL AND o.seller_reference_confirmed_at IS NOT NULL
       AND o.actual_amount_krw > 0 AND o.actual_amount_krw <= o.expected_amount_krw
       AND o.actual_groble_product_id = o.expected_groble_product_id
+      AND EXISTS (SELECT FROM public.earlybird_webhook_events e WHERE e.order_id=o.id AND e.payment_id=o.payment_id
+          AND e.event_type='payment.completed' AND e.disposition='accepted' AND e.amount_krw=o.actual_amount_krw)
       AND u.account_class = 'production' AND u.traffic_class = 'external' AND u.lifecycle = 'active'
       AND a.deleted_at IS NULL AND lower(btrim(u.email)) = lower(btrim(a.email))
       AND length(btrim(a.email)) <= 254 AND btrim(a.email) ~ '^[^[:space:]<>@]+@[^[:space:]<>@]+[.][^[:space:]<>@]+$'
@@ -72,11 +85,12 @@ BEGIN
     SELECT f.order_id, f.request_id, ts FROM public.earlybird_fulfillments f
     JOIN public.earlybird_orders o ON o.id=f.order_id AND o.result_request_id=f.request_id
     JOIN public.analysis_requests r ON r.id=f.request_id AND r.user_id=o.user_id
-    JOIN public.analysis_v2_result_summaries s ON s.request_id=r.id AND s.target_instagram_id=r.target_instagram_id
+    JOIN public.analysis_v2_result_summaries s ON s.request_id=r.id
+        AND public.paid_result_target_matches_v1(r.id,r.target_instagram_id,s.target_instagram_id,o.target_instagram_id)
     CROSS JOIN public.paid_result_email_rollout rollout
     WHERE rollout.singleton AND f.status='completed' AND f.completed_at >= rollout.starts_at AND r.completed_at >= rollout.starts_at
       AND o.status='completed' AND r.status='completed' AND r.pipeline_version='v2'
-      AND o.target_instagram_id=r.target_instagram_id AND o.payment_id IS NOT NULL
+      AND o.payment_id IS NOT NULL
       AND NOT EXISTS (SELECT FROM public.paid_result_email_outbox q WHERE q.order_id=f.order_id OR q.request_id=f.request_id)
       AND public.analysis_result_publication_authorized(r.id)
     ORDER BY f.completed_at,f.order_id LIMIT 16
@@ -85,14 +99,15 @@ BEGIN
     FOR task IN SELECT q.* FROM public.paid_result_email_outbox q
     WHERE q.status IN ('pending','sending') AND q.next_attempt_at <= ts
     ORDER BY q.next_attempt_at,q.order_id LIMIT 16 FOR UPDATE SKIP LOCKED LOOP
-        SELECT public.paid_result_email_recipient(o.id,r.user_id), r.target_instagram_id
+        SELECT public.paid_result_email_recipient(o.id,r.user_id), s.target_instagram_id
         INTO address,instagram
         FROM public.earlybird_orders o
         JOIN public.earlybird_fulfillments f ON f.order_id=o.id AND f.request_id=o.result_request_id
         JOIN public.analysis_requests r ON r.id=f.request_id AND r.user_id=o.user_id
-        JOIN public.analysis_v2_result_summaries s ON s.request_id=r.id AND s.target_instagram_id=r.target_instagram_id
+        JOIN public.analysis_v2_result_summaries s ON s.request_id=r.id
+            AND public.paid_result_target_matches_v1(r.id,r.target_instagram_id,s.target_instagram_id,o.target_instagram_id)
         WHERE o.id=task.order_id AND r.id=task.request_id AND r.pipeline_version='v2'
-          AND o.target_instagram_id=r.target_instagram_id AND o.status='completed'
+          AND o.status='completed'
           AND f.status='completed' AND f.completed_at IS NOT NULL AND public.analysis_result_publication_authorized(r.id);
         fingerprint := sha256(convert_to(address || chr(10) || instagram,'UTF8'));
         IF address IS NULL OR instagram IS NULL OR instagram !~ '^[a-z0-9._]{1,30}$'

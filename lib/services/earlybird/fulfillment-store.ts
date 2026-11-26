@@ -1102,6 +1102,19 @@ export async function admitAndAdvanceEarlybirdFulfillment(
     return advanceAdmittedEarlybirdFulfillment(admitted, dependencies);
 }
 
+// The database binds the ready delivery to its signed payment, existing FIFO slot and exact
+// production owner. A stale/unrelated delivery cannot reserve another profile lookup.
+export async function handoffReadySignedPaidFulfillment(delivery: {
+    preflightId: string; generation: number; dispatchGeneration: number; dispatchToken: string;
+}) {
+    const { data, error } = await supabaseAdmin.rpc('handoff_ready_signed_paid_fulfillment_v1', {
+        p_preflight_id: delivery.preflightId, p_generation: delivery.generation,
+        p_dispatch_generation: delivery.dispatchGeneration, p_dispatch_token: delivery.dispatchToken,
+    });
+    if (error) persistenceError(error);
+    if (data !== null) await dispatchAnalysisV2Job(uuidSchema.parse(data), 'coordinator:bootstrap');
+}
+
 export const supabaseEarlybirdFulfillmentOperator = Object.freeze({
     async bindCredentialSlot(orderId: string, credentialSlot: ApifyCredentialSlot): Promise<void> {
         const { error } = await supabaseAdmin.rpc(

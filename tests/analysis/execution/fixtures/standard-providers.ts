@@ -72,8 +72,8 @@ export class SyntheticApify {
     constructor(private readonly candidatePostCount = 1, private readonly privateCount = 0, private readonly publicCount = 1,
         private readonly onStart?: (start: SyntheticActorStart) => void,
         private readonly durationMs?: () => number) {
-        if (!Number.isInteger(publicCount) || publicCount < 1 || publicCount > 240)
-            throw new Error('Synthetic Standard fixture supports 1 to 240 public candidates');
+        if (!Number.isInteger(publicCount) || publicCount < 1 || publicCount > 600)
+            throw new Error('Synthetic Standard fixture supports 1 to 600 public candidates');
     }
 
     private rows(actor: string, input: ActorInput) {

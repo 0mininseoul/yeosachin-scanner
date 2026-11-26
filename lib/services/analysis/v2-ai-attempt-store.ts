@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresLockTimeout, isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
+import { paidStandardReservationClaim } from './paid-standard-capacity';
 import { z } from 'zod';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -250,6 +252,15 @@ export interface AnalysisV2AiAttemptStore {
         requestId: string;
         operationKey: string;
     }): Promise<AnalysisV2AiAttemptRecord[]>;
+}
+
+export class PaidStandardReservationRolledBackError extends VertexDispatchAuthorizationError {}
+
+/** The final paid reservation may already exist. Only checkpoint recovery may reconcile it. */
+export class PaidStandardReservationUnconfirmedError extends Error {
+    constructor() {
+        super('ANALYSIS_V2_PAID_RESERVATION_UNCONFIRMED');
+    }
 }
 
 export class AnalysisV2AiAttemptConflictError extends Error {
@@ -553,8 +564,9 @@ export function createAnalysisV2AiAttemptStore(
             const parsed = safeParse(reservationInputSchema, input, 'reservation');
             assertMetadataConsistency(parsed, 'reservation');
             const reservationToken = randomUUID().toLowerCase();
-            const { data, error } = await retryPostgresAbortedRpc(() => client.rpc(
-                ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.reserveRpc,
+            const paidClaim = await paidStandardReservationClaim(parsed);
+            const execute = () => client.rpc(
+                paidClaim ? 'reserve_paid_standard_ai_attempt_v1' : ANALYSIS_V2_AI_ATTEMPT_DATABASE_NAMES.reserveRpc,
                 {
                     p_request_id: parsed.requestId.toLowerCase(),
                     p_job_key: parsed.jobKey,
@@ -563,40 +575,63 @@ export function createAnalysisV2AiAttemptStore(
                     p_attempt: parsed.attempt,
                     p_reservation_token: reservationToken,
                     p_metadata: reservationMetadata(parsed),
+                    ...(paidClaim ? { p_job_input_hash: paidClaim.inputHash } : {}),
                 }
-            ));
+            );
+            let reply: RpcResult;
+            try {
+                reply = await retryPostgresAbortedRpc(execute);
+            } catch (error) {
+                if (paidClaim) throw new PaidStandardReservationUnconfirmedError();
+                throw error;
+            }
+            const { data, error } = reply;
+            if (paidClaim && (isPostgresLockTimeout(error) || isPostgresStatementTimeout(error)
+                || (error?.code === '40P01' && error.message === 'deadlock detected'))) {
+                throw new PaidStandardReservationRolledBackError('db_contention');
+            }
+            if (paidClaim && error && error.code !== 'P0001') {
+                throw new PaidStandardReservationUnconfirmedError();
+            }
             if (error?.code === 'P0001' && error.message === 'ANALYSIS_V2_VERTEX_DISPATCH_STOPPED') {
+                if (paidClaim) throw new PaidStandardReservationRolledBackError('closed');
                 throw new VertexDispatchAuthorizationError('closed');
             }
             if (error) throwRpcError(error, 'reservation');
-            if (!data || typeof data !== 'object' || Array.isArray(data)) {
-                throw new Error(
-                    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
-                );
+            try {
+                if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                    throw new Error(
+                        'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
+                    );
+                }
+                const { created, ...attempt } = data as Record<string, unknown>;
+                if (typeof created !== 'boolean') {
+                    throw new Error(
+                        'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
+                    );
+                }
+                if (paidClaim && !created) throw new PaidStandardReservationUnconfirmedError();
+                const record = parseAttemptRecord(attempt, 'reservation');
+                assertRpcAttemptMatches(record, parsed, 'reservation');
+                if (
+                    created
+                    && (
+                        record.status !== 'reserved'
+                        || record.reservationToken !== reservationToken
+                    )
+                ) {
+                    throw new Error(
+                        'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
+                    );
+                }
+                return {
+                    ...record,
+                    created,
+                };
+            } catch (error) {
+                if (paidClaim) throw new PaidStandardReservationUnconfirmedError();
+                throw error;
             }
-            const { created, ...attempt } = data as Record<string, unknown>;
-            if (typeof created !== 'boolean') {
-                throw new Error(
-                    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
-                );
-            }
-            const record = parseAttemptRecord(attempt, 'reservation');
-            assertRpcAttemptMatches(record, parsed, 'reservation');
-            if (
-                created
-                && (
-                    record.status !== 'reserved'
-                    || record.reservationToken !== reservationToken
-                )
-            ) {
-                throw new Error(
-                    'ANALYSIS_V2_AI_ATTEMPT_PERSISTENCE_ERROR: invalid reservation response.'
-                );
-            }
-            return {
-                ...record,
-                created,
-            };
         },
 
         async terminalize(input) {
@@ -681,4 +716,3 @@ export function createAnalysisV2AiAttemptStore(
 }
 
 export const analysisV2AiAttemptStore = createAnalysisV2AiAttemptStore();
-import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';

@@ -1,6 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { StandardConnection } from './standard-database';
 
+const cutoffReasons = new Set(['resolver_handler_deadline', 'resolver_capacity_continuation',
+    'resolver_deadline_continuation', 'resolver_required_error', 'resolver_batch_barrier']);
+
 type Observation = 'wire' | 'abort' | 'waitAborted' | 'generated' | 'sdkReturned' | 'sdkRejected' | 'usageRead';
 interface Trace {
     key?: string;
@@ -11,6 +14,8 @@ interface Trace {
     marks: Partial<Record<Observation, { sequence: number; ms: number }>>;
 }
 interface LedgerRow extends Record<string, unknown> {
+    requestId?: string;
+    uncostedTerminal?: boolean;
     key: string;
     status: string | null;
     holds: number;
@@ -143,12 +148,14 @@ export class SharedResolverObservation {
         }
     }
 
-    report(rows: LedgerRow[]) {
+    report(rows: LedgerRow[], requestOrder: readonly string[] = []) {
+        const unsentCancelledByOwner = requestOrder.map(() => 0);
         const indexed = new Map<string, Trace[]>();
         const issues = { duplicateSends: 0, duplicateBindings: 0, unboundSends: 0, missingSdkTrace: 0,
             missingAttemptRow: 0, unmatchedBudget: 0, inconsistentSettlement: 0, incompleteObservation: 0,
             invalidFixtureUsage: 0, invalidResponseOrder: 0, lateKnownSettlement: 0 };
         const cutoffByCost: Record<CostState, Record<string, number>> = { unknown: {}, known: {}, cancelled: {}, missing: {}, other: {} };
+        const cutoffReasonsByCost: Record<string, number> = {};
         const orderGroups = new Map<string, ReturnType<typeof receiptOrder> & { count: number }>();
         let unboundWithoutSend = 0, durableAttempts = 0, cutoffs = 0, budgetOnlyCancelled = 0;
         const wireToAbortMs = { count: 0, total: 0, max: 0 };
@@ -185,7 +192,16 @@ export class SharedResolverObservation {
             const kind = trace ? outcome(trace) : 'unmatchedObservation';
             if (isCutoff) cutoffByCost[cost][kind] = (cutoffByCost[cost][kind] ?? 0) + 1;
             if (!trace) continue;
+            if (isCutoff && row.holds === 1 && cost === 'cancelled' && row.uncostedTerminal
+                && kind === 'abortedBeforeWire' && !trace.marks.generated && !trace.marks.usageRead) {
+                const index = row.requestId ? requestOrder.indexOf(row.requestId) : -1;
+                if (index >= 0) unsentCancelledByOwner[index]++;
+            }
             if (isCutoff) {
+                const supplied = trace.signal?.reason;
+                const reason = typeof supplied === 'string' && cutoffReasons.has(supplied) ? supplied : 'unobserved';
+                const cause = cost + '.' + reason;
+                cutoffReasonsByCost[cause] = (cutoffReasonsByCost[cause] ?? 0) + 1;
                 const order = receiptOrder(trace, cost);
                 const key = JSON.stringify(order);
                 const group = orderGroups.get(key);
@@ -209,24 +225,27 @@ export class SharedResolverObservation {
         }
         for (const group of indexed.values()) issues.missingAttemptRow += group.length;
         return { ...this.sdkSnapshot(), durableAttempts, unboundWithoutSend, budgetOnlyCancelled,
-            cutoffs, cutoffByCost, cutoffReceiptOrder: [...orderGroups.values()], wireToAbortMs, issues };
+            cutoffs, cutoffByCost, cutoffReasonsByCost, unsentCancelledByOwner, cutoffReceiptOrder: [...orderGroups.values()], wireToAbortMs, issues };
     }
 }
 
 export async function readSharedResolverLedger(db: StandardConnection, requests: string[] | null): Promise<LedgerRow[]> {
     const { rows } = await db.query<LedgerRow>(`
         WITH attempts AS (
-            SELECT request_id::text AS run, operation_key, attempt, status FROM analysis_v2_ai_attempts
+            SELECT request_id::text AS run, operation_key, attempt, status,
+                (terminalized_at IS NOT NULL AND usage_complete IS FALSE AND estimated_cost_usd IS NULL
+                    AND total_tokens IS NULL AND prompt_tokens IS NULL AND completion_tokens IS NULL AND thinking_tokens IS NULL) AS uncosted
+            FROM analysis_v2_ai_attempts
             WHERE ($1::uuid[] IS NULL OR request_id=ANY($1::uuid[])) AND stage='genderResolution'
         ), budget AS (
             SELECT run_id AS run, operation_key, attempt, count(*)::int AS holds,
                 count(*) FILTER (WHERE state='settled' AND usage_unknown AND actual_cost_usd IS NULL)::int AS unknown,
                 count(*) FILTER (WHERE state='settled' AND NOT usage_unknown AND actual_cost_usd>0)::int AS known,
-                count(*) FILTER (WHERE state='cancelled')::int AS cancelled
+                count(*) FILTER (WHERE state='cancelled' AND actual_cost_usd IS NULL)::int AS cancelled
             FROM vertex_ai_budget_reservations WHERE ($1::uuid[] IS NULL OR run_id=ANY($1::uuid[]::text[])) AND operation_key LIKE 'gender-resolution:%'
             GROUP BY run_id,operation_key,attempt
         )
-        SELECT concat_ws('/',run,operation_key,attempt) AS key,a.status,
+        SELECT concat_ws('/',run,operation_key,attempt) AS key,run AS "requestId",a.status, a.uncosted AS "uncostedTerminal",
             coalesce(b.holds,0)::int AS holds, coalesce(b.unknown,0)::int AS unknown,
             coalesce(b.known,0)::int AS known, coalesce(b.cancelled,0)::int AS cancelled
         FROM attempts a FULL JOIN budget b USING (run,operation_key,attempt)

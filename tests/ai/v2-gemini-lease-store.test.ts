@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
 import {
     ANALYSIS_V2_GEMINI_LEASE_DATABASE_NAMES,
     AnalysisV2AiCapacityPendingError,
@@ -22,7 +23,7 @@ const claimToken = '223e4567-e89b-42d3-a456-426614174000'; // gitleaks:allow
 const expiresAt = '2026-07-24T10:04:00.000Z';
 
 function setup(data: unknown) {
-        const rpc = vi.fn(async (..._args: unknown[]) => ({ data, error: null }));
+    const rpc = vi.fn<AnalysisV2GeminiLeaseDependencies['rpc']>(async () => ({ data, error: null }));
     const dependencies: AnalysisV2GeminiLeaseDependencies = {
         rpc,
         nowMs: () => 1_000,
@@ -737,6 +738,35 @@ describe('deployment-wide Gemini lease store', () => {
                 p_stage: 'genderTriage',
             })
         );
+    });
+
+    it.each(['resolver_capacity_pending', 'capacity_pending'])(
+        'reuses the same resolver claim after an authoritative %s reply',
+        async outcome => {
+            const { store, rpc } = setup([{
+                outcome: 'acquired', slot: 2, lease_claim_token: claimToken, fence: 10, expires_at: expiresAt,
+            }]);
+            rpc.mockResolvedValueOnce({ data: [{
+                outcome, slot: null, lease_claim_token: null, fence: null, expires_at: null,
+            }], error: null });
+            await expect(withStandardResolverAdmission(new AbortController().signal, () => store.acquire({
+                ...input(), handlerDeadlineAtMs: 300_000, operationKey: `gender-resolution:${'a'.repeat(64)}`,
+                stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+            }))).resolves.toMatchObject({ slot: 2, claimToken, fence: 10 });
+            expect(rpc).toHaveBeenCalledTimes(2);
+            expect(rpc.mock.calls[0]).toEqual(rpc.mock.calls[1]);
+        },
+    );
+
+    it('keeps the handler commit margin when waiting on resolver admission', async () => {
+        const { store, rpc } = setup([{
+            outcome: 'resolver_capacity_pending', slot: null, lease_claim_token: null, fence: null, expires_at: null,
+        }]);
+        await expect(withStandardResolverAdmission(new AbortController().signal, () => store.acquire({
+            ...input(), operationKey: `gender-resolution:${'a'.repeat(64)}`,
+            stage: 'genderResolution', aiStagePolicyVersion: 'ai-stage-policy-v2.11',
+        }))).rejects.toBeInstanceOf(AnalysisV2AiDeadlineTooShortError);
+        expect(rpc).toHaveBeenCalledTimes(1);
     });
 
     it('maps resolver-only deployment capacity to an internal skip signal', async () => {

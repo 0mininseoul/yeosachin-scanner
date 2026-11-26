@@ -1,6 +1,7 @@
-import { AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore } from './gemini-generation-limiter';
+import { acquireResolverPermit, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore } from './gemini-generation-limiter';
 import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
+import { channel } from 'node:diagnostics_channel';
 import {
     ApiError,
     GoogleGenAI,
@@ -132,19 +133,17 @@ async function runWithGenerationSlot<T>(
 
     const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     if (stage === 'genderResolution') {
-        const releaseStage = stageSemaphore.tryAcquire();
-        if (!releaseStage) {
-            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
-        }
-        const releaseShared = generationLimiterState.shared.tryAcquire();
-        if (!releaseShared) {
-            releaseStage();
-            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
-        }
+        const stagePermit = acquireResolverPermit(stageSemaphore, 'worker_stage');
+        const releaseStage = typeof stagePermit === 'function' ? stagePermit : await stagePermit;
         try {
-            return await guardedTask();
+            const sharedPermit = acquireResolverPermit(generationLimiterState.shared, 'worker_shared');
+            const releaseShared = typeof sharedPermit === 'function' ? sharedPermit : await sharedPermit;
+            try {
+                return await guardedTask();
+            } finally {
+                releaseShared();
+            }
         } finally {
-            releaseShared();
             releaseStage();
         }
     }
@@ -219,6 +218,7 @@ const AI_ADMISSION_SIGNAL_CODES = new Set([
     'ANALYSIS_V2_AI_CAPACITY_PENDING',
     'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT',
     'ANALYSIS_V2_AI_QUARANTINE_ACTIVE',
+    'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING',
     'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED',
 ]);
 
@@ -348,7 +348,10 @@ export interface AnalyzeWithGeminiOptions<T> {
     onRejectedResponseTelemetry?: (telemetry: GeminiAttemptTelemetry, error: Error) => void | Promise<void>;
 }
 
+const tokenLogOutcomes = channel('yeosachin.gemini-token-log');
+
 interface TokenLogMetadata {
+    stage?: AiStageName;
     latencyMs?: number;
     location?: string;
     estimatedCostUsd?: number | null;
@@ -762,6 +765,8 @@ export async function logTokenUsage(
         cached_hit: cachedHit,
     };
 
+    let insertReturnedError = false;
+    const stage = metadata.stage ?? 'legacy';
     try {
         const { supabaseAdmin } = await import('@/lib/supabase/admin');
         if (extendedTelemetrySupported !== false) {
@@ -775,6 +780,7 @@ export async function logTokenUsage(
 
             if (!error) {
                 extendedTelemetrySupported = true;
+                if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome: 'insert_acknowledged' });
                 return;
             }
 
@@ -790,6 +796,7 @@ export async function logTokenUsage(
                     || errorText.includes('does not exist'));
 
             if (!isMissingExtendedColumn) {
+                insertReturnedError = true;
                 throw error;
             }
 
@@ -799,11 +806,16 @@ export async function logTokenUsage(
 
         const { error } = await supabaseAdmin.from('gemini_token_usage').insert(baseRow);
         if (error) {
+            insertReturnedError = true;
             throw error;
         }
-    } catch (error) {
-        // 토큰 로깅 실패는 분석 실패로 이어지지 않도록
-        console.warn('Failed to log token usage:', error);
+        if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome: 'insert_acknowledged' });
+    } catch {
+        // The legacy table has no operation/attempt key. A missing acknowledgement
+        // cannot safely be retried without risking a duplicate usage row.
+        const outcome = insertReturnedError ? 'insert_error_response' : 'insert_threw';
+        if (tokenLogOutcomes.hasSubscribers) tokenLogOutcomes.publish({ stage, outcome });
+        console.warn('Gemini token usage insert was not confirmed', { stage, outcome });
     }
 }
 
@@ -1032,6 +1044,7 @@ export async function analyzeWithGemini<T>(
         let providerDispatchStarted = false;
         let responseReceivedBeforeAbort = false;
         let receivedCostUsd: number | null = null;
+        let committedFence: Error | undefined;
         let budgetSettled = false;
         let devUnusedSettlementFailed = false;
         let devRateLimitSettlementError: Error | null = null;
@@ -1384,20 +1397,35 @@ export async function analyzeWithGemini<T>(
             const terminalHook = rejectedResponse && onRejectedResponseTelemetry
                 ? (telemetry: GeminiAttemptTelemetry) => onRejectedResponseTelemetry(telemetry, rejectedResponse)
                 : onAttemptTelemetry;
-            await emitAttemptTelemetry(attemptTelemetry, terminalHook, completionError ? undefined : parsed);
-            if (abortSignal?.aborted) {
-                throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            try {
+                await emitAttemptTelemetry(attemptTelemetry, terminalHook, completionError ? undefined : parsed);
+            } catch (error) {
+                // The durable store reports committed telemetry explicitly when a
+                // stale worker cannot publish the result. Other audit errors have
+                // no such proof and must leave the secondary log untouched.
+                if (!stage || !(error instanceof Error) || error.name !== 'AnalysisV2AiResultFenceError'
+                    || !('telemetryCommitted' in error) || error.telemetryCommitted !== true) throw error;
+                committedFence = error;
             }
-            emitResponseRejectionDiagnostic(attemptTelemetry);
+            if (!stage && abortSignal?.aborted) throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            if (stage && tokenLogOutcomes.hasSubscribers) {
+                if (committedFence) tokenLogOutcomes.publish({ stage, outcome: 'audit_committed_fenced' });
+                else if (abortSignal?.aborted) tokenLogOutcomes.publish({ stage, outcome: 'audit_committed_then_aborted' });
+            }
 
-            // The legacy table cannot represent unknown usage. Never persist a fabricated zero.
+            // The SDK returned before cutoff and the V2 terminal audit committed.
+            // Cancellation may stop publication, but it cannot undo this measured usage.
             if (!skipTokenLog && !statelessReplay && usage.tokenUsage) {
                 await logTokenUsage(usage.tokenUsage, analysisType, requestId, false, modelName, {
+                    stage,
                     latencyMs: attemptTelemetry.latencyMs,
                     location: attemptTelemetry.location,
                     estimatedCostUsd: attemptTelemetry.estimatedCostUsd,
                 });
             }
+            if (committedFence) throw committedFence;
+            if (stage && abortSignal?.aborted) throw new Error('AI_GENERATION_DEADLINE_EXCEEDED');
+            emitResponseRejectionDiagnostic(attemptTelemetry);
 
             if (completionError) {
                 throw new Error(
@@ -1446,6 +1474,7 @@ export async function analyzeWithGemini<T>(
                 }
                 budgetSettled = true;
             }
+            if (committedFence && error === committedFence) throw committedFence;
             if (abortSignal?.aborted && !devUnusedSettlementFailed) {
                 lastError = new Error('AI_GENERATION_DEADLINE_EXCEEDED');
                 console.error(`Gemini API Error (attempt ${attemptNumber}):`, lastError.message);

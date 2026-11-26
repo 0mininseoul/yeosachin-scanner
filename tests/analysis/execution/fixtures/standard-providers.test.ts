@@ -24,25 +24,25 @@ it('reuses each worker Actor limit across deliveries and keeps separate workers 
     expect(entered).toEqual(['first', 'independent', 'queued']);
 });
 
-it('keeps a 240-public-account fixture distinct across result pages and model microbatches', async () => {
-    const actor = new SyntheticApify(2, 1, 240);
+it.each([240, 600])('keeps %i public candidates distinct across result pages and model microbatches', async publicCount => {
+    const actor = new SyntheticApify(2, 1, publicCount);
     const run = await actor.actor('fixture-relationships').start({ Account: [target], dataToScrape: 'followers' });
     const names: string[] = [];
     const row = z.object({ username: z.string(), id: z.string(), is_private: z.boolean() });
-    for (let offset = 0; offset < 241; offset += 50) {
+    for (let offset = 0; offset < publicCount + 1; offset += 50) {
         const page = await actor.dataset(run.id).listItems({ offset, limit: 50 });
-        expect(page.total).toBe(241);
+        expect(page.total).toBe(publicCount + 1);
         names.push(...page.items.map(item => row.parse(item).username));
     }
     expect(names[0]).toBe(candidate);
     expect(names.at(-1)).toBe(privateCandidate);
-    expect(new Set(names).size).toBe(241);
-    expect(profileItem(target, 2, 241)).toMatchObject({ followersCount: 241, followsCount: 241 });
+    expect(new Set(names).size).toBe(publicCount + 1);
+    expect(profileItem(target, 2, publicCount + 1)).toMatchObject({ followersCount: publicCount + 1, followsCount: publicCount + 1 });
     const accounts = names.slice(0, -1).map(name => profileItem(name, 2));
     const posts = accounts.flatMap(p => p.latestPosts);
-    expect(new Set(posts.map(p => p.id)).size).toBe(480);
-    expect(new Set(posts.map(p => p.shortCode)).size).toBe(480);
-    expect(new Set(accounts.map(p => p.profilePicUrl)).size).toBe(240);
+    expect(new Set(posts.map(p => p.id)).size).toBe(publicCount * 2);
+    expect(new Set(posts.map(p => p.shortCode)).size).toBe(publicCount * 2);
+    expect(new Set(accounts.map(p => p.profilePicUrl)).size).toBe(publicCount);
     expect(posts[0]).toMatchObject({ id: '201', shortCode: 'SamplePost20' });
 
     const pair = accounts.slice(29, 31).map(p => {
