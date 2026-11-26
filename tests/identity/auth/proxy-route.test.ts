@@ -61,6 +61,44 @@ function mockAuthenticatedUser(user: string | ReturnType<typeof devUser> | null,
     });
 }
 
+describe('Cherry public domain', () => {
+    const oldUrl = 'https://yeosachin.com';
+    const newUrl = 'https://cherry.yeosachin.com';
+    const query = '?v=crush&utm_source=meta&fbclid=abc%2Bdef&utm_campaign=x&utm_campaign=y';
+
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('stages the new host before redirecting traffic from the current canonical', async () => {
+        vi.stubEnv('CHERRY_DOMAIN_LIVE', '');
+        mockAuthenticatedUser(null);
+        expect((await proxy(new NextRequest(oldUrl + '/cherry' + query))).headers.get('location')).toBeNull();
+        const newLanding = await proxy(new NextRequest(newUrl + '/' + query));
+        expect(newLanding.headers.get('x-middleware-next')).toBe('1');
+        expect(await (await proxy(new NextRequest(newUrl + '/robots.txt'))).text()).toContain('Disallow: /');
+    });
+
+    it('permanently redirects the old public landing while keeping the full query', async () => {
+        vi.stubEnv('CHERRY_DOMAIN_LIVE', '1');
+        const response = await proxy(new NextRequest(oldUrl + '/cherry' + query));
+        expect(response.status).toBe(308);
+        expect(response.headers.get('location')).toBe(newUrl + '/' + query);
+        const robots = await proxy(new NextRequest(newUrl + '/robots.txt'));
+        expect(await robots.text()).toContain(`Sitemap: ${newUrl}/sitemap.xml`);
+        const sitemap = await proxy(new NextRequest(newUrl + '/sitemap.xml'));
+        expect(await sitemap.text()).toContain(`<loc>${newUrl}/</loc>`);
+    });
+
+    it('preserves the reservation POST, keeps account pages on the main host and rejects unrelated APIs', async () => {
+        expect((await proxy(new NextRequest(newUrl + '/api/cherry/reservations', { method: 'POST' }))).headers.get('x-middleware-next')).toBe('1');
+        expect((await proxy(new NextRequest(oldUrl + '/cherry-public-landing'))).status).toBe(404);
+        expect((await proxy(new NextRequest(newUrl + '/api/cherry/checkout', { method: 'POST' }))).status).toBe(404);
+        expect((await proxy(new NextRequest(newUrl + '/cherry/home'))).headers.get('location')).toBe(oldUrl + '/cherry/home');
+        expect(unstable_doesMiddlewareMatch({
+            config, nextConfig: {}, url: newUrl + '/favicon.ico', headers: { host: 'cherry.yeosachin.com' },
+        })).toBe(true);
+    });
+});
+
 describe('authentication proxy redirects', () => {
     beforeEach(() => {
         vi.clearAllMocks();

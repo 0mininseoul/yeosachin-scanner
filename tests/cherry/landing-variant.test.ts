@@ -63,6 +63,29 @@ describe('cherry landing variant', () => {
         },
     );
 
+    it.each(['', '?v=crush&utm_source=meta&fbclid=abc'])('updates only the approved search and FAQ copy on the new host: %s', async (query) => {
+        const { GET } = await import('@/app/cherry/route');
+        const { createRequire } = await import('node:module');
+        const { JSDOM } = createRequire(import.meta.url)('jsdom') as {
+            JSDOM: new (html: string) => { window: { document: Document } };
+        };
+        const { GET: getPublicLanding } = await import('@/app/cherry-public-landing/route');
+        const oldDocument = new JSDOM(await (await GET(new NextRequest('https://yeosachin.com/cherry' + query))).text()).window.document;
+        const response = await getPublicLanding(new NextRequest('https://cherry.yeosachin.com/cherry-public-landing' + query));
+        const newDocument = new JSDOM(await response.text()).window.document;
+
+        expect(newDocument.title).toBe('체리 · 인스타 남친맞팔알리미, 짝남맞팔알리미, 전남친맞팔알리미');
+        expect(newDocument.querySelector('meta[name="description"]')?.getAttribute('content')).toContain('남친, 짝남, 전남친');
+        expect(newDocument.querySelector('link[rel="canonical"]')?.getAttribute('href')).toBe('https://cherry.yeosachin.com/');
+        expect(newDocument.querySelector('link[rel="icon"]')?.getAttribute('href')).toBe('/cherry/logo.png');
+        const shareCard = (doc: Document) => [...doc.querySelectorAll('meta[property^="og:"], meta[name^="twitter:"]')].map(tag => tag.outerHTML);
+        expect(shareCard(newDocument)).toEqual(shareCard(oldDocument));
+        const oldQuestion = [...oldDocument.querySelectorAll('summary')].find(item => item.textContent?.endsWith('말고 다른 사람도 되나요?'));
+        expect(oldQuestion).toBeDefined();
+        oldQuestion!.textContent = '전남친, 짝남, 썸남도 맞팔 알림을 받을 수 있나요?';
+        expect(newDocument.body.innerHTML).toBe(oldDocument.body.innerHTML);
+    });
+
     it('keeps crush with ad params', async () => {
         const { GET } = await import('@/app/cherry/route');
         const response = await GET(new NextRequest('https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=abc'));
