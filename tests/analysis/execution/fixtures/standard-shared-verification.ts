@@ -382,11 +382,19 @@ export function observeSharedOwnerReads(
             if (pending.size) throw new Error('SHARED_OWNER_FULFILLMENT_INCOMPLETE');
             return new Map(await Promise.all([...reads].map(async ([id, read]) => [id, await read] as const)));
         },
-        async stop() { await Promise.allSettled(reads.values()); },
+        async stop() {
+            const settled = await Promise.allSettled(orders.map(order => reads.get(order.requestId)));
+            return settled.flatMap((result, index) => {
+                if (result.status !== 'fulfilled' || !result.value) return [];
+                const read = result.value;
+                return [{ owner: index + 1, images: read.urls.length,
+                    fromSeatMs: read.startToLastOwnerWebpMs, fromPaymentMs: read.paidToLastOwnerWebpMs }];
+            });
+        },
     };
 }
 
-async function verifyRenderedOwner(requestId: string, { firstPublic, firstPrivate, objects }: OwnerRead) {
+export async function verifyRenderedOwner(requestId: string, { firstPublic, firstPrivate, objects }: OwnerRead) {
     const pageUrl = origin + '/result/' + requestId + '?pipeline=v2';
     for (const [member, kind] of [[firstPublic, 'public'], [firstPrivate, 'private']] as const) {
         if (!member) continue;
@@ -470,7 +478,6 @@ export async function verifySharedStandardRequest(input: SharedVerification, own
     expect(rows[0]).toMatchObject({ published: true, complete: true, consumed: true, paid: true, fulfilled: true, receipt: true });
     expect(rows[0]!.ai_policy).toBe('ai-stage-policy-v2.11');
     expect(owner.scorePolicy).toBe(rows[0]!.score_policy);
-    await asUser(ownerId, () => verifyRenderedOwner(requestId, owner));
     for (const [viewer, expectedStatus] of [[input.otherOwnerId, 404], [null, 401]] as const) {
         await asUser(viewer, async () => {
             expect((await readPage(requestId)).status).toBe(expectedStatus);

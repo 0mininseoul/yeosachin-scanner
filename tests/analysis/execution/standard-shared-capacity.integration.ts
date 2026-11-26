@@ -31,7 +31,7 @@ import {
     processSharedStandardPreflight, processSharedStandardBlite, processSharedStandardFresh,
     sharedStandardAdmissionEnv, type SharedStandardOwner
 } from './fixtures/standard-shared-admission';
-import { countVerifiedResultEmailClaims, observeSharedOwnerReads, settleSharedActorReceipts, verifySharedStandardRequest, sharedStandardEffects } from './fixtures/standard-shared-verification';
+import { countVerifiedResultEmailClaims, observeSharedOwnerReads, settleSharedActorReceipts, verifySharedStandardRequest, verifyRenderedOwner, sharedStandardEffects } from './fixtures/standard-shared-verification';
 
 const boundary = vi.hoisted(() => ({
     rpc: vi.fn(), from: vi.fn(), session: vi.fn(), queue: vi.fn(), apify: vi.fn(), objects: vi.fn(),
@@ -429,6 +429,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
         });
         const ioBefore = await databaseCounters(db);
         const firstAt = performance.now();
+        const proofs: Awaited<ReturnType<typeof verifySharedStandardRequest>>[] = [];
+        let resolutionBeforeStop: Awaited<ReturnType<typeof sharedStandardMeasurements>>['resolutionByOwner'] | null = null;
+        let emailClaimsBeforeStop: number | null = null;
+        let renderedOwners = 0;
         let lateOwners = 0;
         let ownersWithLedgerIssues = 0;
         let sharedLedgerIssues: string[] = [];
@@ -577,7 +581,6 @@ it('publishes simultaneous paid Standard requests through one database and queue
             if (maintenance.passes.some(pass => pass.failed > 0)) sharedLedgerIssues.push('provider_recovery_failed');
             const resolverEvidence = resolverObservation.report(await readSharedResolverLedger(db, requestIds), requestIds);
             if (Object.values(resolverEvidence.issues).some(count => count > 0)) sharedLedgerIssues.push('resolver_sdk_ledger_mismatch');
-            const proofs = [];
             for (const [i, run] of admitted.entries()) {
                 const before = await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id);
                 const duplicate = await deliverPaid(sample.get(run.requestId)!);
@@ -598,7 +601,9 @@ it('publishes simultaneous paid Standard requests through one database and queue
             if (matchedActorStarts !== provider.starts.length) sharedLedgerIssues.push('actor_start_count_mismatch');
             expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
             const verifiedResultEmailClaims = automaticPayments ? await countVerifiedResultEmailClaims(db, requestIds) : 0;
+            emailClaimsBeforeStop = verifiedResultEmailClaims;
             const measurements = await sharedStandardMeasurements(db, requestIds);
+            resolutionBeforeStop = measurements.resolutionByOwner;
             expect(measurements.times).toHaveLength(ownersCount);
             if (measurements.tokenLogsByOwnerAndStage.some(row =>
                 row.completedAttempts !== row.tokenLogRows || row.attemptTokens !== row.loggedTokens)) {
@@ -640,6 +645,16 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 FROM analysis_lifecycle_events WHERE request_id=ANY($1::uuid[])
             `, [admitted.map(run => run.requestId)]);
             expect(lifecycle.rows[0]).toEqual({ started: ownersCount, completed: ownersCount });
+            // Keep the independent HTTP, access and ledger proofs even if a later
+            // serial JSDOM render fails for one of the owners.
+            for (const run of admitted) {
+                const beforeRender = await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id);
+                await asUser(run.owner.id, () => verifyRenderedOwner(run.requestId, ownerReads.get(run.requestId)!));
+                expect(await sharedStandardEffects(db, run.requestId, run.orderId, run.owner.id)).toEqual(beforeRender);
+                renderedOwners++;
+            }
+            expect(provider.starts.length).toBe(startsBeforeReplay);
+            expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
             const ioAfter = await databaseCounters(db);
             const pgDelta = {
                 blocksRead: ioAfter.read - ioBefore.read, bufferHits: ioAfter.hit - ioBefore.hit,
@@ -697,7 +712,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const report = {
                 status: directPublicationMissing ? 'completed_without_direct_order_handoff' : ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners || ownerReadOverHour ? 'completed_over_target' : coverageBelowTarget ? 'completed_below_coverage' : 'verified',
                 hourMeasurement: automaticPayments ? 'capacity_start_to_last_owner_webp' : 'payment_to_last_owner_webp',
-                productionPaid, checkoutEvidence, verifiedResultEmailClaims, ...(automatic ? { automaticPayment: automatic.evidence } : {}),
+                productionPaid, checkoutEvidence, renderedOwners, verifiedResultEmailClaims, ...(automatic ? { automaticPayment: automatic.evidence } : {}),
                 approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
@@ -713,11 +728,13 @@ it('publishes simultaneous paid Standard requests through one database and queue
         } catch (error) {
             // Preserve the original failure and the state left by any in-flight maintenance.
             await maintenance?.stop().catch(() => undefined);
-            await ownerObserver?.stop();
+            const ownerHttpReads = await ownerObserver?.stop() ?? [];
             const reason = error instanceof Error && /^SHARED_WORKER_[a-z0-9:.-]+:[A-Z_0-9]+$/.test(error.message)
                 ? error.message : safeCode(error);
             const failure = {
-                status: 'failed', productionPaid, checkoutEvidence, approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
+                status: 'failed', ownerHttpReads, verifiedRequestsBeforeStop: proofs, renderedOwners,
+                resolutionBeforeStop, emailClaimsBeforeStop, sharedLedgerIssues,
+                productionPaid, checkoutEvidence, approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, cachedResolverLocal, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
