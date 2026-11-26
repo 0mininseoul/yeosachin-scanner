@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+    emailAvailable: vi.fn().mockResolvedValue(false),
     createServerClient: vi.fn(),
     from: vi.fn(),
     rpc: vi.fn(),
@@ -31,6 +32,9 @@ function queryBuilder(data: unknown) {
     return query;
 }
 
+vi.mock('@/lib/services/earlybird/result-email', () => ({
+    isPaidResultEmailAvailableForOrder: mocks.emailAvailable,
+}));
 vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
 }));
@@ -168,6 +172,28 @@ describe('earlybird owner order status route', () => {
         delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
     });
 
+    it('reports a saturated paid order without disclosing a queue rank or analysis link', async () => {
+        installQueries(orderRow({status:'paid', result_request_id:RESULT_ID}));
+        mocks.rpc.mockImplementation(async (name:string) => ({
+            data: name === 'load_earlybird_fulfillment_status' ? 'admission_pending'
+                : {waiting:true,startedAt:null,expectedMaxMinutes:null}, error:null,
+        }));
+        mocks.emailAvailable.mockResolvedValueOnce(true);
+        const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));
+        const { order } = await response.json();
+        expect(order).toMatchObject({capacityWaitStatus:'waiting',deliveryMode:'automatic',
+            progressUrl:null,resultUrl:null,resultEmailNotificationAvailable:true});
+        expect(order.analysisStartedAt).toBeUndefined();
+        expect(mocks.rpc).toHaveBeenCalledWith('load_paid_analysis_capacity_v1', {p_order_id:ORDER_ID,p_user_id:USER_ID});
+    });
+
+    it('can poll a specific older payment using its owner and plan', async () => {
+        const path = 'https://example.com/api/earlybird/orders/latest?plan=standard&orderId=';
+        expect((await GET(new Request(path + ORDER_ID))).status).toBe(200);
+        expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('id', ORDER_ID);
+        expect(mocks.orderQuery?.eq).toHaveBeenCalledWith('user_id', USER_ID);
+        expect((await GET(new Request(path + 'invalid'))).status).toBe(400);
+    });
     it('requires authentication and returns no cached owner data', async () => {
         authenticate(null);
         const response = await GET(new Request('https://example.com/api/earlybird/orders/latest'));

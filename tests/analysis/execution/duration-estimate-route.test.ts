@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     getUser: vi.fn(),
+    capacityRpc: vi.fn(),
     loadForOwner: vi.fn(),
     loadDag: vi.fn(),
     demoFindForOwner: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.capacityRpc } }));
 vi.mock('@/lib/services/analysis/v2-progress-store', () => ({
     analysisV2ProgressStore: { loadForOwner: mocks.loadForOwner },
 }));
@@ -65,6 +67,28 @@ describe('analysis duration owner route', () => {
             lifecycle: 'active',
             classificationVersion: 'account-ledger-v1',
         });
+    });
+
+    it('returns only the estimate captured at admission for this paid owner and request', async () => {
+        const request = new Request(`https://example.com/api/analysis/duration/${requestId}?source=paid_capacity`);
+        const timing = { waiting: false, startedAt: '2026-11-26T10:15:00+00:00', expectedMaxMinutes: 52 };
+        mocks.capacityRpc.mockResolvedValueOnce({ data: timing, error: null })
+            .mockResolvedValueOnce({ data: { ...timing, expectedMaxMinutes: null }, error: null })
+            .mockResolvedValueOnce({ data: { ...timing, waiting: true, startedAt: null }, error: null })
+            .mockResolvedValueOnce({ data: null, error: null });
+        const active = await GET(request, context());
+        expect(active.headers.get('cache-control')).toBe('private, no-store, max-age=0');
+        expect(await active.json()).toEqual({ expectedAnalysisMaxMinutes: 52 });
+        expect(mocks.capacityRpc).toHaveBeenCalledWith('load_paid_analysis_capacity_by_request_v1', {
+            p_request_id: requestId, p_user_id: userId,
+        });
+        expect(await (await GET(request, context())).json()).toEqual({ expectedAnalysisMaxMinutes: null });
+        expect(await (await GET(request, context())).json()).toEqual({ expectedAnalysisMaxMinutes: null });
+        expect((await GET(request, context())).status).toBe(404);
+        expect(mocks.loadDag).not.toHaveBeenCalled();
+        mocks.getUser.mockResolvedValueOnce({ data: { user: null }, error: null });
+        expect((await GET(request, context())).status).toBe(401);
+        expect(mocks.capacityRpc).toHaveBeenCalledTimes(4);
     });
 
     it('owner-scopes stage two and returns only its versioned public range', async () => {

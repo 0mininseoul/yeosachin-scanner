@@ -125,6 +125,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
     let current = new Map<string, ProgressSnapshotV1>();
     let currentEvents = new Map<string, ProgressEventV1[]>();
     let fetchUrls: string[] = [];
+    let paidMaxMinutes: number | null = null;
     let refetch: (() => Promise<void>) | undefined;
 
     beforeEach(() => {
@@ -166,6 +167,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
             [REQUEST_B, []],
         ]);
         fetchUrls = [];
+        paidMaxMinutes = null;
         const channel = {
             on: vi.fn().mockReturnThis(),
             subscribe: vi.fn().mockReturnValue({}),
@@ -176,6 +178,9 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         });
         vi.stubGlobal('fetch', vi.fn(async (url: string) => {
             fetchUrls.push(url);
+            if (url.includes('?source=paid_capacity')) {
+                return Response.json({ expectedAnalysisMaxMinutes: paidMaxMinutes });
+            }
             if (url.includes('/api/analysis/status/')) {
                 const requestId = url.includes(REQUEST_B) ? REQUEST_B : REQUEST_A;
                 return response({
@@ -404,6 +409,8 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await renderPage();
         expect(fetchUrls[0]).toContain('reviewAfterDone=-1');
         expect(container.textContent).toContain('맞팔 390명 중 공개 계정 42명 검토 완료');
+        expect(container.querySelector('h1')?.textContent).toBe('꼼꼼하게 정밀 분석 중이에요.');
+        expect(container.textContent).not.toContain('Dev · 실제 분석');
 
         current.set(REQUEST_A, { ...progress, revision: 3 });
         await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
@@ -425,6 +432,29 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         expect(fetchUrls.at(-1)).toContain('reviewAfterDone=-1');
     });
 
+    it('keeps the processing headline and duration together while announcing stage changes separately', async () => {
+        paidMaxMinutes = 52;
+        const base = snapshot(REQUEST_A, { status: 'processing', lastEventSeq: 1 });
+        current.set(REQUEST_A, base);
+        await renderPage();
+        const title = container.querySelector('h1');
+        const stage = container.querySelector('header [role="status"]');
+        expect(title?.textContent).toBe('꼼꼼하게 정밀 분석 중이에요.');
+        expect(title?.nextElementSibling?.textContent).toBe('분석 시작 후 완료까지 최대 52분 정도 걸릴 수 있어요.');
+        expect(stage?.textContent).toBe('맞팔 계정을 판독하고 있습니다.');
+        expect(container.textContent).toContain('화면을 나가도 분석은 계속돼요.');
+        expect(container.textContent?.match(/보관함/g)).toHaveLength(1);
+        expect(container.querySelector('a[href="/mypage"]')?.textContent).toBe('보관함으로 이동');
+
+        current.set(REQUEST_A, { ...base, revision: 2, tracks: {
+            ...base.tracks,
+            relationshipAi: { ...base.tracks.relationshipAi, stageCode: 'CANDIDATES_RANKING' },
+        } });
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+        expect(stage?.textContent).toBe('위험도 순위를 계산하고 있습니다.');
+        expect(title?.textContent).toBe('꼼꼼하게 정밀 분석 중이에요.');
+    });
+
     it('keeps production demo reads on variable timing and hides partial profile counts', async () => {
         current.set(REQUEST_A, snapshot(REQUEST_A, { lastEventSeq: 1, activeProfile: { maskedUsername: 'a***', imageUrl: null, currentOrdinal: 10 } }));
         const defaultFetch = vi.mocked(fetch).getMockImplementation()!;
@@ -436,6 +466,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await renderPage();
         expect(container.textContent).toContain('계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요');
         expect(container.textContent).not.toContain('45초');
+        expect(container.textContent).not.toContain('최대 1시간');
         expect(container.textContent).not.toContain('현재 10번째');
         expect(container.textContent).not.toContain('대상 30개');
         expect(container.textContent).not.toMatch(/맞팔 \d+명/);
@@ -451,6 +482,7 @@ describe('useAnalysisProgress V2 display lifecycle', () => {
         await renderPage();
         expect(container.querySelector('a[href="/mypage"]')).toBeNull();
         expect(container.textContent).toContain('이 페이지를 닫지 마세요');
+        expect(container.textContent).not.toContain('화면을 나가도');
     });
 
     it('keeps the progress view visible on later 503 and disables its GET-only retry while in flight', async () => {

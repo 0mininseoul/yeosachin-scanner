@@ -956,6 +956,7 @@ describe('operator-approved earlybird fulfillment migration', () => {
                 REFERENCES public.analysis_preflights(id)
                 DEFERRABLE INITIALLY DEFERRED;
             CREATE TABLE public.earlybird_orders (
+                paid_at timestamptz DEFAULT now(),
                 id UUID PRIMARY KEY,
                 user_id UUID NOT NULL REFERENCES public.users(id),
                 preflight_id UUID NOT NULL REFERENCES public.analysis_preflights(id),
@@ -1280,10 +1281,13 @@ describe('operator-approved earlybird fulfillment migration', () => {
         await db.exec(relationshipAdoptionChargeDriftMigration);
         await db.exec(freshAdmissionProviderRecoveryMigration);
         await db.exec(completedAfterRefundMigration);
+        await db.exec(readFileSync(new URL('../../../supabase/migrations/20261126100000_add_paid_analysis_capacity_queue.sql',
+            import.meta.url), 'utf8'));
     });
 
     beforeEach(async () => {
         await db.exec(`
+            UPDATE paid_analysis_capacity_policy SET max_active=NULL,validation_ref=NULL,expected_basic_max_minutes=NULL,expected_standard_max_minutes=NULL;
             TRUNCATE public.analysis_v2_recovery_provider_run_adoptions,
                 public.earlybird_partial_adoption_second_rearms,
                 public.earlybird_adoption_policy_failure_rearms,
@@ -2129,6 +2133,27 @@ describe('operator-approved earlybird fulfillment migration', () => {
             status: 'ready',
         });
         expect(rows.filter(row => row.status === 'ready')).toHaveLength(1);
+    });
+
+    it('hands an exhausted queued payment to support only when the database proves the expired preflight has no open provider cost', async () => {
+        await db.exec("UPDATE paid_analysis_capacity_policy SET max_active=1,validation_ref='local cap test'");
+        await admit();
+        expect((await asService<{ state: string }>('SELECT claim_paid_analysis_capacity_v1($1) AS state',[ORDER])).rows[0].state).toBe('ready');
+        for (let generation = 0; generation < 10; generation++) {
+            await expireBoundPreflight();
+            await rebind();
+        }
+        const preflight = await expireBoundPreflight();
+        await db.query("INSERT INTO analysis_preflight_provider_runs(preflight_id,status) VALUES($1,'starting')", [preflight]);
+        expect(await rebind()).toBe(preflight);
+        expect((await db.query('SELECT status FROM earlybird_fulfillments WHERE order_id=$1',[ORDER])).rows)
+            .toEqual([{status:'admission_pending'}]);
+        await db.query("UPDATE analysis_preflight_provider_runs SET status='succeeded',actual_usage_usd=0,usage_reconciled_at=now() WHERE preflight_id=$1",
+            [preflight]);
+        expect(await rebind()).toBe(preflight);
+        expect((await db.query('SELECT status,last_error_code,attempt_count FROM earlybird_fulfillments WHERE order_id=$1',[ORDER])).rows)
+            .toEqual([{status:'manual_review',last_error_code:'PAID_PREFLIGHT_REBIND_EXHAUSTED',attempt_count:0}]);
+        expect((await db.query('SELECT paid_analysis_capacity_available_v1(1) AS slots')).rows).toEqual([{slots:1}]);
     });
 
     it('leaves a scrubbed checkout preflight waiting when the retained admission snapshot is not eligible', async () => {

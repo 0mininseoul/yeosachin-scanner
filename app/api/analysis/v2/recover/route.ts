@@ -11,6 +11,7 @@ import {
 import {
     purgeConfiguredResultImages,
 } from '@/lib/services/media/result-image-purge';
+import { deliverPaidResultEmails } from '@/lib/services/earlybird/result-email';
 import { observeRoute } from '@/lib/observability/request';
 import { assertAnalysisWorkerWorkloadRole } from '@/lib/services/analysis/workload-role';
 import { devLiveWorkerRequestBoundary } from '@/lib/services/dev-ui/live-runtime';
@@ -48,16 +49,18 @@ async function handlePOST(request: Request) {
         return NextResponse.json({ code: 'V2_PIPELINE_UNAVAILABLE' }, { status: 503 });
     }
 
-    const [generalResult, canaryResult, resultImagePurgeResult] =
+    const [generalResult, canaryResult, resultImagePurgeResult, emailResult] =
         await Promise.allSettled([
             recoverAnalysisV2Jobs(),
             recoverExpiredProfileProviderCanaries(),
             purgeConfiguredResultImages(),
+            deliverPaidResultEmails(),
         ]);
     if (
         generalResult.status === 'rejected'
         || canaryResult.status === 'rejected'
         || resultImagePurgeResult.status === 'rejected'
+        || emailResult.status === 'rejected'
     ) {
         console.error('Analysis V2 dispatch recovery failed.');
         return NextResponse.json({ code: 'RECOVERY_FAILED' }, { status: 500 });
@@ -66,11 +69,12 @@ async function handlePOST(request: Request) {
     const profileProviderCanary = canaryResult.value;
     const resultImagePurge = resultImagePurgeResult.value;
     return NextResponse.json(
-        { ...summary, profileProviderCanary, resultImagePurge },
+        { ...summary, profileProviderCanary, resultImagePurge, resultEmails: emailResult.value },
         {
             status: summary.failed === 0
                 && profileProviderCanary.failed === 0
                 && resultImagePurge.failed === 0
+                && emailResult.value.failed === 0
                 ? 200
                 : 500,
         }

@@ -9,7 +9,7 @@ export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic';
 
 type StatusRefreshOrder = Pick<
     EarlybirdOrderStatusDto,
-    'systemStatus' | 'requiresSupport' | 'deliveryMode' | 'progressUrl' | 'resultUrl'
+    'systemStatus' | 'requiresSupport' | 'deliveryMode' | 'progressUrl' | 'resultUrl' | 'capacityWaitStatus'
 >;
 
 const OWNER_STATUS_SYSTEM_STATUSES = new Set([
@@ -50,6 +50,10 @@ function isOwnerStatusSnapshot(value: unknown): value is EarlybirdOrderStatusDto
         && typeof order.deliveryMode === 'string'
         && OWNER_STATUS_DELIVERY_MODES.has(order.deliveryMode)
         && typeof order.checkoutRecoverable === 'boolean'
+        && (order.resultEmailNotificationAvailable === undefined || order.resultEmailNotificationAvailable === true)
+        && (order.capacityWaitStatus === undefined || (order.capacityWaitStatus === 'waiting'
+            && order.systemStatus === 'paid' && order.deliveryMode === 'automatic' && !order.requiresSupport
+            && order.progressUrl === null && order.resultUrl === null))
         && (order.progressUrl === null || typeof order.progressUrl === 'string')
         && (order.resultUrl === null || typeof order.resultUrl === 'string');
 }
@@ -68,6 +72,7 @@ export function createSingleFlightEarlybirdStatusRefresh(
     planId: 'basic' | 'standard',
     onSnapshot: OwnerStatusSnapshotHandler,
     request: OwnerStatusRequest = (input, init) => fetch(input, init),
+    orderId?: string,
 ): SingleFlightEarlybirdStatusRefresh {
     let stopped = false;
     let controller: AbortController | null = null;
@@ -80,13 +85,14 @@ export function createSingleFlightEarlybirdStatusRefresh(
         const requestController = new AbortController();
         controller = requestController;
         const promise = request(
-            `/api/earlybird/orders/latest?plan=${encodeURIComponent(planId)}`,
+            `/api/earlybird/orders/latest?plan=${encodeURIComponent(planId)}`
+                + (orderId ? `&orderId=${encodeURIComponent(orderId)}` : ''),
             { cache: 'no-store', signal: requestController.signal },
         ).then(async response => {
             if (!response.ok) return;
             const payload = await response.json() as { order?: unknown };
             if (stopped || requestController.signal.aborted) return;
-            if (isOwnerStatusSnapshot(payload.order)) onSnapshot(payload.order);
+            if (isOwnerStatusSnapshot(payload.order) && payload.order.planId === planId) onSnapshot(payload.order);
         }).catch(() => {
             // Preserve the current truthful snapshot on transient read errors;
             // the bounded scheduler will try again.
@@ -127,7 +133,7 @@ function validatedOwnerPath(value: string | null, kind: 'progress' | 'result'): 
 export function earlybirdStatusNavigationTarget(
     order: StatusRefreshOrder
 ): string | null {
-    if (order.requiresSupport) return null;
+    if (order.requiresSupport || order.capacityWaitStatus === 'waiting') return null;
 
     if (order.systemStatus === 'completed') {
         return validatedOwnerPath(order.resultUrl, 'result');

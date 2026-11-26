@@ -19,9 +19,10 @@ interface SendEmailParams {
   to: string;
   subject: string;
   html: string;
+  idempotencyKey?: string;
 }
 
-export async function sendEmail({ to, subject, html }: SendEmailParams) {
+export async function sendEmail({ to, subject, html, idempotencyKey }: SendEmailParams) {
   try {
     const resend = getResendClient();
     const { data, error } = await resend.emails.send({
@@ -29,16 +30,16 @@ export async function sendEmail({ to, subject, html }: SendEmailParams) {
       to,
       subject,
       html,
-    });
+    }, idempotencyKey ? { idempotencyKey } : undefined);
 
     if (error) {
-      console.error('Email send error:', error);
+      if (!idempotencyKey) console.error('Email send error:', error);
       throw error;
     }
 
     return data;
   } catch (error) {
-    console.error('Email service error:', error);
+    if (!idempotencyKey) console.error('Email service error:', error);
     // 이메일 발송 실패해도 분석은 계속 진행
     return null;
   }
@@ -50,7 +51,8 @@ export async function sendEmail({ to, subject, html }: SendEmailParams) {
 export async function sendAnalysisCompleteEmail(
   email: string,
   targetInstagramId: string,
-  requestId: string
+  requestId: string,
+  idempotencyKey?: string,
 ) {
   const appUrl = appOriginForServer();
   const resultUrl = `${appUrl}/result/${requestId}`;
@@ -88,6 +90,7 @@ export async function sendAnalysisCompleteEmail(
 
   return sendEmail({
     to: email,
+    idempotencyKey,
     subject: `[AI 바람감지기] @${targetInstagramId} 분석 완료!`,
     html,
   });
