@@ -1,3 +1,4 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { paidStandardExpandedCapacityEnabled, type PaidStandardCapacityJob } from './paid-standard-capacity';
 import { devStandardExpandedCapacityEnabled } from '@/lib/services/ai/standard-resolver-admission';
 import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
@@ -123,7 +124,7 @@ import {
     type ResolverCutoffReason,
 } from './v2-ai-stage-runtime';
 import { AnalysisV2AiResultRecoveryPendingError } from './v2-ai-result-store';
-import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError, localStandardResolverGraceMs } from './v2-ai-scheduler-continuation';
+import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError, localStandardResolverGraceMs, preferredAiSiblingFailure } from './v2-ai-scheduler-continuation';
 import { ANALYSIS_V2_SCHEDULER_COMMIT_MARGIN_MS } from './v2-ai-scheduler-runtime';
 import { isAnalysisV2AiDeterministicFallbackError } from './v2-ai-fallback-policy';
 import { emitAnalysisLifecycleEvent } from '@/lib/services/analytics-server';
@@ -290,6 +291,28 @@ function analysisUnavailableOutcome(
     };
 }
 
+function resolverBlockingError(state: AnalysisV2GenderResolutionState | null): Error | undefined {
+    if (state?.status === 'blocking_error') return state.error;
+    if (state?.status === 'recovery_pending') return new AnalysisV2AiResultRecoveryPendingError();
+}
+
+/** Wait for each outstanding cutoff even if another one loses its fence. */
+async function drainResolverCleanup<T>(updates: readonly Promise<T>[]): Promise<T[]> {
+    const values = new Array<T>(updates.length);
+    let failed = false;
+    let failure: unknown;
+    await Promise.all(updates.map(async (update, index) => {
+        try {
+            values[index] = await update;
+        } catch (error) {
+            failure = failed ? preferredAiSiblingFailure(failure, error) : error;
+            failed = true;
+        }
+    }));
+    if (failed) throw failure;
+    return values;
+}
+
 async function settleOptionalGenderResolution(
     handle: AnalysisV2GenderResolutionHandle | null,
     reason?: ResolverCutoffReason,
@@ -359,6 +382,7 @@ async function admittedStandardResolverEnabled(
 }
 
 function resolverContinuationReason(error: unknown): ResolverCutoffReason | undefined {
+    if (error instanceof VertexAiBudgetCapacityPendingError) return 'resolver_capacity_continuation';
     if (!(error instanceof AnalysisV2SchedulerContinuationError)) return;
     if (error.reason === 'ANALYSIS_V2_AI_CAPACITY_PENDING') return 'resolver_capacity_continuation';
     if (error.reason === 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT') return 'resolver_deadline_continuation';
@@ -478,10 +502,8 @@ async function runProfileGroups<T>(
         occupied += slots;
         const task = run(group, slots).catch(error => {
             onError?.(error);
-            if (!failed) {
-                failed = true;
-                failure = error;
-            }
+            failure = failed ? preferredAiSiblingFailure(failure, error) : error;
+            failed = true;
         }).finally(() => {
             occupied -= slots;
             active.delete(task);
@@ -919,10 +941,8 @@ async function runBounded<T, R>(
                 results[index] = await task(values[index], index);
             } catch (error) {
                 onError?.(error);
-                if (!failed) {
-                    failed = true;
-                    firstError = error;
-                }
+                firstError = failed ? preferredAiSiblingFailure(firstError, error) : error;
+                failed = true;
             }
         }
     }
@@ -2285,7 +2305,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             let deferringAdmitted = false;
             let freshFeatureAttempt = false;
             const cutOffDuringExecution = (handles: AnalysisV2GenderResolutionHandle[], reason?: ResolverCutoffReason) => {
-                earlyCleanup = Promise.all([earlyCleanup, ...handles.map(handle =>
+                earlyCleanup = drainResolverCleanup<unknown>([Promise.resolve(earlyCleanup), ...handles.map(handle =>
                     settleOptionalGenderResolution(handle, reason))]).then(() => {});
                 void earlyCleanup.catch(() => {});
             };
@@ -2738,11 +2758,14 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                             };
                         }
                         stopOnOtherError?.(error);
-                        const resolverState = await settleOptionalGenderResolution(
-                            resolverHandle, admittedResolver ? 'resolver_required_error' : undefined,
-                        );
-                        if (resolverState?.status === 'recovery_pending') {
-                            throw new AnalysisV2AiResultRecoveryPendingError();
+                        try {
+                            const state = await settleOptionalGenderResolution(
+                                resolverHandle, admittedResolver ? 'resolver_required_error' : undefined,
+                            );
+                            const blockingError = resolverBlockingError(state);
+                            if (blockingError) throw blockingError;
+                        } catch (cleanupError) {
+                            throw preferredAiSiblingFailure(error, cleanupError);
                         }
                         throw error;
                     }
@@ -2986,32 +3009,37 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     await waitForLocalResolverTrial(startedResolverHandles, context.handlerDeadlineAtMs, graceMs);
                 }
             } catch (error) {
+                let failure = error;
+                const continuation = admittedResolver && resolverContinuationReason(error);
                 try {
-                    const continuation = admittedResolver && resolverContinuationReason(error);
                     if (continuation && !blockedCapacityTrial) {
                         await finishAdmittedResolvers(startedResolverHandles, context.handlerDeadlineAtMs!, continuation);
                     } else if (graceMs === 50_000 && error instanceof AnalysisV2ConfirmedCapacityContinuation
                         && !requiredFallbackOrFailure && !blockedCapacityTrial) {
                         await waitForLocalResolverTrial(startedResolverHandles, context.handlerDeadlineAtMs, graceMs);
                     }
-                } finally {
-                    const states = await Promise.all([earlyCleanup, ...startedResolverHandles.map(handle => settleOptionalGenderResolution(
-                        handle, admittedResolver ? resolverContinuationReason(error) ?? 'resolver_required_error' : undefined,
-                    ))]);
-                    if (states.some(state => state?.status === 'recovery_pending')) {
-                        throw new AnalysisV2AiResultRecoveryPendingError();
-                    }
+                } catch (drainError) {
+                    failure = preferredAiSiblingFailure(failure, drainError);
                 }
-                throw error;
+                const reason = admittedResolver ? continuation || 'resolver_required_error' : undefined;
+                try {
+                    await drainResolverCleanup([Promise.resolve(earlyCleanup), ...startedResolverHandles.map(async handle => {
+                        const state = await settleOptionalGenderResolution(handle, reason);
+                        const blockingError = resolverBlockingError(state);
+                        if (blockingError) throw blockingError;
+                    })]);
+                } catch (cleanupError) {
+                    failure = preferredAiSiblingFailure(failure, cleanupError);
+                }
+                throw failure;
             }
-            const resolverStates = await Promise.all(preparedOutcomes.map(outcome => (
-                isDeferredProfileAiOutcome(outcome)
-                    ? settleOptionalGenderResolution(outcome.resolverHandle, admittedResolver ? 'resolver_batch_barrier' : undefined)
-                    : Promise.resolve(null)
-            )));
-            if (resolverStates.some(state => state?.status === 'recovery_pending')) {
-                throw new AnalysisV2AiResultRecoveryPendingError();
-            }
+            const resolverStates = await drainResolverCleanup(preparedOutcomes.map(async outcome => {
+                if (!isDeferredProfileAiOutcome(outcome)) return null;
+                const state = await settleOptionalGenderResolution(outcome.resolverHandle, admittedResolver ? 'resolver_batch_barrier' : undefined);
+                const blockingError = resolverBlockingError(state);
+                if (blockingError) throw blockingError;
+                return state;
+            }));
             if (resolverStates.some(state => state?.status === 'unsent_capacity_pending')) {
                 // Reuse completed feature/resolver checkpoints. Only the unstarted resolver
                 // can obtain its first attempt after the next delivery checks its deadline.

@@ -1,3 +1,4 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { paidStandardExpandedCapacityEnabled } from '../../../lib/services/analysis/paid-standard-capacity';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { VertexDispatchWindow } from '@/lib/services/ai/vertex-dispatch-window';
@@ -2081,6 +2082,7 @@ describe('analysis V2 durable DAG worker', () => {
     it.each([
         { error: new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 37), delay: 37 },
         { error: new DevLiveVertexBudgetReservationPendingError(), delay: 5 },
+        { error: new VertexAiBudgetCapacityPendingError(), delay: 5 },
     ])('enqueues a delayed continuation for $error.name', async ({ error, delay }) => {
         const claimed = { ...bootstrapClaim, attemptCount: 3 };
         const jobStore = store(claimed);

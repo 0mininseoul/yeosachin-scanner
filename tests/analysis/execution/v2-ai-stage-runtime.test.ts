@@ -1,3 +1,4 @@
+import { VertexAiBudgetCapacityPendingError, VertexAiBudgetExceededError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
 import { LocalResolverPermitTimeoutError } from '@/lib/services/ai/gemini-generation-limiter';
 import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
@@ -244,7 +245,7 @@ describe('durable V2 AI stage runtime', () => {
     it.each([
         [new AnalysisV2AiCapacityPendingError(), 'unsent_capacity_pending'],
         [new VertexDispatchAuthorizationError('db_contention'), 'unsent_capacity_pending'],
-        [new VertexDispatchAuthorizationError('closed'), 'terminal_unavailable'],
+        [new VertexDispatchAuthorizationError('closed'), 'blocking_error'],
         [new VertexDispatchAuthorizationError('unavailable'), 'terminal_unavailable'],
         [new Error('ANALYSIS_V2_AI_CAPACITY_PENDING'), 'terminal_unavailable'],
     ] as const)('classifies only confirmed pre-dispatch contention for preserved checkpoints', async (error, expected) => {
@@ -569,19 +570,35 @@ describe('durable V2 AI stage runtime', () => {
         expect(runGenderResolution).not.toHaveBeenCalled();
     });
 
-    it('retains the typed budget rollback when a resolver has yet to dispatch', async () => {
-        const error = new DevLiveVertexBudgetReservationPendingError();
-        const runtime = createDurableAnalysisV2AiStageRuntime({
-            createAudit: cachedAuditFactory({}).createAudit,
-            runGenderResolution: vi.fn().mockRejectedValue(error),
-        });
-        const handle = runtime.startGenderResolution({ media: [] }, {
-            ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
-        });
-        await handle.completion;
-        await handle.cutoff();
-        expect(handle.peek()).toEqual({ status: 'budget_reservation_pending', error });
-    });
+    it.each([new DevLiveVertexBudgetReservationPendingError(), new VertexAiBudgetCapacityPendingError()])(
+        'retains the typed budget rollback when a resolver has yet to dispatch (%s)', async error => {
+            const runtime = createDurableAnalysisV2AiStageRuntime({
+                createAudit: cachedAuditFactory({}).createAudit,
+                runGenderResolution: vi.fn().mockRejectedValue(error),
+            });
+            const handle = runtime.startGenderResolution({ media: [] }, {
+                ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            });
+            await handle.completion;
+            await handle.cutoff();
+            expect(handle.peek()).toEqual({ status: 'budget_reservation_pending', error });
+        },
+    );
+
+    it.each([new VertexAiBudgetExceededError('run', 'fixture', 18, 18, 1), new VertexDispatchAuthorizationError('closed')])(
+        'returns the hard resolver failure only for admitted Standard (%s)', async error => {
+            const runGenderResolution = vi.fn().mockRejectedValue(error);
+            const runtime = createDurableAnalysisV2AiStageRuntime({ createAudit: cachedAuditFactory({}).createAudit, runGenderResolution });
+            for (const admittedStandardResolver of [true, undefined] as const) {
+                const handle = runtime.startGenderResolution({ media: [] }, {
+                    ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION, admittedStandardResolver,
+                });
+                await handle.completion;
+                expect(handle.peek()).toEqual(admittedStandardResolver ? { status: 'blocking_error', error } : { status: 'terminal_unavailable' });
+            }
+            expect(runGenderResolution).toHaveBeenCalledTimes(2);
+        },
+    );
 
     it.each(['DEV_LIVE_BUDGET_EXCEEDED', 'DEV_LIVE_BUDGET_UNAVAILABLE'])(
         'preserves %s when the resolver cannot start', async budgetError => {

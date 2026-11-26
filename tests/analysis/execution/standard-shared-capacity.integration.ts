@@ -16,6 +16,8 @@ import { createSharedStandardDatabase } from './fixtures/standard-shared-databas
 import { readSharedResolverLedger, SharedResolverObservation } from './fixtures/standard-shared-resolver-observation';
 import { sharedStandardCapacity } from './fixtures/standard-shared-capacities.mjs';
 import { configureSharedStandard } from './fixtures/standard-shared-environment';
+import { SharedBudgetPressureProbe } from './fixtures/standard-shared-budget-probe';
+import { StandardSharedBudgetEvidence } from './fixtures/standard-shared-budget-evidence';
 import { StandardSharedQueue } from './fixtures/standard-shared-queue';
 import { createFixtureObjects, createFixtureR2 } from './fixtures/standard-media';
 import { createSharedImageSource } from './fixtures/standard-shared-image-source';
@@ -165,6 +167,9 @@ function marker(label: string, data: object) { console.info(label, JSON.stringif
 
 it('publishes simultaneous paid Standard requests through one database and queue', async () => {
     resolverObservation = new SharedResolverObservation();
+    const budgetTimeline = new StandardSharedBudgetEvidence();
+    const deliveryScope = new AsyncLocalStorage<object>();
+    const incidentContext = () => ({ owner: requestScope.getStore(), delivery: deliveryScope.getStore() });
     configureSharedStandard();
     for (const [key, value] of Object.entries(sharedStandardAdmissionEnv)) vi.stubEnv(key, value);
     vi.stubGlobal('fetch', async (url: unknown) => {
@@ -236,6 +241,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
             await db.query(`UPDATE paid_analysis_capacity_policy SET max_active=$1, validation_ref='automatic-webhook-offline'`,
                 [ownersCount]);
         }
+        const probeMode = process.env.SHARED_STANDARD_BUDGET_PROBE;
+        if (probeMode && (!['held', 'spent'].includes(probeMode) || !automaticPayments || observedTiming || ownersCount !== 1 || publicCount !== 4))
+            throw new Error('SHARED_BUDGET_PROBE_REQUIRES_SMALL_SIGNED_FIXTURE');
+        const budgetProbe = probeMode === 'held' || probeMode === 'spent' ? new SharedBudgetPressureProbe(db, probeMode) : null;
         const { rpc, from } = db.client();
         const errors: Record<string, number> = {};
         let injectedTimeouts = 0;
@@ -275,7 +284,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     throw freshProbeFailure;
                 }
             }
+            if (budgetProbe) await budgetProbe.beforeRpc(name, args);
             const reply = await rpc(name, args);
+            budgetTimeline.rpc(name, args, reply.error, incidentContext());
+            if (budgetProbe) await budgetProbe.afterRpc(name, args, reply.error, deliveryScope.getStore());
             if (name === 'complete_published_capacity_order_v1') {
                 publishedHandoffCalls++;
                 if (reply.data === true) publishedHandoffs.add(args.p_request_id);
@@ -360,6 +372,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 partner: 5797, narrative: 21595, private_names: 12316
             };
             const stage = private90ModelStage(input);
+            budgetProbe?.observeModelCall(stage);
             const delay = observedTiming ? observedMs[stage] : 100;
             if (!delay) throw new Error('SHARED_UNCALIBRATED_MODEL_STAGE');
             activeModels++;
@@ -467,9 +480,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     // A Cloud Run 429 refuses the delivery before the handler acquires a job.
                     const rejectAtIngress = recovery && injectedWorker429s === 0 && task.jobKey === 'coordinator:bootstrap';
                     if (rejectAtIngress) injectedWorker429s++;
+                    const deliveryIdentity = {};
                     const response = rejectAtIngress
                         ? Response.json({ code: 'WORKER_INGRESS_429' }, { status: 429 })
-                        : await workerCapacity.run(paidWorkers[worker]!, () => activeTask.run(payload, () => deliverPaid(payload)));
+                        : await workerCapacity.run(paidWorkers[worker]!, () => deliveryScope.run(deliveryIdentity, () => activeTask.run(payload, () => deliverPaid(payload))));
                     const result = await response.json();
                     const waitForCapacity = response.status === 503 && ['ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING', 'ANALYSIS_V2_AI_CAPACITY_PENDING'].includes(result.code);
                     const waitForDispatch = response.status === 409 && ['JOB_DISPATCH_NOT_READY', 'JOB_LEASE_BUSY'].includes(result.code);
@@ -483,6 +497,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     if (result.status === 'continuation') { continuations++; return; }
                     if (result.status === 'stale_delivery' || result.status === 'already_terminal') return;
                     if (!response.ok || result.status !== 'completed') {
+                        budgetTimeline.terminalWorkerResponse({ owner: task.requestId, delivery: deliveryIdentity });
                         throw new Error('SHARED_WORKER_' + stage + ':' + (result.errorCode ?? result.code ?? result.status));
                     }
                     if (task.jobKey === 'track:profile-ai:batch:0') sample.set(task.requestId, payload);
@@ -622,6 +637,23 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const paidStartToLastReadMs = Math.round(performance.now() - paidStart);
             ownerReadOverHour = coverage99 && lateOwners > 0;
             directPublicationMissing = automaticPayments && publishedHandoffs.size !== ownersCount;
+            const budgetProbeEvidence = budgetProbe ? await budgetProbe.receipt() : undefined;
+            if (budgetProbeEvidence) {
+                expect(budgetProbeEvidence).toMatchObject({ mode: 'held', cancelled: 1, spent: 0, signedOrderMatches: 1, fixtureModelAttempts: 0 });
+                expect(budgetProbeEvidence.triageModelCalls).toBeGreaterThan(0);
+                expect(budgetProbeEvidence.deniedReservationKeys).toBeGreaterThan(0);
+                expect(budgetProbeEvidence.admittedAfterDenial).toBe(budgetProbeEvidence.deniedReservationKeys);
+                expect(budgetProbeEvidence.settledAfterDenial).toBe(budgetProbeEvidence.deniedReservationKeys);
+                expect(budgetProbeEvidence.deniedDeliveries).toBeGreaterThanOrEqual(2);
+                expect(budgetProbeEvidence.continuations).toBeGreaterThanOrEqual(2);
+                const firstBudget = budgetTimeline.receipt().firstByKind.find(event => event.kind === 'budget_denied')?.budget;
+                expect(firstBudget).toMatchObject({ scope: 'run', capacityPending: true, transactionTotals: { scope: 'run', limitUsd: 2 } });
+                const totals = firstBudget?.transactionTotals;
+                if (!totals) throw new Error('SHARED_BUDGET_PROBE_TOTALS_MISSING');
+                const fixedExposure = totals.settledUsd + totals.staleReservedUsd + totals.requestedUsd;
+                expect(fixedExposure).toBeLessThanOrEqual(totals.limitUsd);
+                expect(fixedExposure + totals.freshReservedUsd).toBeGreaterThan(totals.limitUsd);
+            }
             const report = {
                 status: directPublicationMissing ? 'completed_without_direct_order_handoff' : ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners || ownerReadOverHour ? 'completed_over_target' : coverageBelowTarget ? 'completed_below_coverage' : 'verified',
                 hourMeasurement: automaticPayments ? 'capacity_start_to_last_owner_webp' : 'payment_to_last_owner_webp',
@@ -633,7 +665,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
-                resolverEvidence, peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
+                resolverEvidence, ...(budgetProbeEvidence ? { budgetProbeEvidence } : {}), budgetTimeline: budgetTimeline.receipt(), peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
             };
             marker('shared-standard-complete', report);
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(report, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
@@ -649,16 +681,37 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
-                errors, ...await sharedStandardStopEvidence(db, resolverObservation)
+                errors, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
             };
+            let expectedHardDenial = false;
+            if (budgetProbe?.mode === 'spent') {
+                const probe = await budgetProbe.receipt().catch(() => null);
+                const first = failure.budgetTimeline.firstByKind.find(event => event.kind === 'budget_denied');
+                const terminal = failure.budgetTimeline.firstAfterDenialByKind.find(event => event.kind === 'terminal_worker_response');
+                const budget = first?.budget;
+                expectedHardDenial = !!probe && probe.spent === 1 && probe.cancelled === 0 && probe.continuations === 0
+                    && probe.signedOrderMatches === 1 && probe.fixtureModelAttempts === 0 && probe.triageModelCalls === 0
+                    && probe.deniedReservationKeys > 0 && probe.admittedAfterDenial === 0 && probe.settledAfterDenial === 0
+                    && probe.deniedDeliveries > 0 && budget?.scope === 'run' && !budget.capacityPending
+                    && budget.transactionTotals?.scope === 'run' && budget.transactionTotals.limitUsd === 2
+                    && budget.transactionTotals.settledUsd + budget.transactionTotals.requestedUsd > 2
+                    && terminal?.sameOwnerAsFirstDenial === true && terminal.sameDeliveryAsFirstDenial === true
+                    && reason.startsWith('SHARED_WORKER_track:profile-ai:batch:batch:')
+                    && failure.requests?.length === 1 && failure.requests[0]?.status === 'failed' && failure.requests[0].n === 1
+                    && failure.paymentTimingAtStop?.paid === 1 && failure.paymentTimingAtStop.published === 0;
+                Object.assign(failure, { budgetProbeEvidence: probe });
+                if (expectedHardDenial) failure.status = 'verified_expected_hard_denial';
+            }
             marker('shared-standard-stopped', failure);
             if (process.env.SHARED_STANDARD_RECEIPT) {
                 try {
                     writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-                } catch {
+                } catch (writeError) {
                     marker('shared-standard-receipt-write-failed', { reason });
+                    if (expectedHardDenial) throw writeError;
                 }
             }
+            if (expectedHardDenial) return;
             throw error;
         }
         // Keep all owner and cost proofs even when the measured deadline was missed.

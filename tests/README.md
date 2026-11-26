@@ -49,6 +49,8 @@ node scripts/standard-shared-capacity.mjs 16 112-r40 recovery /tmp/standard-reso
 node scripts/standard-shared-capacity.mjs 16 128-r48 recovery /tmp/standard-coverage.json 240 observed coverage99
 node scripts/standard-shared-capacity.mjs 16 18i-40q recovery /tmp/standard-region-16.json 240 observed coverage99
 node scripts/standard-shared-capacity.mjs 2 18i-40q recovery /tmp/standard-production-smoke.json 4 fast coverage99 production-paid
+node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-held.json 4 fast coverage99 production-paid held
+node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-spent.json 4 fast coverage99 production-paid spent
 ```
 
 - 1~10명은 서명된 합성 결제 웹훅을 처리한다. 11~16명은 한정판매 재고 10건을 보존하기 위해 각 소유자의 실제 체크아웃에 합성 결제 확인과 이행 작업을 기록한다. 두 방식 모두 사전 점검, 정식 접수, 같은 DB와 큐를 사용하는 워커, 발행, 소유자 페이지와 WebP 열람을 거친다.
@@ -57,6 +59,7 @@ node scripts/standard-shared-capacity.mjs 2 18i-40q recovery /tmp/standard-produ
 - 일곱 번째 인자 기본값 `immediate`는 추가 판독을 기다리지 않는 기존 정책이다. `grace8s`는 정상 필수 배치 끝에서 이미 예약한 시도들에 배치당 최대 8초를 준다. `finish50s`는 정상 완료와 필수 판독의 용량 부족에 따른 재개 시 최대 50초를 허용하는 로컬 비교 조건이다. 소유권 검증과 핸들러 기한을 적용하며 다음 시도 예약을 차단한다.
 - `coverage99`는 필수 특징 판독이 슬롯을 얻거나 기존 결과를 확인한 후 추가 판독을 시작한다. 복구 시나리오에서 공개 후보를 4명 이상 지정한다. 240명·600명 조건은 주문마다 추가 판독 대상이 각각 120명·300명인지 확인한다. 전체 및 각 주문의 대상 중 99% 이상 완료, 모든 소유자의 60분 내 이행과 결과·이미지 열람, 미확정 비용 및 중복 차감 0건을 요구한다. 송신 전 취소는 해당 소유자와 시도의 모의 전송 관측, 마감 기록, 단일 예약 취소가 모두 일치해야 인정한다.
 - 여덟 번째 인자 `production-paid`는 새 로컬 DB에 운영용 128슬롯 SQL을 설치한다. 정식 워커에서 각 주문의 결제·소유권·작업 임대를 확인하고 운영 전용 슬롯을 임대한 증거가 있어야 통과한다. 10명 이하는 중복을 포함한 서명 웹훅과 등록 후 자동 이행을 확인한다. 11~16명은 판매 재고 경계로 인해 결제 증거를 합성해 이행부터 검증한다. 결과의 `checkoutEvidence`가 어느 경로였는지 표시한다. 외부 공급자는 고정 응답을 사용한다.
+- 마지막 인자 `held`와 `spent`는 같은 서명 결제 주문의 실행당 $2 한도를 검사한다. `held`에서는 임시 예약을 유지한 채 워커를 재전달하고, 예약을 해제한 뒤 같은 입력이 한 번 정산되어 소유자 결과와 WebP까지 열리는지 확인한다. `spent`에서는 이미 정산된 금액이 한도를 채운다. 다음 성별 판독 송신과 결과 발행이 모두 0건일 때 종료 영수증에 `verified_expected_hard_denial`을 기록한다.
 - 각 소유자의 추가 판독 대상·완료·스킵·마감과 최초 미확정·최종 미확정·실제 판정 보완 수를 기록한다. 모의 전송과 SDK 응답·사용량 확인 시점을 같은 DB 시도·비용 예약에 대조한다. 증빙 없는 비용은 미상으로 보존한다.
 - 다섯 번째 인자로 요청당 공개 후보를 1~600명 지정한다. 비공개 후보 1명을 별도로 추가한다. 240명은 과거 유료 실행 비교 조건이고 600명은 Standard의 공개 상세 분석 상한이다. `fast`는 모델 응답과 재전달 대기를 단축한다. `observed`는 이전 유료 실행의 단계별 모델 평균과 수집 예약 시간을 사용한다. 수집 대기는 Actor 1회당 약 25초로 균등 배분한 값이다. Dev 유료 큐의 재시도 간격 40~300초를 적용하며 관리형 서비스의 부하 조절은 재현하지 않는다.
 - `recovery`는 워커 진입 전 HTTP 429 한 번, 프로필 체크포인트 조회에서 SQLSTATE 57014 한 번을 주입하고 고정 응답 지연을 25% 늘린다. 공개 후보가 4명 이상이면 묶음 분류의 일부 응답에 중간 확신도를 사용해 추가 판독도 요청한다.

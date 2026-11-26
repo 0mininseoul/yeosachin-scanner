@@ -1,4 +1,5 @@
-import { localStandardResolverGraceMs } from './v2-ai-scheduler-continuation';
+import { localStandardResolverGraceMs, preferredAiSiblingFailure } from './v2-ai-scheduler-continuation';
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
@@ -143,7 +144,9 @@ export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
 function schedulerAdmissionReason(error: unknown): SchedulerAdmissionReason | null {
     // The operation RPC verifies the claim and absence of an unresolved AI attempt
     // before releasing it with the existing five-second admission delay.
-    if (error instanceof DevLiveVertexBudgetReservationPendingError) return 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+    if (error instanceof DevLiveVertexBudgetReservationPendingError || error instanceof VertexAiBudgetCapacityPendingError) {
+        return 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+    }
     if (!(error instanceof Error)) return null;
     switch (error.message) {
     case 'ANALYSIS_V2_AI_CAPACITY_PENDING':
@@ -393,7 +396,8 @@ export async function runAnalysisV2FairAiScheduler<T>(
     let onlyRequiredCapacity = localStandardResolverGraceMs() === 50_000;
     const fail = (error: unknown, requiredCapacity = false) => {
         if (!requiredCapacity) onlyRequiredCapacity = false;
-        fatalError ??= error;
+        // A skipped new reservation must never hide a sibling's hard failure or uncertain charge.
+        fatalError = fatalError === undefined ? error : preferredAiSiblingFailure(fatalError, error);
     };
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
 
@@ -500,7 +504,10 @@ export async function runAnalysisV2FairAiScheduler<T>(
                                 claimToken: claim.claimToken,
                                 reason,
                             });
-                            fail(new AnalysisV2SchedulerAdmissionDeferredError(reason, notBeforeAtMs), requiredOperationCapacity);
+                            // Keep this typed rollback until the parent has drained its paid siblings.
+                            // The durable operation already has the five-second capacity not-before.
+                            if (error instanceof VertexAiBudgetCapacityPendingError) fail(error);
+                            else fail(new AnalysisV2SchedulerAdmissionDeferredError(reason, notBeforeAtMs), requiredOperationCapacity);
                         } catch (deferralError) {
                             fail(deferralError);
                         }

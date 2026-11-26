@@ -1,3 +1,5 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import type { AnalysisV2AiAdmissionErrorCode } from './v2-job-store';
 
 export const PROFILE_CONSUMER_READ_TIMEOUT = 'ANALYSIS_V2_PROFILE_CONSUMER_READ_TIMEOUT';
@@ -49,4 +51,16 @@ AnalysisV2SchedulerContinuationReason | null {
     default:
         return null;
     }
+}
+
+function siblingFailurePriority(error: unknown): number {
+    if (error instanceof VertexAiBudgetCapacityPendingError || error instanceof DevLiveVertexBudgetReservationPendingError) return 0;
+    const reason = schedulerContinuationReason(error);
+    if (reason === 'ANALYSIS_V2_AI_RESULT_RECOVERY_PENDING' || reason === 'ANALYSIS_V2_AI_QUARANTINE_ACTIVE') return 1;
+    return reason === null ? 2 : 0;
+}
+
+/** Preserve the first hard failure, then uncertain paid attempts, then ordinary admission waits. */
+export function preferredAiSiblingFailure(current: unknown, next: unknown): unknown {
+    return siblingFailurePriority(next) > siblingFailurePriority(current) ? next : current;
 }

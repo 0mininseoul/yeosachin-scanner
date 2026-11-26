@@ -56,6 +56,17 @@ export function capturePaidStandardDispatchSelection(): () => Promise<boolean> {
     return async () => active ? select(active) : false;
 }
 
+/** A refused reservation can wait only when this exact request has confirmed paid routing. */
+export async function paidStandardBudgetWaitEnabled(runId: string): Promise<boolean> {
+    const active = delivery.getStore();
+    if (!active || active.requestId !== runId) return false;
+    try {
+        return await select(active);
+    } catch {
+        return false;
+    }
+}
+
 /** The final attempt transaction binds the same worker claim and input that passed the wire fence. */
 export async function paidStandardReservationClaim(job: PaidStandardCapacityJob): Promise<{ inputHash: string } | null> {
     const active = delivery.getStore();

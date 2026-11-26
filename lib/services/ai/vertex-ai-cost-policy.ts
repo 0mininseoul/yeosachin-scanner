@@ -281,6 +281,12 @@ export interface VertexAiBudgetSnapshot {
     day: Readonly<Record<string, number>>;
 }
 
+export class VertexAiBudgetCapacityPendingError extends Error {
+    constructor() {
+        super('VERTEX_AI_BUDGET_CAPACITY_PENDING');
+    }
+}
+
 export class VertexAiBudgetExceededError extends Error {
     constructor(
         public readonly scope: 'run' | 'order' | 'day',

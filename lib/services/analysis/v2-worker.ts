@@ -1,4 +1,5 @@
 import { capturePaidStandardDispatchSelection, withPaidStandardCapacityJob } from './paid-standard-capacity';
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { VertexDispatchAuthorizationError, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
 import { observableAnalysisV2JobKey, sanitizeOperationalEvent } from '@/lib/observability/schema';
@@ -1281,7 +1282,8 @@ export async function processAnalysisV2TaskDelivery(
         });
     } catch (error) {
         // Some durable stages run directly without the per-operation scheduler.
-        const continuation = error instanceof DevLiveVertexBudgetReservationPendingError
+        const continuation = error instanceof VertexAiBudgetCapacityPendingError
+            || error instanceof DevLiveVertexBudgetReservationPendingError
             || (error instanceof VertexDispatchAuthorizationError && error.reason === 'db_contention')
             ? new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5)
             : error;

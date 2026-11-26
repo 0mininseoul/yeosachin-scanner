@@ -2,6 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 
+import { safeStandardBudgetRpcFields } from './standard-shared-budget-evidence';
+
 const migrationVersions = [
     '20261120160000',
     '20261120161000',
@@ -31,6 +33,7 @@ const migrationVersions = [
     '20261126100001',
     '20261126100002',
     '20261126100003',
+    '20261126100004',
 ];
 
 export interface StandardConnection {
@@ -185,10 +188,10 @@ export function localDatabaseClient(db: StandardDatabase, subject?: string | nul
             );
             return { data: value, error: null };
         } catch (cause) {
-            const error = cause as { code: string; message: string; constraint?: string };
+            const error = cause as { code: string; message: string; constraint?: string; hint?: string; detail?: string };
             const constraint = error.code === '23514' && /^[a-z][a-z0-9_]{0,62}$/.test(error.constraint ?? '')
                 ? error.constraint : undefined;
-            return { data: null, error: { code: error.code, message: error.message, constraint } };
+            return { data: null, error: { code: error.code, message: error.message, constraint, ...safeStandardBudgetRpcFields(name, error) } };
         }
     }
     function from(table: string) {

@@ -1,3 +1,4 @@
+import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -144,6 +145,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
                     handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
                 });
                 if (scenario === 'failed defer') await expect(run).rejects.toBe(timeout);
+                else if (scenario === 'mixed fence') await expect(run).rejects.toThrow('OPERATION_FENCE_MISMATCH');
                 else await expect(run).rejects.toMatchObject({ reason: capacity.message,
                     confirmedCapacityOnly: scenario === 'capacity' });
                 expect(store.defer).toHaveBeenCalledOnce();
@@ -174,6 +176,67 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         expect(store.defer).toHaveBeenCalledTimes(1);
         expect(store.commitReady).not.toHaveBeenCalled();
     });
+
+    it.each(['success', 'hard error'] as const)('drains paid siblings after a temporary budget rejection (%s)', async outcome => {
+        const pending = new VertexAiBudgetCapacityPendingError();
+        const hard = new Error('VERTEX_AI_BUDGET_EXCEEDED:run');
+        const store = { ...operationStore(), defer: vi.fn().mockResolvedValue(5_000) };
+        let finish!: () => void;
+        const receiving = new Promise<void>(resolve => { finish = resolve; });
+        const sibling = vi.fn(async () => {
+            await receiving;
+            if (outcome === 'hard error') throw hard;
+            return 'paid-checkpoint';
+        });
+        const done = vi.fn();
+        const run = runAnalysisV2FairAiScheduler({
+            capability: 'scheduler-v1', operationStore: store, handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+            tasks: [task('already-sent', 'featureAnalysis', 0, sibling),
+                task('no-funds-yet', 'featureAnalysis', 1, vi.fn().mockRejectedValue(pending))],
+        }).catch(done);
+        try {
+            await vi.waitFor(() => expect(store.defer).toHaveBeenCalledExactlyOnceWith({
+                key: 'no-funds-yet', stage: 'featureAnalysis', claimToken: 'claim:no-funds-yet', reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING',
+            }));
+            expect(done).not.toHaveBeenCalled();
+        } finally {
+            finish();
+            await run;
+        }
+        expect(sibling).toHaveBeenCalledOnce();
+        expect(done).toHaveBeenCalledExactlyOnceWith(outcome === 'success' ? pending : hard);
+        expect(store.commitReady).toHaveBeenCalledTimes(outcome === 'success' ? 1 : 0);
+    });
+
+    it.each(['budget first', 'deadline first', 'hard first'] as const)(
+        'returns the first hard sibling error after all admitted work drains (%s)', async order => {
+            const budget = new VertexAiBudgetCapacityPendingError();
+            const deadline = new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+            const hard = new Error('VERTEX_AI_BUDGET_EXCEEDED:run');
+            const fence = new Error('ANALYSIS_V2_AI_RESULT_FENCE_MISMATCH');
+            const failures = order === 'budget first' ? [budget, deadline, fence, hard]
+                : order === 'deadline first' ? [deadline, budget, hard, fence] : [hard, budget, deadline, fence];
+            const reject: ((error: Error) => void)[] = [];
+            const runs = failures.map(() => vi.fn(() => new Promise<string>((_, fail) => { reject.push(fail); })));
+            const store = { ...operationStore(), defer: vi.fn().mockResolvedValue(5_000) };
+            const done = vi.fn();
+            const result = runAnalysisV2FairAiScheduler({
+                capability: 'scheduler-v1', operationStore: store, handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+                tasks: runs.map((run, index) => task(String(index), 'genderTriage', index, run)),
+            }).catch(done);
+            await vi.waitFor(() => expect(reject).toHaveLength(4));
+            for (const [index, error] of failures.entries()) {
+                expect(done).not.toHaveBeenCalled();
+                reject[index]!(error);
+                await new Promise<void>(resolve => setImmediate(resolve));
+            }
+            await result;
+            expect(done).toHaveBeenCalledExactlyOnceWith(order === 'budget first' ? fence : hard);
+            expect(store.defer).toHaveBeenCalledTimes(2);
+            expect(store.commitReady).not.toHaveBeenCalled();
+            runs.forEach(run => expect(run).toHaveBeenCalledOnce());
+        },
+    );
 
     it('is fail-closed outside the exact persisted scheduler capability', async () => {
         await expect(runAnalysisV2FairAiScheduler({

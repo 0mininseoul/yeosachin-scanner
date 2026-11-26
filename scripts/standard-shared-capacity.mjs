@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { sharedStandardCapacity } from '../tests/analysis/execution/fixtures/standard-shared-capacities.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const [owners = '16', preset = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', tail = 'immediate', delivery = 'fixture', ...rest] =
+const [owners = '16', preset = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', tail = 'immediate', delivery = 'fixture', budgetProbe, ...rest] =
     process.argv.slice(2);
 const capacity = sharedStandardCapacity(preset);
 const graceByStrategy = { immediate: '0', grace8s: '8000', finish50s: '50000', coverage99: '0' };
@@ -13,10 +13,12 @@ if (rest.length || !/^(?:[1-9]|1[0-6])$/.test(owners) || !['normal', 'recovery']
     || !/^[1-9][0-9]{0,2}$/.test(publicCount) || Number(publicCount) > 600
     || !['fixture', 'production-paid'].includes(delivery)
     || (tail === 'coverage99' && (scenario !== 'recovery' || Number(publicCount) < 4))
+    || (budgetProbe !== undefined && (!['held', 'spent'].includes(budgetProbe) || owners !== '1' || publicCount !== '4'
+        || delivery !== 'production-paid' || timing !== 'fast'))
     || (delivery === 'production-paid' && (capacity.slots !== 128 || tail !== 'coverage99'))
     || !Object.hasOwn(graceByStrategy, tail) || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
     throw new Error('Usage: node scripts/standard-shared-capacity.mjs [1..16] [capacity preset] [normal|recovery] '
-        + '[absolute-new-receipt.json] [1..600 public candidates] [fast|observed] [immediate|grace8s|finish50s|coverage99] [fixture|production-paid]');
+        + '[absolute-new-receipt.json] [1..600 public candidates] [fast|observed] [immediate|grace8s|finish50s|coverage99] [fixture|production-paid] [held|spent]');
 }
 
 const test = [process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--config',
@@ -43,6 +45,7 @@ const env = {
     SHARED_STANDARD_TIMING: timing,
     STANDARD_SHARED_RESOLVER_GRACE_MS: graceByStrategy[tail],
     ...(tail === 'coverage99' && delivery === 'fixture' ? { DEV_LIVE_STANDARD_RESOLVER_MODE: 'admitted' } : {}),
+    ...(budgetProbe ? { SHARED_STANDARD_BUDGET_PROBE: budgetProbe } : {}),
     ...(receipt ? { SHARED_STANDARD_RECEIPT: receipt } : {}),
 };
 const result = spawnSync(sandbox[0], [...sandbox.slice(1), ...test], { cwd: root, env, stdio: 'inherit' });

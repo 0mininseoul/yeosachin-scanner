@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    VertexAiBudgetCapacityPendingError,
     VertexAiBudgetExceededError,
     type VertexAiBudgetLimits,
     type VertexAiBudgetReservationInput,
@@ -8,6 +9,7 @@ import {
     createSupabaseVertexAiBudgetStore,
     type VertexAiBudgetRpcClient,
 } from '../../lib/services/ai/vertex-ai-budget-store';
+import { withPaidStandardCapacityJob } from '../../lib/services/analysis/paid-standard-capacity';
 
 const input: VertexAiBudgetReservationInput = {
     reservationKey: 'run-1:feature:1',
@@ -97,5 +99,31 @@ describe('Supabase Vertex AI budget store adapter', () => {
         };
         await expect(createSupabaseVertexAiBudgetStore(client).reserve(input))
             .rejects.toBeInstanceOf(VertexAiBudgetExceededError);
+    });
+
+    it.each([
+        ['approved', true], ['outside-worker', false], ['different-run', false], ['unapproved', false],
+        ['verification-error', false], ['ordinary-denial', false], ['wrong-code', false],
+    ] as const)('classifies database-confirmed open holds only for the registered paid request (%s)', async (mode, pending) => {
+        const store = createSupabaseVertexAiBudgetStore({
+            rpc: async () => ({
+                data: null,
+                error: { message: 'VERTEX_AI_BUDGET_EXCEEDED:run:fixture-run', code: mode === 'wrong-code' ? '57014' : 'P0001',
+                    hint: mode === 'ordinary-denial' ? null : 'VERTEX_AI_BUDGET_CAPACITY_PENDING' },
+            }),
+        });
+        const run = withPaidStandardCapacityJob(
+            { requestId: mode === 'different-run' ? 'another-run' : input.runId, jobKey: 'job', claimToken: 'test-claim' },
+            async () => {
+                if (mode === 'verification-error') throw new Error('TEST_OFFLINE');
+                return mode !== 'unapproved';
+            },
+            () => store.reserve(input),
+            { NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                PAID_STANDARD_VERTEX_CAPACITY_MODE: mode === 'outside-worker' ? 'off' : 'expanded128',
+                ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+        );
+        await expect(run).rejects.toBeInstanceOf(pending ? VertexAiBudgetCapacityPendingError : VertexAiBudgetExceededError);
+        if (pending) await expect(run).rejects.toThrow(/^VERTEX_AI_BUDGET_CAPACITY_PENDING$/);
     });
 });

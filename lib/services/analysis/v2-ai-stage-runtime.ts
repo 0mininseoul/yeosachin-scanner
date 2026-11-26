@@ -10,7 +10,7 @@ import {
     assertSupportedAiStagePolicyVersion,
     type AiStagePolicyVersion,
 } from '@/lib/services/ai/stage-policy';
-import type { VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
+import { VertexAiBudgetCapacityPendingError, VertexAiBudgetExceededError, type VertexAiBudgetGuard } from '@/lib/services/ai/vertex-ai-cost-policy';
 import {
     analyzePrivateAccountNames,
     createPrivateNameBatchIdentity,
@@ -167,7 +167,8 @@ export type AnalysisV2GenderResolutionState =
     }
     | { status: 'cutoff' }
     | { status: 'recovery_pending' }
-    | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError }
+    | { status: 'blocking_error'; error: Error }
+    | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError | VertexAiBudgetCapacityPendingError }
     | { status: 'capacity_skipped'; localFirstAttemptTimedOut?: true }
     | { status: 'deadline_pending' }
     | { status: 'unsent_capacity_pending' }
@@ -781,8 +782,20 @@ export function createDurableAnalysisV2AiStageRuntime(
                         state = { status: 'deadline_pending' };
                         return;
                     }
-                    if (error instanceof DevLiveVertexBudgetReservationPendingError) {
+                    if (error instanceof DevLiveVertexBudgetReservationPendingError || error instanceof VertexAiBudgetCapacityPendingError) {
                         state = { status: 'budget_reservation_pending', error };
+                        return;
+                    }
+                    // Only the admitted Standard path drains paid siblings across a continuation.
+                    if (fence.admittedStandardResolver && error instanceof Error && (
+                        error instanceof VertexAiBudgetExceededError
+                        || error.message.endsWith('_FENCE_MISMATCH')
+                        || error.message === 'ANALYSIS_V2_JOB_LEASE_LOST'
+                        || error.message === 'DEV_LIVE_BUDGET_EXCEEDED'
+                        || error.message === 'DEV_LIVE_BUDGET_UNAVAILABLE'
+                        || error.message.startsWith('VERTEX_AI_BUDGET_RPC_')
+                    )) {
+                        state = { status: 'blocking_error', error };
                         return;
                     }
                     if (error instanceof Error && (

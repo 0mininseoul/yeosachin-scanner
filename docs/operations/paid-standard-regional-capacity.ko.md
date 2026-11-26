@@ -14,7 +14,9 @@
 ## 전환 전
 
 1. 기존 [유료 워커 배포기](../../scripts/deploy-analysis-capacity-workers.sh)의 일반 배포 절차로 검토한 커밋을 활성 유료 워커에 반영하고 운영 manifest로 `--role=paid --check`를 통과한다. 같은 출시에서 사전점검 워커·공개 생산자·공급자 연동을 별도로 변경하는 경우 해당 변경과 검증을 먼저 마친다. 계획 생성부터 최종 승격 또는 원복 검증까지 이 서비스·큐에는 배포 담당자 한 명만 쓴다. 그동안 기존 배포기, 자동 배포와 콘솔 수동 변경을 배제한다. LATEST 전환도 같은 단독 변경 창에서 수행한다.
-2. 승인된 운영 Supabase 연결에서 active 요청·작업·provider lease를 집계한다. 수동 [운영 SQL](../../supabase/operations/20261126_expand_paid_standard_vertex.sql)은 설치 시 유휴 상태, 기존 함수·권한·8슬롯·120 RPM을 직접 확인한다. 등록된 운영 프로젝트 한 곳에 적용한 뒤 128개의 슬롯, global budget `max_active=128`·`rate_limit_per_minute=240`, 전용 RPC의 역할 제한과 검토한 함수 지문을 대조한다. 기존 8슬롯 호출자와 80/48 단계 상한은 SQL이 검사하는 함수 및 [네이티브 회귀](../../tests/analysis/execution/fixtures/paid-standard-capacity.test.ts)의 범위다. 이미 설치된 SQL은 설치 이력과 함수 지문으로 검증한다.
+2. [예산 예약 분류 마이그레이션](../../supabase/migrations/20261126100004_classify_open_vertex_budget_reservations.sql)의 적용 이력과 함수 권한을 확인한다. 기존 요청별·주문별·일별 상한을 사용한다. 진행 중인 예약만 정리되면 다음 호출이 들어갈 때 워커가 송신 전에 대기한다.
+
+   승인된 운영 Supabase 연결에서 active 요청·작업·provider lease를 집계한다. 수동 [운영 SQL](../../supabase/operations/20261126_expand_paid_standard_vertex.sql)은 설치 시 유휴 상태, 기존 함수·권한·8슬롯·120 RPM을 직접 확인한다. 등록된 운영 프로젝트 한 곳에 적용한 뒤 128개의 슬롯, global budget `max_active=128`·`rate_limit_per_minute=240`, 전용 RPC의 역할 제한과 검토한 함수 지문을 대조한다. 기존 8슬롯 호출자와 80/48 단계 상한은 SQL이 검사하는 함수 및 [네이티브 회귀](../../tests/analysis/execution/fixtures/paid-standard-capacity.test.ts)의 범위다. 이미 설치된 SQL은 설치 이력과 함수 지문으로 검증한다.
 3. DB의 `public.paid_analysis_capacity_policy` 단일 행에서 `max_active`, `validation_ref`, `expected_basic_max_minutes`, `expected_standard_max_minutes`를 읽고 복원용 값을 보존한다. 이전 정책과 전환할 정책을 같은 출시 기록에 둔다. 신규 주문을 받기 전에 같은 코드·후보 범위·큐·DB·워커 구성에서 검증한 동시 주문 수 N을 `max_active`에, 검증 근거를 `validation_ref`에 반영한다. 시간 측정 근거가 있는 플랜의 ETA만 해당 `expected_*_max_minutes`에 넣는다. N은 인스턴스 수나 큐 동시성과 독립적이다. NULL인 `max_active`는 기존 무제한 입장 경로다. 접수를 닫으려면 기존 출시 제어를 사용한다. [결제 대기 정책](../../supabase/migrations/20261126100000_add_paid_analysis_capacity_queue.sql)
 4. 현재 서울 할당량과 다른 서비스의 점유를 관측한다. 18개 유료 인스턴스가 모두 동작할 때 18 vCPU·36 GiB를 사용한다. 프로젝트 할당량과 실제 분당 요청 한도는 같은 시점에 조회한다.
 
