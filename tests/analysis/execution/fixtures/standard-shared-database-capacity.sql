@@ -5,6 +5,7 @@ DO $capacity$
 DECLARE
     slots int := current_setting('standard_shared.vertex_slots')::int;
     feature_cap int := current_setting('standard_shared.feature_slots')::int;
+    resolver_cap int := current_setting('standard_shared.resolver_slots')::int;
     credential_pattern text;
     allocator regprocedure := 'public.acquire_analysis_v2_gemini_lease_v2(uuid,text,text,text,integer,uuid,integer)'::regprocedure;
     existing_rank_end constant text := $original$          AND admission.state IN ('leased', 'recovery_required')
@@ -27,7 +28,7 @@ DECLARE
     installed text;
     revised text;
 BEGIN
-    IF (slots, feature_cap) NOT IN ((48,32), (56,40), (64,48), (80,70))
+    IF (slots, feature_cap, resolver_cap) NOT IN ((48,32,6), (56,40,6), (64,48,6), (80,70,6), (80,70,12), (112,70,40), (128,80,48))
         OR current_setting('listen_addresses') <> '' OR inet_server_addr() IS NOT NULL
         OR to_regclass('dev_live_budget.standard_owner_policy') IS NULL
         OR EXISTS (SELECT FROM public.analysis_requests)
@@ -39,7 +40,9 @@ BEGIN
     credential_pattern := CASE slots WHEN 48 THEN '([1-9]|[1-3][0-9]|4[0-8])'
         WHEN 56 THEN '([1-9]|[1-4][0-9]|5[0-6])'
         WHEN 64 THEN '([1-9]|[1-5][0-9]|6[0-4])'
-        WHEN 80 THEN '([1-9]|[1-7][0-9]|80)' END;
+        WHEN 80 THEN '([1-9]|[1-7][0-9]|80)'
+        WHEN 112 THEN '([1-9]|[1-9][0-9]|10[0-9]|11[0-2])'
+        WHEN 128 THEN '([1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])' END;
 
     FOR patch IN SELECT * FROM (VALUES
         ('acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)',
@@ -73,7 +76,7 @@ BEGIN
         revised := replace(revised, '^gemini-([1-8])$', '^gemini-' || credential_pattern || '$');
         revised := replace(revised, 'WHEN ''featureAnalysis'' THEN 6', 'WHEN ''featureAnalysis'' THEN ' || feature_cap);
         revised := replace(revised, 'WHEN ''genderTriage'' THEN 6', 'WHEN ''genderTriage'' THEN 12');
-        revised := replace(revised, 'v_resolver_count >= 2', 'v_resolver_count >= 6');
+        revised := replace(revised, 'v_resolver_count >= 2', 'v_resolver_count >= ' || resolver_cap);
         IF signature = allocator THEN
             IF pg_catalog.strpos(revised, existing_rank_end) = 0
                OR NOT pg_catalog.has_function_privilege('service_role', signature, 'EXECUTE')

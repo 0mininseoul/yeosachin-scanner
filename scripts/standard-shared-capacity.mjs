@@ -4,15 +4,16 @@ import { fileURLToPath } from 'node:url';
 import { sharedStandardCapacity } from '../tests/analysis/execution/fixtures/standard-shared-capacities.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const [owners = '16', slots = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', ...rest] =
+const [owners = '16', preset = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', tail = 'immediate', ...rest] =
     process.argv.slice(2);
-const capacity = sharedStandardCapacity(slots);
+const capacity = sharedStandardCapacity(preset);
+const graceByStrategy = { immediate: '0', grace8s: '8000', finish50s: '50000' };
 
 if (rest.length || !['2', '16'].includes(owners) || !['normal', 'recovery'].includes(scenario)
     || !/^[1-9][0-9]{0,2}$/.test(publicCount) || Number(publicCount) > 240
-    || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
-    throw new Error('Usage: node scripts/standard-shared-capacity.mjs [2|16] [8|48|56|64|80] [normal|recovery] '
-        + '[absolute-new-receipt.json] [1..240 public candidates] [fast|observed]');
+    || !Object.hasOwn(graceByStrategy, tail) || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
+    throw new Error('Usage: node scripts/standard-shared-capacity.mjs [2|16] [capacity preset] [normal|recovery] '
+        + '[absolute-new-receipt.json] [1..240 public candidates] [fast|observed] [immediate|grace8s|finish50s]');
 }
 
 const test = [process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--config',
@@ -31,10 +32,12 @@ const env = {
     NODE_ENV: 'test',
     SHARED_STANDARD_OWNERS: owners,
     SHARED_STANDARD_WORKERS: String(capacity.workers),
-    STANDARD_SHARED_VERTEX_SLOTS: slots,
+    SHARED_STANDARD_PRESET: preset,
+    STANDARD_SHARED_VERTEX_SLOTS: String(capacity.slots),
     SHARED_STANDARD_SCENARIO: scenario,
     SHARED_STANDARD_PUBLIC: publicCount,
     SHARED_STANDARD_TIMING: timing,
+    STANDARD_SHARED_RESOLVER_GRACE_MS: graceByStrategy[tail],
     ...(receipt ? { SHARED_STANDARD_RECEIPT: receipt } : {}),
 };
 const result = spawnSync(sandbox[0], [...sandbox.slice(1), ...test], { cwd: root, env, stdio: 'inherit' });

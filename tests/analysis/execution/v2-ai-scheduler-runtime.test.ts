@@ -111,6 +111,48 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         });
     });
 
+    it.each(['capacity', 'mixed fence', 'rollback', 'already deferred', 'failed defer', 'untrusted commit'] as const)(
+        'marks only a durably deferred capacity-only scheduler turn for the 50s trial (%s)', async scenario => {
+            vi.stubEnv('STANDARD_SHARED_RESOLVER_GRACE_MS', '50000');
+            try {
+                const states = new Map<string, 'claimed' | 'ready'>();
+                if (scenario === 'already deferred') states.set('peer', 'claimed');
+                const store = operationStore(states);
+                const capacity = new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+                const timeout = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+                let releasePeer!: () => void;
+                const peerMayFinish = new Promise<void>(resolve => { releasePeer = resolve; });
+                store.defer = vi.fn(async () => {
+                    if (scenario === 'failed defer') throw timeout;
+                    releasePeer();
+                    return 5000;
+                });
+                if (scenario === 'untrusted commit') store.commitReady = vi.fn().mockRejectedValue(capacity);
+                const tasks = [task('required', 'featureAnalysis', 0, vi.fn(async () => {
+                    if (scenario === 'untrusted commit') return 'completed';
+                    if (scenario === 'rollback') throw new DevLiveVertexBudgetReservationPendingError();
+                    throw capacity;
+                }))];
+                if (scenario === 'mixed fence' || scenario === 'already deferred') {
+                    tasks.unshift(task('peer', 'featureAnalysis', 0, vi.fn(async () => {
+                        await peerMayFinish;
+                        throw new Error('OPERATION_FENCE_MISMATCH');
+                    })));
+                }
+                const run = runAnalysisV2FairAiScheduler({
+                    capability: 'scheduler-v1', tasks, operationStore: store,
+                    handlerDeadlineAtMs: 1_000_000, nowMs: () => 0,
+                });
+                if (scenario === 'failed defer') await expect(run).rejects.toBe(timeout);
+                else await expect(run).rejects.toMatchObject({ reason: capacity.message,
+                    confirmedCapacityOnly: scenario === 'capacity' });
+                expect(store.defer).toHaveBeenCalledOnce();
+            } finally {
+                vi.unstubAllEnvs();
+            }
+        },
+    );
+
     it('releases the operation fence only for a proven pre-dispatch budget rollback', async () => {
         const rollback = new DevLiveVertexBudgetReservationPendingError();
         const store = { ...operationStore(), defer: vi.fn().mockResolvedValue(5_000) };

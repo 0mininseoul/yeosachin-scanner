@@ -59,9 +59,11 @@ function slotMaximum(env: Record<string, string | undefined>) {
     if (env.STANDARD_SHARED_VERTEX_SLOTS === '56') return 56;
     if (env.STANDARD_SHARED_VERTEX_SLOTS === '64') return 64;
     if (env.STANDARD_SHARED_VERTEX_SLOTS === '80') return 80;
+    if (env.STANDARD_SHARED_VERTEX_SLOTS === '112') return 112;
+    if (env.STANDARD_SHARED_VERTEX_SLOTS === '128') return 128;
     return 8;
 }
-const slotNumber = z.number().int().min(1).max(80);
+const slotNumber = z.number().int().min(1).max(128);
 const acquiredRowSchema = z.object({
     outcome: z.literal('acquired'),
     slot: slotNumber,

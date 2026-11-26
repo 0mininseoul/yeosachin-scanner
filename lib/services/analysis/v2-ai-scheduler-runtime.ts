@@ -1,3 +1,4 @@
+import { localStandardResolverGraceMs } from './v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
@@ -132,6 +133,7 @@ export class AnalysisV2SchedulerAdmissionDeferredError extends Error {
     constructor(
         readonly reason: SchedulerAdmissionReason,
         readonly notBeforeAtMs: number,
+        readonly confirmedCapacityOnly = false,
     ) {
         super(reason);
         this.name = 'AnalysisV2SchedulerAdmissionDeferredError';
@@ -388,6 +390,11 @@ export async function runAnalysisV2FairAiScheduler<T>(
     let cursor = 0;
     const active = new Set<Promise<void>>();
     let fatalError: unknown;
+    let onlyRequiredCapacity = localStandardResolverGraceMs() === 50_000;
+    const fail = (error: unknown, requiredCapacity = false) => {
+        if (!requiredCapacity) onlyRequiredCapacity = false;
+        fatalError ??= error;
+    };
     const mayAdmit = () => nowMs() + policy.admissionReserveMs < input.handlerDeadlineAtMs;
 
     const admitOne = async (): Promise<
@@ -419,10 +426,11 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 // Other operations may still be receiving a paid response. Do
                 // not move the parent job fence until their writes have drained.
-                fatalError ??= error;
+                fail(error);
                 return { status: 'blocked', generation: null };
             }
             if (claim.decision === 'deferred') {
+                onlyRequiredCapacity = false;
                 queue.shift();
                 arbiter.cancel(waiter);
                 recoveryPending.add(task.key);
@@ -454,12 +462,17 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 lease.release();
                 throw new Error('ANALYSIS_V2_SCHEDULER_RECOVERY_HANDLER_MISSING');
             }
+            if (claim.terminalUnavailable || claim.recoveryOnly) onlyRequiredCapacity = false;
             const operation = claim.terminalUnavailable
                 ? task.terminalFallback!
                 : claim.recoveryOnly ? task.recover! : task.run;
-            const execution = Promise.resolve()
-                .then(operation)
-                .then(async value => {
+            let requiredOperationCapacity = false;
+            const started = Promise.resolve().then(operation);
+            const observed = onlyRequiredCapacity ? started.catch(error => {
+                requiredOperationCapacity = error instanceof Error && error.message === 'ANALYSIS_V2_AI_CAPACITY_PENDING';
+                throw error;
+            }) : started;
+            const execution = observed.then(async value => {
                     await input.operationStore.commitReady({
                         key: task.key,
                         stage: task.stage,
@@ -487,16 +500,13 @@ export async function runAnalysisV2FairAiScheduler<T>(
                                 claimToken: claim.claimToken,
                                 reason,
                             });
-                            fatalError ??= new AnalysisV2SchedulerAdmissionDeferredError(
-                                reason,
-                                notBeforeAtMs,
-                            );
+                            fail(new AnalysisV2SchedulerAdmissionDeferredError(reason, notBeforeAtMs), requiredOperationCapacity);
                         } catch (deferralError) {
-                            fatalError ??= deferralError;
+                            fail(deferralError);
                         }
                         return;
                     }
-                    fatalError ??= error;
+                    fail(error);
                 })
                 .finally(() => {
                     lease.release();
@@ -524,7 +534,12 @@ export async function runAnalysisV2FairAiScheduler<T>(
                 await Promise.race(active);
                 continue;
             }
-            if (fatalError !== undefined) throw fatalError;
+            if (fatalError !== undefined) {
+                if (onlyRequiredCapacity && fatalError instanceof AnalysisV2SchedulerAdmissionDeferredError) {
+                    throw new AnalysisV2SchedulerAdmissionDeferredError(fatalError.reason, fatalError.notBeforeAtMs, true);
+                }
+                throw fatalError;
+            }
             if (!mayAdmit()) break;
             if (!admittedOrHandled) {
                 if (blockedGeneration === null) break;

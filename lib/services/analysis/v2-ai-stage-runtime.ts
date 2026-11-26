@@ -74,6 +74,7 @@ import {
 } from './v2-ai-scheduler-operation-store';
 import {
     AnalysisV2SchedulerContinuationError,
+    AnalysisV2ConfirmedCapacityContinuation,
     schedulerContinuationReason,
 } from './v2-ai-scheduler-continuation';
 
@@ -169,6 +170,7 @@ export type AnalysisV2GenderResolutionState =
 export interface AnalysisV2GenderResolutionHandle {
     operationKey: string;
     completion: Promise<void>;
+    holdActiveAttempt?(): boolean;
     peek(): AnalysisV2GenderResolutionState;
     cutoff(): Promise<void>;
 }
@@ -421,7 +423,9 @@ function createSchedulerMicrobatch(
                     Math.ceil((error.notBeforeAtMs - performance.now()) / 1_000),
                 ));
                 plans.forEach(plan => plan.reject(
-                    new AnalysisV2SchedulerContinuationError(error.reason, delaySeconds),
+                    error.confirmedCapacityOnly && error.reason === 'ANALYSIS_V2_AI_CAPACITY_PENDING'
+                        ? new AnalysisV2ConfirmedCapacityContinuation(delaySeconds)
+                        : new AnalysisV2SchedulerContinuationError(error.reason, delaySeconds),
                 ));
                 return;
             }
@@ -765,6 +769,7 @@ export function createDurableAnalysisV2AiStageRuntime(
             return {
                 operationKey: identity.operationKey,
                 completion,
+                holdActiveAttempt: audit.holdActiveResolverAttempt,
                 peek: () => state,
                 cutoff() {
                     if (cutoffStarted) return cutoffStarted;

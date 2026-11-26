@@ -9,8 +9,9 @@ import { parseAnalysisV2TaskPayload } from '@/lib/services/analysis/v2-tasks';
 import { startSharedStandardMaintenance } from './fixtures/standard-shared-maintenance';
 import { POST as paidWorker } from '@/app/api/analysis/v2/worker/route';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION, ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER } from '@/lib/services/analysis/v2-worker-task-contract';
-import { databaseCounters, sharedStandardFailureSummary, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
+import { databaseCounters, sharedStandardStopEvidence, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
 import { createSharedStandardDatabase } from './fixtures/standard-shared-database';
+import { readSharedResolverLedger, SharedResolverObservation } from './fixtures/standard-shared-resolver-observation';
 import { sharedStandardCapacity } from './fixtures/standard-shared-capacities.mjs';
 import { configureSharedStandard } from './fixtures/standard-shared-environment';
 import { StandardSharedQueue } from './fixtures/standard-shared-queue';
@@ -91,10 +92,13 @@ vi.mock('@google/genai/node', async original => ({
         constructor(options: { fetch: typeof fetch }) {
             const transport = options.fetch;
             this.models = {
-                generateContent: async (input: unknown) => {
+                generateContent: (input: unknown) => {
                     const signal = (input as { config?: { abortSignal?: AbortSignal } }).config?.abortSignal;
-                    await transport('https://vertex.fixture.invalid', { signal });
-                    return boundary.model(input);
+                    const generate = async () => {
+                        await transport('https://vertex.fixture.invalid', { signal });
+                        return boundary.model(input);
+                    };
+                    return private90ModelStage(input) === 'resolver' ? resolverObservation.sdk(signal, generate) : generate();
                 }
             };
         }
@@ -139,6 +143,7 @@ const workerCapacity = new AsyncLocalStorage<ReturnType<typeof createWorkerCapac
 const auth = new AsyncLocalStorage<SharedStandardOwner | null>();
 const requestScope = new AsyncLocalStorage<string>();
 const activeTask = new AsyncLocalStorage<Record<string, unknown>>();
+let resolverObservation: SharedResolverObservation;
 function safeCode(value: unknown) {
     const word = value instanceof Error ? value.message.split(/[:\s]/)[0] : '';
     return /^[A-Z][A-Z0-9_]{1,95}$/.test(word) ? word : 'UNCLASSIFIED';
@@ -154,20 +159,25 @@ async function completeWave<T>(tasks: Promise<T>[]) {
 }
 
 it('publishes simultaneous paid Standard requests through one database and queue', async () => {
+    resolverObservation = new SharedResolverObservation();
     configureSharedStandard();
     for (const [key, value] of Object.entries(sharedStandardAdmissionEnv)) vi.stubEnv(key, value);
     vi.stubGlobal('fetch', async (url: unknown) => {
-        if (url === 'https://vertex.fixture.invalid') return new Response();
+        if (url === 'https://vertex.fixture.invalid') {
+            resolverObservation.wire();
+            return new Response();
+        }
         throw new Error('SHARED_STANDARD_EGRESS_DENIED');
     });
     const publicCount = Number(process.env.SHARED_STANDARD_PUBLIC ?? 1);
     const observedTiming = process.env.SHARED_STANDARD_TIMING === 'observed';
     const ownersCount = Number(process.env.SHARED_STANDARD_OWNERS ?? 16);
-    const { slots, workers } = sharedStandardCapacity(process.env.STANDARD_SHARED_VERTEX_SLOTS ?? '8');
+    const capacity = sharedStandardCapacity(process.env.SHARED_STANDARD_PRESET ?? '8');
+    const { slots, workers } = capacity;
     expect([2, 16]).toContain(ownersCount);
     if (process.env.SHARED_STANDARD_WORKERS !== undefined) expect(Number(process.env.SHARED_STANDARD_WORKERS)).toBe(workers);
     const recovery = process.env.SHARED_STANDARD_SCENARIO === 'recovery';
-    const db = await createSharedStandardDatabase(slots);
+    const db = await createSharedStandardDatabase(capacity.preset);
     try {
         const { rpc, from } = db.client();
         const errors: Record<string, number> = {};
@@ -183,6 +193,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
             }
             const reply = await rpc(name, args);
+            if (name === 'reserve_analysis_v2_ai_attempt' && !reply.error && reply.data && typeof reply.data === 'object'
+                && 'created' in reply.data && reply.data.created === true) {
+                resolverObservation.bindReservation(args.p_request_id, args.p_operation_key, args.p_attempt);
+            }
             if (timeoutRequest && timeoutRequest === requestScope.getStore() && !reply.error
                 && name === 'load_analysis_v2_profile_fetch_for_consumer'
                 && args.p_consumer_job_key === 'track:profile-ai:batch:0') resumedTimedOutRead = true;
@@ -249,8 +263,13 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     expect(duplicate.status).toBe(409);
                     expect((await duplicate.json()).code).toBe('JOB_LEASE_BUSY');
                 }
-                await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
-                return syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4);
+                try {
+                    await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
+                } catch (error) {
+                    resolverObservation.waitRejected(error);
+                    throw error;
+                }
+                return resolverObservation.response(syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4));
             } finally {
                 activeModels--;
             }
@@ -349,7 +368,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const matchedActorStarts = proofs.reduce((n, proof) => n + proof.actorReceipts.paid.matched + proof.actorReceipts.preflight.matched, 0);
             if (matchedActorStarts !== provider.starts.length) sharedLedgerIssues.push('actor_start_count_mismatch');
             expect(boundary.model.mock.calls.length).toBe(modelsBeforeReplay);
-            const measurements = await sharedStandardMeasurements(db, admitted.map(run => run.requestId));
+            const requestIds = admitted.map(run => run.requestId);
+            const resolverEvidence = resolverObservation.report(await readSharedResolverLedger(db, requestIds));
+            if (Object.values(resolverEvidence.issues).some(count => count > 0)) sharedLedgerIssues.push('resolver_sdk_ledger_mismatch');
+            const measurements = await sharedStandardMeasurements(db, requestIds);
             expect(measurements.times).toHaveLength(ownersCount);
             expect(measurements.times.every(t => t.admissionMs >= 0 && t.paymentMs >= t.admissionMs && t.ownerReadyMs >= t.paymentMs)).toBe(true);
             lateOwners = measurements.times.filter(t => !t.withinHour).length;
@@ -370,10 +392,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
             };
             const report = {
                 status: ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners ? 'completed_over_target' : 'verified',
-                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
-                peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
+                resolverEvidence, peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
             };
             marker('shared-standard-complete', report);
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(report, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
@@ -383,12 +405,18 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const reason = error instanceof Error && /^SHARED_WORKER_[a-z0-9:.-]+:[A-Z_0-9]+$/.test(error.message)
                 ? error.message : safeCode(error);
             const failure = {
-                status: 'failed', maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots,
+                status: 'failed', maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
-                errors, ...await sharedStandardFailureSummary(db)
+                errors, ...await sharedStandardStopEvidence(db, resolverObservation)
             };
             marker('shared-standard-stopped', failure);
-            if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+            if (process.env.SHARED_STANDARD_RECEIPT) {
+                try {
+                    writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(failure, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+                } catch {
+                    marker('shared-standard-receipt-write-failed', { reason });
+                }
+            }
             throw error;
         }
         // Keep all owner and cost proofs even when the measured deadline was missed.
@@ -396,6 +424,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         expect(ownersWithLedgerIssues, 'SHARED_ACCOUNTING_UNRESOLVED').toBe(0);
         expect(lateOwners, 'SHARED_OWNER_HOUR_EXCEEDED').toBe(0);
     } finally {
+        resolverObservation.dispose();
         await db.close();
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();

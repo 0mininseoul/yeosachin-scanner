@@ -1455,8 +1455,14 @@ describe('analysis V2 Gemini audit adapter', () => {
         });
 
         await adapter.prepare();
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(false);
         await adapter.onBeforeAttempt(resolverStart);
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(true);
+        await expect(adapter.onBeforeAttempt({ ...resolverStart, attempt: 2, retryCount: 1 }))
+            .rejects.toThrow('unexpected attempt reservation');
+        expect(leaseMocks.acquire).toHaveBeenCalledOnce();
         await adapter.cutoff?.();
+        expect(adapter.holdActiveResolverAttempt?.()).toBe(false);
         await adapter.onAttemptTelemetry(
             lateSuccess,
             { value: 'female', confidence: 0.9 }

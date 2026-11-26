@@ -377,6 +377,8 @@ export interface AnalysisV2AiAuditAdapter<T> {
         parsedResult?: unknown,
         repairedNarrative?: unknown
     ): Promise<void>;
+    /** Keep only the exact already-reserved resolver attempt alive during a local batch grace trial. */
+    holdActiveResolverAttempt?(): boolean;
     /** Resolver-only durable cutoff fence. Implementations must not await provider completion. */
     cutoff?(): Promise<void>;
     resultSchema: z.ZodType<T>;
@@ -1136,6 +1138,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
     let attemptSetup: Promise<void> | null = null;
     let cutoffStarted: Promise<void> | null = null;
     let cutoffRequested = false;
+    let holdCurrentAttemptOnly = false;
     let expectedAttempt: number | null = null;
     let terminal = false;
     const emittedTerminalAttempts = new Set<number>();
@@ -1323,6 +1326,14 @@ export function createAnalysisV2AiAuditAdapter<T>(
             return preparation;
         },
 
+        holdActiveResolverAttempt() {
+            if (resultIdentity.stage !== 'genderResolution' || terminal || cutoffRequested || reservations.size !== 1) {
+                return false;
+            }
+            holdCurrentAttemptOnly = true;
+            return true;
+        },
+
         async onBeforeAttempt(telemetry) {
             assertAuditTelemetryIdentity(telemetry, {
                 requestId: request.data.requestId,
@@ -1330,6 +1341,7 @@ export function createAnalysisV2AiAuditAdapter<T>(
             });
             if (
                 terminal
+                || holdCurrentAttemptOnly
                 || expectedAttempt === null
                 || telemetry.attempt !== expectedAttempt
                 || reservations.has(telemetry.attempt)

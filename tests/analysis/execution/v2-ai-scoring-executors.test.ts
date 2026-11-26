@@ -1,6 +1,6 @@
 import * as devBudget from '@/lib/services/dev-ui/live-budget';
 import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
-import { AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
+import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { createHash } from 'node:crypto';
 import { setFlagsFromString } from 'node:v8';
@@ -1754,6 +1754,135 @@ describe('V2 AI and scoring executors', () => {
         expect(cutoffs.get('feature.fatal')).toHaveBeenCalledOnce();
         expect(memoryState.outcomes).toEqual([]);
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { mode: 'trial', expectedWait: 8000 },
+        { mode: 'normal50', expectedWait: 50000 },
+        { mode: 'fallback50', expectedWait: 0 },
+        { mode: 'capacity50', expectedWait: 50000 },
+        { mode: 'unconfirmed50', expectedWait: 0 },
+        { mode: 'capacity8', expectedWait: 0 },
+        { mode: 'mixed50', expectedWait: 100 },
+        { mode: 'all-ready', expectedWait: 100 },
+        { mode: 'near-deadline', expectedWait: 1000 },
+        { mode: 'deadline-reached', expectedWait: 0 },
+        { mode: 'late-fence-failure', expectedWait: 100 },
+        { mode: 'off', expectedWait: 0 },
+        { mode: 'production', expectedWait: 0 },
+        { mode: 'required-failure', expectedWait: 0 },
+    ] as const)('bounds the offline Standard resolver window for $mode', async ({ mode, expectedWait }) => {
+        vi.useFakeTimers();
+        vi.stubEnv('STANDARD_SHARED_RESOLVER_GRACE_MS', mode.endsWith('50') ? '50000' : mode === 'off' ? '' : '8000');
+        if (mode === 'production') vi.stubEnv('NODE_ENV', 'production');
+        try {
+            const members = ['timely', 'slow', 'unadmitted'].map(name => profile(name));
+            const data = memory();
+            const deps = dependencies(data, {
+                profileAiConcurrency: mode === 'fallback50' ? 1 : 3,
+                profileBatches: { loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: members.map(row => row.username),
+                    results: members.map(row => ({ username: row.username, status: 'success' as const, profile: row })),
+                })) },
+            });
+            const confirmed = new AnalysisV2ConfirmedCapacityContinuation(5);
+            const uncertain = new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async input => {
+                if ((mode === 'capacity50' || mode === 'capacity8' || mode === 'mixed50')
+                    && input.media.some(m => m.selectionId.includes('timely'))) throw confirmed;
+                if (mode === 'mixed50' && input.media.some(m => m.selectionId.includes('slow'))) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    throw new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+                }
+                if (mode === 'fallback50' && input.media.some(m => m.selectionId.includes('timely'))) {
+                    throw new AnalysisV2AiResultRateLimitExhaustedError();
+                }
+                if (mode === 'unconfirmed50') throw uncertain;
+                if (mode === 'required-failure') throw new Error('ANALYSIS_V2_RESULT_FENCE_MISMATCH');
+                return {
+                    result: feature(input.media.map(row => row.selectionId), 'unresolved'),
+                    operationKey: `feature-analysis:${digest(input.media[0].selectionId)}`,
+                    resultHash: digest('feature-result'), source: 'checkpoint' as const,
+                };
+            });
+            const timedOut: { name: string; at: number }[] = [];
+            const held = vi.fn((name: string) => name !== 'unadmitted');
+            deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>(input => {
+                const name = members.find(row => input.media.some(m => m.selectionId.includes(row.username)))!.username;
+                const key = `gender-resolution:${digest(name)}`;
+                let progress: ReturnType<ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']> = { status: 'pending' };
+                const completion = new Promise<void>(resolve => {
+                    if (name !== 'timely' && !(mode === 'all-ready' && name === 'slow')) return;
+                    setTimeout(() => {
+                        if (progress.status === 'pending') progress = mode === 'late-fence-failure'
+                            ? { status: 'terminal_unavailable' }
+                            : { status: 'ready', value: {
+                                result: { assessment: { inferredGender: 'female', confidence: 'high', ownerConsistency: 'same_person',
+                                    evidenceSelectionIds: input.media.slice(0, 2).map(row => row.selectionId) },
+                                analyzedSelectionIds: input.media.map(row => row.selectionId) },
+                                operationKey: key, resultHash: digest('ready-resolver'), source: 'checkpoint',
+                            } };
+                        resolve();
+                    }, mode === 'late-fence-failure' || mode === 'all-ready' ? 100 : 7000);
+                });
+                return { operationKey: key, completion, peek: () => progress, holdActiveAttempt: () => held(name),
+                    cutoff: vi.fn(async () => {
+                        progress = { status: 'cutoff' };
+                        timedOut.push({ name, at: performance.now() });
+                    }),
+                };
+            });
+            const base = state();
+            const ctx = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
+                aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+                state: state({ planId: 'standard', relationships: { ...base.relationships!, profileBatches: [
+                    { batch: 0, itemCount: 3, inputHash: digest('trial-topology') },
+                ] }, profileFetchBatches: [{ batch: 0, itemCount: 3, producerInputHash: digest('trial-producer'),
+                    revision: 1, resultHash: digest('trial-fetch') }] }),
+            });
+            const start = performance.now();
+            const budget = mode === 'near-deadline' ? 16000 : mode === 'deadline-reached' ? 15000 : 120000;
+            const execution = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!({
+                ...ctx, handlerDeadlineAtMs: start + budget,
+            });
+            const expectContinuation = ['capacity50', 'capacity8', 'mixed50', 'unconfirmed50'].includes(mode);
+            const checked = expectContinuation ? expect(execution).rejects.toBe(mode === 'unconfirmed50' ? uncertain : confirmed)
+                : mode === 'required-failure' ? expect(execution).rejects.toThrow('ANALYSIS_V2_RESULT_FENCE_MISMATCH')
+                    : expect(execution).resolves.toBeDefined();
+            await vi.advanceTimersByTimeAsync(0);
+            if (mode === 'mixed50') {
+                expect(timedOut).toEqual([]);
+                await vi.advanceTimersByTimeAsync(100);
+                expect(held).not.toHaveBeenCalled();
+            } else if (expectedWait) {
+                expect(timedOut).toEqual([{ name: 'unadmitted', at: start }]);
+                await vi.advanceTimersByTimeAsync(expectedWait - 1);
+                expect(timedOut).toHaveLength(1);
+                await vi.advanceTimersByTimeAsync(1);
+            }
+            await checked;
+            if (mode === 'all-ready') {
+                expect(timedOut).toHaveLength(1);
+                expect(data.outcomes.map(outcome => outcome.genderResolutionStatus))
+                    .toEqual(['ready_applied', 'ready_applied', 'cutoff']);
+            } else {
+                expect(timedOut).toContainEqual({ name: 'slow', at: start + expectedWait });
+            }
+            expect(held).toHaveBeenCalledTimes(expectedWait && mode !== 'mixed50' ? 3 : 0);
+            if (mode === 'fallback50') {
+                expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(3);
+                expect(data.outcomes[0].status).toBe('analysis_unavailable');
+                expect(data.outcomes.map(row => row.genderResolutionStatus)).toEqual(['cutoff', 'cutoff', 'cutoff']);
+            }
+            if (expectContinuation) expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            if (mode === 'trial') expect(data.outcomes.map(outcome => outcome.genderResolutionStatus))
+                .toEqual(['ready_applied', 'cutoff', 'cutoff']);
+            if (mode === 'required-failure') expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+        } finally {
+            vi.clearAllTimers();
+            vi.useRealTimers();
+            vi.unstubAllEnvs();
+        }
     });
 
     it('cuts off a pending resolver after feature completion without waiting for it', async () => {

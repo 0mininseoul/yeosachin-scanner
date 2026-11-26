@@ -20,6 +20,22 @@ export class AnalysisV2SchedulerContinuationError extends Error {
     }
 }
 
+/** The scheduler durably deferred required work for capacity, after draining its siblings. */
+export class AnalysisV2ConfirmedCapacityContinuation extends AnalysisV2SchedulerContinuationError {
+    constructor(delaySeconds: number) {
+        super('ANALYSIS_V2_AI_CAPACITY_PENDING', delaySeconds);
+    }
+}
+
+export function localStandardResolverGraceMs(): 0 | 8000 | 50000 {
+    if (process.env.NODE_ENV !== 'test') return 0;
+    switch (process.env.STANDARD_SHARED_RESOLVER_GRACE_MS) {
+    case '8000': return 8000;
+    case '50000': return 50000;
+    default: return 0;
+    }
+}
+
 export function schedulerContinuationReason(error: unknown):
 AnalysisV2SchedulerContinuationReason | null {
     if (error instanceof AnalysisV2SchedulerContinuationError) return error.reason;
