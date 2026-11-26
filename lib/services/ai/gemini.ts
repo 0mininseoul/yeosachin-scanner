@@ -1281,6 +1281,9 @@ export async function analyzeWithGemini<T>(
                 releasePaidFeature?.();
                 releasePaidFeature = undefined;
             } catch (generationError) {
+                // The SDK no longer uses the local slots while its financial receipt is reconciled.
+                cachedResolver?.release();
+                cachedResolver = undefined;
                 if (budgetReservation && !budgetSettled) {
                     if (providerDispatchStarted) {
                         await resolvedBudgetGuard?.settle(budgetReservation, {

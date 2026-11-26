@@ -4,7 +4,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { vertexDispatchFetch, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
 import {
-    acquireResolverPermit, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore,
+    acquireResolverGenerationSlots, acquireResolverPermit, AsyncSemaphore, createGeminiGenerationLimiter,
+    getGeminiGenerationLimiter, getStageGenerationSemaphore,
     LocalResolverPermitTimeoutError,
 } from '@/lib/services/ai/gemini-generation-limiter';
 import { remainingResolverAdmissionWait, withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
@@ -2430,6 +2431,20 @@ describe('analyzeWithGemini process concurrency', () => {
             expect(deferred.maximumActive()).toBe(concurrency);
         },
     );
+
+    it('takes both uncontended resolver permits before another local caller can enter', async () => {
+        const state = createGeminiGenerationLimiter();
+        const holders = Array.from({ length: 7 }, () => state.shared.tryAcquire()!);
+        const resolver = acquireResolverGenerationSlots(state, 'ai-stage-policy-v2.11', 1);
+        const competing = state.shared.tryAcquire();
+        try {
+            expect(competing).toBeNull();
+        } finally {
+            competing?.();
+            for (const release of holders) release();
+            (await resolver)();
+        }
+    });
 
     it('shares one five-second wait across the worker stage and shared slots', async () => {
         vi.useFakeTimers();

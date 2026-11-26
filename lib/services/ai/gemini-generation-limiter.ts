@@ -242,9 +242,11 @@ export async function acquireResolverGenerationSlots(
     state: GeminiGenerationLimiterState, policyVersion: AiStagePolicyVersion, attempt: number, localDeadline?: number,
 ): Promise<() => void> {
     const stage = getStageGenerationSemaphore(state, policyVersion, 'genderResolution');
-    const releaseStage = await acquireResolverPermit(stage, 'worker_stage', attempt, localDeadline);
+    const stagePermit = acquireResolverPermit(stage, 'worker_stage', attempt, localDeadline);
+    const releaseStage = typeof stagePermit === 'function' ? stagePermit : await stagePermit;
     try {
-        const releaseShared = await acquireResolverPermit(state.shared, 'worker_shared', attempt, localDeadline);
+        const sharedPermit = acquireResolverPermit(state.shared, 'worker_shared', attempt, localDeadline);
+        const releaseShared = typeof sharedPermit === 'function' ? sharedPermit : await sharedPermit;
         return () => { releaseShared(); releaseStage(); };
     } catch (error) {
         releaseStage();
