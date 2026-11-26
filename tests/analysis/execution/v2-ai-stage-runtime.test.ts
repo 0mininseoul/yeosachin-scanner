@@ -351,6 +351,7 @@ describe('durable V2 AI stage runtime', () => {
 
         expect(handle.peek()).toEqual({ status: 'cutoff' });
         expect(onCutoff).toHaveBeenCalledOnce();
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
         await handle.completion;
     });
 
@@ -450,6 +451,7 @@ describe('durable V2 AI stage runtime', () => {
 
         await expect(handle.cutoff()).rejects.toBe(persistenceFailure);
         expect(handle.peek()).toEqual({ status: 'cutoff' });
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
         await handle.completion;
     });
 
@@ -486,8 +488,24 @@ describe('durable V2 AI stage runtime', () => {
 
         await handle.completion;
         expect(handle.peek()).toEqual({ status: scenario.status });
+        expect(handle.recoveredCutoffFromAudit).toBe(scenario.status === 'cutoff');
         await expect(handle.cutoff()).resolves.toBeUndefined();
         expect(handle.peek()).not.toEqual({ status: 'terminal_unavailable' });
+    });
+
+    it('distinguishes an admission rejection from recovery of a resolver attempt', async () => {
+        const runGenderResolution = vi.fn();
+        const runtime = createDurableAnalysisV2AiStageRuntime({
+            createAudit: cachedAuditFactory({}).createAudit, runGenderResolution,
+        });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence, aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
+            reserveGenderResolutionCapacity: vi.fn().mockRejectedValue(new AnalysisV2AiResultRecoveredCutoffError()),
+        });
+        await handle.completion;
+        expect(handle.peek()).toEqual({ status: 'cutoff' });
+        expect(handle.recoveredCutoffFromAudit).toBe(false);
+        expect(runGenderResolution).not.toHaveBeenCalled();
     });
 
     it('retains the typed budget rollback when a resolver has yet to dispatch', async () => {

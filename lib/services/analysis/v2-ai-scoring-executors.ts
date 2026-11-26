@@ -317,7 +317,10 @@ async function waitForLocalResolverTrial(
     if (remaining <= 0) return;
 
     const states = handles.map(handle => handle.peek().status);
-    if (states.some(status => status !== 'ready' && status !== 'pending' && status !== 'capacity_skipped')) return;
+    if (states.some((status, index) => {
+        if (graceMs === 50_000 && status === 'cutoff' && handles[index].recoveredCutoffFromAudit) return false;
+        return status !== 'ready' && status !== 'pending' && status !== 'capacity_skipped';
+    })) return;
     const pending = handles.filter((_, index) => states[index] === 'pending');
     const admitted = pending.filter(handle => handle.holdActiveAttempt?.());
     if (!admitted.length) return;

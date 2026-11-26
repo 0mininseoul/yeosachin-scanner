@@ -171,6 +171,7 @@ export interface AnalysisV2GenderResolutionHandle {
     operationKey: string;
     completion: Promise<void>;
     holdActiveAttempt?(): boolean;
+    readonly recoveredCutoffFromAudit?: boolean;
     peek(): AnalysisV2GenderResolutionState;
     cutoff(): Promise<void>;
 }
@@ -704,8 +705,10 @@ export function createDurableAnalysisV2AiStageRuntime(
             );
             const controller = new AbortController();
             let state: AnalysisV2GenderResolutionState = { status: 'pending' };
+            let recoveredCutoffFromAudit = false;
             let cutoffStarted: Promise<void> | null = null;
             const completion = (async () => {
+                let auditStarted = false;
                 try {
                     if (fence.reserveGenderResolutionCapacity) {
                         const admission = await fence.reserveGenderResolutionCapacity(
@@ -717,6 +720,7 @@ export function createDurableAnalysisV2AiStageRuntime(
                             return;
                         }
                     }
+                    auditStarted = true;
                     const result = await runGenderResolution(
                         input,
                         audit,
@@ -753,16 +757,19 @@ export function createDurableAnalysisV2AiStageRuntime(
                         state = { status: 'terminal_unavailable', budgetError: error.message };
                         return;
                     }
+                    if (error instanceof AnalysisV2AiResultRecoveredCutoffError) {
+                        // Only the audited resolver can report an exact terminal attempt from prepare().
+                        recoveredCutoffFromAudit = auditStarted;
+                        state = { status: 'cutoff' };
+                        return;
+                    }
                     state = {
                         status: error instanceof AnalysisV2AiResultRecoveryPendingError
                             ? 'recovery_pending'
-                            : error instanceof AnalysisV2AiResultRecoveredCutoffError
-                                ? 'cutoff'
-                                : error instanceof Error
-                                    && error.message
-                                        === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
-                                    ? 'capacity_skipped'
-                                    : 'terminal_unavailable',
+                            : error instanceof Error
+                                && error.message === 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'
+                                ? 'capacity_skipped'
+                                : 'terminal_unavailable',
                     };
                 }
             })();
@@ -770,6 +777,7 @@ export function createDurableAnalysisV2AiStageRuntime(
                 operationKey: identity.operationKey,
                 completion,
                 holdActiveAttempt: audit.holdActiveResolverAttempt,
+                get recoveredCutoffFromAudit() { return recoveredCutoffFromAudit; },
                 peek: () => state,
                 cutoff() {
                     if (cutoffStarted) return cutoffStarted;

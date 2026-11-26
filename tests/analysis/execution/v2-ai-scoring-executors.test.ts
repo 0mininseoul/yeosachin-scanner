@@ -1759,6 +1759,9 @@ describe('V2 AI and scoring executors', () => {
     it.each([
         { mode: 'trial', expectedWait: 8000 },
         { mode: 'normal50', expectedWait: 50000 },
+        { mode: 'recovered50', expectedWait: 50000 },
+        { mode: 'recovered8', expectedWait: 0 },
+        { mode: 'current-cutoff50', expectedWait: 0 },
         { mode: 'fallback50', expectedWait: 0 },
         { mode: 'capacity50', expectedWait: 50000 },
         { mode: 'unconfirmed50', expectedWait: 0 },
@@ -1776,7 +1779,9 @@ describe('V2 AI and scoring executors', () => {
         vi.stubEnv('STANDARD_SHARED_RESOLVER_GRACE_MS', mode.endsWith('50') ? '50000' : mode === 'off' ? '' : '8000');
         if (mode === 'production') vi.stubEnv('NODE_ENV', 'production');
         try {
+            const hasCutoffSibling = mode === 'recovered50' || mode === 'recovered8' || mode === 'current-cutoff50';
             const members = ['timely', 'slow', 'unadmitted'].map(name => profile(name));
+            if (hasCutoffSibling) members.push(profile('closed'));
             const data = memory();
             const deps = dependencies(data, {
                 profileAiConcurrency: mode === 'fallback50' ? 1 : 3,
@@ -1810,6 +1815,12 @@ describe('V2 AI and scoring executors', () => {
             deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>(input => {
                 const name = members.find(row => input.media.some(m => m.selectionId.includes(row.username)))!.username;
                 const key = `gender-resolution:${digest(name)}`;
+                if (name === 'closed') return {
+                    operationKey: key, completion: Promise.resolve(), peek: () => ({ status: 'cutoff' as const }),
+                    recoveredCutoffFromAudit: mode !== 'current-cutoff50',
+                    holdActiveAttempt: () => { throw new Error('Cannot hold a closed attempt'); },
+                    cutoff: () => { throw new Error('Cannot repeat a completed cutoff'); },
+                };
                 let progress: ReturnType<ReturnType<AnalysisV2AiStageRuntime['startGenderResolution']>['peek']> = { status: 'pending' };
                 const completion = new Promise<void>(resolve => {
                     if (name !== 'timely' && !(mode === 'all-ready' && name === 'slow')) return;
@@ -1836,8 +1847,8 @@ describe('V2 AI and scoring executors', () => {
             const ctx = context('profile_ai', { jobKey: 'track:profile-ai:batch:0', batch: 0,
                 aiStagePolicyVersion: AI_STAGE_POLICY_LATEST_VERSION,
                 state: state({ planId: 'standard', relationships: { ...base.relationships!, profileBatches: [
-                    { batch: 0, itemCount: 3, inputHash: digest('trial-topology') },
-                ] }, profileFetchBatches: [{ batch: 0, itemCount: 3, producerInputHash: digest('trial-producer'),
+                    { batch: 0, itemCount: members.length, inputHash: digest('trial-topology') },
+                ] }, profileFetchBatches: [{ batch: 0, itemCount: members.length, producerInputHash: digest('trial-producer'),
                     revision: 1, resultHash: digest('trial-fetch') }] }),
             });
             const start = performance.now();
@@ -1869,6 +1880,12 @@ describe('V2 AI and scoring executors', () => {
                 expect(timedOut).toContainEqual({ name: 'slow', at: start + expectedWait });
             }
             expect(held).toHaveBeenCalledTimes(expectedWait && mode !== 'mixed50' ? 3 : 0);
+            if (hasCutoffSibling) {
+                expect(data.outcomes.map(row => row.genderResolutionStatus)).toEqual([
+                    mode === 'recovered50' ? 'ready_applied' : 'cutoff', 'cutoff', 'cutoff', 'cutoff',
+                ]);
+                expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(4);
+            }
             if (mode === 'fallback50') {
                 expect(deps.ai.startGenderResolution).toHaveBeenCalledTimes(3);
                 expect(data.outcomes[0].status).toBe('analysis_unavailable');
