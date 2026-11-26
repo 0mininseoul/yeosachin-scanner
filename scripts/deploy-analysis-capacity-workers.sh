@@ -45,6 +45,9 @@ usage() {
   cat <<'EOF'
 Usage: scripts/deploy-analysis-capacity-workers.sh --role=preflight|paid [--dry-run | --check | --apply] [--reconcile-iam] [--reconcile-jobs] [--allow-bootstrap-initial-transition] [--allow-initial-identity-roll-forward]
 
+For the separate paid Standard 18-instance layout and its rollback, see
+  docs/operations/paid-standard-regional-capacity.ko.md
+
 Deploys one private split-capacity Cloud Run worker from the shared source
 tree. Existing queue names remain analysis-preflight and analysis-v2-pipeline.
 The external runtime and build manifests must be strict JSON objects and are
