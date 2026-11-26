@@ -46,7 +46,7 @@ export function cherryDomainResponse(request: NextRequest): NextResponse | undef
     }
     if (reads && pathname === '/robots.txt') {
         return new NextResponse(live
-            ? `User-agent: *\nAllow: /$\nAllow: /?\nAllow: /cherry/\nDisallow: /\nSitemap: ${CHERRY_PUBLIC_URL}sitemap.xml\n`
+            ? `User-agent: *\nAllow: /$\nAllow: /?\nAllow: /cherry/\nAllow: /sitemap.xml$\nDisallow: /\nSitemap: ${CHERRY_PUBLIC_URL}sitemap.xml\n`
             : 'User-agent: *\nDisallow: /\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     if (reads && pathname === '/sitemap.xml' && live) {
