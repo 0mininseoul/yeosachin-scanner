@@ -1,10 +1,12 @@
 import { currentStandardResolverAdmission, observeResolverAdmission, remainingResolverAdmissionWait } from './standard-resolver-admission';
-import { AI_SHARED_CONCURRENCY_LIMIT, getAiStagePolicy, type AiStageName, type AiStagePolicyVersion } from './stage-policy';
+import { AI_GEMINI_MIN_REMAINING_MS, AI_GEMINI_SDK_TIMEOUT_MS, AI_SHARED_CONCURRENCY_LIMIT, getAiStagePolicy, type AiStageName, type AiStagePolicyVersion } from './stage-policy';
+
+type PermitLimit = number | (() => number);
 
 interface GeminiSemaphoreWaiter {
     resolve: () => void;
     reject: (error: unknown) => void;
-    limit: number;
+    limit: PermitLimit;
     signal?: AbortSignal;
     onAbort?: () => void;
 }
@@ -13,10 +15,10 @@ export class AsyncSemaphore {
     private active = 0;
     private readonly queue: GeminiSemaphoreWaiter[] = [];
 
-    constructor(private readonly limit: number) {}
+    constructor(private readonly limit: number, private readonly maximum = Infinity) {}
 
-    async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-        await this.acquire(signal);
+    async run<T>(task: () => Promise<T>, signal?: AbortSignal, limit: PermitLimit = this.limit): Promise<T> {
+        await this.acquire(signal, limit);
         try {
             return await task();
         } finally {
@@ -25,7 +27,7 @@ export class AsyncSemaphore {
     }
 
     tryAcquire(limit = this.limit): (() => void) | null {
-        if (this.active >= limit || this.queue.length) return null;
+        if (this.active >= this.effectiveLimit(limit) || this.queue.length) return null;
         this.active++;
         return this.releaseOnce();
     }
@@ -44,11 +46,15 @@ export class AsyncSemaphore {
         };
     }
 
-    private acquire(signal?: AbortSignal, limit = this.limit): Promise<void> {
+    private effectiveLimit(limit: PermitLimit): number {
+        return Math.min(this.maximum, typeof limit === 'number' ? limit : limit());
+    }
+
+    private acquire(signal?: AbortSignal, limit: PermitLimit = this.limit): Promise<void> {
         if (signal?.aborted) {
             return Promise.reject(signal.reason ?? new Error('ABORTED'));
         }
-        if (this.active < limit && !this.queue.length) {
+        if (this.active < this.effectiveLimit(limit) && !this.queue.length) {
             this.active++;
             return Promise.resolve();
         }
@@ -63,7 +69,7 @@ export class AsyncSemaphore {
             const onAbort = () => {
                 const index = this.queue.indexOf(waiter);
                 if (index >= 0) this.queue.splice(index, 1);
-                this.admitWaiters();
+                this.recheckWaiters();
                 signal?.removeEventListener('abort', onAbort);
                 reject(signal?.reason ?? new Error('ABORTED'));
             };
@@ -76,11 +82,11 @@ export class AsyncSemaphore {
 
     private release(): void {
         this.active--;
-        this.admitWaiters();
+        this.recheckWaiters();
     }
 
-    private admitWaiters(): void {
-        while (this.queue.length && this.active < this.queue[0].limit) {
+    recheckWaiters(): void {
+        while (this.queue.length && this.active < this.effectiveLimit(this.queue[0].limit)) {
             const next = this.queue.shift();
             if (!next) break;
             next.signal?.removeEventListener('abort', next.onAbort as EventListener);
@@ -96,11 +102,16 @@ export class AsyncSemaphore {
 
 interface GeminiGenerationLimiterState {
     shared: AsyncSemaphore;
+    featureMix: { slots: AsyncSemaphore; expandedInterest: number };
     stages: Map<string, AsyncSemaphore>;
 }
 
 export function createGeminiGenerationLimiter(): GeminiGenerationLimiterState {
-    return { shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT), stages: new Map() };
+    return {
+        shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT),
+        featureMix: { slots: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT), expandedInterest: 0 },
+        stages: new Map(),
+    };
 }
 
 const processScope = globalThis as typeof globalThis & {
@@ -120,9 +131,67 @@ export function getStageGenerationSemaphore(
     const existing = state.stages.get(key);
     if (existing) return existing;
 
-    const semaphore = new AsyncSemaphore(getAiStagePolicy(policyVersion, stage).concurrency);
+    const concurrency = getAiStagePolicy(policyVersion, stage).concurrency;
+    const maximum = stage === 'featureAnalysis' && policyVersion === 'ai-stage-policy-v2.11' ? 4 : undefined;
+    const semaphore = new AsyncSemaphore(concurrency, maximum);
     state.stages.set(key, semaphore);
     return semaphore;
+}
+
+// A signed waiter joins before reserving money or auditing an attempt. Older
+// legacy waiters retain FIFO priority; new ones cannot fill slots ahead of it.
+export async function acquirePaidFeatureSlot(
+    { featureMix }: GeminiGenerationLimiterState, handlerDeadlineAtMs: number | undefined, signal?: AbortSignal,
+): Promise<() => void> {
+    signal?.throwIfAborted();
+    const latest = handlerDeadlineAtMs === undefined ? undefined : handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS;
+    if (latest !== undefined && (!Number.isFinite(latest) || latest <= performance.now())) {
+        throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+    }
+    const waitMs = latest === undefined ? 0 : Math.floor(Math.min(AI_GEMINI_SDK_TIMEOUT_MS, latest - performance.now()));
+    featureMix.expandedInterest++;
+    try {
+        let release = featureMix.slots.tryAcquire(4);
+        if (!release) {
+            if (waitMs < 1) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+            const timeout = AbortSignal.timeout(waitMs);
+            const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
+            try {
+                release = await featureMix.slots.acquirePermit(bounded, 4);
+            } catch (error) {
+                signal?.throwIfAborted();
+                if (!timeout.aborted) throw error;
+                throw new Error(latest !== undefined && performance.now() + 1 >= latest
+                    ? 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT' : 'ANALYSIS_V2_AI_CAPACITY_PENDING');
+            }
+        }
+        if (signal?.aborted || (latest !== undefined && performance.now() >= latest)) {
+            release();
+            signal?.throwIfAborted();
+            throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+        }
+        let returned = false;
+        return () => {
+            if (returned) return;
+            returned = true;
+            featureMix.expandedInterest--;
+            release();
+        };
+    } catch (error) {
+        featureMix.expandedInterest--;
+        featureMix.slots.recheckWaiters();
+        throw error;
+    }
+}
+
+export async function runWithMixedFeatureSlot<T>(
+    { featureMix }: GeminiGenerationLimiterState, wait: boolean, task: () => Promise<T>, signal?: AbortSignal,
+): Promise<T> {
+    const limit = () => featureMix.expandedInterest > 0 ? 4 : AI_SHARED_CONCURRENCY_LIMIT;
+    if (wait) return featureMix.slots.run(task, signal, limit);
+    const release = featureMix.slots.tryAcquire(limit());
+    if (!release) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
+    try { return await task(); } finally { release(); }
 }
 
 /** A local slot wait ended before entering the dispatched function or reserving an AI attempt. */

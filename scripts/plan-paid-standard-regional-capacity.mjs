@@ -13,7 +13,8 @@ function requireCondition(ok, message) {
     if (!ok) throw new ReleasePlanError(message);
 }
 
-export function regionalCapacityCommands({ project, sourceSha, releaseProof, suffix, cloudRun, cloudTasks }) {
+export function regionalCapacityCommands({ project, sourceSha, releaseProof, suffix, cloudRun, cloudTasks, processFeatureSlots = 3 }) {
+    requireCondition(processFeatureSlots === 3 || processFeatureSlots === 4, 'Expected 3 or 4 feature slots per worker.');
     requireCondition(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project)
         && /^[a-f0-9]{40}$/.test(sourceSha) && /^[a-z][a-z0-9-]{0,22}[a-z0-9]$/.test(suffix),
     'Invalid project, reviewed commit or revision suffix.');
@@ -36,7 +37,7 @@ export function regionalCapacityCommands({ project, sourceSha, releaseProof, suf
         && env.get('ANALYSIS_V2_TASKS_PROJECT') === project && env.get('ANALYSIS_V2_TASKS_LOCATION') === region
         && env.get('ANALYSIS_V2_TASKS_QUEUE') === queue && env.get('ANALYSIS_PROVIDER_ADMISSION_ENABLED') === 'true'
         && env.get('ANALYSIS_CAPACITY_WORKER_CPU') === '2' && env.get('ANALYSIS_CAPACITY_WORKER_MEMORY') === '2Gi'
-        && !env.has('DEV_LIVE_WORKLOAD') && !env.has('PAID_STANDARD_VERTEX_CAPACITY_MODE'),
+        && !env.has('DEV_LIVE_WORKLOAD') && !env.has('PAID_STANDARD_VERTEX_CAPACITY_MODE') && !env.has('PAID_STANDARD_PROCESS_FEATURE_SLOTS'),
     'The target must be the reviewed initial production paid worker with expansion off.');
     requireCondition(traffic?.length === 1 && traffic[0].percent === 100 && !traffic[0].tag
         && typeof previous === 'string' && previous.startsWith(service + '-') && previous !== candidate && previous !== restored
@@ -78,11 +79,13 @@ export function regionalCapacityCommands({ project, sourceSha, releaseProof, suf
         '--project=' + project, '--location=' + region, '--max-concurrent-dispatches=' + concurrent,
         '--max-dispatches-per-second=' + perSecond, '--quiet'];
     const trafficTo = revision => run('update-traffic', service, '--to-revisions=' + revision + '=100');
+    const featureEnv = processFeatureSlots === 4 ? ',PAID_STANDARD_PROCESS_FEATURE_SLOTS=4' : '';
+    const restoreFeatureEnv = processFeatureSlots === 4 ? ',PAID_STANDARD_PROCESS_FEATURE_SLOTS' : '';
     return {
-        service, queue, region, sourceSha, previous, previousTrafficMode, candidate, restored, image: container.image,
+        service, queue, region, sourceSha, processFeatureSlots, previous, previousTrafficMode, candidate, restored, image: container.image,
         stage: run('update', service, '--image=' + container.image, '--no-traffic', '--revision-suffix=' + suffix,
             '--cpu=1', '--memory=2Gi', '--concurrency=3', '--max-instances=18',
-            '--update-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE=expanded128,ANALYSIS_CAPACITY_WORKER_CPU=1'),
+            '--update-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE=expanded128,ANALYSIS_CAPACITY_WORKER_CPU=1' + featureEnv),
         raiseServiceCap: run('update', service, '--max=18'),
         promote: trafficTo(candidate),
         raiseQueue: queueLimits(40, 32),
@@ -91,7 +94,7 @@ export function regionalCapacityCommands({ project, sourceSha, releaseProof, suf
         restoreServiceCap: run('update', service, '--max=' + serviceMax),
         restoreTemplate: run('update', service, '--image=' + container.image, '--no-traffic',
             '--revision-suffix=' + suffix + '-base', '--cpu=2', '--memory=2Gi', '--concurrency=1',
-            '--max-instances=' + revisionMax, '--remove-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE',
+            '--max-instances=' + revisionMax, '--remove-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE' + restoreFeatureEnv,
             '--update-env-vars=ANALYSIS_CAPACITY_WORKER_CPU=2'),
         promoteRestoredTemplate: previousTrafficMode === 'latest'
             ? run('update-traffic', service, '--to-latest')
@@ -102,9 +105,10 @@ export function regionalCapacityCommands({ project, sourceSha, releaseProof, suf
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     try {
         const [choice, project, sourceSha, proofFile, suffix] = process.argv.slice(2);
-        requireCondition(process.argv.length === 7 && choice === '--plan-paid-standard-18i-40q'
+        const processFeatureSlots = choice === '--plan-paid-standard-18i-40q-f4' ? 4 : 3;
+        requireCondition(process.argv.length === 7 && ['--plan-paid-standard-18i-40q', '--plan-paid-standard-18i-40q-f4'].includes(choice)
             && /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(project ?? ''),
-        'Usage: node scripts/plan-paid-standard-regional-capacity.mjs --plan-paid-standard-18i-40q PROJECT REVIEWED_SHA VERIFIED_RELEASE_JSON SUFFIX');
+        'Usage: node scripts/plan-paid-standard-regional-capacity.mjs --plan-paid-standard-18i-40q[-f4] PROJECT REVIEWED_SHA VERIFIED_RELEASE_JSON SUFFIX');
         requireCondition(/^[a-f0-9]{40}$/.test(sourceSha) && /^[a-z][a-z0-9-]{0,22}[a-z0-9]$/.test(suffix),
             'Invalid reviewed commit or revision suffix.');
         const releaseProof = JSON.parse(readFileSync(proofFile, 'utf8'));
@@ -114,6 +118,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
             ['lib/services/analysis/v2-ai-attempt-store.ts', 'reserve_paid_standard_ai_attempt_v1'],
             ['supabase/operations/20261126_expand_paid_standard_vertex.sql', 'reserve_paid_standard_ai_attempt_v1'],
         ];
+        if (processFeatureSlots === 4) contracts.push(
+            ['lib/services/analysis/paid-standard-capacity.ts', 'PAID_STANDARD_PROCESS_FEATURE_SLOTS'],
+            ['lib/services/analysis/v2-ai-scheduler-runtime.ts', 'paidStandardFourthFeatureEnabled'],
+            ['lib/services/ai/gemini.ts', 'runWithMixedFeatureSlot'],
+        );
         for (const [path, symbol] of contracts) {
             const file = execFileSync('git', ['show', sourceSha + ':' + path], { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] });
             requireCondition(file.includes(symbol), 'The reviewed commit lacks the paid Standard release contract.');
@@ -121,7 +130,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         const observe = args => JSON.parse(execFileSync('gcloud', args, { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] }));
         const cloudRun = observe(['run', 'services', 'describe', service, '--project=' + project, '--region=' + region, '--format=json']);
         const cloudTasks = observe(['tasks', 'queues', 'describe', queue, '--project=' + project, '--location=' + region, '--format=json']);
-        console.log(JSON.stringify(regionalCapacityCommands({ project, sourceSha, releaseProof, suffix, cloudRun, cloudTasks }), null, 2));
+        console.log(JSON.stringify(regionalCapacityCommands({ project, sourceSha, releaseProof, suffix, cloudRun, cloudTasks, processFeatureSlots }), null, 2));
     } catch (error) {
         console.error(error instanceof ReleasePlanError ? error.message : 'Could not inspect the reviewed source or Cloud resources.');
         process.exitCode = 1;

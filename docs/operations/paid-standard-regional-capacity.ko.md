@@ -9,7 +9,9 @@
 | 유료 Cloud Tasks 동시 전달·초당 시작 | 8·8 | 40·32 |
 | PostgreSQL의 승인된 유료 Standard용 Vertex | 기존 입구 8슬롯 | 전체 128·특징 80·추가 판독 48·분당 240 |
 
-서비스와 큐는 다른 유료 플랜도 공유한다. 128슬롯 대상은 결제·작업·소유권이 검증된 운영 Standard다. 이 구분은 [워커의 유료 경로 선택](../../lib/services/analysis/paid-standard-capacity.ts)과 [DB 승인·최종 전송 예약](../../supabase/operations/20261126_expand_paid_standard_vertex.sql)이 집행한다. 인스턴스당 특징 슬롯은 3개여서 18개 인스턴스의 프로세스 한도는 54개다. `18i-40q`는 이를 반영한 [부하 시험 구성](../../tests/analysis/execution/fixtures/standard-shared-capacities.mjs)이다.
+서비스와 큐는 다른 유료 플랜도 공유한다. 128슬롯 대상은 결제·작업·소유권이 검증된 운영 Standard다. 이 구분은 [워커의 유료 경로 선택](../../lib/services/analysis/paid-standard-capacity.ts)과 [DB 승인·최종 전송 예약](../../supabase/operations/20261126_expand_paid_standard_vertex.sql)이 집행한다. 기본 구성의 인스턴스당 특징 슬롯은 3개로, 18개 인스턴스가 최대 54개를 사용한다. `18i-40q`는 이를 반영한 [부하 시험 구성](../../tests/analysis/execution/fixtures/standard-shared-capacities.mjs)이다.
+
+`18i-40q-f4` 비교 구성은 동일한 워커 리비전에 `PAID_STANDARD_PROCESS_FEATURE_SLOTS=4`를 명시한다. 승인된 v2.11 유료 Standard 프로필 배치가 인스턴스당 네 번째 특징 슬롯을 사용할 수 있어 18개 인스턴스에서 최대 72개다. 전체 모델 호출은 인스턴스당 8개이며 DB의 전체·특징·추가 판독 한도는 각각 128·80·48이다. 분석 시작부터 모든 소유자 이미지 수신까지 60분 이내이고 주문별 추가 판독 완료율이 99% 이상인 동시성 측정값을 해당 구성에만 사용한다.
 
 ## 전환 전
 
@@ -29,6 +31,8 @@ umask 077
 node scripts/plan-paid-standard-regional-capacity.mjs \
   --plan-paid-standard-18i-40q "$prod_project" "$reviewed_sha" "$verified_release_json" "$new_suffix" > "$release_dir/paid-shape.json"
 ```
+
+인스턴스당 특징 4개로 검증을 마친 구성을 선택할 때는 같은 명령에서 `--plan-paid-standard-18i-40q-f4`를 사용한다. 계획의 `stage`에서 `PAID_STANDARD_PROCESS_FEATURE_SLOTS=4`를, `restoreTemplate`에서 그 설정의 제거를 확인한다.
 
 다음 함수는 출시 담당자가 **지정한 한 단계**의 인수 배열을 그대로 실행한다. 실행 직전에 계획과 현재 리비전·트래픽·큐가 일치하는지 확인한다. 해당 접미사의 기존 리비전이 있으면 배포 결과를 먼저 조회한다. 이전 요청이 성공했으면 그 결과를 검증해 다음 단계로 진행한다.
 
@@ -50,7 +54,7 @@ PY
 
 1. `run_shape_step stage`가 동일 이미지로 **무트래픽 후보**를 만든다. 기존 서비스 최대 10과 큐 8/8은 이 단계에서 유지된다. `gcloud run revisions describe "$candidate" --region=asia-northeast3 --project="$prod_project" --format=json`의 Ready, 이미지 다이제스트, 1 vCPU·2 GiB·HTTP 3·리비전 최대 18, `PAID_STANDARD_VERTEX_CAPACITY_MODE=expanded128`와 admission 활성화를 허용 목록으로 비교한다. 원래 리비전이 계속 100%인지 확인한다. IAM·서비스 계정·비밀 참조·다른 환경 설정은 원래 리비전과 메모리 안에서 비교하고 일치 여부만 출력한다.
 2. `run_shape_step raiseServiceCap` 후 서비스의 **최상위** `metadata.annotations["run.googleapis.com/maxScale"]`이 18인지 확인한다. 리비전의 `autoscaling.knative.dev/maxScale`도 18이어야 한다. `run_shape_step promote` 후 선택한 후보가 트래픽 100%를 받는지 확인한다.
-3. `run_shape_step raiseQueue` 후 정확한 `analysis-v2-pipeline`의 `rateLimits.maxConcurrentDispatches=40`, `maxDispatchesPerSecond=32`와 기존 재시도·OIDC 설정을 검증한다. 이 단계까지 완료되고 DB 정책과 검증 근거가 일치할 때 접수를 연다. 1시간 달성 여부는 실제 분석의 주문별 자리 배정부터 이행까지 기록한 값으로 판단한다.
+3. `run_shape_step raiseQueue` 후 정확한 `analysis-v2-pipeline`의 `rateLimits.maxConcurrentDispatches=40`, `maxDispatchesPerSecond=32`와 기존 재시도·OIDC 설정을 검증한다. 이 단계까지 완료되고 DB 정책과 검증 근거가 일치할 때 접수를 연다. 운영 측정에서는 주문별 결제 대기, 자리 배정부터 발행·이행까지 걸린 시간, 소유자가 결과와 이미지를 읽을 수 있게 된 시점을 각각 기록한다. 동일 조건의 QA에서는 소유자가 마지막 WebP 본문을 받은 시각까지 포함해 1시간 달성 여부를 판단한다.
 
 ## 실패와 복구
 

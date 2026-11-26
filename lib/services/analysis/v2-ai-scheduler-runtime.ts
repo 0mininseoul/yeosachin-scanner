@@ -1,6 +1,7 @@
 import { localStandardResolverGraceMs, preferredAiSiblingFailure } from './v2-ai-scheduler-continuation';
 import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
+import { paidStandardFourthFeatureEnabled, type PaidStandardCapacityJob } from './paid-standard-capacity';
 import type { AiSchedulerCapability } from '@/lib/services/ai/scheduler-policy';
 import { AI_GEMINI_SDK_TIMEOUT_MS } from '@/lib/services/ai/stage-policy';
 import { AnalysisV2AiTerminalUnavailableError } from './v2-ai-fallback-policy';
@@ -112,6 +113,7 @@ export type AnalysisV2SchedulerRunResult<T> = Readonly<{
 
 export interface AnalysisV2SchedulerRuntimeOptions<T> {
     capability: AiSchedulerCapability;
+    featureJob?: PaidStandardCapacityJob & { aiStagePolicyVersion: string };
     tasks: readonly AnalysisV2SchedulerTask<T>[];
     operationStore: AnalysisV2SchedulerOperationStore<T>;
     handlerDeadlineAtMs: number;
@@ -182,8 +184,12 @@ function assertTasks(tasks: readonly AnalysisV2SchedulerTask<unknown>[]): void {
     }
 }
 
+// Only an immutable policy created after verification can raise a process arbiter limit.
+const fourthFeaturePolicies = new WeakSet<Readonly<AnalysisV2SchedulerRuntimePolicy>>();
+
 function boundedPolicy(
     override: Partial<AnalysisV2SchedulerRuntimePolicy> | undefined,
+    fourthFeature: boolean,
 ): Readonly<AnalysisV2SchedulerRuntimePolicy> {
     if (
         override
@@ -194,7 +200,8 @@ function boundedPolicy(
         throw new Error('ANALYSIS_V2_SCHEDULER_INVALID_POLICY');
     }
     const hard = ANALYSIS_V2_SCHEDULER_V1_POLICY;
-    return Object.freeze({
+    const featureLimit = fourthFeature ? 4 : hard.featureAnalysisConcurrency;
+    const policy = Object.freeze({
         sharedConcurrency: Math.min(
             hard.sharedConcurrency,
             override?.sharedConcurrency ?? hard.sharedConcurrency,
@@ -204,8 +211,7 @@ function boundedPolicy(
             override?.genderTriageConcurrency ?? hard.genderTriageConcurrency,
         ),
         featureAnalysisConcurrency: Math.min(
-            hard.featureAnalysisConcurrency,
-            override?.featureAnalysisConcurrency ?? hard.featureAnalysisConcurrency,
+            featureLimit, override?.featureAnalysisConcurrency ?? featureLimit,
         ),
         privateAccountNameConcurrency: Math.min(
             hard.privateAccountNameConcurrency,
@@ -216,19 +222,19 @@ function boundedPolicy(
             override?.admissionReserveMs ?? hard.admissionReserveMs,
         ),
     });
+    if (fourthFeature) fourthFeaturePolicies.add(policy);
+    return policy;
 }
 
 export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2SchedulerArbiter {
     private activeTotal = 0;
     private generation = 0;
-    private sequence = 0;
     private stageCursor = 0;
     private readonly activeByStage = new Map<AnalysisV2SchedulerStage, number>();
     private readonly waiters = new Set<() => void>();
     private readonly pending = new Map<object, Readonly<{
         stage: AnalysisV2SchedulerStage;
         limits: Readonly<AnalysisV2SchedulerRuntimePolicy>;
-        sequence: number;
     }>>();
     private readonly stages: readonly AnalysisV2SchedulerStage[] = [
         'genderTriage',
@@ -250,7 +256,7 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
         return this.activeTotal < Math.min(8, limits.sharedConcurrency)
             && (this.activeByStage.get(stage) ?? 0) < Math.min(
                 stageLimit(stage, limits),
-                stageLimit(stage, ANALYSIS_V2_SCHEDULER_V1_POLICY),
+                stage === 'featureAnalysis' && fourthFeaturePolicies.has(limits) ? 4 : stageLimit(stage, ANALYSIS_V2_SCHEDULER_V1_POLICY),
             );
     }
 
@@ -259,13 +265,19 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
         for (let offset = 0; offset < this.stages.length; offset++) {
             const stageIndex = (this.stageCursor + offset) % this.stages.length;
             const stage = this.stages[stageIndex]!;
-            const candidate = [...this.pending.entries()]
-                .filter(([, pending]) => (
-                    pending.stage === stage
-                    && this.canAcquire(pending.stage, pending.limits)
-                ))
-                .sort((left, right) => left[1].sequence - right[1].sequence)[0];
-            if (candidate) return candidate[0];
+            // Map insertion order is FIFO. An older three-slot feature waits for
+            // a second release when four are occupied. New four-slot callers
+            // cannot refill the slot ahead of it, and other stages still run.
+            let earlierFeatureBlocked = false;
+            for (const [waiter, pending] of this.pending) {
+                if (pending.stage !== stage) continue;
+                if (!this.canAcquire(stage, pending.limits)) {
+                    if (stage === 'featureAnalysis') earlierFeatureBlocked = true;
+                    continue;
+                }
+                if (earlierFeatureBlocked && fourthFeaturePolicies.has(pending.limits)) continue;
+                return waiter;
+            }
         }
         return null;
     }
@@ -279,7 +291,6 @@ export class ProcessWideAnalysisV2SchedulerArbiter implements AnalysisV2Schedule
             this.pending.set(waiter, Object.freeze({
                 stage,
                 limits,
-                sequence: this.sequence++,
             }));
             this.signalChange();
         }
@@ -368,7 +379,10 @@ export async function runAnalysisV2FairAiScheduler<T>(
     if (!Number.isFinite(input.handlerDeadlineAtMs) || input.handlerDeadlineAtMs < 0) {
         throw new Error('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
     }
-    const policy = boundedPolicy(input.policy);
+    const job = input.featureJob;
+    const fourthFeature = !!job && input.tasks.some(task => task.stage === 'featureAnalysis')
+        && await paidStandardFourthFeatureEnabled(job.aiStagePolicyVersion, job.requestId, job);
+    const policy = boundedPolicy(input.policy, fourthFeature);
     const nowMs = input.nowMs ?? (() => performance.now());
     const queues = new Map<AnalysisV2SchedulerStage, AnalysisV2SchedulerTask<T>[]>([
         ['genderTriage', []], ['featureAnalysis', []], ['privateAccountName', []],

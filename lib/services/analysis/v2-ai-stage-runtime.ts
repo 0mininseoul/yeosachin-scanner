@@ -410,6 +410,7 @@ function createSchedulerMicrobatch(
                 terminalFallback: plan.terminalFallback,
             }));
             const result = await runScheduler<unknown>({
+                featureJob: group.fence,
                 capability: 'scheduler-v1',
                 tasks,
                 operationStore,

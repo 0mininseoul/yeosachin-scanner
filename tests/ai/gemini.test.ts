@@ -1,4 +1,5 @@
 import { channel } from 'node:diagnostics_channel';
+import { withPaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { vertexDispatchFetch, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
@@ -2140,6 +2141,98 @@ describe('analyzeWithGemini process concurrency', () => {
             maximumActive: () => maximumActive,
         };
     }
+
+    it('shares the fourth signed feature permit across policy versions and preserves legacy-only capacity', async () => {
+        for (const [key, value] of Object.entries({
+            NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+            ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128',
+            PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4',
+        })) vi.stubEnv(key, value);
+        const held = deferredGenerations();
+        const active: Promise<unknown>[] = [];
+        const job = { requestId: stageRequestId, jobKey: 'track:profile-ai:batch:0', claimToken: 'fixture-claim' };
+        const options = { schema: responseSchema, stage: 'featureAnalysis' as const, ...stageAuditOptions() };
+        const start = (version: 'ai-stage-policy-v2.6' | 'ai-stage-policy-v2.10' | 'ai-stage-policy-v2.11', signed = false) =>
+            withPaidStandardCapacityJob(job, async () => signed, () => analyzeWithGemini('prompt', undefined,
+                { ...options, aiStagePolicyVersion: version }));
+        const waitForCount = (n: number) => vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(n));
+        for (let i = 0; i < 3; i++) active.push(start('ai-stage-policy-v2.11'));
+        await waitForCount(3);
+        await expect(start('ai-stage-policy-v2.11')).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        active.push(start('ai-stage-policy-v2.11', true));
+        await waitForCount(4);
+        await expect(start('ai-stage-policy-v2.11', true)).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        await expect(start('ai-stage-policy-v2.10', true)).rejects.toThrow('ANALYSIS_V2_AI_CAPACITY_PENDING');
+        // The older policy waits in FIFO order. A fifth call cannot jump the queue or
+        // open a separate per-policy pool while the paid permit is active.
+        active.push(start('ai-stage-policy-v2.6'));
+        await new Promise<void>(resolve => setImmediate(resolve));
+        await waitForCount(4);
+        held.releases.shift()!();
+        await waitForCount(5);
+        expect(held.maximumActive()).toBe(4);
+        held.releases.splice(0).forEach(release => release());
+        await Promise.all(active);
+        active.length = 0;
+        for (let i = 0; i < 8; i++) active.push(start('ai-stage-policy-v2.6'));
+        await waitForCount(13);
+        expect(held.maximumActive()).toBe(8);
+        held.releases.splice(0).forEach(release => release());
+        await Promise.all(active);
+    });
+
+    it('serves a signed feature from a saturated legacy pool before later arrivals without a waiting charge', async () => {
+        for (const [key, value] of Object.entries({
+            NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+            ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128',
+            PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4',
+        })) vi.stubEnv(key, value);
+        const held = deferredGenerations();
+        const budget = new InMemoryVertexAiBudgetStore();
+        const reserve = vi.spyOn(budget, 'reserve');
+        const audit = stageAuditOptions();
+        const job = { requestId: stageRequestId, jobKey: 'track:profile-ai:batch:0', claimToken: 'fixture-claim',
+            handlerDeadlineAtMs: performance.now() + 300_000 };
+        const legacy = () => analyzeWithGemini('old', undefined, { ...stageAuditOptions(), schema: responseSchema,
+            stage: 'featureAnalysis', aiStagePolicyVersion: 'ai-stage-policy-v2.6' });
+        const paid = (abortSignal?: AbortSignal, deadline = job.handlerDeadlineAtMs) =>
+            withPaidStandardCapacityJob({ ...job, handlerDeadlineAtMs: deadline }, async () => true,
+                () => analyzeWithGemini('signed', undefined, { ...audit, schema: responseSchema,
+                    stage: 'featureAnalysis', aiStagePolicyVersion: 'ai-stage-policy-v2.11', abortSignal, budgetGuard: budget }));
+        const legacyCalls = Array.from({ length: 8 }, legacy);
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(8));
+        const aborted = new AbortController();
+        const cancelled = expect(paid(aborted.signal)).rejects.toThrow('AI_GENERATION_DEADLINE_EXCEEDED');
+        await new Promise<void>(resolve => setImmediate(resolve));
+        aborted.abort();
+        await cancelled;
+        await expect(paid(undefined, performance.now() + 120_000)).rejects.toThrow('ANALYSIS_V2_AI_DEADLINE_TOO_SHORT');
+        const signed = paid();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        legacyCalls.push(...Array.from({ length: 4 }, legacy));
+        for (let i = 0; i < 4; i++) {
+            held.releases.shift()!();
+            await new Promise<void>(resolve => setImmediate(resolve));
+            expect(reserve).not.toHaveBeenCalled();
+            expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+            expect(mocks.generateContent).toHaveBeenCalledTimes(8);
+        }
+        held.releases.shift()!();
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(9));
+        expect(reserve).toHaveBeenCalledOnce();
+        expect(audit.onBeforeAttempt).toHaveBeenCalledOnce();
+        expect(mocks.generateContent.mock.calls.at(-1)?.[0].contents[0].parts[0].text).toBe('signed');
+        held.releases.splice(0).forEach(release => release());
+        await signed;
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(13));
+        held.releases.splice(0).forEach(release => release());
+        await Promise.all(legacyCalls);
+        const state = getGeminiGenerationLimiter().featureMix;
+        expect(state.expandedInterest).toBe(0);
+        const free = Array.from({ length: 8 }, () => state.slots.tryAcquire());
+        expect(free.every(release => typeof release === 'function')).toBe(true);
+        free.forEach(release => release?.());
+    });
 
     it('uses the normal feature and shared generation limits for Dev owner-start Standard', async () => {
         vi.stubEnv('DEV_LIVE_WORKLOAD', 'paid');

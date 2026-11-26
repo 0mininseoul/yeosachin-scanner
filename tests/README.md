@@ -49,6 +49,7 @@ node scripts/standard-shared-capacity.mjs 16 112-r40 recovery /tmp/standard-reso
 node scripts/standard-shared-capacity.mjs 16 128-r48 recovery /tmp/standard-coverage.json 240 observed coverage99
 node scripts/standard-shared-capacity.mjs 16 18i-40q recovery /tmp/standard-region-16.json 240 observed coverage99
 node scripts/standard-shared-capacity.mjs 2 18i-40q recovery /tmp/standard-production-smoke.json 4 fast coverage99 production-paid
+node scripts/standard-shared-capacity.mjs 8 18i-40q-f4 recovery /tmp/standard-feature4.json 600 observed coverage99 production-paid
 node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-held.json 4 fast coverage99 production-paid held
 node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-spent.json 4 fast coverage99 production-paid spent
 ```
@@ -56,6 +57,7 @@ node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budge
 - 1~10명은 서명된 합성 결제 웹훅을 처리한다. 11~16명은 한정판매 재고 10건을 보존하기 위해 각 소유자의 실제 체크아웃에 합성 결제 확인과 이행 작업을 기록한다. 두 방식 모두 사전 점검, 정식 접수, 같은 DB와 큐를 사용하는 워커, 발행, 소유자 페이지와 WebP 열람을 거친다.
 - 두 번째 인자는 로컬 용량 구성이다. 숫자 8·48·56·64·80의 전체 슬롯에 대응하는 유료 워커 수는 8·16·20·24·32, 특징 슬롯은 6·32·40·48·70, 추가 판독 슬롯은 2·6·6·6·6이다. `80-r12`는 32워커·전체 80·특징 70·추가 12, `112-r40`은 32·112·70·40, `128-r48`은 40·128·80·48이다. 후보 구성은 분당 모델 시작 240회와 자격 증명별 분당 15회 한도를 공유한다. 워커 32개와 40개의 유료 큐 전달률은 모두 초당 32건이다. 워커별 프로세스 동시성 제한을 각각 적용하고, 확장 SQL은 빈 로컬 DB에서만 실행한다.
 - `18i-40q`는 인스턴스 18개에 동시 HTTP 요청 40개를 분배한다. 인스턴스 안의 요청은 Gemini·Apify·스케줄러 한도를 공유한다. 유료 워커에 각 1 vCPU·2 GiB를 배정할 때 서울 20 vCPU·40 GiB 한도 안에 들어가는 구성이다. 로컬 실행은 Cloud Run CPU 할당, 자동 확장, 콜드 스타트 또는 실제 배치 지연을 측정하지 않는다.
+- `18i-40q-f4`는 같은 18개 인스턴스에 특징 판독 슬롯을 하나씩 더 허용하는 비교 조건이다. 실제 유료 워커의 선택 경로에서 서명 결제·소유권·현재 작업 임대와 v2.11을 확인한다. 승인된 작업의 특징 판독은 인스턴스당 최대 4개, 전체 모델 호출은 인스턴스당 최대 8개다. 비교 기준인 `18i-40q`는 특징 판독을 인스턴스당 3개까지 실행한다.
 - 일곱 번째 인자 기본값 `immediate`는 추가 판독을 기다리지 않는 기존 정책이다. `grace8s`는 정상 필수 배치 끝에서 이미 예약한 시도들에 배치당 최대 8초를 준다. `finish50s`는 정상 완료와 필수 판독의 용량 부족에 따른 재개 시 최대 50초를 허용하는 로컬 비교 조건이다. 소유권 검증과 핸들러 기한을 적용하며 다음 시도 예약을 차단한다.
 - `coverage99`는 필수 특징 판독이 슬롯을 얻거나 기존 결과를 확인한 후 추가 판독을 시작한다. 복구 시나리오에서 공개 후보를 4명 이상 지정한다. 240명·600명 조건은 주문마다 추가 판독 대상이 각각 120명·300명인지 확인한다. 전체 및 각 주문의 대상 중 99% 이상 완료, 모든 소유자의 60분 내 이행과 결과·이미지 열람, 미확정 비용 및 중복 차감 0건을 요구한다. 송신 전 취소는 해당 소유자와 시도의 모의 전송 관측, 마감 기록, 단일 예약 취소가 모두 일치해야 인정한다.
 - 여덟 번째 인자 `production-paid`는 새 로컬 DB에 운영용 128슬롯 SQL을 설치한다. 정식 워커에서 각 주문의 결제·소유권·작업 임대를 확인하고 운영 전용 슬롯을 임대한 증거가 있어야 통과한다. 10명 이하는 중복을 포함한 서명 웹훅과 등록 후 자동 이행을 확인한다. 11~16명은 판매 재고 경계로 인해 결제 증거를 합성해 이행부터 검증한다. 결과의 `checkoutEvidence`가 어느 경로였는지 표시한다. 외부 공급자는 고정 응답을 사용한다.

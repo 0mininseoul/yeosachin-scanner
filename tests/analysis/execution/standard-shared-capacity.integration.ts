@@ -153,7 +153,8 @@ vi.mock('next/navigation', async original => {
 });
 
 function createWorkerCapacity() {
-    return { gemini: createGeminiGenerationLimiter(), scheduler: new ProcessWideAnalysisV2SchedulerArbiter(), apify: new ApifyActorSemaphore() };
+    return { gemini: createGeminiGenerationLimiter(), scheduler: new ProcessWideAnalysisV2SchedulerArbiter(),
+        apify: new ApifyActorSemaphore(), activeModels: 0, activeFeatures: 0 };
 }
 const workerCapacity = new AsyncLocalStorage<ReturnType<typeof createWorkerCapacity>>();
 const auth = new AsyncLocalStorage<SharedStandardOwner | null>();
@@ -370,6 +371,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         const models = new Map<string, number>();
         let activeModels = 0;
         let peakModels = 0;
+        const processModelPeaks = { all: 0, features: 0 };
         const duplicatedDuringModel = new Set<string>();
         boundary.model.mockImplementation(async input => {
             const scope = requestScope.getStore();
@@ -387,6 +389,13 @@ it('publishes simultaneous paid Standard requests through one database and queue
             if (!delay) throw new Error('SHARED_UNCALIBRATED_MODEL_STAGE');
             activeModels++;
             peakModels = Math.max(peakModels, activeModels);
+            const instance = workerCapacity.getStore();
+            if (instance) {
+                instance.activeModels++;
+                if (stage === 'features') instance.activeFeatures++;
+                processModelPeaks.all = Math.max(processModelPeaks.all, instance.activeModels);
+                processModelPeaks.features = Math.max(processModelPeaks.features, instance.activeFeatures);
+            }
             try {
                 const task = activeTask.getStore();
                 if (task && !duplicatedDuringModel.has(scope)) {
@@ -404,6 +413,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 return resolverObservation.response(syntheticGeneration(input, 'female', 'female', recovery && publicCount >= 4));
             } finally {
                 activeModels--;
+                if (instance) {
+                    instance.activeModels--;
+                    if (stage === 'features') instance.activeFeatures--;
+                }
             }
         });
         const ioBefore = await databaseCounters(db);
@@ -441,6 +454,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 vi.stubEnv('K_SERVICE', 'analysis-paid-worker');
                 vi.stubEnv('ANALYSIS_WORKLOAD_ROLE', 'paid');
                 vi.stubEnv('PAID_STANDARD_VERTEX_CAPACITY_MODE', 'expanded128');
+                if ('processFeatureSlots' in capacity) vi.stubEnv('PAID_STANDARD_PROCESS_FEATURE_SLOTS', String(capacity.processFeatureSlots));
             };
             if (automatic) enablePaidWorker();
             await queue.drain(p => p.kind === 'fresh_admission', workers, async (payload, worker) => {
@@ -647,6 +661,11 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const paidStartToLastReadMs = Math.round(performance.now() - paidStart);
             ownerReadOverHour = coverage99 && lateOwners > 0;
             directPublicationMissing = automaticPayments && publishedHandoffs.size !== ownersCount;
+            if ('processFeatureSlots' in capacity) {
+                expect(processModelPeaks.all).toBeLessThanOrEqual(8);
+                expect(processModelPeaks.features).toBeGreaterThan(0);
+                expect(processModelPeaks.features).toBeLessThanOrEqual(capacity.processFeatureSlots);
+            }
             const budgetProbeEvidence = budgetProbe ? await budgetProbe.receipt() : undefined;
             if (budgetProbeEvidence) {
                 expect(budgetProbeEvidence).toMatchObject({ mode: 'held', cancelled: 1, spent: 0, signedOrderMatches: 1, fixtureModelAttempts: 0,
@@ -676,7 +695,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
-                resolverEvidence, ...(budgetProbeEvidence ? { budgetProbeEvidence } : {}), budgetTimeline: budgetTimeline.receipt(), peakModels, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
+                resolverEvidence, ...(budgetProbeEvidence ? { budgetProbeEvidence } : {}), budgetTimeline: budgetTimeline.receipt(), peakModels, processModelPeaks, duplicatesDuringModel: duplicatedDuringModel.size, duplicatesAfterModel: sample.size, duplicateCreates: queue.duplicateCreates, stageCounts, errors, proofs
             };
             marker('shared-standard-complete', report);
             if (process.env.SHARED_STANDARD_RECEIPT) writeFileSync(process.env.SHARED_STANDARD_RECEIPT, JSON.stringify(report, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
@@ -692,7 +711,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
-                errors, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
+                errors, processModelPeaks, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
             };
             let expectedHardDenial = false;
             if (budgetProbe?.mode === 'spent') {

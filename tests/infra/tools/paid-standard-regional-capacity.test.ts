@@ -63,6 +63,17 @@ describe('read-only regional paid Standard release plan', () => {
         expect(JSON.stringify(plan)).not.toContain('fixture-must-remain-private');
     });
 
+    it('adds only the opt-in feature limit to the candidate and removes it on rollback', () => {
+        const measured = sharedStandardCapacity('18i-40q-f4');
+        if (measured.preset !== '18i-40q-f4') throw new Error('Missing measured feature preset');
+        const plan = regionalCapacityCommands({ ...tags, ...observations(), processFeatureSlots: measured.processFeatureSlots });
+        expect(plan.processFeatureSlots).toBe(4);
+        expect(plan.stage).toContain('--update-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE=expanded128,ANALYSIS_CAPACITY_WORKER_CPU=1,PAID_STANDARD_PROCESS_FEATURE_SLOTS=4');
+        expect(plan.restoreTemplate).toContain('--remove-env-vars=PAID_STANDARD_VERTEX_CAPACITY_MODE,PAID_STANDARD_PROCESS_FEATURE_SLOTS');
+        expect(measured).toMatchObject({ cpu: 1, workers: 40, instances: 18, slots: 128, features: 80, resolvers: 48 });
+        expect(() => regionalCapacityCommands({ ...tags, ...observations(), processFeatureSlots: 5 })).toThrow();
+    });
+
     it.each([
         { name: 'explicit LATEST', traffic: [{ latestRevision: true, percent: 100 }], mode: 'latest' },
         { name: 'empty default', traffic: [], mode: 'latest' },
@@ -144,6 +155,9 @@ esac
         ['mutable image', (r: ReturnType<typeof observations>) => { r.cloudRun.spec.template.spec.containers[0].image = 'repo:latest'; }],
         ['queue scope', (r: ReturnType<typeof observations>) => { r.cloudTasks.name = r.cloudTasks.name.replace(project, 'other-project'); }],
         ['queue drift', (r: ReturnType<typeof observations>) => { r.cloudTasks.rateLimits.maxConcurrentDispatches = 40; }],
+        ['existing feature opt-in', (r: ReturnType<typeof observations>) => {
+            r.cloudRun.spec.template.spec.containers[0].env.push({ name: 'PAID_STANDARD_PROCESS_FEATURE_SLOTS', value: '4' });
+        }],
         ['existing paid opt-in', (r: ReturnType<typeof observations>) => {
             r.cloudRun.spec.template.spec.containers[0].env.push({ name: 'PAID_STANDARD_VERTEX_CAPACITY_MODE', value: 'expanded128' });
         }],

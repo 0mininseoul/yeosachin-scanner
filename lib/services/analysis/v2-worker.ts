@@ -1247,7 +1247,7 @@ export async function processAnalysisV2TaskDelivery(
     const activeClaim = claim;
     let successors: readonly AnalysisV2JobSuccessor[];
     try {
-        successors = await withPaidStandardCapacityJob(activeClaim, async job => {
+        successors = await withPaidStandardCapacityJob({ ...activeClaim, handlerDeadlineAtMs: dependencies.handlerDeadlineAtMs }, async job => {
             const { data, error } = await supabaseAdmin.rpc('paid_standard_capacity_approved_v1', {
                 p_request_id: job.requestId,
                 p_job_key: job.jobKey,
