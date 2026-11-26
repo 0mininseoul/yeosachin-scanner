@@ -83,7 +83,9 @@ describe('Cherry public domain', () => {
         expect(response.status).toBe(308);
         expect(response.headers.get('location')).toBe(newUrl + '/' + query);
         const robots = await proxy(new NextRequest(newUrl + '/robots.txt'));
-        expect(await robots.text()).toContain(`Sitemap: ${newUrl}/sitemap.xml`);
+        const rules = await robots.text();
+        expect(rules).toContain('Allow: /sitemap.xml$');
+        expect(rules).toContain(`Sitemap: ${newUrl}/sitemap.xml`);
         const sitemap = await proxy(new NextRequest(newUrl + '/sitemap.xml'));
         expect(await sitemap.text()).toContain(`<loc>${newUrl}/</loc>`);
     });
