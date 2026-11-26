@@ -157,6 +157,21 @@ describe('cherry reservation variant', () => {
         }));
     };
 
+    it.each([
+        ['cherry.yeosachin.com', 'https://cherry.yeosachin.com', 400],
+        ['cherry.yeosachin.com', 'https://external.example', 403],
+        ['yeosachin.com', 'https://cherry.yeosachin.com', 403],
+    ])('checks the browser origin for %s with %s before any reservation write', async (host, origin, status) => {
+        const { POST } = await import('@/app/api/cherry/reservations/route');
+        const response = await POST(new Request('http://localhost:3148/api/cherry/reservations', {
+            method: 'POST',
+            headers: { host, origin, 'content-type': 'application/json' },
+            body: '{}',
+        }));
+        expect(response.status).toBe(status);
+        expect(db.insert).not.toHaveBeenCalled();
+    });
+
     it('stores the variant', async () => {
         db.insert.mockResolvedValue({ error: null });
         const response = await reserve({ variant: 'crush' });
