@@ -86,6 +86,26 @@ describe('cherry landing variant', () => {
         expect(newDocument.body.innerHTML).toBe(oldDocument.body.innerHTML);
     });
 
+    it('publishes a valid Naver verification marker only on the Cherry host', async () => {
+        const { GET: getPublicLanding } = await import('@/app/cherry-public-landing/route');
+        const { GET: getLegacyLanding } = await import('@/app/cherry/route');
+        const marker = 'a'.repeat(40);
+        try {
+            vi.stubEnv('CHERRY_NAVER_SITE_VERIFICATION', marker);
+            const publicRequest = new NextRequest('https://cherry.yeosachin.com/cherry-public-landing');
+            const publicHtml = await (await getPublicLanding(publicRequest)).text();
+            expect(publicHtml.split('</head>')[0]).toContain(`<meta name="naver-site-verification" content="${marker}">`);
+
+            const legacyHtml = await (await getLegacyLanding(new NextRequest('https://yeosachin.com/cherry'))).text();
+            expect(legacyHtml).not.toContain('naver-site-verification');
+
+            vi.stubEnv('CHERRY_NAVER_SITE_VERIFICATION', 'malformed"');
+            expect(await (await getPublicLanding(publicRequest)).text()).not.toContain('naver-site-verification');
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('keeps crush with ad params', async () => {
         const { GET } = await import('@/app/cherry/route');
         const response = await GET(new NextRequest('https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=abc'));

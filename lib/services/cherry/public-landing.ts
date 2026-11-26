@@ -28,6 +28,10 @@ export async function serveCherryLanding(request: NextRequest, onCherryHost: boo
             .replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, (schema) => schema
                 .replaceAll(`"${CHERRY_LEGACY_URL}"`, `"${CHERRY_PUBLIC_URL}"`)
                 .replaceAll(`"${CHERRY_LEGACY_URL}#`, `"${CHERRY_PUBLIC_URL}#`));
+        const naverVerification = process.env.CHERRY_NAVER_SITE_VERIFICATION?.trim();
+        if (naverVerification && /^[a-f0-9]{40}$/i.test(naverVerification)) {
+            html = html.replace('</head>', `  <meta name="naver-site-verification" content="${naverVerification}">\n  </head>`);
+        }
     }
     const indexable = !onCherryHost || isCherryDomainLive();
     return new Response(html, {
