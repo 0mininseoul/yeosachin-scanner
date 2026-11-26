@@ -2,7 +2,10 @@ import { channel } from 'node:diagnostics_channel';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { vertexDispatchFetch, withVertexDispatchAuthorization } from '@/lib/services/ai/vertex-dispatch-window';
-import { acquireResolverPermit, AsyncSemaphore } from '@/lib/services/ai/gemini-generation-limiter';
+import {
+    acquireResolverPermit, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore,
+    LocalResolverPermitTimeoutError,
+} from '@/lib/services/ai/gemini-generation-limiter';
 import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
 import devRegistry from '@/config/dev-ui-deployment.json';
 import { ApiError } from '@google/genai';
@@ -76,7 +79,7 @@ import {
 import { deepRiskNarrativeResponseSchema } from '../../lib/services/ai/deep-risk-analysis';
 import { createPrivateNameBatchResponseSchema } from '../../lib/services/ai/private-name-analysis';
 import { AI_STAGE_POLICY_V212_VERSION } from '../../lib/services/ai/stage-policy';
-import type { VertexAiBudgetGuard } from '../../lib/services/ai/vertex-ai-cost-policy';
+import { InMemoryVertexAiBudgetStore, type VertexAiBudgetGuard } from '../../lib/services/ai/vertex-ai-cost-policy';
 
 const responseSchema = z.object({ value: z.string() }).strict();
 const stageRequestId = '11111111-1111-4111-8111-111111111111';
@@ -2343,15 +2346,15 @@ describe('analyzeWithGemini process concurrency', () => {
         const releaseShared = shared.tryAcquire()!;
         try {
             const wait = withStandardResolverAdmission(new AbortController().signal, async () => {
-                const releaseStage = await acquireResolverPermit(stage, 'worker_stage');
+                const releaseStage = await acquireResolverPermit(stage, 'worker_stage', 1);
                 try {
-                    const release = await acquireResolverPermit(shared, 'worker_shared');
+                    const release = await acquireResolverPermit(shared, 'worker_shared', 1);
                     release();
                 } finally {
                     releaseStage();
                 }
             });
-            const rejected = expect(wait).rejects.toThrow('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            const rejected = expect(wait).rejects.toBeInstanceOf(LocalResolverPermitTimeoutError);
             await vi.advanceTimersByTimeAsync(3_000);
             holders.shift()!();
             await vi.advanceTimersByTimeAsync(2_000);
@@ -2363,6 +2366,52 @@ describe('analyzeWithGemini process concurrency', () => {
         }
         expect(stage.tryAcquire()).toEqual(expect.any(Function));
         expect(shared.tryAcquire()).toEqual(expect.any(Function));
+    });
+
+    it('cancels a local timeout before durable reservation and settles the same operation once on redelivery', async () => {
+        const policy = 'ai-stage-policy-v2.11' as const;
+        const stage = getStageGenerationSemaphore(getGeminiGenerationLimiter(), policy, 'genderResolution');
+        const holders = Array.from({ length: 4 }, () => stage.tryAcquire(4)!);
+        const audit = stageAuditOptions();
+        const budgetGuard = new InMemoryVertexAiBudgetStore();
+        const reserve = vi.spyOn(budgetGuard, 'reserve');
+        const cancel = vi.spyOn(budgetGuard, 'cancel');
+        const settle = vi.spyOn(budgetGuard, 'settle');
+        const run = () => withStandardResolverAdmission(new AbortController().signal, () => analyzeWithGemini(
+            'prompt', undefined, {
+                ...audit, stage: 'genderResolution', aiStagePolicyVersion: policy, schema: responseSchema,
+                budgetGuard, budgetOperationKey: 'test-local-permit',
+            },
+        ));
+        mocks.generateContent.mockResolvedValue(successfulResponse());
+        vi.useFakeTimers();
+        try {
+            const rejected = expect(run()).rejects.toMatchObject({
+                message: 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED', attempt: 1,
+            });
+            await vi.advanceTimersByTimeAsync(5_000);
+            await rejected;
+            expect(mocks.generateContent).not.toHaveBeenCalled();
+            expect(audit.onBeforeAttempt).not.toHaveBeenCalled();
+            expect(audit.onAttemptTelemetry).not.toHaveBeenCalled();
+            expect(cancel).toHaveBeenCalledOnce();
+            expect(settle).not.toHaveBeenCalled();
+            expect(await budgetGuard.snapshot()).toEqual({ run: {}, order: {}, day: {} });
+
+            holders.pop()!();
+            await expect(run()).resolves.toEqual({ value: 'ok' });
+            expect(reserve.mock.calls.map(([input]) => input.reservationKey)).toEqual([
+                `${stageRequestId}:test-local-permit:1`, `${stageRequestId}:test-local-permit:1`,
+            ]);
+            expect(mocks.generateContent).toHaveBeenCalledOnce();
+            expect(audit.onBeforeAttempt).toHaveBeenCalledOnce();
+            expect(audit.onAttemptTelemetry).toHaveBeenCalledOnce();
+            expect(settle).toHaveBeenCalledOnce();
+            expect(settle.mock.calls[0][1].actualCostUsd).toBeGreaterThan(0);
+        } finally {
+            holders.forEach(release => release());
+            vi.useRealTimers();
+        }
     });
 
     it('admits four opted-in resolvers and removes cancelled work before dispatch', async () => {

@@ -398,6 +398,7 @@ async function finishAdmittedResolvers(
 interface AnalysisV2DeferredProfileAiOutcome {
     kind: 'resolver_pending';
     resolverHandle: AnalysisV2GenderResolutionHandle | null;
+    featureReservedThisDelivery?: boolean;
     finalize(
         resolverState: AnalysisV2GenderResolutionState | null
     ): Promise<AnalysisV2ProfileAiOutcome>;
@@ -2681,6 +2682,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         ? createFeatureAnalysisResultIdentity(featureInput, inputQualityPolicyVersion).operationKey : null;
                     const featureRemainderSha256 = await pinProfileFeatureMedia(featureMedia, featureKey, true);
                     let resolverHandle: AnalysisV2GenderResolutionHandle | null = null;
+                    let featureReservedThisDelivery = false;
                     const startResolver = () => {
                         if (!shouldStartResolver || blockedCapacityTrial || deferringAdmitted || resolverHandle) return;
                         resolverHandle = dependencies.ai.startGenderResolution({ media: resolverMedia }, resolverFence);
@@ -2692,6 +2694,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                         features = admittedResolver
                             ? await dependencies.ai.features(featureInput, scheduledProfileFence, () => {
                                 freshFeatureAttempt = true;
+                                featureReservedThisDelivery = true;
                                 startResolver();
                             })
                             : await dependencies.ai.features(featureInput, scheduledProfileFence);
@@ -2812,6 +2815,7 @@ export function createAnalysisV2AiScoringExecutorRegistry(
                     return {
                         kind: 'resolver_pending',
                         resolverHandle,
+                        featureReservedThisDelivery,
                         finalize: async settledResolverState => {
                             const readyResolver =
                                 settledResolverState?.status === 'ready'
@@ -3015,6 +3019,16 @@ export function createAnalysisV2AiScoringExecutorRegistry(
             }
             const budgetWait = resolverStates.find(state => state?.status === 'budget_reservation_pending');
             if (budgetWait?.status === 'budget_reservation_pending') throw budgetWait.error;
+            // Only the affected candidate's newly completed feature earns this delivery.
+            // Its immutable feature checkpoint has no reservation callback when replayed.
+            const retryLocalPermit = preparedOutcomes.some((outcome, index) => {
+                const state = resolverStates[index];
+                return isDeferredProfileAiOutcome(outcome) && outcome.featureReservedThisDelivery
+                    && state?.status === 'capacity_skipped' && state.localFirstAttemptTimedOut;
+            });
+            if (retryLocalPermit && await paidStandardExpandedCapacityEnabled(aiFence.aiStagePolicyVersion, context.claim)) {
+                throw new AnalysisV2SchedulerContinuationError('ANALYSIS_V2_AI_CAPACITY_PENDING', 5);
+            }
             // A fresh feature checkpoint makes redelivery cheaper. If a cached-only
             // delivery is still too short, seal the unsent optional result as cutoff
             // rather than repeatedly deferring the same immutable checkpoint.

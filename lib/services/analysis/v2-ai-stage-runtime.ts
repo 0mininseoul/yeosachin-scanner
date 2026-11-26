@@ -1,6 +1,7 @@
 import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
 import { AnalysisV2AiCapacityPendingError } from './v2-gemini-lease-store';
 import { withStandardResolverAdmission } from '@/lib/services/ai/standard-resolver-admission';
+import { LocalResolverPermitTimeoutError } from '@/lib/services/ai/gemini-generation-limiter';
 import { AI_GEMINI_MIN_REMAINING_MS } from '@/lib/services/ai/stage-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { z } from 'zod';
@@ -167,7 +168,7 @@ export type AnalysisV2GenderResolutionState =
     | { status: 'cutoff' }
     | { status: 'recovery_pending' }
     | { status: 'budget_reservation_pending'; error: DevLiveVertexBudgetReservationPendingError }
-    | { status: 'capacity_skipped' }
+    | { status: 'capacity_skipped'; localFirstAttemptTimedOut?: true }
     | { status: 'deadline_pending' }
     | { status: 'unsent_capacity_pending' }
     | {
@@ -795,6 +796,10 @@ export function createDurableAnalysisV2AiStageRuntime(
                         // Only the audited resolver can report an exact terminal attempt from prepare().
                         recoveredCutoffFromAudit = auditStarted;
                         state = { status: 'cutoff' };
+                        return;
+                    }
+                    if (fence.admittedStandardResolver && error instanceof LocalResolverPermitTimeoutError && error.attempt === 1) {
+                        state = { status: 'capacity_skipped', localFirstAttemptTimedOut: true };
                         return;
                     }
                     state = {

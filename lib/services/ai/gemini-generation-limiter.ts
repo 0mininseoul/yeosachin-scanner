@@ -125,11 +125,19 @@ export function getStageGenerationSemaphore(
     return semaphore;
 }
 
+/** A local slot wait ended before entering the dispatched function or reserving an AI attempt. */
+export class LocalResolverPermitTimeoutError extends Error {
+    constructor(readonly attempt: number) {
+        super('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+    }
+}
+
 // A worker still shares one eight-call semaphore. At most four of those permits
 // can be used by the admitted Standard resolver, including existing legacy calls.
 export function acquireResolverPermit(
     semaphore: AsyncSemaphore,
     reason: 'worker_stage' | 'worker_shared',
+    attempt: number,
 ): (() => void) | Promise<() => void> {
     const trial = currentStandardResolverAdmission();
     const limit = reason === 'worker_stage' && trial ? 4 : undefined;
@@ -149,9 +157,10 @@ export function acquireResolverPermit(
             trial.signal.throwIfAborted();
             if (!timeout.signal.aborted) throw error;
             observeResolverAdmission(reason, 'skipped');
-            throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
+            throw new LocalResolverPermitTimeoutError(attempt);
         }).finally(() => clearTimeout(timer));
     }
     observeResolverAdmission(reason, 'skipped');
+    if (trial) throw new LocalResolverPermitTimeoutError(attempt);
     throw new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED');
 }

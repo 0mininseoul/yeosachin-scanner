@@ -1,4 +1,5 @@
 import * as devBudget from '@/lib/services/dev-ui/live-budget';
+import { withPaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
 import { observeDevStandardProfileDelivery } from '@/lib/services/dev-ui/standard-profile-delivery';
 import { AnalysisV2ConfirmedCapacityContinuation, AnalysisV2SchedulerContinuationError } from '@/lib/services/analysis/v2-ai-scheduler-continuation';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
@@ -1769,6 +1770,78 @@ describe('V2 AI and scoring executors', () => {
         expect(cutoffs.get('feature.fatal')).toHaveBeenCalledOnce();
         expect(memoryState.outcomes).toEqual([]);
         expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+    });
+
+    it.each([true, false])('gives only the affected candidate one local timeout continuation under paid approval=%s', async approved => {
+        const accounts = ['local.timeout', 'other.fresh'].map(username => profile(username));
+        const data = memory();
+        const deps = dependencies(data, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: accounts.map(account => account.username),
+                    results: accounts.map(account => ({
+                        username: account.username, status: 'success' as const, profile: account,
+                    })),
+                })),
+            },
+        });
+        const ctx = context('profile_ai', {
+            jobKey: 'track:profile-ai:batch:0',
+            batch: 0,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            state: state({
+                planId: 'standard',
+                relationships: {
+                    ...state().relationships!,
+                    profileBatches: [{ batch: 0, itemCount: 2, inputHash: digest('local-permit-topology') }],
+                },
+                profileFetchBatches: [{
+                    batch: 0, itemCount: 2, producerInputHash: digest('producer'), revision: 1, resultHash: digest('result'),
+                }],
+            }),
+        });
+        const freshlyReserved: string[] = [];
+        let delivery = 1;
+        deps.ai.features = vi.fn<AnalysisV2AiStageRuntime['features']>(async (input, _fence, onReserved) => {
+            const selections = input.media.map(row => row.selectionId);
+            const owner = selections.some(id => id.includes('local.timeout')) ? 'local.timeout' : 'other.fresh';
+            // On redelivery an unrelated feature may be freshly reserved while the affected one is replayed.
+            if ((delivery === 1 && owner === 'local.timeout') || (delivery === 2 && owner === 'other.fresh')) {
+                freshlyReserved.push(owner);
+                onReserved?.();
+            }
+            return {
+                result: feature(selections), operationKey: 'feature-analysis:' + digest(owner),
+                resultHash: digest(owner), source: 'checkpoint',
+            };
+        });
+        deps.ai.startGenderResolution = vi.fn<AnalysisV2AiStageRuntime['startGenderResolution']>(input => {
+            const affected = input.media.some(row => row.selectionId.includes('local.timeout'));
+            return {
+                operationKey: 'gender-resolution:' + digest(String(affected)), completion: Promise.resolve(),
+                peek: () => affected
+                    ? { status: 'capacity_skipped', localFirstAttemptTimedOut: true }
+                    : { status: 'capacity_skipped' },
+                cutoff: vi.fn(),
+            };
+        });
+        const execute = createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!;
+        const run = () => withPaidStandardCapacityJob(ctx.claim, async () => approved,
+            () => execute({ ...ctx, handlerDeadlineAtMs: performance.now() + 300_000 }), {
+                NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true',
+            });
+        if (approved) {
+            await expect(run()).rejects.toMatchObject({ reason: 'ANALYSIS_V2_AI_CAPACITY_PENDING', delaySeconds: 5 });
+            expect(deps.resultStore.checkpointFeatureBatch).not.toHaveBeenCalled();
+            delivery++;
+        }
+        await run();
+        expect(deps.resultStore.checkpointFeatureBatch).toHaveBeenCalledOnce();
+        expect(data.outcomes.find(row => row.instagramId === 'local.timeout')).toMatchObject({
+            baselineClassification: 'verified_female', genderResolutionStatus: 'capacity_skipped',
+        });
+        expect(freshlyReserved).toEqual(approved ? ['local.timeout', 'other.fresh'] : ['local.timeout']);
     });
 
     it.each([

@@ -114,6 +114,7 @@ function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
+    attempt: number,
     task: () => Promise<T>,
     signal?: AbortSignal,
 ): Promise<T> {
@@ -133,10 +134,10 @@ async function runWithGenerationSlot<T>(
 
     const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
     if (stage === 'genderResolution') {
-        const stagePermit = acquireResolverPermit(stageSemaphore, 'worker_stage');
+        const stagePermit = acquireResolverPermit(stageSemaphore, 'worker_stage', attempt);
         const releaseStage = typeof stagePermit === 'function' ? stagePermit : await stagePermit;
         try {
-            const sharedPermit = acquireResolverPermit(generationLimiterState.shared, 'worker_shared');
+            const sharedPermit = acquireResolverPermit(generationLimiterState.shared, 'worker_shared', attempt);
             const releaseShared = typeof sharedPermit === 'function' ? sharedPermit : await sharedPermit;
             try {
                 return await guardedTask();
@@ -1260,6 +1261,7 @@ export async function analyzeWithGemini<T>(
                 response = await runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
+                    attemptNumber,
                     devLiveBudget && !useDevStandardConcurrency
                         ? () => devLiveGenerationSlot.run(dispatch, abortSignal)
                         : dispatch,

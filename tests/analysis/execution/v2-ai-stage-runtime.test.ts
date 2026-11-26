@@ -1,4 +1,5 @@
 import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
+import { LocalResolverPermitTimeoutError } from '@/lib/services/ai/gemini-generation-limiter';
 import { AnalysisV2AiCapacityPendingError } from '@/lib/services/analysis/v2-gemini-lease-store';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
@@ -256,6 +257,25 @@ describe('durable V2 AI stage runtime', () => {
         await handle.completion;
         expect(handle.peek().status).toBe(expected);
         expect(runGenderResolution).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        [new LocalResolverPermitTimeoutError(1), true, true],
+        [new LocalResolverPermitTimeoutError(2), true, false],
+        [new LocalResolverPermitTimeoutError(1), false, false],
+        [new Error('ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED'), true, false],
+    ] as const)('identifies only a local timeout before the first admitted send', async (error, admitted, eligible) => {
+        const runtime = createDurableAnalysisV2AiStageRuntime({ runGenderResolution: vi.fn().mockRejectedValue(error) });
+        const handle = runtime.startGenderResolution({ media: [] }, {
+            ...fence,
+            aiStagePolicyVersion: AI_STAGE_POLICY_V211_VERSION,
+            ...(admitted ? { admittedStandardResolver: true as const } : {}),
+            handlerDeadlineAtMs: performance.now() + 300_000,
+        });
+        await handle.completion;
+        expect(handle.peek()).toEqual(eligible
+            ? { status: 'capacity_skipped', localFirstAttemptTimedOut: true }
+            : { status: 'capacity_skipped' });
     });
 
     it('defers an uncached admitted resolver without starting an attempt when its delivery is too short', async () => {
