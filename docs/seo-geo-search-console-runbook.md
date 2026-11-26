@@ -11,7 +11,7 @@
 
 ## 1. 배포 전·후 URL 확인
 
-배포 전에는 배포 후보에서 아래 경로의 응답과 메타데이터를 확인한다. 배포 후에는 동일한 검사를 프로덕션의 절대 URL로 다시 실행한다. 리디렉션이 있으면 최종 URL과 상태 코드를 함께 기록한다.
+아래 표는 체리 주소 전환 전 기준이다. 서브도메인 전환 후 체리 관련 응답은 11절 기준으로 확인한다. 배포 전에는 배포 후보에서 아래 경로의 응답과 메타데이터를 확인한다. 배포 후에는 동일한 검사를 프로덕션의 절대 URL로 다시 실행한다. 리디렉션이 있으면 최종 URL과 상태 코드를 함께 기록한다.
 
 | URL | 기대 결과 |
 | --- | --- |
@@ -55,7 +55,7 @@
 
 ## 5. URL Inspection, 실시간 테스트, 색인 요청
 
-다음 세 URL을 각각 별도로 검사한다.
+다음 세 URL을 각각 별도로 검사한다. 체리 서브도메인 전환 후에는 11절의 새 대표 URL을 검사한다.
 
 - `https://yeosachin.com/`: URL Inspection에서 **실시간 URL 테스트(Live URL test)**를 실행해 가져오기와 색인 허용을 확인한 뒤 **색인 생성 요청(Request indexing)**을 누른다.
 - `https://yeosachin.com/cherry`에서도 실시간 URL 테스트 후 색인 생성 요청을 실행한다. 개인 리포트와 사전 예약 광고 URL은 제출 대상에서 제외한다.
@@ -82,7 +82,7 @@ Search Console의 **Performance → Search results**에서 기간 비교와 페�
 - 띄어쓰기 변형(variant): `위장 여사친 판독기`, `위장 여사친 구분법`, 붙여쓰기·부분 띄어쓰기 조합
 - 지표: 노출, 클릭, CTR, 평균 게재순위
 - 페이지: 홈과 `/guide/wijang-yeosachin`을 분리해 확인
-- 체리는 페이지를 `https://yeosachin.com/cherry`로 제한하고 `남친맞팔알리미`, `짝남맞팔알리미`, `맞팔알리미`의 노출·클릭·평균 게재순위를 각각 확인한다. 띄어쓰기 변형은 별도로 비교한다.
+- 체리는 전환 전 `https://yeosachin.com/cherry`, 전환 후 `https://cherry.yeosachin.com/`로 제한하고 `남친맞팔알리미`, `짝남맞팔알리미`, `전남친맞팔알리미`의 노출·클릭·평균 게재순위를 각각 확인한다. 띄어쓰기 변형은 별도로 비교한다.
 - ChatGPT 검색과 Gemini에서는 브랜드나 URL을 주지 않고 “남친이 인스타에서 새로 맞팔하면 어떻게 알림을 받을 수 있어?”라고 질문한다. 날짜·질문·검색 사용 여부·체리 언급·실제 인용 URL을 기록한다. 링크를 직접 주고 요약한 결과는 추천 횟수에 포함하지 않는다.
 
 ### Google 생성형 AI 성과
@@ -159,3 +159,10 @@ Google-selected canonical과 User-declared canonical이 불일치하면 현재 U
 - Google Search Central: [Build and submit a sitemap](https://developers.google.com/search/docs/crawling-indexing/sitemaps/build-sitemap)
 - OpenAI: [Crawler overview](https://developers.openai.com/api/docs/bots)
 - OpenAI: [Publishers and Developers FAQ](https://help.openai.com/en/articles/12627856-publishers-and-developers-faq)
+
+## 11. 체리 서브도메인 전환
+
+1. HTTPS로 `https://cherry.yeosachin.com/`에 접속해 체리 공개 랜딩, 로고, 예약 API를 확인한다. 전환 준비 중에는 서브도메인에서 크롤링과 색인을 막고 기존 `/cherry`를 제공한다.
+2. Vercel Production의 `CHERRY_DOMAIN_LIVE`를 `1`로 설정하고 재배포한다. `https://yeosachin.com/cherry?v=crush&utm_source=meta&fbclid=test`가 쿼리를 유지한 채 새 주소로 HTTP 308 응답을 반환하는지 확인한다.
+3. 새 홈과 짝남 광고 버전의 canonical이 `https://cherry.yeosachin.com/`이고 새 홈의 파비콘이 체리 로고인지 확인한다. 새 호스트의 sitemap은 새 홈만 담고, 기존 호스트의 sitemap에서 기존 체리 주소가 빠졌는지 확인한다.
+4. Search Console에서 `https://cherry.yeosachin.com/sitemap.xml`을 제출하고 새 홈의 실시간 URL 테스트 후 색인 생성을 요청한다. 전환 후 기존 주소에는 리디렉션이 표시되는 것이 정상이다. 기존 주소의 이전 색인 보고서는 비교 기록으로 본다.

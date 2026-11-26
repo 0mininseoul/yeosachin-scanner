@@ -175,6 +175,7 @@ describe('authentication proxy redirects', () => {
         ['/guide/wijang-yeosachin', 'ChatGPT-User/1.0', null],
         ['/terms-and-conditions', 'ClaudeBot/1.0', null],
     ])('passes through %s for %s with the expected search directives', async (path, agent, tag) => {
+        vi.stubEnv('CHERRY_DOMAIN_LIVE', '');
         mockAuthenticatedUser(null);
         const response = await proxy(new NextRequest(`https://yeosachin.com${path}`, {
             headers: { 'User-Agent': agent },

@@ -45,7 +45,8 @@ describe('search discovery routes', () => {
         });
     });
 
-    it('publishes only the three indexable public pages without ranking hints', async () => {
+    it('publishes the public pages before Cherry moves without ranking hints', async () => {
+        vi.stubEnv('CHERRY_DOMAIN_LIVE', '');
         const { default: sitemap } = await import('@/app/sitemap');
         const entries = sitemap();
 
@@ -57,6 +58,15 @@ describe('search discovery routes', () => {
         expect(entries.every(({ lastModified }) => lastModified instanceof Date)).toBe(true);
         expect(entries.every((entry) => !('priority' in entry))).toBe(true);
         expect(entries.every((entry) => !('changeFrequency' in entry))).toBe(true);
+    });
+
+    it('excludes the old Cherry URL from the main sitemap after the move', async () => {
+        vi.stubEnv('CHERRY_DOMAIN_LIVE', '1');
+        const { default: sitemap } = await import('@/app/sitemap');
+        expect(sitemap().map(({ url }) => url)).toEqual([
+            `${CANONICAL_ORIGIN}/`,
+            `${CANONICAL_ORIGIN}/guide/wijang-yeosachin`,
+        ]);
     });
 });
 
