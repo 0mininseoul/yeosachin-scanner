@@ -41,11 +41,19 @@ it('writes only registered paid-route outcomes to the QA worker log', () => {
         ]);
     } finally { log.mockRestore(); }
 });
-function settings(role: QaRole): NodeJS.ProcessEnv {
-    const { environment } = qaWorkerDeployment(role, wave);
+function settings(role: QaRole, plan = 'standard'): NodeJS.ProcessEnv {
+    const { environment } = qaWorkerDeployment(role, wave, plan);
     return { ...environment, NODE_ENV: 'production', K_SERVICE: service(role), K_REVISION: service(role) + '-00001-abc' };
 }
 afterEach(() => { vi.unstubAllEnvs(); vi.resetAllMocks(); });
+
+it('runs the Plus rehearsal with the unexpanded paid worker limits', () => {
+    for (const role of ['preflight', 'paid'] as const) {
+        const env = settings(role, 'plus');
+        expect(qaWorkerConfig(env).role).toBe(role);
+        expect(() => qaWorkerConfig({ ...env, PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' })).toThrow('CONFIG_REJECTED');
+    }
+});
 
 it('pins each role to the Dev project, queue, OIDC audience, resource buckets and existing machine identity', async () => {
     for (const role of ['preflight', 'paid'] as const) {

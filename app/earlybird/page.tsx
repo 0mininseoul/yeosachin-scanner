@@ -34,7 +34,7 @@ export default async function EarlybirdPage({
 
     const params = await searchParams;
     const requestedPlan = params.plan;
-    const planId = requestedPlan === 'basic' || requestedPlan === 'standard'
+    const planId = requestedPlan === 'basic' || requestedPlan === 'standard' || requestedPlan === 'plus'
         ? requestedPlan
         : undefined;
 

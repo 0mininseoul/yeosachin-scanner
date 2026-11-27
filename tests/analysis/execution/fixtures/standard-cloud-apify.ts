@@ -12,7 +12,7 @@ const actors = {
 } as const;
 
 // Exactly the 600 public and one private candidates of the six-order load fixture.
-const publicCount = 600;
+const publicCount = process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 900 : 600;
 const publicNames = Array.from({ length: publicCount }, (_, index) => publicUsername(index));
 const names = [target, ...publicNames, privateCandidate];
 const postUrls = [target, ...publicNames].flatMap(name => profileItem(name).latestPosts.map(post => post.url));

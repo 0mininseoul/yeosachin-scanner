@@ -11,7 +11,11 @@ native('serializes simultaneous paid claims, preserves FIFO and releases only te
         const base = await seedProcessingJob(db);
         const { rows: [source] } = await db.query<{ owner: string; preflight: string }>(
             'SELECT user_id AS owner, preflight_id AS preflight FROM analysis_requests WHERE id=$1', [base.requestId]);
-        async function order(index: number, paidAt = new Date(Date.UTC(2026, 0, 1, 0, index))) {
+        async function order(
+            index: number,
+            paidAt = new Date(Date.UTC(2026, 0, 1, 0, index)),
+            planId: 'basic' | 'standard' | 'plus' = index % 2 ? 'basic' : 'standard',
+        ) {
             const id = randomUUID();
             const owner = index === 0 ? source.owner : randomUUID();
             const preflight = index === 0 ? source.preflight : randomUUID();
@@ -23,15 +27,16 @@ native('serializes simultaneous paid claims, preserves FIFO and releases only te
                     plan_catalog_snapshot,pricing_version,pricing_snapshot,policy_versions_snapshot FROM analysis_preflights WHERE id=$3`,
                 [preflight, id, source.preflight,owner]);
             }
+            const suffix = String(index).padStart(2, '0');
             await db.query(`UPDATE users SET phone_number=$2, phone_number_normalized=$3, phone_number_verified_at=now(),
-                phone_number_verification_source='kakao_rest_api' WHERE id=$1`, [owner, '0100000000'+index, '+82100000000'+index]);
+                phone_number_verification_source='kakao_rest_api' WHERE id=$1`, [owner, '010000000'+suffix, '+8210000000'+suffix]);
             await db.query(`INSERT INTO earlybird_orders(id,user_id,preflight_id,target_instagram_id,target_followers_count,
                 target_following_count,exclusion_decision,plan_id,pricing_version,expected_amount_krw,expected_groble_product_id,
                 disclosure_version,disclosure_text,disclosure_accepted_at,status,payment_id,actual_groble_product_id,actual_amount_krw,
                 paid_at,buyer_match_policy,seller_reference_confirmed_at)
                 VALUES($1,$2,$3,'capacity_fixture',150,110,'skip',$4,'fixture',9900,'fixture','fixture','fixture',now(),'paid',
                     $5,'fixture',9900,$6::timestamptz,'legacy_email',now())`,
-                [id,owner,preflight,index%2 ? 'basic' : 'standard',id,paidAt.toISOString()]);
+                [id,owner,preflight,planId,id,paidAt.toISOString()]);
             await db.query("UPDATE earlybird_fulfillments SET status='admission_pending',operator_admitted_at=now() WHERE order_id=$1", [id]);
             return { id, preflight, owner };
         }
@@ -143,6 +148,23 @@ native('serializes simultaneous paid claims, preserves FIFO and releases only te
         expect(counts.rows[0]).toEqual({attempts:0,leases:0,fences:0});
         expect((await db.client(source.owner).rpc('claim_paid_analysis_capacity_v1',{p_order_id:d.id})).error).toBeTruthy();
         expect((await db.client(null).rpc('load_paid_analysis_capacity_v1',{p_order_id:d.id,p_user_id:source.owner})).error).toBeTruthy();
+
+        await db.exec(`UPDATE analysis_requests SET status='failed' WHERE status IN ('pending','processing');
+            UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now();
+            UPDATE paid_analysis_capacity_policy SET max_active=3, validation_ref='three-shared-seats'`);
+        const plusOrders = await Promise.all([0, 1, 2].map(async i => order(8 + i, new Date(Date.UTC(2026,0,1,1,i)), 'plus')));
+        const fourth = await order(11, new Date(Date.UTC(2026,0,1,1,3)), 'standard');
+        for (const p of plusOrders) expect(await claim(p.id)).toBe('ready');
+        expect(await claim(fourth.id)).toBe('waiting');
+        expect(await info(fourth)).toMatchObject({waiting:true,startedAt:null});
+        await expect(db.query(`UPDATE earlybird_fulfillments SET lease_token=gen_random_uuid(),lease_expires_at=now()+interval '1 minute'
+            WHERE order_id=$1`,[fourth.id])).rejects.toThrow('EARLYBIRD_ANALYSIS_CAPACITY_WAITING');
+        await db.query("UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now() WHERE order_id=$1",[plusOrders[0].id]);
+        expect(await claim(fourth.id)).toBe('ready');
+        const started = await info(fourth);
+        expect(started).toMatchObject({waiting:false,startedAt:expect.any(String)});
+        expect(await claim(fourth.id)).toBe('ready');
+        expect(await info(fourth)).toEqual(started);
     } finally {
         await db.close();
     }

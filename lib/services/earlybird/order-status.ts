@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
@@ -31,7 +32,7 @@ const orderRowSchema = z.object({
     user_id: z.string().uuid(),
     preflight_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     pricing_version: z.string().min(1).max(64),
     expected_amount_krw: z.number().int().positive(),
     expected_groble_product_id: z.string().min(1).max(128),
@@ -97,7 +98,7 @@ const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     refunded: '환불 완료',
 };
 
-const PLAN_NAMES = { basic: 'Basic', standard: 'Standard' } as const;
+const PLAN_NAMES = { basic: 'Basic', standard: 'Standard', plus: 'Plus' } as const;
 
 const capacitySchema = z.object({
     waiting: z.boolean(),
@@ -113,8 +114,8 @@ export interface EarlybirdOrderStatusDto {
     orderId: string;
     preflightId: string;
     targetInstagramId: string;
-    planId: 'basic' | 'standard';
-    planName: 'Basic' | 'Standard';
+    planId: PaidEarlybirdPlanId;
+    planName: 'Basic' | 'Standard' | 'Plus';
     actualAmountKrw: number | null;
     acceptedAt: string | null;
     dueAt: string | null;
@@ -137,7 +138,7 @@ export class EarlybirdOrderLookupError extends Error {
 
 export async function loadLatestEarlybirdOrder(
     userId: string,
-    planId?: 'basic' | 'standard',
+    planId?: PaidEarlybirdPlanId,
     orderId?: string
 ): Promise<EarlybirdOrderStatusDto | null> {
     let query = supabaseAdmin

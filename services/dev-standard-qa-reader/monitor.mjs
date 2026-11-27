@@ -8,18 +8,18 @@ export function safeCode(error) {
 }
 
 /** Start each owner's reads as soon as its own authoritative publication is visible. */
-export async function monitorReaders(getRows, readOwner, emit, sleep = (ms) => delay(ms)) {
+export async function monitorReaders(getRows, readOwner, emit, sleep = (ms) => delay(ms), participantCount = 6) {
     const started = new Map();
     const slots = new Map();
     const tasks = [];
     const cutoff = Date.now() + 3 * 60 * 60_000;
     try {
-        while (slots.size < 6) {
+        while (slots.size < participantCount) {
             requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
             const rows = await getRows();
-            requireReader(Array.isArray(rows) && rows.length === 6 && new Set(rows.map(row => row.slot)).size === 6, 'ROSTER');
+            requireReader(Array.isArray(rows) && rows.length === participantCount && new Set(rows.map(row => row.slot)).size === participantCount, 'ROSTER');
             for (const row of rows) {
-                requireReader(Number.isInteger(row.slot) && row.slot >= 1 && row.slot <= 6, 'ROSTER_SLOT');
+                requireReader(Number.isInteger(row.slot) && row.slot >= 1 && row.slot <= participantCount, 'ROSTER_SLOT');
                 if (slots.has(row.slot)) continue;
                 if (row.startedAt) {
                     const at = Date.parse(row.startedAt);
@@ -57,7 +57,7 @@ export async function monitorReaders(getRows, readOwner, emit, sleep = (ms) => d
                     }
                 })());
             }
-            if (slots.size < 6) await sleep(5_000);
+            if (slots.size < participantCount) await sleep(5_000);
         }
     } finally {
         await Promise.all(tasks);

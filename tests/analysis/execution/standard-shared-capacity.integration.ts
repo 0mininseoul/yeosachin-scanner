@@ -1,3 +1,4 @@
+import { sharedPaidPlan } from './fixtures/standard-shared-admission';
 import { channel } from 'node:diagnostics_channel';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -203,7 +204,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         vi.stubEnv('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED', 'true');
         vi.stubEnv('EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE', new Date(Date.now() - 60_000).toISOString());
     }
-    const coverage99 = productionPaid || process.env.DEV_LIVE_STANDARD_RESOLVER_MODE === 'admitted';
+    const coverage99 = sharedPaidPlan === 'standard' && (productionPaid || process.env.DEV_LIVE_STANDARD_RESOLVER_MODE === 'admitted');
     const approvedOwners = new Set<string>();
     const expandedOwners = new Set<string>();
     const logicalLeaseOwners = new Set<string>();
@@ -251,7 +252,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
     admissionChannel.subscribe(observeAdmission);
     continuationChannel.subscribe(observeContinuation);
     try {
-        if (productionPaid) {
+        if (productionPaid && sharedPaidPlan === 'standard') {
             await db.exec(readFileSync('supabase/operations/20261126_expand_paid_standard_vertex.sql', 'utf8'));
         }
         if (apifyHeadroom) await applyApifyHeadroom(db);
@@ -466,7 +467,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 vi.stubEnv('NODE_ENV', 'production');
                 vi.stubEnv('K_SERVICE', 'analysis-paid-worker');
                 vi.stubEnv('ANALYSIS_WORKLOAD_ROLE', 'paid');
-                vi.stubEnv('PAID_STANDARD_VERTEX_CAPACITY_MODE', 'expanded128');
+                if (sharedPaidPlan === 'standard') vi.stubEnv('PAID_STANDARD_VERTEX_CAPACITY_MODE', 'expanded128');
                 if ('processFeatureSlots' in capacity) vi.stubEnv('PAID_STANDARD_PROCESS_FEATURE_SLOTS', String(capacity.processFeatureSlots));
             };
             if (automatic) enablePaidWorker();

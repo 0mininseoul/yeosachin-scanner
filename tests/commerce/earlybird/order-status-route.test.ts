@@ -495,7 +495,7 @@ describe('earlybird owner order status route', () => {
 
     it('rejects invalid plan filters instead of widening the query', async () => {
         const response = await GET(new Request(
-            'https://example.com/api/earlybird/orders/latest?plan=plus'
+            'https://example.com/api/earlybird/orders/latest?plan=enterprise'
         ));
         expect(response.status).toBe(400);
         expect(mocks.from).not.toHaveBeenCalled();

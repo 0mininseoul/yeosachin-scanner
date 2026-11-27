@@ -148,6 +148,7 @@ function safeWebhookEventType(value: string): WebhookEventType {
 function planForProduct(productId: string, config: GrobleConfig): PaidEarlybirdPlanId | undefined {
     if (productId === config.productIds.basic) return 'basic';
     if (productId === config.productIds.standard) return 'standard';
+    if (productId === config.productIds.plus) return 'plus';
     return undefined;
 }
 

@@ -1,3 +1,4 @@
+import { sharedPaidPlan } from './standard-shared-admission';
 import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { NextRequest } from 'next/server';
@@ -323,7 +324,7 @@ async function readOwnerResult(input: OwnerReadInput, scorePolicy: string) {
         expect(response.status).toBe(200);
         const body = storedAnalysisResultPageV1Schema.parse(await response.json());
         expect(body.requestId === requestId && body.schemaVersion === ANALYSIS_V2_SCHEMA_VERSION).toBe(true);
-        expect(body.summary).toMatchObject({ planId: 'standard', scorePolicyVersion: scorePolicy, targetInstagramId: target });
+        expect(body.summary).toMatchObject({ planId: sharedPaidPlan, scorePolicyVersion: scorePolicy, targetInstagramId: target });
         if (pages === 0) {
             await verifyImage(body.summary.targetProfileImage, 'target');
             firstPublic = body.femaleAccounts[0]?.instagramId;
@@ -464,7 +465,7 @@ export async function verifySharedStandardRequest(input: SharedVerification, own
         SELECT public.analysis_result_publication_authorized(r.id) AS published,
             r.status='completed' AND r.pipeline_version='v2' AND r.completed_at IS NOT NULL AND r.test_entitlement_jti_hash IS NULL AS complete,
             p.status='consumed' AND p.consumed_request_id=r.id AND p.user_id=r.user_id AS consumed,
-            o.status='completed' AND o.plan_id='standard' AND o.result_request_id=r.id AND o.paid_at IS NOT NULL
+            o.status='completed' AND o.plan_id=$6 AND o.result_request_id=r.id AND o.paid_at IS NOT NULL
                 AND o.expected_amount_krw>0 AND o.expected_amount_krw=o.actual_amount_krw AS paid,
             f.status='completed' AND f.completed_at IS NOT NULL AND f.request_id=r.id AS fulfilled,
             e.payment_id=o.payment_id AND e.amount_krw=o.actual_amount_krw AS receipt,
@@ -473,7 +474,7 @@ export async function verifySharedStandardRequest(input: SharedVerification, own
         JOIN earlybird_fulfillments f ON f.order_id=o.id JOIN analysis_v2_result_summaries s ON s.request_id=r.id
         JOIN accepted_payment e ON e.order_id=o.id
         WHERE r.id=$1 AND r.user_id=$3
-    `, [requestId, orderId, ownerId, preflightId, input.paymentMode]);
+    `, [requestId, orderId, ownerId, preflightId, input.paymentMode, sharedPaidPlan]);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ published: true, complete: true, consumed: true, paid: true, fulfilled: true, receipt: true });
     expect(rows[0]!.ai_policy).toBe('ai-stage-policy-v2.11');

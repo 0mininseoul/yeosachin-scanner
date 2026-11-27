@@ -358,8 +358,8 @@ describe('earlybird checkout and waitlist routes', () => {
             p_preflight_id: PREFLIGHT_ID,
             p_plan_id: 'basic',
             p_expected_product_id: 'basic_product-01',
-            p_expected_amount_krw: 9_900,
-            p_pricing_version: 'earlybird-2026-08-v5',
+            p_expected_amount_krw: 3_900,
+            p_pricing_version: 'earlybird-2026-11-v6',
             p_disclosure_version: 'earlybird-auto-start-v2',
         }));
         expect(mocks.rpc).toHaveBeenCalledWith(
@@ -384,7 +384,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 9_900,
+                amount_krw: 3_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             },
@@ -423,7 +423,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 order_id: ORDER_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'standard',
-                amount_krw: 19_900,
+                amount_krw: 6_900,
                 operation: 'checkout',
                 disposition: 'exists',
             }),
@@ -557,7 +557,7 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(lineageOrderQuery.eq).toHaveBeenCalledWith('status', 'payment_pending');
     });
 
-    it('rejects a v2 pending checkout below the current price', async () => {
+    it('recovers a v2 pending checkout at its immutable price', async () => {
         installRecoveryOrder(recoveryOrderRow({
             pricing_version: 'earlybird-2026-07-v2',
             expected_amount_krw: 6_900,
@@ -570,9 +570,9 @@ describe('earlybird checkout and waitlist routes', () => {
             planId: 'basic',
         });
 
-        expect(response.status).toBe(409);
+        expect(response.status).toBe(200);
         await expect(response.json()).resolves.toMatchObject({
-            code: 'EARLYBIRD_CHECKOUT_NOT_RECOVERABLE',
+            orderId: ORDER_ID,
         });
     });
 
@@ -736,7 +736,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 order_id: ORDER_ID,
                 plan_id: 'basic',
-                amount_krw: 9_900,
+                amount_krw: 3_900,
                 operation: 'checkout',
                 disposition: 'accepted',
             }),
@@ -916,7 +916,7 @@ describe('earlybird checkout and waitlist routes', () => {
                 preflight_id: PREFLIGHT_ID,
                 target_instagram_id: 'target.account',
                 plan_id: 'basic',
-                amount_krw: 9_900,
+                amount_krw: 3_900,
                 operation: 'checkout',
                 disposition: 'rejected',
                 error_code: 'VALIDATION_ERROR',

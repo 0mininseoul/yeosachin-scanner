@@ -200,30 +200,31 @@ describe('earlybird analyze UI state', () => {
         expect(canSubmitEarlybirdSelection('basic', false, true)).toBe(false);
         expect(canSubmitEarlybirdSelection('basic', true, true)).toBe(true);
         expect(canSubmitEarlybirdSelection('standard', true, false)).toBe(false);
-        expect(canSubmitEarlybirdSelection('plus', false, true)).toBe(true);
+        expect(canSubmitEarlybirdSelection('plus', false, true)).toBe(false);
+        expect(canSubmitEarlybirdSelection('plus', true, true)).toBe(true);
     });
 
-    it('presents reference, earlybird, and waitlist pricing without invented wording', () => {
+    it('presents each plan’s reference price, earlybird price, and discount', () => {
         expect(buildEarlybirdPlanPresentation('basic')).toEqual({
-            referencePriceLabel: '19,900원',
-            priceLabel: '9,900원',
-            discountLabel: '50% OFF',
+            referencePriceLabel: '10,900원',
+            priceLabel: '3,900원',
+            discountLabel: '64% OFF',
             actionLabel: '지금 분석하기',
         });
         expect(buildEarlybirdPlanPresentation('standard')).toMatchObject({
-            referencePriceLabel: '39,900원',
-            priceLabel: '19,900원',
-            discountLabel: '50% OFF',
+            referencePriceLabel: '20,900원',
+            priceLabel: '6,900원',
+            discountLabel: '67% OFF',
         });
         expect(buildEarlybirdPlanPresentation('plus')).toEqual({
-            referencePriceLabel: null,
-            priceLabel: '대기 신청',
-            discountLabel: null,
-            actionLabel: 'Plus 대기 신청하기',
+            referencePriceLabel: '34,900원',
+            priceLabel: '10,900원',
+            discountLabel: '69% OFF',
+            actionLabel: '지금 분석하기',
         });
     });
 
-    it('allows browser navigation only to a server-owned Basic or Standard continuation', () => {
+    it('accepts a server-owned checkout continuation for each paid plan', () => {
         expect(isSafeEarlybirdCheckoutContinuationUrl(buildEarlybirdCheckoutContinuationUrl({
             orderId: '10000000-0000-4000-8000-000000000001',
             planId: 'basic',
@@ -231,6 +232,10 @@ describe('earlybird analyze UI state', () => {
         expect(isSafeEarlybirdCheckoutContinuationUrl(buildEarlybirdCheckoutContinuationUrl({
             orderId: '20000000-0000-4000-8000-000000000001',
             planId: 'standard',
+        }))).toBe(true);
+        expect(isSafeEarlybirdCheckoutContinuationUrl(buildEarlybirdCheckoutContinuationUrl({
+            orderId: '30000000-0000-4000-8000-000000000001',
+            planId: 'plus',
         }))).toBe(true);
     });
 
@@ -243,7 +248,7 @@ describe('earlybird analyze UI state', () => {
         ['an encoded order id', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-00000000000%31&planId=basic'],
         ['a trailing query separator', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=basic&'],
         ['a malformed order id', '/api/earlybird/checkout/redirect?orderId=not-an-id&planId=basic'],
-        ['an unsupported plan', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=plus'],
+        ['an unsupported plan', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-000000000001&planId=enterprise'],
         ['an uppercase order id', '/api/earlybird/checkout/redirect?orderId=10000000-0000-4000-8000-00000000000A&planId=basic'],
         ['an absolute URL', 'https://provider.example/checkout?orderId=10000000-0000-4000-8000-000000000001&planId=basic'],
         ['a wrong path', '/earlybird?orderId=10000000-0000-4000-8000-000000000001&planId=basic'],
@@ -447,9 +452,9 @@ describe('earlybird analyze UI state', () => {
         }
     });
 
-    it('emits zero pricing events for stale v1 and current 9,900/19,900 prices for fresh v5', () => {
+    it('suppresses stale pricing events and uses the current paid checkout amounts', () => {
         const stale = readyPreflight('earlybird-2026-07-v1', 14_900, 19_900);
-        const fresh = readyPreflight('earlybird-2026-08-v5', 9_900, 19_900);
+        const fresh = readyPreflight('earlybird-2026-11-v6', 3_900, 6_900);
         const emit = vi.fn();
 
         for (const event of [
@@ -467,8 +472,8 @@ describe('earlybird analyze UI state', () => {
         expect(emit).not.toHaveBeenCalled();
 
         for (const [planId, amountKrw] of [
-            ['basic', 9_900],
-            ['standard', 19_900],
+            ['basic', 3_900],
+            ['standard', 6_900],
         ] as const) {
             for (const event of [
                 'plan_viewed',
@@ -605,7 +610,7 @@ describe('earlybird analyze UI state', () => {
         expect(pendingEarlybirdCheckoutStatusPath(409, {
             code: 'EARLYBIRD_CHECKOUT_ACTIVE_PENDING_LINEAGE',
             subreason: 'STALE_PRICING_LINEAGE',
-        }, 'plus')).toBeNull();
+        }, 'plus')).toBe('/earlybird?plan=plus');
     });
 
     it('maps both classified lineages to status, but never offers cancelled lineage recovery', () => {

@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -30,7 +31,7 @@ const identityRowSchema = z.object({
     fulfillment_status: fulfillmentStatusSchema,
     preflight_id: uuidSchema,
     user_id: uuidSchema,
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     request_id: uuidSchema.nullable(),
 }).strict();
 const identityRowsSchema = z.array(identityRowSchema).max(100);
@@ -94,7 +95,7 @@ export type EarlybirdFulfillmentIdentity = Readonly<{
     status: EarlybirdFulfillmentStatus;
     preflightId: string;
     userId: string;
-    planId: 'basic' | 'standard';
+    planId: PaidEarlybirdPlanId;
     requestId: string | null;
 }>;
 
@@ -687,7 +688,7 @@ export interface EarlybirdFulfillmentAdvanceDependencies {
         input: {
             preflightId: string;
             userId: string;
-            selectedPlanId: 'basic' | 'standard';
+            selectedPlanId: PaidEarlybirdPlanId;
             entitlementJtiHash: string;
         }
     ): Promise<AnalysisV2FreshAdmissionReservation>;

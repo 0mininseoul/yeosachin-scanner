@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { loadAccountCheckoutPhone } from '@/lib/services/identity/account-principal-store';
@@ -16,7 +17,7 @@ const checkoutRecoveryRowSchema = z.object({
     user_id: z.string().uuid(),
     preflight_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(128),
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     pricing_version: z.string().min(1).max(64),
     expected_amount_krw: z.number().int().positive(),
     expected_groble_product_id: z.string().min(1).max(128),
@@ -63,7 +64,7 @@ export interface EarlybirdCheckoutRecoveryRecord {
     userId: string;
     preflightId: string;
     targetInstagramId: string;
-    planId: 'basic' | 'standard';
+    planId: PaidEarlybirdPlanId;
     pricingVersion: string;
     expectedAmountKrw: number;
     expectedProductId: string;
@@ -221,7 +222,7 @@ function boundedDatabaseFailure(error: unknown): {
 export interface CreateCheckoutRecordInput {
     userId: string;
     preflightId: string;
-    planId: 'basic' | 'standard';
+    planId: PaidEarlybirdPlanId;
     productId: string;
     amountKrw: number;
     pricingVersion: string;
@@ -288,7 +289,7 @@ export const earlybirdStore = {
         userId: string,
         preflightId: string,
         targetInstagramId: string | null,
-        planId: 'basic' | 'standard',
+        planId: PaidEarlybirdPlanId,
     ) {
         const ownerQuery = supabaseAdmin
             .from('earlybird_orders')
@@ -323,7 +324,7 @@ export const earlybirdStore = {
     async findCheckoutForRedirect(
         userId: string,
         orderId: string,
-        planId: 'basic' | 'standard',
+        planId: PaidEarlybirdPlanId,
     ) {
         const query = supabaseAdmin
             .from('earlybird_orders')

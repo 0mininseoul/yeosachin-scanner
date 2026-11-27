@@ -5,7 +5,7 @@ import { qaDelivery } from './scope';
 export async function getSelfHostedProfileSummary(name: string) {
     qaDelivery();
     if (name !== target) throw new Error('DEV_STANDARD_QA_PROFILE_OUTSIDE_FIXTURE');
-    const item = profileItem(target, 1, 601);
+    const item = profileItem(target, 1, process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 901 : 601);
     return { username: target, followersCount: item.followersCount, followingCount: item.followsCount, postsCount: item.postsCount,
         isPrivate: false, isVerified: false, fullName: item.fullName, bio: item.biography, profilePicUrl: item.profilePicUrl };
 }

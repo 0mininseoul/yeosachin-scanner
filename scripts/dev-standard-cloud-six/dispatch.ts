@@ -12,10 +12,12 @@ import { dbOrigin, origin, project, region, taskPath, type QaRole } from '../../
 import { queueName } from '../../services/dev-standard-qa-worker/queue-name.mjs';
 import { buyerIdentity } from './identity.mjs';
 
+const plusRehearsal = process.env.DEV_STANDARD_QA_PLAN === 'plus';
+const participantCount = plusRehearsal ? 4 : 6;
 const buyers = z.array(z.object({ slot: z.number().int().min(1).max(6), owner_id: z.uuid(),
     preflight_id: z.uuid().nullable(), order_id: z.uuid().nullable(), request_id: z.uuid().nullable(),
     preflight_status: z.string().nullable(), request_status: z.string().nullable(), order_status: z.string().nullable(),
-})).length(6);
+})).length(participantCount);
 
 function checkEnvironment(role: QaRole) {
     const e = process.env;
@@ -42,13 +44,13 @@ async function rpc(name: string, args: Record<string,unknown>) {
 
 async function participants(wave: string) {
     const rows = buyers.parse(await rpc('dev_cloud_six_order_state_v1',{p_wave:wave}));
-    if (new Set(rows.map(row=>row.slot)).size!==6 || new Set(rows.map(row=>row.owner_id)).size!==6)
+    if (new Set(rows.map(row=>row.slot)).size!==participantCount || new Set(rows.map(row=>row.owner_id)).size!==participantCount)
         throw new Error('SIX_DRIVER_PARTICIPANTS_INVALID');
     return rows;
 }
 async function prepare(wave: string) {
-    const enrolled = await rpc('dev_cloud_six_open_v1',{p_wave:wave});
-    if (enrolled!==6) throw new Error('SIX_DRIVER_ENROLLMENT_FAILED');
+    const enrolled = await rpc(plusRehearsal ? 'dev_cloud_six_open_plus_v1' : 'dev_cloud_six_open_v1', {p_wave:wave});
+    if (enrolled!==participantCount) throw new Error('SIX_DRIVER_ENROLLMENT_FAILED');
     const rows = await participants(wave);
     await allSlots(rows,async row=>{
         const scope = await rpc('dev_cloud_six_scope_v1',{p_wave:wave,p_owner_id:row.owner_id});
@@ -102,27 +104,35 @@ async function begin(wave: string) {
     if (!rows.every(r=>r.preflight_id && (r.preflight_status==='ready' || (r.order_id && r.preflight_status==='consumed'))))
         throw new Error('SIX_DRIVER_WAITING_FOR_PREFLIGHT');
     const publicKey = await resolveDevPublicKey(undefined);
-    // Prepare all six synthetic orders before starting any of their active-analysis clocks.
-    await allSlots(rows,async row=>{
+    // Prepare all synthetic orders before any of their active-analysis clocks starts.
+    const recordOrder = async (row: Buyer) => {
         if (row.order_id) return;
         await storeOwnerChoice(wave, row, publicKey);
         z.uuid().parse(await rpc('dev_cloud_six_create_order_v1',{p_wave:wave,p_owner_id:row.owner_id,p_preflight_id:row.preflight_id}));
-    });
+    };
+    if (plusRehearsal) {
+        for (const row of rows) await recordOrder(row);
+    } else await allSlots(rows, recordOrder);
     const ordered=await participants(wave);
     if (!ordered.every(r=>r.order_id)) throw new Error('SIX_DRIVER_ORDERS_INCOMPLETE');
     await allSlots(ordered,async row=>{
+        let observedWaiting = false;
         const scope=await rpc('dev_cloud_six_scope_v1',{p_wave:wave,p_owner_id:row.owner_id,p_order_id:row.order_id});
         if (scope!==row.slot) throw new Error('SIX_DRIVER_ORDER_SCOPE');
-        for (let attempt = 1; attempt <= 8; attempt++) {
+        const maxAttempts = plusRehearsal ? 226 : 8;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             const admitted = await admitAndAdvanceEarlybirdFulfillment(row.order_id!);
             const action = admitted.nextAction;
-            console.log(JSON.stringify({ slot: row.slot, admission: action, attempt }));
+            if (attempt === 1 || action !== 'wait_for_capacity' || !observedWaiting) {
+                console.log(JSON.stringify({ slot: row.slot, admission: action, attempt }));
+            }
+            if (action === 'wait_for_capacity') observedWaiting = true;
             if (['wait_for_fresh_admission', 'monitor_analysis', 'completed'].includes(action)) return;
             if (action !== 'retry_handoff' && action !== 'wait_for_capacity') {
                 throw new Error('SIX_DRIVER_ADMISSION_' + action.toUpperCase());
             }
-            if (attempt === 8) throw new Error('SIX_DRIVER_PENDING_' + action.toUpperCase());
-            await sleep(action === 'wait_for_capacity' ? 5_000 : 500 * attempt);
+            if (attempt === maxAttempts) throw new Error('SIX_DRIVER_PENDING_' + action.toUpperCase());
+            await sleep(action === 'wait_for_capacity' ? (plusRehearsal ? 20_000 : 5_000) : Math.min(500 * attempt, 5_000));
         }
     });
 }
