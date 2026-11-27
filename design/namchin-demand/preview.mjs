@@ -17,6 +17,7 @@ const staticFiles = new Map([
   ['/cherry/landing.js', [landingRoot + 'landing.js', 'text/javascript; charset=utf-8']],
   ['/cherry/intro.js', [landingRoot + 'intro.js', 'text/javascript; charset=utf-8']],
   ['/cherry/campaign.mjs', [landingRoot + 'campaign.mjs', 'text/javascript; charset=utf-8']],
+  ['/cherry/reservation-source.mjs', [landingRoot + 'reservation-source.mjs', 'text/javascript; charset=utf-8']],
   ['/cherry/logo.png', [landingRoot + 'logo.png', 'image/png']],
   ['/cherry/og.jpg', [landingRoot + 'og.jpg', 'image/jpeg']],
   ['/cherry/og-crush.jpg', [landingRoot + 'og-crush.jpg', 'image/jpeg']],
