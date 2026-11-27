@@ -41,7 +41,7 @@ async function verifyImages(requestId: string, get: Get, publicCount: number) {
     result.searchParams.set('pageSize', '50');
     const firstPageUrl = result.href;
     const profiles = new Set(Array.from({ length: publicCount }, (_, index) => publicUsername(index)));
-    const imagePaths: string[] = [];
+    const imagesRead: { url: string; username: string; page: string }[] = [];
     const cursors = new Set<string>();
     let femaleCursor: string | null = null;
     let privateCursor: string | null = null;
@@ -85,23 +85,25 @@ async function verifyImages(requestId: string, get: Get, publicCount: number) {
                 const bytes = Buffer.from(await image.arrayBuffer());
                 requireCheck(bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP'
                     && await matchesSharedResultImage(bytes, username), 'IMAGE_CONTENT');
-                imagePaths.push(url);
+                imagesRead.push({ url, username, page: result.href });
             }));
         }
         pages++;
     } while (femaleCursor || privateCursor);
-    requireCheck(profiles.size === 0 && privateRead && new Set(imagePaths).size === publicCount + 2, 'COVERAGE');
+    requireCheck(profiles.size === 0 && privateRead && new Set(imagesRead.map(image => image.url)).size === publicCount + 2, 'COVERAGE');
     return {
-        pages, images: imagePaths.length, completedAt: new Date().toISOString(),
+        pages, images: imagesRead.length, completedAt: new Date().toISOString(),
         // Run negative controls immediately after all owners' positive reads, while image locators remain valid.
         checkOtherSessions(other: Get, anonymous: Get) {
-            return safeEvidence(() => checkDenied([firstPageUrl, ...imagePaths], other, anonymous));
+            return safeEvidence(() => checkDenied(firstPageUrl, imagesRead, get, other, anonymous));
         },
     };
 }
 
-async function checkDenied(urls: string[], other: Get, anonymous: Get) {
-    for (const href of urls) {
+async function checkDenied(firstPage: string, images: { url: string; username: string; page: string }[], owner: Get, other: Get, anonymous: Get) {
+    const refreshed = new Map<string, string>();
+    const validForControls = (href: string) => Number(new URL(href).searchParams.get('expires')) > Date.now() / 1_000 + 65;
+    async function denied(href: string) {
         const [foreign, unauthenticated] = await Promise.all([other(href, policy), anonymous(href, policy)]);
         try {
             requireCheck(foreign.status === 403 && unauthenticated.status === 401, 'ACCESS');
@@ -109,5 +111,21 @@ async function checkDenied(urls: string[], other: Get, anonymous: Get) {
             await Promise.all([foreign.body?.cancel(), unauthenticated.body?.cancel()]);
         }
     }
-    return { otherDenied: urls.length, anonymousDenied: urls.length };
+    await denied(firstPage);
+    for (const image of images) {
+        let href = refreshed.get(image.username) ?? image.url;
+        // A stale signed locator could reject a foreign owner even if the ownership check were broken.
+        if (!validForControls(href)) {
+            const response = await owner(image.page, policy);
+            requireCheck(response.status === 200 && !response.redirected && response.headers.get('x-dev-synthetic-owner') === '1', 'REFRESH_RESULT');
+            const page = storedAnalysisResultPageV1Schema.parse(await response.json());
+            requireCheck(page.summary.targetInstagramId === target && page.requestId === new URL(firstPage).pathname.split('/').at(-1), 'REFRESH_SCOPE');
+            refreshed.set(target, resultImagePath(page.summary.targetProfileImage));
+            for (const row of [...page.femaleAccounts, ...page.privateAccounts]) refreshed.set(row.instagramId, resultImagePath(row.profileImage));
+            href = refreshed.get(image.username) ?? '';
+            requireCheck(!!href && validForControls(href), 'CONTROL_LOCATOR_EXPIRED');
+        }
+        await denied(href);
+    }
+    return { otherDenied: images.length + 1, anonymousDenied: images.length + 1 };
 }
