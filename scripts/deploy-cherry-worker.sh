@@ -25,10 +25,11 @@ Usage: scripts/deploy-cherry-worker.sh [--apply | --dry-run | --print-grants] [-
 
 Optional environment:
   CHERRY_EMAIL_FROM              Sender for e-mail notices, for example "체리 <notice@example.com>".
+  CHERRY_SOLAPI_SENDER           Registered SOLAPI sender number. Text messages need it.
   CHERRY_KAKAO_CHANNEL_ID        Alimtalk channel ID.
   CHERRY_ALIMTALK_TEMPLATES      JSON object of notice kind to template ID.
   CHERRY_SECRETS                 Extra comma-separated NAME=secret:version references
-                                 (CHERRY_SOLAPI_API_KEY, CHERRY_SOLAPI_API_SECRET, CHERRY_SOLAPI_SENDER,
+                                 (CHERRY_SOLAPI_API_KEY, CHERRY_SOLAPI_API_SECRET,
                                  CHERRY_TOSS_SECRET_KEY, CHERRY_TOSS_CLIENT_KEY, CHERRY_BILLING_KEY_SECRET, RESEND_API_KEY).
 EOF
 }
@@ -77,7 +78,8 @@ jq -c '
 jq -e 'has("NEXT_PUBLIC_SUPABASE_URL") and has("ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET")' "$WORK/shared.json" >/dev/null \
   || die "the source worker no longer exposes the shared settings"
 jq -c --arg audience "$URL" --arg callers "$SCHEDULER_SA,$TASK_SA" --arg from "${CHERRY_EMAIL_FROM:-}" \
-  --arg channel "${CHERRY_KAKAO_CHANNEL_ID:-}" --arg templates "${CHERRY_ALIMTALK_TEMPLATES:-}" '
+  --arg channel "${CHERRY_KAKAO_CHANNEL_ID:-}" --arg templates "${CHERRY_ALIMTALK_TEMPLATES:-}" \
+  --arg sender "${CHERRY_SOLAPI_SENDER:-}" '
   . + {
     CHERRY_WORKER_ENABLED: "true", CHERRY_WORKER_AUDIENCE: $audience, CHERRY_WORKER_CALLERS: $callers,
     PREFLIGHT_APIFY_API_TOKEN_SLOTS: "primary,tertiary,quaternary,quinary,senary,septenary,octonary,nonary,tenth",
@@ -85,6 +87,7 @@ jq -c --arg audience "$URL" --arg callers "$SCHEDULER_SA,$TASK_SA" --arg from "$
   }
   + (if $from == "" then {} else {CHERRY_EMAIL_FROM: $from} end)
   + (if $channel == "" then {} else {CHERRY_KAKAO_CHANNEL_ID: $channel} end)
+  + (if $sender == "" then {} else {CHERRY_SOLAPI_SENDER: ($sender | gsub("[^0-9]"; ""))} end)
   + (if $templates == "" then {} else {CHERRY_ALIMTALK_TEMPLATES: $templates} end)' "$WORK/shared.json" > "$WORK/env.json"
 SECRETS="$(jq -r '
   [.spec.template.spec.containers[0].env[] | select(has("valueFrom"))
