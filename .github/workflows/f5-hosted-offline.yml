@@ -1,0 +1,117 @@
+name: F5 hosted offline verification
+on:
+  pull_request:
+    branches: [codex/dev-six-five-feature-20261127]
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  observed:
+    if: >-
+      github.repository == '0mininseoul/yeosachin-scanner' &&
+      github.event.repository.private == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'codex/dev-six-offline-hosted-20261127' &&
+      github.event.pull_request.base.sha == 'd529a77a076ae7985c15c7f7b431809df9d75db0' &&
+      github.run_attempt == 1
+    runs-on: macos-15
+    timeout-minutes: 270
+    env:
+      SOURCE: d529a77a076ae7985c15c7f7b431809df9d75db0
+      HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out the reviewed workflow
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: tooling
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the original benchmark independently
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: d529a77a076ae7985c15c7f7b431809df9d75db0
+          path: measured
+          persist-credentials: false
+
+      - name: Verify revisions
+        id: revisions
+        shell: bash
+        run: |
+          set -eu
+          test "$(git -C tooling rev-parse HEAD)" = "$HEAD_REVISION"
+          test "$(git -C measured rev-parse HEAD)" = "$SOURCE"
+          test "$(git -C tooling merge-base "$SOURCE" HEAD)" = "$SOURCE"
+          expected=$(printf '%s\n' .github/scripts/f5-receipt.py .github/workflows/f5-hosted-offline.yml)
+          test "$(git -C tooling diff --name-only "$SOURCE" HEAD)" = "$expected"
+
+      - name: Set up Node 24
+        id: node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.13.1'
+
+      - name: Install pinned dependencies and PostgreSQL 17
+        id: dependencies
+        shell: bash
+        working-directory: measured
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/f5-private/home" "$RUNNER_TEMP/f5-public"
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          pg_bin="$(brew --prefix)/opt/postgresql@17/bin"
+          if [ ! -x "$pg_bin/postgres" ]; then
+            brew install postgresql@17 >"$RUNNER_TEMP/f5-private/brew.log" 2>&1
+          fi
+          "$pg_bin/postgres" --version | grep -Eq '^postgres \(PostgreSQL\) 17\.'
+          test "$(node -p 'process.versions.node')" = 24.13.1
+          printf '%s\n' "$pg_bin" >> "$GITHUB_PATH"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/f5-private/home" CI=true \
+            npm ci --no-audit --no-fund >"$RUNNER_TEMP/f5-private/install.log" 2>&1
+          test -z "$(git status --porcelain)"
+
+      - name: Witness isolation and run one independent six-owner wave
+        id: benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/f5-private/home" \
+            python3 tooling/.github/scripts/f5-receipt.py run measured "$RUNNER_TEMP/f5-private" "$RUNNER_TEMP/f5-public"
+
+      - name: Preserve an infrastructure failure before a receipt exists
+        if: ${{ failure() }}
+        shell: bash
+        env:
+          REVISIONS: ${{ steps.revisions.outcome }}
+          NODE: ${{ steps.node.outcome }}
+          DEPENDENCIES: ${{ steps.dependencies.outcome }}
+          BENCHMARK: ${{ steps.benchmark.outcome }}
+        run: |
+          set -eu
+          umask 077
+          mkdir -p "$RUNNER_TEMP/f5-public"
+          if [ ! -e "$RUNNER_TEMP/f5-public/aggregate.json" ]; then
+            python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          statuses = {k: os.environ[k] for k in ('REVISIONS','NODE','DEPENDENCIES','BENCHMARK')}
+          assert all(v in {'success','failure','cancelled','skipped'} for v in statuses.values())
+          path = Path(os.environ['RUNNER_TEMP'])/'f5-public'/'aggregate.json'
+          with path.open('x') as f:
+              json.dump({'outcome':'infrastructure_failed','processExit':None,'rawSha256':None,'measured':None,'steps':statuses},f)
+          PYTHON
+          fi
+
+      - name: Publish only the aggregate receipt
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: f5-offline-aggregate
+          path: ${{ runner.temp }}/f5-public/aggregate.json
+          if-no-files-found: error
+          retention-days: 7
