@@ -10,9 +10,12 @@ const mocks = vi.hoisted(() => ({
     config: vi.fn(),
     getApprovedDevLiveDelivery: vi.fn(),
     verify: vi.fn(),
+    qaScope: vi.fn(),
     available: vi.fn(),
     process: vi.fn(),
     processFresh: vi.fn(),
+    rearmCapacity: vi.fn(),
+    resumeCapacity: vi.fn(),
     settleBlockedFresh: vi.fn(),
     emit: vi.fn(),
     observeRoute: vi.fn((
@@ -35,7 +38,7 @@ vi.mock('@/lib/services/dev-ui/live-budget', () => ({
         approvalScope.run(approval, operation)
     ),
 }));
-vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: { rpc: mocks.qaScope } }));
 vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
 vi.mock('@/lib/observability/server', () => ({
     operationalLogger: { emit: mocks.emit },
@@ -47,6 +50,8 @@ vi.mock('@/lib/services/analysis/v2-tasks', async (importOriginal) => {
         ...actual,
         getAnalysisV2TasksConfig: mocks.config,
         verifyAnalysisV2TaskAuthorization: mocks.verify,
+        rearmAnalysisV2JobAfterCapacity: mocks.rearmCapacity,
+        resumeAnalysisV2CapacityHandoff: mocks.resumeCapacity,
     };
 });
 vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
@@ -128,6 +133,8 @@ describe('analysis V2 worker route', () => {
             pendingRecoveryCount: 0,
         });
         mocks.processFresh.mockResolvedValue('ready');
+        mocks.rearmCapacity.mockResolvedValue(undefined);
+        mocks.resumeCapacity.mockResolvedValue(false);
         mocks.settleBlockedFresh.mockResolvedValue(undefined);
     });
 
@@ -300,6 +307,61 @@ describe('analysis V2 worker route', () => {
         const response = await POST(request());
         expect(response.status).toBe(503);
         expect(mocks.process).not.toHaveBeenCalled();
+    });
+
+    it.each(['ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING', 'ANALYSIS_V2_AI_CAPACITY_PENDING'])(
+        'hands off an authenticated first delivery waiting for %s and retries an uncertain handoff',
+        async code => {
+            const delivery = { ...payload, workloadRole: 'paid' };
+            function fromQueue() {
+                const req = request(delivery);
+                req.headers.set('x-cloudtasks-taskretrycount', '0');
+                return req;
+            }
+            mocks.process.mockResolvedValue({ status: 'retry', errorCode: code });
+            expect((await POST(fromQueue())).status).toBe(200);
+            expect(mocks.rearmCapacity).toHaveBeenCalledTimes(1);
+            mocks.rearmCapacity.mockRejectedValueOnce(new Error('response lost'));
+            expect((await POST(fromQueue())).status).toBe(503);
+        },
+    );
+
+    it('preserves the actual Dev QA wrapper and its first-delivery capacity response', async () => {
+        const { handleQaWorker } = await import('../../../services/dev-standard-qa-worker/handler');
+        const { qaWorkerDeployment } = await import('../../../services/dev-standard-qa-worker/deployment-env.mjs');
+        const { service, origin, taskPath, qaDelivery } = await import('../../../services/dev-standard-qa-worker/scope');
+        const wave = 'a'.repeat(64);
+        const { environment } = qaWorkerDeployment('paid', wave);
+        const { queueName } = await import('../../../services/dev-standard-qa-worker/queue-name.mjs');
+        for (const [key, value] of Object.entries(environment)) vi.stubEnv(key, value);
+        for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'GOOGLE_APPLICATION_CREDENTIALS']) vi.stubEnv(key, undefined);
+        vi.stubEnv('K_SERVICE', service('paid'));
+        vi.stubEnv('K_REVISION', service('paid') + '-00001-abc');
+        vi.stubEnv('NODE_ENV', 'production');
+        const req = () => new Request(origin('paid') + taskPath('paid'), {
+            method: 'POST', headers: { host: new URL(origin('paid')).host, authorization: 'Bearer signed',
+                'x-cloudtasks-queuename': queueName('paid', wave), 'x-cloudtasks-taskretrycount': '0' },
+            body: JSON.stringify({ ...payload, workloadRole: 'paid' }),
+        });
+        mocks.qaScope.mockResolvedValueOnce({ error: {}, data: null });
+        expect((await handleQaWorker(req())).status).toBe(503);
+        expect(mocks.process).not.toHaveBeenCalled();
+        mocks.qaScope.mockResolvedValue({ error: null, data: 1 });
+        mocks.process.mockResolvedValue({ status: 'retry', errorCode: 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING' });
+        mocks.rearmCapacity.mockImplementationOnce(async () => {
+            expect(qaDelivery()).toMatchObject({ wave, role: 'paid', slot: 1, requestId: payload.requestId });
+        });
+        const response = await handleQaWorker(req());
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ status: 'capacity_handoff' });
+    });
+
+    it('requires successful recovery when an old delivery races the next capacity reservation', async () => {
+        mocks.process.mockRejectedValue(new AnalysisV2JobFenceError());
+        mocks.resumeCapacity.mockRejectedValueOnce(new Error('mark timeout'));
+        expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(503);
+        mocks.resumeCapacity.mockResolvedValueOnce(true);
+        expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(200);
     });
 
     it('acknowledges a stale generation but retries early delivery and a busy lease', async () => {

@@ -324,3 +324,47 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1').each(sharedStand
         }
     }, 60_000,
 );
+
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
+    'persists progress alongside sibling parent readers while fencing cancellation and claim changes', async () => {
+        const db = await createSharedStandardDatabase(8);
+        try {
+            const job = await seedProcessingJob(db);
+            const tracks = JSON.stringify({
+                relationshipAi: { state: 'running', stageCode: 'PUBLIC_PROFILES_COLLECTING', done: 1, total: 4, progressBp: 2500 },
+                interactions: { state: 'pending', stageCode: 'INTERACTIONS_QUEUED', done: 0, total: 2, progressBp: 0 },
+                finalization: { state: 'pending', stageCode: 'FINALIZATION_QUEUED', done: 0, total: 3, progressBp: 0 },
+            });
+            await db.query(`UPDATE public.analysis_preflights p SET status='consumed',consumed_at=now(),
+                consumed_request_id=r.id,exclusion_decision='skip',target_followers_count=1,target_following_count=0,
+                target_is_private=false,ready_at=now(),capacity_required_plan_id='basic',required_plan_id='basic',
+                plan_cards_snapshot=r.plan_cards_snapshot FROM public.analysis_requests r
+                WHERE r.id=$1 AND p.id=r.preflight_id`, [job.requestId]);
+            await db.query(`INSERT INTO public.analysis_progress_state(request_id,revision,status,progress_bp,
+                background_processing,tracks,last_event_seq,snapshot_fingerprint)
+                VALUES($1,1,'processing',1800,true,$2,0,repeat('0',64))`, [job.requestId, tracks]);
+            const checkpoint = `SELECT public.checkpoint_analysis_v2_progress(
+                $1,$2,$3,repeat('a',64),'processing',1800,true,$4,NULL,NULL,repeat('0',64)) AS result`;
+            const args = [job.requestId, job.jobKey, job.jobClaimToken, tracks];
+            await db.transaction(async reader => {
+                await reader.query(`SELECT id FROM public.analysis_preflights WHERE consumed_request_id=$1 FOR SHARE`, [job.requestId]);
+                await reader.query(`SELECT id FROM public.analysis_requests WHERE id=$1 FOR SHARE`, [job.requestId]);
+                await db.transaction(async writer => {
+                    await writer.exec("SET LOCAL lock_timeout='250ms'");
+                    await writer.exec('SET LOCAL ROLE service_role');
+                    const result = await writer.query(checkpoint, args);
+                    expect(result.rows[0].result).toMatchObject({ snapshot: { revision: 1, progressBp: 1800 } });
+                });
+            });
+            await db.transaction(async writer => {
+                await writer.query(checkpoint, args);
+                await expect(db.transaction(async cancellation => {
+                    await cancellation.exec("SET LOCAL lock_timeout='100ms'");
+                    await cancellation.query('SELECT id FROM public.analysis_requests WHERE id=$1 FOR UPDATE', [job.requestId]);
+                })).rejects.toMatchObject({ code: '55P03' });
+            });
+            await expect(db.query(checkpoint, [job.requestId, job.jobKey, randomUUID(), tracks]))
+                .rejects.toMatchObject({ message: 'ANALYSIS_V2_PROGRESS_FENCE_MISMATCH' });
+        } finally { await db.close(); }
+    }, 45_000,
+);

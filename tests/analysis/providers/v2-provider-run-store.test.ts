@@ -1252,6 +1252,71 @@ describe('analysis V2 provider run store', () => {
         ]);
     });
 
+    describe('start ID confirmation', () => {
+        const args = { ...identity, reservationToken, runId };
+        const timeout = { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+        const lost = { data: null, status: 0, error: { code: '', message: 'TypeError: fetch failed' } };
+        const success = { data: storedRow('running'), error: null };
+        const names = ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES;
+
+        it.each([timeout, lost])('replays only the same fenced checkpoint after rollback or a lost response', async failure => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockResolvedValueOnce(failure).mockResolvedValueOnce(success);
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).resolves.toMatchObject({
+                status: 'running', runId, actualUsageUsd: null,
+            });
+            expect(rpc.mock.calls.map(([name]) => name)).toEqual([names.startedRpc, names.startedRpc]);
+            expect(rpc.mock.calls[1]).toEqual(rpc.mock.calls[0]);
+        });
+
+        it('writes the known ID without the busy parent, then checks the original job claim before continuing', async () => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockResolvedValueOnce(timeout).mockResolvedValueOnce(timeout)
+                .mockResolvedValueOnce({ data: true, error: null }).mockResolvedValueOnce(success);
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).resolves.toMatchObject({ runId });
+            expect(rpc.mock.calls.map(([name]) => name)).toEqual([names.startedRpc, names.startedRpc, names.startedReceiptRpc, names.startedRpc]);
+            expect(rpc.mock.calls[2][1]).toEqual({ ...rpc.mock.calls[0][1], p_input_hash: inputHash });
+            expect(rpc.mock.calls[3]).toEqual(rpc.mock.calls[0]);
+        });
+
+        it.each([true, false])('a lost response on worker takeover can protect a run but cannot authorize polling', async recorded => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockRejectedValueOnce(new TypeError('fetch failed'))
+                .mockResolvedValueOnce({ data: null, error: { code: 'P0001', message: 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH' } })
+                .mockResolvedValueOnce({ data: recorded ? storedRow('running') : storedRow('starting'), error: null });
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).rejects.toMatchObject({
+                receiptConfirmed: recorded, message: 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR',
+            });
+            expect(rpc.mock.calls.map(([name]) => name)).toEqual([names.startedRpc, names.startedRpc, names.loadRpc]);
+        });
+
+        it('a known receipt followed by a lost claim retains the exact run and stops the old worker', async () => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockResolvedValueOnce(timeout).mockResolvedValueOnce(timeout)
+                .mockResolvedValueOnce({ data: true, error: null })
+                .mockResolvedValueOnce({ data: null, error: { code: 'P0001', message: 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH' } });
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).rejects.toMatchObject({
+                receiptConfirmed: true, message: 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH',
+            });
+        });
+
+        it('does not abort a run ID protected by the unique constraint of another reservation', async () => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockResolvedValueOnce({ data: null, error: { code: '23505', message: 'duplicate' } });
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).rejects.toMatchObject({
+                receiptConfirmed: false, message: 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT',
+            });
+            expect(rpc).toHaveBeenCalledOnce();
+        });
+
+        it('rejects a returned row belonging to a different input', async () => {
+            const { rpc, client } = clientWithRpc();
+            rpc.mockResolvedValueOnce({ data: storedRow('running', { inputHash: 'f'.repeat(64) }), error: null });
+            await expect(createAnalysisV2ProviderRunStore(client).checkpointStarted(args)).rejects.toMatchObject({ receiptConfirmed: false });
+            expect(rpc).toHaveBeenCalledOnce();
+        });
+    });
+
     it('retries only the receipt write after a statement timeout on a previously succeeded Actor', async () => {
         const { rpc, client } = clientWithRpc();
         rpc

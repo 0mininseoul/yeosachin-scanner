@@ -34,6 +34,7 @@ import {
     lookupAnalysisV2FreshAdmissionTask,
     parseAnalysisV2WorkerTaskPayload,
     rearmAnalysisV2JobAfterCapacity,
+    resumeAnalysisV2CapacityHandoff,
     verifyAnalysisV2TaskAuthorization,
 } from '@/lib/services/analysis/v2-tasks';
 import {
@@ -147,10 +148,7 @@ async function handlePOST(
         });
         return NextResponse.json({ code: 'UNAUTHORIZED' }, { status: 401 });
     }
-    // The OIDC check above authenticated this task.  A successor generation
-    // may be rotated only when the authenticated Cloud Tasks retry header has
-    // reached the bounded safety ceiling; all earlier capacity responses use
-    // the queue's normal backoff.
+    // Interpret queue retry headers only after verifying the service account.
     const retryCount = trustedCloudTasksRetryCount(request.headers, true);
     if (!isAnalysisV2WorkerAvailable()) {
         emitWorkerOutcome({
@@ -356,7 +354,7 @@ async function handlePOST(
             );
         }
     }
-    const paidDelivery = delivery as import('@/lib/services/analysis/v2-job-store').AnalysisV2TaskDelivery;
+    const paidDelivery = delivery as AnalysisV2TaskDelivery;
     const jobKey = observableAnalysisV2JobKey(paidDelivery.jobKey);
     const analysisRequestId = paidDelivery.requestId;
     try {
@@ -369,34 +367,25 @@ async function handlePOST(
                 outcome.errorCode,
                 'ANALYSIS_V2_JOB_HANDLER_FAILED'
             );
-            emitWorkerOutcome({
-                context,
-                event: 'analysis_v2.worker_retry',
-                analysisRequestId,
-                jobKey,
-                disposition: 'transient',
-                retryable: true,
-                errorCode,
-            });
             const isCapacityWait = errorCode === 'ANALYSIS_V2_AI_CAPACITY_PENDING'
                 || errorCode === 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING';
-            if (isCapacityWait) {
-                if (
-                    retryCount !== null
-                    && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING
-                ) {
-                    try {
-                        await runWithApproval(() => rearmAnalysisV2JobAfterCapacity(
-                            paidDelivery as AnalysisV2TaskDelivery,
-                            { config, store: analysisV2JobStore },
-                        ));
-                    } catch {
-                        // The old delivery remains retryable; a failed rearm must never ack work
-                        // without either a successor task or the original dispatch fence.
-                        return NextResponse.json({ code: errorCode }, { status: 503 });
-                    }
+            if (isCapacityWait && retryCount !== null && (paidDelivery.workloadRole === 'paid'
+                || retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING)) {
+                try {
+                    await runWithApproval(() => rearmAnalysisV2JobAfterCapacity(
+                        paidDelivery, { config, store: analysisV2JobStore },
+                    ));
+                    emitWorkerOutcome({ context, analysisRequestId, jobKey,
+                        event: 'analysis_v2.worker_completed', disposition: 'capacity_handoff' });
+                    return NextResponse.json({ status: 'capacity_handoff' });
+                } catch {
+                    // Preserve this delivery on a lost reservation, create or DB mark response.
                 }
             }
+            emitWorkerOutcome({
+                context, analysisRequestId, jobKey,
+                event: 'analysis_v2.worker_retry', disposition: 'transient', retryable: true, errorCode,
+            });
             return NextResponse.json(
                 { code: errorCode },
                 { status: isCapacityWait ? 503 : 500 },
@@ -439,6 +428,16 @@ async function handlePOST(
         return NextResponse.json(outcome);
     } catch (error) {
         if (error instanceof AnalysisV2JobFenceError) {
+            if (paidDelivery.workloadRole === 'paid' || (retryCount !== null
+                && retryCount >= CLOUD_TASK_DELIVERY_RETRY_SAFETY_CEILING)) {
+                try {
+                    if (await runWithApproval(() => resumeAnalysisV2CapacityHandoff(
+                        paidDelivery, { config, store: analysisV2JobStore },
+                    ))) return NextResponse.json({ status: 'capacity_handoff' });
+                } catch {
+                    return NextResponse.json({ code: 'JOB_DISPATCH_NOT_READY' }, { status: 503 });
+                }
+            }
             emitWorkerOutcome({
                 context,
                 event: 'analysis_v2.worker_completed',

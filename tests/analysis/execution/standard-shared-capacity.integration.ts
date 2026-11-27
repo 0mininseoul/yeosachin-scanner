@@ -493,6 +493,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const stageCounts: Record<string, number> = {};
             const sample = new Map<string, Record<string, unknown>>();
             let continuations = 0;
+            let capacityHandoffs = 0;
             let queueRetries = 0;
             const retryCodes: Record<string, number> = {};
             const asUser = <T>(id: string | null, fn: () => Promise<T>) =>
@@ -522,6 +523,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                         retryCodes[result.code] = (retryCodes[result.code] ?? 0) + 1;
                         queueRetries++;
                         queue.retry(payload);
+                        return;
+                    }
+                    if (response.ok && result.status === 'capacity_handoff') {
+                        capacityHandoffs++;
                         return;
                     }
                     if (result.status === 'continuation') { continuations++; return; }
@@ -710,7 +715,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
-                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, capacityHandoffs, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),

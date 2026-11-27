@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresLockTimeout, isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
 import type {
     ApifyCredentialSlot,
     ProviderCostRunFinished,
@@ -8,7 +8,7 @@ import type {
     ProviderCostTerminalStatus,
     ProviderRunCheckpoint,
 } from '@/lib/services/instagram/providers/types';
-import { isApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
+import { isApifyCredentialSlot, ProviderRunStartConfirmationPending } from '@/lib/services/instagram/providers/types';
 import {
     RevenueCostOperationStore,
     type RevenueCostLiveSource,
@@ -214,6 +214,7 @@ interface RpcError {
 }
 
 interface RpcResult {
+    status?: number;
     data: unknown;
     error: RpcError | null;
 }
@@ -234,6 +235,7 @@ export const ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES = Object.freeze({
     table: 'analysis_v2_provider_runs',
     reserveRpc: 'reserve_analysis_v2_provider_run',
     startedRpc: 'checkpoint_analysis_v2_provider_run_started',
+    startedReceiptRpc: 'record_analysis_v2_provider_run_started_receipt',
     rejectedRpc: 'reject_analysis_v2_provider_run_start',
     terminalRpc: 'checkpoint_analysis_v2_provider_run_terminal',
     loadRpc: 'load_analysis_v2_provider_run',
@@ -711,6 +713,27 @@ function assertCostEventIdentity(
     }
 }
 
+function startCheckpointResponseUncertain(response: RpcResult): boolean {
+    return !!response.error && !response.error.code && (response.status === 0
+        || response.status === 408 || (response.status !== undefined && response.status >= 500));
+}
+
+function retryableStartCheckpoint(response: RpcResult): boolean {
+    return startCheckpointResponseUncertain(response) || isPostgresStatementTimeout(response.error)
+        || isPostgresLockTimeout(response.error) || response.error?.code === '40P01';
+}
+
+/** Only for the idempotent start-ID writes. The provider POST must never run here. */
+async function startCheckpointRpc(
+    client: AnalysisV2ProviderRunSupabaseClient, name: string, params: Record<string, unknown>,
+): Promise<RpcResult> {
+    try {
+        return await client.rpc(name, params);
+    } catch {
+        return { status: 0, data: null, error: { code: '' } };
+    }
+}
+
 function safeRpcCode(error: RpcError): string {
     return typeof error.code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
         ? error.code
@@ -1057,27 +1080,79 @@ export function createAnalysisV2ProviderRunStore(
                 'reservation token'
             );
             const runId = requiredString(input.runId, RUN_ID_PATTERN, 'run id');
-            const { data, error } = await client.rpc(
-                ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc,
-                {
-                    p_request_id: input.requestId.toLowerCase(),
-                    p_job_key: input.jobKey,
-                    p_claim_token: input.claimToken.toLowerCase(),
-                    p_operation_key: input.operationKey,
-                    p_reservation_token: reservationToken,
-                    p_run_id: runId,
+            const params = {
+                p_request_id: input.requestId.toLowerCase(),
+                p_job_key: input.jobKey,
+                p_claim_token: input.claimToken.toLowerCase(),
+                p_operation_key: input.operationKey,
+                p_reservation_token: reservationToken,
+                p_run_id: runId,
+            };
+            const authorize = () => startCheckpointRpc(client, ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedRpc, params);
+            let receiptConfirmed = false;
+            let result = await authorize();
+            if (retryableStartCheckpoint(result)) {
+                let uncertain = startCheckpointResponseUncertain(result);
+                result = await authorize();
+                if (retryableStartCheckpoint(result)) {
+                    // A busy request/job parent can block both ordinary checkpoints. Save only
+                    // the already-observed ID against the original immutable reservation.
+                    const receipt = await startCheckpointRpc(client, ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.startedReceiptRpc, {
+                        ...params, p_input_hash: input.inputHash,
+                    });
+                    uncertain ||= startCheckpointResponseUncertain(result) || startCheckpointResponseUncertain(receipt)
+                        || (!receipt.error && receipt.data !== true);
+                    if (!receipt.error && receipt.data === true) {
+                        receiptConfirmed = true;
+                        result = await authorize();
+                        if (result.error) {
+                            throw new ProviderRunStartConfirmationPending(true,
+                                result.error.message === 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH'
+                                    ? 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH' : undefined);
+                        }
+                    } else if (receipt.error?.message === 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT'
+                        || receipt.error?.code === '23505') {
+                        throw new ProviderRunStartConfirmationPending(false, 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT');
+                    }
                 }
-            );
-            if (error) throwRpcError(error, 'run checkpoint');
-            const stored = parseStoredRun(data, 'run checkpoint');
+                if (result.error && uncertain) {
+                    // A response can disappear after COMMIT, including during takeover. A read
+                    // can protect the recorded run from abort, but cannot authorize polling.
+                    let observed: StoredAnalysisV2ProviderRun | null;
+                    try {
+                        observed = await load(input);
+                    } catch {
+                        throw new ProviderRunStartConfirmationPending(false);
+                    }
+                    if (observed?.requestId === params.p_request_id && observed.jobKey === input.jobKey
+                        && observed.operationKey === input.operationKey && observed.inputHash === input.inputHash
+                        && observed.reservationToken === reservationToken && observed.runId === runId) {
+                        throw new ProviderRunStartConfirmationPending(true);
+                    }
+                    // An uncertain transaction might commit after this read. Preserve the
+                    // admission for recovery even when its receipt is not visible yet.
+                    throw new ProviderRunStartConfirmationPending(false);
+                }
+            }
+            if (result.error?.code === '23505' || result.error?.message === 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT') {
+                // The ID may already belong to another reservation. This caller may not abort it.
+                throw new ProviderRunStartConfirmationPending(false, 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT');
+            }
+            if (result.error) throwRpcError(result.error, 'run checkpoint');
+            let stored: StoredAnalysisV2ProviderRun;
+            try {
+                stored = parseStoredRun(result.data, 'run checkpoint');
+            } catch {
+                throw new ProviderRunStartConfirmationPending(receiptConfirmed);
+            }
             if (
-                stored.reservationToken !== reservationToken
+                stored.requestId !== params.p_request_id || stored.jobKey !== input.jobKey
+                || stored.operationKey !== input.operationKey || stored.inputHash !== input.inputHash
+                || stored.reservationToken !== reservationToken
                 || stored.runId !== runId
                 || stored.status === 'starting'
             ) {
-                throw new Error(
-                    'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid run checkpoint.'
-                );
+                throw new ProviderRunStartConfirmationPending(receiptConfirmed);
             }
             return stored;
         },

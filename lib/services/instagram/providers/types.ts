@@ -57,6 +57,17 @@ export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialS
 }
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
+/** A start receipt may belong to a successor. Never abort this run after an uncertain DB acknowledgement. */
+export class ProviderRunStartConfirmationPending extends Error {
+    constructor(
+        readonly receiptConfirmed: boolean,
+        code: 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR' | 'ANALYSIS_V2_PROVIDER_RUN_FENCE_MISMATCH'
+            | 'ANALYSIS_V2_PROVIDER_RUN_RUN_CONFLICT' = 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR',
+    ) {
+        super(code);
+    }
+}
+
 export interface ProviderCostRunStarted {
     logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
     actorId: string;

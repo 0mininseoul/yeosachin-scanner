@@ -1,3 +1,4 @@
+import { ProviderRunStartConfirmationPending } from '@/lib/services/instagram/providers/types';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
@@ -178,6 +179,26 @@ describe('replacement Apify profile details adapter', () => {
             maxTotalChargeUsd: 0.05,
         })).rejects.toThrow('SCRAPING_ACCESS_ERROR');
         expect(listItems).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        { confirmed: true, rejectRestrictionUpdate: undefined },
+        { confirmed: true, rejectRestrictionUpdate: 'dataset' as const },
+        { confirmed: false, rejectRestrictionUpdate: undefined },
+    ])('restricts only the confirmed receipt before deferring an unauthorized reader', async ({ confirmed, rejectRestrictionUpdate }) => {
+        const resources = mockClient({ items: [profileItem('alice')], rejectRestrictionUpdate });
+        await expect(runReplacementProfileDetails({
+            client: resources.client, usernames: ['alice'], credentialSlot: 'primary', maxTotalChargeUsd: 0.05,
+            context: context({ onRunStarted: async () => { throw new ProviderRunStartConfirmationPending(confirmed); } }),
+        })).rejects.toThrow(rejectRestrictionUpdate ? 'SCRAPING_ACCESS_ERROR' : 'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR');
+        for (const update of [resources.update, resources.updateKeyValueStore, resources.updateDataset, resources.updateRequestQueue]) {
+            expect(update).toHaveBeenCalledTimes(confirmed ? 1 : 0);
+            if (confirmed) expect(update).toHaveBeenCalledWith({ generalAccess: 'RESTRICTED' });
+        }
+        expect(resources.start).toHaveBeenCalledOnce();
+        expect(resources.abort).not.toHaveBeenCalled();
+        expect(resources.waitForFinish).not.toHaveBeenCalled();
+        expect(resources.listItems).not.toHaveBeenCalled();
     });
 
     it('pins an inherited replacement run to restricted access before reading its Dataset', async () => {

@@ -5,6 +5,7 @@ interface Task {
     name: string;
     due: number;
     payload: SharedPayload;
+    httpRequest: { body: string };
 }
 
 // Keep created names after acknowledgement, just as Cloud Tasks rejects duplicate task names.
@@ -12,7 +13,7 @@ export class StandardSharedQueue {
     private pending: Task[] = [];
     private created = new Set<string>();
     private delivered = new WeakMap<SharedPayload, Task>();
-    private inFlight = new Set<string>();
+    private inFlight = new Map<string, Task>();
     private firstAttempts = new WeakMap<SharedPayload, number>();
     private buckets = new Map<string, { tokens: number; replenishedAt: number }>();
     readonly retryPolicy;
@@ -41,12 +42,13 @@ export class StandardSharedQueue {
             const due = task.scheduleTime
                 ? task.scheduleTime.seconds * 1_000 + (task.scheduleTime.nanos ?? 0) / 1_000_000
                 : 0;
-            this.pending.push({ name: task.name, due, payload });
+            this.pending.push({ name: task.name, due, payload, httpRequest: task.httpRequest });
             return [{ name: task.name }];
         },
-        getTask: async ({ name }: { name: string }) => {
-            if (!this.inFlight.has(name) && !this.pending.some(task => task.name === name)) throw Object.assign(new Error('NOT_FOUND'), { code: 5 });
-            return [{ name }];
+        getTask: async ({ name, responseView }: { name: string; responseView?: string }) => {
+            const task = this.inFlight.get(name) ?? this.pending.find(item => item.name === name);
+            if (!task) throw Object.assign(new Error('NOT_FOUND'), { code: 5 });
+            return responseView === 'FULL' ? [{ name, httpRequest: task.httpRequest }] : [{ name }];
         },
     };
     private path([project, location, queue, task]: string[]) {
@@ -105,7 +107,7 @@ export class StandardSharedQueue {
             this.delivered.set(next.payload, next);
             if (!this.firstAttempts.has(next.payload)) this.firstAttempts.set(next.payload, Date.now());
             const worker = availableWorkers.shift()!;
-            this.inFlight.add(next.name);
+            this.inFlight.set(next.name, next);
             const task = deliver(next.payload, worker).catch(error => { firstError ??= error; }).finally(() => {
                 this.inFlight.delete(next.name);
                 availableWorkers.push(worker);

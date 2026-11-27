@@ -2,7 +2,13 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { createSupabaseAnalysisV2JobStore, AnalysisV2JobFenceError } from '@/lib/services/analysis/v2-job-store';
+import { getAnalysisV2TasksConfig, rearmAnalysisV2JobAfterCapacity, resumeAnalysisV2CapacityHandoff } from '@/lib/services/analysis/v2-tasks';
+import { qaWorkerDeployment } from '../../../../services/dev-standard-qa-worker/deployment-env.mjs';
+
+const local = vi.hoisted(() => ({ from: vi.fn() }));
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: local }));
 import { standardCloudSixInstallSql } from '../../../../supabase/dev-ui/standard-cloud-six-install.mjs';
 import { createSharedStandardDatabase } from './standard-shared-database';
 import { admitCloudSixFixture } from './standard-cloud-six-admitted-fixture';
@@ -277,3 +283,83 @@ native('authorizes through unrelated row locks and serializes synthetic revocati
         await db.close();
     }
 }, 60_000);
+
+
+native('repairs an ambiguous delayed task on the same admitted Dev order using the old delivery', async () => {
+    const db = await createSharedStandardDatabase(8);
+    try {
+        await db.exec(standardCloudSixInstallSql({ includeCron: false }));
+        const owners = await seedSixIdentities(db);
+        const admin = db.client();
+        local.from.mockImplementation(admin.from);
+        expect((await admin.rpc('dev_cloud_six_open_v1', { p_wave: wave })).data).toBe(6);
+        const { job } = await admitCloudSixFixture(db, owners[0], wave);
+        const identity = { requestId: job.requestId, jobKey: job.jobKey };
+        expect((await admin.rpc('dev_cloud_six_scope_v1', {
+            p_wave: wave, p_request_id: identity.requestId,
+        })).data).toBe(1);
+        const token = randomUUID();
+        await db.query(`UPDATE analysis_pipeline_jobs SET dispatch_workload_role='paid',dispatch_contract_version=2,
+            dispatch_reservation_token=$3 WHERE request_id=$1 AND job_key=$2`, [job.requestId, job.jobKey, token]);
+        const original = { ...identity, generation: 1, reservationToken: token, workloadRole: 'paid' as const };
+        const store = createSupabaseAnalysisV2JobStore(admin);
+        expect(await store.deferAiCapacity({ ...original, claimToken: job.jobClaimToken,
+            track: 'relationships', kind: 'profile_ai', batch: 0, inputHash: 'a'.repeat(64), attemptCount: 1,
+        }, 'ANALYSIS_V2_PROVIDER_ADMISSION_CAPACITY_PENDING')).toMatchObject({ released: true, attemptCount: 0 });
+        const config = getAnalysisV2TasksConfig(qaWorkerDeployment('paid', wave).environment)!;
+        const queuePath = `projects/${config.project}/locations/${config.location}/queues/${config.queue}`;
+        type Task = { name: string; httpRequest: { body: string; headers: Record<string, string> }; scheduleTime: { seconds: number; nanos: number } };
+        const accepted = new Map<string, Task>();
+        const client = {
+            queuePath: () => queuePath,
+            taskPath: (_p: string, _l: string, _q: string, id: string) => queuePath + '/tasks/' + id,
+            createTask: vi.fn(async (request: Record<string, unknown>) => {
+                const task = request.task as Task;
+                if (accepted.has(task.name)) throw Object.assign(new Error(), { code: 6 });
+                accepted.set(task.name, task);
+                throw Object.assign(new Error('accepted, response lost'), { code: 14 });
+            }),
+            getTask: vi.fn(async ({ name }: { name: string; responseView: 'FULL' }) => [accepted.get(name)]),
+        };
+        const opts = { config, client, store };
+        const started = Date.now();
+        await expect(rearmAnalysisV2JobAfterCapacity(original, opts)).rejects.toThrow('task creation failed');
+        const [acceptedTask] = accepted.values();
+        expect(acceptedTask.scheduleTime.seconds + acceptedTask.scheduleTime.nanos / 1e9).toBeGreaterThanOrEqual(started / 1000 + 10);
+        await expect(store.claim(original)).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+        // A tombstone, or a same-name task containing a different fence, cannot authorize an ACK.
+        client.getTask.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 5 }));
+        await expect(resumeAnalysisV2CapacityHandoff(original, opts)).rejects.toThrow();
+        client.getTask.mockResolvedValueOnce([{ ...acceptedTask, httpRequest: {
+            ...acceptedTask.httpRequest, body: Buffer.from(JSON.stringify(original)).toString('base64'),
+        } }]);
+        await expect(resumeAnalysisV2CapacityHandoff(original, opts)).rejects.toThrow('fence mismatch');
+        for (const headers of [{}, { 'x-analysis-v2-worker-contract': '1' },
+            { 'x-analysis-v2-worker-contract': '2', 'X-Analysis-V2-Worker-Contract': '2' }] as Record<string, string>[]) {
+            client.getTask.mockResolvedValueOnce([{ ...acceptedTask, httpRequest: { ...acceptedTask.httpRequest, headers } }]);
+            await expect(resumeAnalysisV2CapacityHandoff(original, opts)).rejects.toThrow('unexpected capacity task');
+        }
+        acceptedTask.httpRequest.headers = { 'x-analysis-v2-worker-contract': '2' };
+        const mark = store.markDispatched.bind(store);
+        vi.spyOn(store, 'markDispatched').mockImplementationOnce(async reservation => {
+            await mark(reservation);
+            throw new Error('committed, response lost');
+        });
+        await expect(resumeAnalysisV2CapacityHandoff(original, opts)).rejects.toThrow('committed, response lost');
+        expect(await resumeAnalysisV2CapacityHandoff(original, opts)).toBe(true);
+        expect(accepted.size).toBe(1);
+        expect(await resumeAnalysisV2CapacityHandoff({ ...original, reservationToken: randomUUID() }, opts)).toBe(false);
+        const next = JSON.parse(Buffer.from(acceptedTask.httpRequest.body, 'base64').toString());
+        expect(await store.claim(next)).toMatchObject({ generation: 2, attemptCount: 1 });
+        const lookups = client.getTask.mock.calls.length;
+        expect(await resumeAnalysisV2CapacityHandoff(original, opts)).toBe(true);
+        expect(client.getTask).toHaveBeenCalledTimes(lookups);
+        expect((await db.query(`SELECT dispatch_generation,attempt_count,ai_capacity_deferral_count FROM analysis_pipeline_jobs
+            WHERE request_id=$1 AND job_key=$2`, [job.requestId, job.jobKey])).rows).toEqual([
+            { dispatch_generation: 2, attempt_count: 1, ai_capacity_deferral_count: 1 },
+        ]);
+    } finally {
+        local.from.mockReset();
+        await db.close();
+    }
+}, 45_000);
