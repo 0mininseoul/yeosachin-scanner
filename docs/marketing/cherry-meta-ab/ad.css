@@ -181,5 +181,16 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .assure-icon { display: grid; place-items: center; width: 66px; height: 66px; border-radius: 50%; border: 3px solid currentColor; }
 .assure-icon svg { width: 42px; height: 42px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .c2 .assure, .c3 .assure { color: #ffd6db; }
-/* Arm C v3: on C2 the lock line belongs to the alert, so it sits under the card and the brand closes the ad alone. */
-.lock .assure { justify-content: center; margin-top: 44px; }
+/* Arm C v4: the lock line reads at the same weight as the brand row. */
+.assure { gap: 22px; font-size: 48px; }
+.assure-icon { width: 82px; height: 82px; border-width: 4px; }
+.assure-icon svg { width: 50px; height: 50px; }
+/* Arm C v4 C2: one left-aligned column like C1 — brand on top, headline, alert card,
+   and the lock line right under the card it explains. */
+.v-ex.c2 footer { top: var(--top); bottom: auto; }
+.v-ex.c2 h1 { top: calc(var(--top) + 140px); }
+.v-ex.c2 .lock { top: calc(var(--top) + 440px); }
+.ad--story.v-ex.c2 h1 { top: calc(var(--top) + 200px); }
+.ad--story.v-ex.c2 .lock { top: calc(var(--top) + 560px); }
+.ad--story .lock .assure { margin-top: 64px; }
+.lock .assure { margin-top: 48px; }
