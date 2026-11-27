@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { createAnalysisV2EvidenceStore, createAnalysisV2RelationshipResultHash } from '@/lib/services/analysis/v2-evidence-store';
 import { expect, it } from 'vitest';
 import { seedProcessingJob } from './standard-shared-processing-job';
 import {
@@ -383,5 +385,92 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
             const unchanged = await db.query('SELECT count(*)::int AS n FROM public.analysis_v2_cost_rollup_snapshots WHERE request_id=$1', [requestId]);
             expect(unchanged.rows).toEqual([{ n: 0 }]);
         } finally { await db.close(); }
+    }, 45_000,
+);
+
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
+    'reads the original ordered relationship evidence for six concurrent Standard requests and detects source deletion', async () => {
+        const db = await createSharedStandardDatabase();
+        const jobKey = 'track:relationships:collect';
+        const reader = 'public.load_analysis_v2_relationship_staging';
+        const read = (requestId: string) => createAnalysisV2EvidenceStore(db.client()).loadRelationshipStaging({ requestId, jobKey });
+        try {
+            // Only the reference is restored from the baseline. Exercise the RPC installed by the normal fixture.
+            const baseline = readFileSync('supabase/dev-ui/production-baseline.sql', 'utf8');
+            const start = baseline.indexOf('CREATE FUNCTION ' + reader + '(');
+            const end = baseline.indexOf('\n$_$;', start);
+            expect(start).toBeGreaterThan(-1);
+            expect(end).toBeGreaterThan(start);
+            const ids: string[] = [];
+            for (let i = 0; i < 6; i++) {
+                const job = await seedProcessingJob(db);
+                const id = job.requestId;
+                ids.push(id);
+                await db.query(`UPDATE public.analysis_preflights p SET status='consumed', consumed_at=now(), consumed_request_id=r.id,
+                    exclusion_decision='skip', target_followers_count=601, target_following_count=601, target_is_private=false,
+                    ready_at=now(), capacity_required_plan_id='basic', required_plan_id='basic', plan_cards_snapshot=r.plan_cards_snapshot
+                    FROM public.analysis_requests r WHERE r.id=$1 AND p.id=r.preflight_id`, [id]);
+                await db.query("UPDATE public.analysis_pipeline_jobs SET job_key=$2, kind='collection', batch=NULL WHERE request_id=$1 AND job_key=$3",
+                    [id, jobKey, job.jobKey]);
+                const members = Array.from({ length: 601 }, (_, k) => ({
+                    username: 'fixture_' + k, isPrivate: k === 142, isVerified: k % 5 === 2,
+                    fullName: k % 3 ? '사용자 ' + k : null, profilePicUrl: k % 7 ? 'https://fixture.invalid/' + k : null,
+                }));
+                for (const side of ['followers', 'following'] as const) {
+                    const rows = side === 'followers' ? members : [...members].reverse();
+                    await db.query(`INSERT INTO public.analysis_v2_relationship_sides
+                        (request_id,job_key,side,job_claim_token,provider,provider_run_id,provider_operation_key,provider_credential_slot,
+                        declared_count,collected_count,coverage_bps,input_hash,result_hash,completed_at,created_at,updated_at)
+                        VALUES ($1,$2,$3::text,$4,'apify','fixtureRun','relationship-'||$3||':'||repeat('b',64),'secondary',
+                        601,601,10000,repeat('a',64),$5,now(),now(),now())`,
+                        [id, jobKey, side, job.jobClaimToken, createAnalysisV2RelationshipResultHash(side, rows)]);
+                    await db.query(`INSERT INTO public.analysis_v2_relationship_rows
+                        (request_id,job_key,side,ordinal,username,is_private,is_verified,full_name,profile_pic_url)
+                        SELECT $1,$2,$3,ordinality,v->>'username',(v->>'isPrivate')::boolean,(v->>'isVerified')::boolean,
+                               v->>'fullName',v->>'profilePicUrl' FROM jsonb_array_elements($4) WITH ORDINALITY x(v,ordinality)`,
+                        [id, jobKey, side, JSON.stringify(rows)]);
+                }
+                await db.query(`SELECT public.freeze_analysis_v2_relationships($1,$2,$3,repeat('a',64),
+                    (analysis_scope_snapshot->>'detailedMutualLimit')::integer) FROM public.analysis_requests WHERE id=$1`,
+                    [id, jobKey, job.jobClaimToken]);
+            }
+            const results = await Promise.all(ids.map(read));
+            expect(results.every(s => s?.mutualRows.length === 601 && s.privateMutualRows.length === 1)).toBe(true);
+            await db.transaction(async tx => {
+                // The previous RPC exists only in this connection, with all original arrays and sort keys.
+                const original = baseline.slice(start, end + '\n$_$;'.length).replace(reader, 'pg_temp.original_relationship_read');
+                await tx.exec(original);
+                const versions = await tx.query(`SELECT
+                    (SELECT md5(prosrc) FROM pg_proc WHERE oid='pg_temp.original_relationship_read(uuid,text)'::regprocedure) AS previous,
+                    (SELECT md5(prosrc) FROM pg_proc WHERE oid=$1::regprocedure) AS installed`, [reader + '(uuid,text)']);
+                expect(versions.rows).toEqual([{
+                    previous: '49950faf19bf83282cc5a422702d6964', installed: '2ae784476f9ee92c95895c63a98eccf5',
+                }]);
+                const result = await tx.query(`SELECT bool_and(${reader}(id,$2)=pg_temp.original_relationship_read(id,$2)) AS same
+                    FROM unnest($1::uuid[]) AS fixture(id)`, [ids, jobKey]);
+                expect(result.rows).toEqual([{ same: true }]);
+            });
+            const grants = await db.query(`SELECT has_function_privilege('anon',$1,'EXECUTE') AS anon,
+                 has_function_privilege('authenticated',$1,'EXECUTE') AS member,
+                 has_function_privilege('service_role',$1,'EXECUTE') AS worker`, [reader + '(uuid,text)']);
+            expect(grants.rows).toEqual([{ anon: false, member: false, worker: true }]);
+            await db.query("DELETE FROM public.analysis_v2_relationship_rows WHERE request_id=$1 AND side='followers' AND ordinal=3", [ids[0]]);
+            await expect(read(ids[0])).rejects.toThrow('followers relationship staging drift');
+            await db.query('UPDATE public.analysis_v2_mutual_rows SET full_name=NULL WHERE request_id=$1 AND mutual_ordinal=2', [ids[1]]);
+            await expect(read(ids[1])).rejects.toThrow('relationship staging drift');
+            await db.query("DELETE FROM public.analysis_v2_relationship_sides WHERE request_id=$1 AND side='following'", [ids[2]]);
+            await expect(db.query('SELECT ' + reader + '($1,$2)', [ids[2], jobKey])).rejects.toMatchObject({ code: 'P0002' });
+            await db.query('DELETE FROM public.analysis_v2_relationship_manifests WHERE request_id=$1', [ids[3]]);
+            expect(await read(ids[3])).toBeNull();
+            await db.query('DELETE FROM public.analysis_v2_mutual_rows WHERE request_id=$1', [ids[4]]);
+            const empty = await db.query(`SELECT s->'mutualRows' AS mutual, s->'privateMutualRows' AS private,
+                s->'privateMutualUsernames' AS names, s->'detailedPublicUsernames' AS detailed
+                FROM ${reader}($1,$2) AS s`, [ids[4], jobKey]);
+            expect(empty.rows).toEqual([{ mutual: [], private: [], names: [], detailed: [] }]);
+            await expect(read(ids[4])).rejects.toThrow('relationship staging drift');
+            await expect(db.query('SELECT ' + reader + '($1,$2)', [null, jobKey])).rejects.toMatchObject({ code: 'P0001' });
+        } finally {
+            await db.close();
+        }
     }, 45_000,
 );
