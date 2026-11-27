@@ -1,6 +1,6 @@
 import { currentStandardResolverAdmission } from './standard-resolver-admission';
 import { acquirePaidFeatureSlot, acquireResolverGenerationSlots, acquireCachedResolverSlots, AsyncSemaphore, getGeminiGenerationLimiter, getStageGenerationSemaphore, runWithMixedFeatureSlot } from './gemini-generation-limiter';
-import { paidStandardFourthFeatureEnabled, paidStandardFeaturePoolEnabled, paidStandardFeatureAdmissionDeadline } from '@/lib/services/analysis/paid-standard-capacity';
+import { paidStandardFeatureSlots, type PaidStandardFeatureSlots, paidStandardFeaturePoolEnabled, paidStandardFeatureAdmissionDeadline } from '@/lib/services/analysis/paid-standard-capacity';
 import { VertexDispatchAuthorizationError, VertexDispatchWindow, vertexDispatchFetch } from './vertex-dispatch-window';
 import { randomUUID } from 'node:crypto';
 import { channel } from 'node:diagnostics_channel';
@@ -116,7 +116,7 @@ function defaultVertexAiBudgetGuard(): VertexAiBudgetGuard {
 async function runWithGenerationSlot<T>(
     stage: AiStageName | null,
     policyVersion: AiStagePolicyVersion,
-    expandedFeature: boolean,
+    featureSlots: PaidStandardFeatureSlots | undefined,
     attempt: number,
     task: () => Promise<T>,
     signal?: AbortSignal,
@@ -140,7 +140,7 @@ async function runWithGenerationSlot<T>(
         try { return await guardedTask(); } finally { release(); }
     }
     const stageSemaphore = getStageGenerationSemaphore(generationLimiterState, policyVersion, stage);
-    const mixedFeature = !expandedFeature && stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled();
+    const mixedFeature = !featureSlots && stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled();
     if (
         aiStagePolicySupports(policyVersion, 'inputQualityV28')
         && (
@@ -149,7 +149,7 @@ async function runWithGenerationSlot<T>(
             || stage === 'privateAccountName'
         )
     ) {
-        const releaseStage = stageSemaphore.tryAcquire(expandedFeature ? 4 : undefined);
+        const releaseStage = stageSemaphore.tryAcquire(featureSlots);
         if (!releaseStage) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
         const runShared = async () => {
             const releaseShared = generationLimiterState.shared.tryAcquire();
@@ -1033,6 +1033,7 @@ export async function analyzeWithGemini<T>(
         attemptNumber <= finalAttemptNumber;
         attemptNumber++
     ) {
+        let featureSlots: PaidStandardFeatureSlots | undefined;
         let releasePaidFeature: (() => void) | undefined;
         let cachedResolver: Awaited<ReturnType<typeof acquireCachedResolverSlots>> | undefined;
         let budgetReservation: VertexAiBudgetReservation | null = null;
@@ -1058,16 +1059,18 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
-            if (stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled()
-                && await paidStandardFourthFeatureEnabled(resolvedPolicyVersion, requestId)) {
-                releasePaidFeature = await acquirePaidFeatureSlot(getGeminiGenerationLimiter(), paidStandardFeatureAdmissionDeadline(), abortSignal);
+            if (stage === 'featureAnalysis' && paidStandardFeaturePoolEnabled()) {
+                featureSlots = await paidStandardFeatureSlots(resolvedPolicyVersion, requestId);
+                if (featureSlots) releasePaidFeature = await acquirePaidFeatureSlot(
+                    getGeminiGenerationLimiter(), featureSlots, paidStandardFeatureAdmissionDeadline(), abortSignal,
+                );
             }
             const admission = stage === 'genderResolution' && resolvedPolicyVersion === 'ai-stage-policy-v2.11'
                 && !statelessReplay && attemptNumber === 1 ? currentStandardResolverAdmission() : undefined;
             const cached = admission?.cached;
             if (cached && admission.signal === abortSignal && cached.requestId === requestId && cached.operationKey === budgetOperationKey) {
                 cachedResolver = await acquireCachedResolverSlots(getGeminiGenerationLimiter(), resolvedPolicyVersion,
-                    cached.handlerDeadlineAtMs, admission.signal);
+                    cached.handlerDeadlineAtMs, admission.signal, cached.waitMs);
             }
             if (resolvedBudgetGuard) {
                 budgetReservation = await resolvedBudgetGuard.reserve({
@@ -1269,7 +1272,7 @@ export async function analyzeWithGemini<T>(
                 response = cachedResolver ? await dispatch() : await runWithGenerationSlot(
                     stage ?? null,
                     resolvedPolicyVersion,
-                    Boolean(releasePaidFeature),
+                    featureSlots,
                     attemptNumber,
                     devLiveBudget && !useDevStandardConcurrency
                         ? () => devLiveGenerationSlot.run(dispatch, abortSignal)

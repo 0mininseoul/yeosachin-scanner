@@ -55,6 +55,7 @@ it('pins each role to the Dev project, queue, OIDC audience, resource buckets an
         expect(config?.queue).toBe(queueName(role, wave));
         expect(env).toMatchObject({ PRECHECKOUT_BLITE_ENABLED: 'false', PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
             VERTEX_AI_PER_ORDER_BUDGET_USD: '2', VERTEX_AI_DAILY_BUDGET_USD: '2' });
+        expect(env.PAID_STANDARD_PROCESS_FEATURE_SLOTS).toBe(role === 'paid' ? '5' : undefined);
         expect(env).not.toHaveProperty('PREFLIGHT_PROFILE_PROVIDER');
         expect(Object.keys(qaWorkerDeployment(role, wave).secretRefs)).toHaveLength(role === 'paid' ? 7 : 2);
         for (const override of [{ K_SERVICE: 'analysis-paid-worker' }, { APIFY_API_TOKEN: 'not-an-inert-placeholder' },

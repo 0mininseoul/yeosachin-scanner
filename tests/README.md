@@ -51,6 +51,7 @@ node scripts/standard-shared-capacity.mjs 16 18i-40q recovery /tmp/standard-regi
 node scripts/standard-shared-capacity.mjs 2 18i-40q recovery /tmp/standard-production-smoke.json 4 fast coverage99 production-paid
 node scripts/standard-shared-capacity.mjs 8 18i-40q-f4 recovery /tmp/standard-feature4.json 600 observed coverage99 production-paid
 node scripts/standard-shared-capacity.mjs 6 13i-32q-f4 recovery /tmp/standard-apify7.json 600 fast coverage99 production-paid --apify-headroom=7
+node scripts/standard-shared-capacity.mjs 6 13i-32q-f5 recovery /tmp/standard-f5-apify7.json 600 observed coverage99 production-paid --apify-headroom=7
 node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-held.json 4 fast coverage99 production-paid held
 node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-spent.json 4 fast coverage99 production-paid spent
 ```

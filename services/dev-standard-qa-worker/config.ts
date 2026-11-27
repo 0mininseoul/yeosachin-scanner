@@ -22,7 +22,7 @@ export function qaWorkerConfig(env: NodeJS.ProcessEnv = process.env) {
         ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: project + '-dev-live-results',
     };
     if (role === 'paid') Object.assign(envFlags, {
-        PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4',
+        PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', PAID_STANDARD_PROCESS_FEATURE_SLOTS: env.PAID_STANDARD_PROCESS_FEATURE_SLOTS === '4' ? '4' : '5',
         ANALYSIS_V2_WORKER_ENABLED: 'true', ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
     });
     for (const r of ['preflight', 'paid'] as const) {

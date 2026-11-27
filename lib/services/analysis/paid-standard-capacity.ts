@@ -12,7 +12,8 @@ export type PaidStandardCapacityJob = Readonly<{
 type Verify = (job: PaidStandardCapacityJob) => Promise<boolean>;
 type Environment = Readonly<Record<string, string | undefined>>;
 
-type Delivery = PaidStandardCapacityJob & { verify: Verify; approval?: Promise<boolean>; featureOptIn: boolean };
+export type PaidStandardFeatureSlots = 4 | 5;
+type Delivery = PaidStandardCapacityJob & { verify: Verify; approval?: Promise<boolean>; featureSlots?: PaidStandardFeatureSlots };
 const delivery = new AsyncLocalStorage<Delivery>();
 
 function select(active: Delivery): Promise<boolean> {
@@ -31,6 +32,14 @@ function productionWorkerEnabled(env: Environment) {
         && !env.DEV_LIVE_WORKLOAD && !env.CLOUD_RUN_JOB;
 }
 
+function configuredFeatureSlots(env: Environment): PaidStandardFeatureSlots | undefined {
+    switch (env.PAID_STANDARD_PROCESS_FEATURE_SLOTS) {
+        case '4': return 4;
+        case '5': return 5;
+        default: return undefined;
+    }
+}
+
 export function withPaidStandardCapacityJob<T>(
     job: PaidStandardCapacityJob,
     verify: Verify,
@@ -38,7 +47,7 @@ export function withPaidStandardCapacityJob<T>(
     env: Environment = process.env,
 ): T {
     if (!productionWorkerEnabled(env)) return run();
-    return delivery.run({ ...job, verify, featureOptIn: env.PAID_STANDARD_PROCESS_FEATURE_SLOTS === '4' }, run);
+    return delivery.run({ ...job, verify, featureSlots: configuredFeatureSlots(env) }, run);
 }
 
 /** A positive cache lives for one claimed handler. The physical allocator rechecks against PostgreSQL per grant. */
@@ -55,18 +64,18 @@ export async function paidStandardExpandedCapacityEnabled(
 
 /** Only this worker revision participates in the mixed-version feature limiter. */
 export function paidStandardFeaturePoolEnabled(): boolean {
-    return process.env.PAID_STANDARD_PROCESS_FEATURE_SLOTS === '4' && productionWorkerEnabled(process.env);
+    return configuredFeatureSlots(process.env) !== undefined && productionWorkerEnabled(process.env);
 }
 
 /** The DB verifier binds the signed order, owner, profile job, v2.11 snapshot and live claim. */
-export async function paidStandardFourthFeatureEnabled(
+export async function paidStandardFeatureSlots(
     policyVersion: string | undefined, requestId: string | undefined, job?: PaidStandardCapacityJob,
-): Promise<boolean> {
+): Promise<PaidStandardFeatureSlots | undefined> {
     const active = delivery.getStore();
-    if (!active?.featureOptIn || policyVersion !== 'ai-stage-policy-v2.11' || active.requestId !== requestId
-        || !/^track:profile-ai:batch:\d+$/.test(active.jobKey)) return false;
-    if (job && (active.jobKey !== job.jobKey || active.claimToken !== job.claimToken)) return false;
-    return select(active);
+    if (!active?.featureSlots || policyVersion !== 'ai-stage-policy-v2.11' || active.requestId !== requestId
+        || !/^track:profile-ai:batch:\d+$/.test(active.jobKey)) return undefined;
+    if (job && (active.jobKey !== job.jobKey || active.claimToken !== job.claimToken)) return undefined;
+    return await select(active) ? active.featureSlots : undefined;
 }
 
 export function paidStandardFeatureAdmissionDeadline(): number | undefined {

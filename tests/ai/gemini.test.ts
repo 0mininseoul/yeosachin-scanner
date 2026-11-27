@@ -2143,6 +2143,37 @@ describe('analyzeWithGemini process concurrency', () => {
         };
     }
 
+    it('serves an earlier signed four-slot SDK waiter before a later five-slot waiter', async () => {
+        const env = { NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+            ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', PAID_STANDARD_PROCESS_FEATURE_SLOTS: '5' };
+        for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+        const held = deferredGenerations();
+        const job = { requestId: stageRequestId, jobKey: 'track:profile-ai:batch:0', claimToken: 'fixture-claim',
+            handlerDeadlineAtMs: performance.now() + 300_000 };
+        const start = (prompt: string, limit: string) => withPaidStandardCapacityJob(job, async () => true,
+            () => analyzeWithGemini(prompt, undefined, { schema: responseSchema, ...stageAuditOptions(),
+                stage: 'featureAnalysis', aiStagePolicyVersion: 'ai-stage-policy-v2.11' }),
+            { ...env, PAID_STANDARD_PROCESS_FEATURE_SLOTS: limit });
+        const active = Array.from({ length: 4 }, () => start('four', '4'));
+        await vi.waitFor(() => expect(held.releases).toHaveLength(4));
+        active.push(start('fifth', '5'));
+        await vi.waitFor(() => expect(held.releases).toHaveLength(5));
+        active.push(start('older-four', '4'));
+        await vi.waitFor(() => expect(getGeminiGenerationLimiter().featureMix.expandedInterest).toBe(6));
+        active.push(start('later-five', '5'));
+        await vi.waitFor(() => expect(getGeminiGenerationLimiter().featureMix.expandedInterest).toBe(7));
+        held.releases.shift()!();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(mocks.generateContent).toHaveBeenCalledTimes(5);
+        held.releases.shift()!();
+        await vi.waitFor(() => expect(mocks.generateContent).toHaveBeenCalledTimes(7));
+        expect(mocks.generateContent.mock.calls.slice(5).map(([input]) => input.contents[0].parts[0].text))
+            .toEqual(['older-four', 'later-five']);
+        held.releases.splice(0).forEach(release => release());
+        await Promise.all(active);
+        expect(held.maximumActive()).toBe(5);
+    });
+
     it('shares the fourth signed feature permit across policy versions and preserves legacy-only capacity', async () => {
         for (const [key, value] of Object.entries({
             NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
@@ -2476,7 +2507,7 @@ describe('analyzeWithGemini process concurrency', () => {
         expect(shared.tryAcquire()).toEqual(expect.any(Function));
     });
 
-    it.each(['ready', 'timeout', 'abort', 'deadline', 'hard', 'missing usage', 'later attempt', 'unapproved', 'other operation', 'stateless replay'] as const)(
+    it.each(['ready', 'timeout', 'abort', 'deadline', 'five ready', 'five timeout', 'five abort', 'five deadline', 'hard', 'missing usage', 'later attempt', 'unapproved', 'other operation', 'stateless replay'] as const)(
         'bounds a signed cached-feature resolver before reserve and dispatch (%s)', async scenario => {
             vi.useFakeTimers();
             const policy = 'ai-stage-policy-v2.11' as const;
@@ -2492,8 +2523,12 @@ describe('analyzeWithGemini process concurrency', () => {
             const hard = new Error('VERTEX_AI_BUDGET_EXCEEDED:run');
             if (scenario === 'hard') reserve.mockRejectedValueOnce(hard);
             const job = { requestId: stageRequestId, jobKey: 'track:profile-ai:batch:0', claimToken: 'fixture-claim' };
+            const five = scenario.startsWith('five ');
+            const deadline = scenario === 'deadline' || scenario === 'five deadline';
+            const aborted = scenario === 'abort' || scenario === 'five abort';
+            const timedOut = scenario === 'timeout' || scenario === 'five timeout';
             const candidate = { ...job, operationKey: 'gender-resolution:local', aiStagePolicyVersion: policy,
-                handlerDeadlineAtMs: performance.now() + (scenario === 'deadline' ? 234_000 : 300_000) };
+                handlerDeadlineAtMs: performance.now() + (deadline ? 234_000 : 300_000) };
             const normal = ['later attempt', 'unapproved', 'other operation', 'stateless replay'].includes(scenario);
             const observations: string[] = [];
             const event = channel('yeosachin.standard.cached-resolver-local');
@@ -2513,10 +2548,11 @@ describe('analyzeWithGemini process concurrency', () => {
                 }), candidate), {
                 NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
                 ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128',
+                PAID_STANDARD_PROCESS_FEATURE_SLOTS: five ? '5' : '4',
             });
-            const error = scenario === 'deadline' ? 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
-                : scenario === 'abort' ? 'AI_GENERATION_DEADLINE_EXCEEDED' : 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED';
-            const sends = scenario === 'ready' || scenario === 'missing usage';
+            const error = deadline ? 'ANALYSIS_V2_AI_DEADLINE_TOO_SHORT'
+                : aborted ? 'AI_GENERATION_DEADLINE_EXCEEDED' : 'ANALYSIS_V2_AI_RESOLVER_CAPACITY_SKIPPED';
+            const sends = scenario === 'ready' || scenario === 'five ready' || scenario === 'missing usage';
             const checked = sends ? expect(run).resolves.toEqual({ value: 'ok' }) : scenario === 'hard'
                 ? expect(run).rejects.toBe(hard) : expect(run).rejects.toThrow(error);
             try {
@@ -2527,9 +2563,14 @@ describe('analyzeWithGemini process concurrency', () => {
                 await vi.advanceTimersByTimeAsync(2_000);
                 stageHolds.pop()!();
                 await vi.advanceTimersByTimeAsync(1_000);
-                if (scenario === 'abort') controller.abort();
+                if (five && !deadline) {
+                    await vi.advanceTimersByTimeAsync(8_000);
+                    expect(reserve).not.toHaveBeenCalled();
+                    expect(mocks.generateContent).not.toHaveBeenCalled();
+                }
+                if (aborted) controller.abort();
                 if (sends || scenario === 'hard') sharedHolds.pop()!();
-                await vi.advanceTimersByTimeAsync(7_000);
+                await vi.advanceTimersByTimeAsync(scenario === 'five timeout' ? 14_000 : 7_000);
                 await checked;
                 const sent = sends ? 1 : 0;
                 expect(reserve).toHaveBeenCalledTimes(normal || scenario === 'hard' ? 1 : sent);
@@ -2539,8 +2580,8 @@ describe('analyzeWithGemini process concurrency', () => {
                 expect(settle).toHaveBeenCalledTimes(sent);
                 if (sent) expect(physicalWaitLeft).toBe(0);
                 if (scenario === 'missing usage') expect(settle.mock.calls[0][1].actualCostUsd).toBeNull();
-                const outcome = scenario === 'abort' ? 'aborted' : scenario === 'timeout' ? 'timeout'
-                    : scenario === 'deadline' ? 'deadline' : 'after_5s';
+                const outcome = aborted ? 'aborted' : timedOut ? 'timeout'
+                    : deadline ? 'deadline' : 'after_5s';
                 expect(observations).toEqual(normal ? [] : ['entered', outcome]);
             } finally {
                 event.unsubscribe(observe);

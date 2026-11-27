@@ -1,3 +1,4 @@
+import type { PaidStandardFeatureSlots } from '../analysis/paid-standard-capacity';
 import { currentStandardResolverAdmission, observeCachedResolverLocal, observeResolverAdmission, remainingResolverAdmissionWait } from './standard-resolver-admission';
 import { AI_GEMINI_MIN_REMAINING_MS, AI_GEMINI_SDK_TIMEOUT_MS, AI_SHARED_CONCURRENCY_LIMIT, getAiStagePolicy, type AiStageName, type AiStagePolicyVersion } from './stage-policy';
 
@@ -102,14 +103,14 @@ export class AsyncSemaphore {
 
 interface GeminiGenerationLimiterState {
     shared: AsyncSemaphore;
-    featureMix: { slots: AsyncSemaphore; expandedInterest: number };
+    featureMix: { slots: AsyncSemaphore; expandedInterest: number; fourSlotInterest: number };
     stages: Map<string, AsyncSemaphore>;
 }
 
 export function createGeminiGenerationLimiter(): GeminiGenerationLimiterState {
     return {
         shared: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT),
-        featureMix: { slots: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT), expandedInterest: 0 },
+        featureMix: { slots: new AsyncSemaphore(AI_SHARED_CONCURRENCY_LIMIT), expandedInterest: 0, fourSlotInterest: 0 },
         stages: new Map(),
     };
 }
@@ -132,7 +133,7 @@ export function getStageGenerationSemaphore(
     if (existing) return existing;
 
     const concurrency = getAiStagePolicy(policyVersion, stage).concurrency;
-    const maximum = stage === 'featureAnalysis' && policyVersion === 'ai-stage-policy-v2.11' ? 4 : undefined;
+    const maximum = stage === 'featureAnalysis' && policyVersion === 'ai-stage-policy-v2.11' ? 5 : undefined;
     const semaphore = new AsyncSemaphore(concurrency, maximum);
     state.stages.set(key, semaphore);
     return semaphore;
@@ -141,7 +142,7 @@ export function getStageGenerationSemaphore(
 // A signed waiter joins before reserving money or auditing an attempt. Older
 // legacy waiters retain FIFO priority; new ones cannot fill slots ahead of it.
 export async function acquirePaidFeatureSlot(
-    { featureMix }: GeminiGenerationLimiterState, handlerDeadlineAtMs: number | undefined, signal?: AbortSignal,
+    { featureMix }: GeminiGenerationLimiterState, limit: PaidStandardFeatureSlots, handlerDeadlineAtMs: number | undefined, signal?: AbortSignal,
 ): Promise<() => void> {
     signal?.throwIfAborted();
     const latest = handlerDeadlineAtMs === undefined ? undefined : handlerDeadlineAtMs - AI_GEMINI_MIN_REMAINING_MS;
@@ -150,14 +151,19 @@ export async function acquirePaidFeatureSlot(
     }
     const waitMs = latest === undefined ? 0 : Math.floor(Math.min(AI_GEMINI_SDK_TIMEOUT_MS, latest - performance.now()));
     featureMix.expandedInterest++;
+    if (limit === 4) featureMix.fourSlotInterest++;
+    const leave = () => {
+        featureMix.expandedInterest--;
+        if (limit === 4) featureMix.fourSlotInterest--;
+    };
     try {
-        let release = featureMix.slots.tryAcquire(4);
+        let release = featureMix.slots.tryAcquire(limit);
         if (!release) {
             if (waitMs < 1) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
             const timeout = AbortSignal.timeout(waitMs);
             const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
             try {
-                release = await featureMix.slots.acquirePermit(bounded, 4);
+                release = await featureMix.slots.acquirePermit(bounded, limit);
             } catch (error) {
                 signal?.throwIfAborted();
                 if (!timeout.aborted) throw error;
@@ -174,11 +180,11 @@ export async function acquirePaidFeatureSlot(
         return () => {
             if (returned) return;
             returned = true;
-            featureMix.expandedInterest--;
+            leave();
             release();
         };
     } catch (error) {
-        featureMix.expandedInterest--;
+        leave();
         featureMix.slots.recheckWaiters();
         throw error;
     }
@@ -187,7 +193,10 @@ export async function acquirePaidFeatureSlot(
 export async function runWithMixedFeatureSlot<T>(
     { featureMix }: GeminiGenerationLimiterState, wait: boolean, task: () => Promise<T>, signal?: AbortSignal,
 ): Promise<T> {
-    const limit = () => featureMix.expandedInterest > 0 ? 4 : AI_SHARED_CONCURRENCY_LIMIT;
+    const limit = () => {
+        if (featureMix.fourSlotInterest > 0) return 4;
+        return featureMix.expandedInterest > 0 ? 5 : AI_SHARED_CONCURRENCY_LIMIT;
+    };
     if (wait) return featureMix.slots.run(task, signal, limit);
     const release = featureMix.slots.tryAcquire(limit());
     if (!release) throw new Error('ANALYSIS_V2_AI_CAPACITY_PENDING');
@@ -254,13 +263,14 @@ export async function acquireResolverGenerationSlots(
     }
 }
 
-/** The cached first attempt may spend fifteen seconds in both local queues together. */
+/** Both local queues share one deadline for the cached first attempt. */
 export async function acquireCachedResolverSlots(
     state: GeminiGenerationLimiterState, policyVersion: AiStagePolicyVersion, handlerDeadline: number, signal: AbortSignal,
+    waitMs: 15_000 | 30_000 = 15_000,
 ) {
     const start = performance.now();
     const latestStart = handlerDeadline - AI_GEMINI_MIN_REMAINING_MS;
-    const deadline = Math.min(start + 15_000, latestStart);
+    const deadline = Math.min(start + waitMs, latestStart);
     let release: (() => void) | undefined;
     observeCachedResolverLocal('entered');
     try {

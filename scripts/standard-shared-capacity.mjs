@@ -34,7 +34,12 @@ const sandbox = {
 }[process.platform];
 if (!sandbox) throw new Error('Isolated network execution requires macOS or Linux.');
 
+// Identify the tracked code actually measured; dirty worktrees must not claim a commit's results.
+const head = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, encoding: 'utf8' });
+const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' });
+const sourceRevision = head.status === 0 && status.status === 0 && !status.stdout.trim() ? head.stdout.trim() : undefined;
 const env = {
+    ...(sourceRevision ? { SHARED_STANDARD_SOURCE_REVISION: sourceRevision } : {}),
     PATH: process.env.PATH,
     CI: 'true',
     TZ: 'UTC',
