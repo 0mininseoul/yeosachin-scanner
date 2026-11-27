@@ -67,3 +67,7 @@ body { background: #111; font-family: Paperlogy, sans-serif; }
 
 /* B, crush variant: the longer lead needs its own line. */
 .b.crush h1 { font-size: 80px; }
+
+/* B, ex variant (/ex): four short lines; the cherry stays as large as on the default card. */
+.b.ex h1 { margin: 12px 0 24px; font-size: 76px; line-height: 1.08; }
+.b.ex .cherry { width: 860px; height: 860px; right: -230px; bottom: -250px; }

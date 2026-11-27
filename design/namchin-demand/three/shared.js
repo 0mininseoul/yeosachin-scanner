@@ -9,10 +9,13 @@ import {
 } from 'three';
 
 export const BRAND = '체리';
-// Who the visitor is watching: the landing's Meta A/B arm (?v=crush) swaps 남친 for 짝남.
-export const TARGET = typeof document !== 'undefined' && document.documentElement.dataset.variant === 'crush'
+// Who the visitor is watching: the landing variant (?v=crush, /ex) swaps 남친 for 짝남 or 전남친.
+const VARIANT = typeof document !== 'undefined' ? document.documentElement.dataset.variant : undefined;
+export const TARGET = VARIANT === 'crush'
   ? { short: '짝남', full: '짝남' }
-  : { short: '남친', full: '남자친구' };
+  : VARIANT === 'ex'
+    ? { short: '전남친', full: '전남친' }
+    : { short: '남친', full: '남자친구' };
 export const FONT = 'Paperlogy, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
 export const DIGITS = '"Barlow Condensed", Paperlogy, sans-serif';
 export const COLORS = {

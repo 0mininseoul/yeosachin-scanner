@@ -13,6 +13,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/cherry": ["./public/cherry/landing.html"],
     "/cherry-public-landing": ["./public/cherry/landing.html"],
+    "/cherry-public-landing/ex": ["./public/cherry/landing.html"],
     "/api/analysis/start": cloudTasksBuildTrace,
     "/api/analysis/step": cloudTasksBuildTrace,
     "/api/analysis/preflight": cloudTasksBuildTrace,
@@ -28,6 +29,10 @@ const nextConfig: NextConfig = {
         source: '/',
         has: [{ type: 'host', value: CHERRY_PUBLIC_HOST.replaceAll('.', '\\.') }],
         destination: CHERRY_LANDING_PATH,
+      }, {
+        source: '/ex',
+        has: [{ type: 'host', value: CHERRY_PUBLIC_HOST.replaceAll('.', '\\.') }],
+        destination: `${CHERRY_LANDING_PATH}/ex`,
       }],
       afterFiles: [],
       fallback: [],

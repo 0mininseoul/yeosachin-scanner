@@ -9,7 +9,7 @@ vi.mock('@/lib/services/admin/operator-route', async (importOriginal) => ({
     requireConsoleOperator: async () => ({ ok: true }),
 }));
 
-import { CRUSH_REPLACEMENTS, parseCherryVariant, renderCherryLanding } from '@/lib/services/cherry/landing-variant';
+import { CRUSH_REPLACEMENTS, EX_REPLACEMENTS, parseCherryVariant, renderCherryLanding } from '@/lib/services/cherry/landing-variant';
 
 const landing = readFileSync(path.join(process.cwd(), 'public/cherry/landing.html'), 'utf8');
 
@@ -17,11 +17,44 @@ describe('cherry landing variant', () => {
     it('parses only the two exact variant values', () => {
         expect(parseCherryVariant('bf')).toBe('bf');
         expect(parseCherryVariant('crush')).toBe('crush');
-        for (const value of [null, '', 'CRUSH', 'crush ', 'x']) expect(parseCherryVariant(value)).toBeNull();
+        expect(parseCherryVariant('ex')).toBe('ex');
+        for (const value of [null, '', 'CRUSH', 'crush ', 'EX', 'x']) expect(parseCherryVariant(value)).toBeNull();
     });
 
     it('every replacement source exists in the landing page', () => {
-        for (const [from] of CRUSH_REPLACEMENTS) expect(landing.includes(from), from).toBe(true);
+        for (const [from] of [...CRUSH_REPLACEMENTS, ...EX_REPLACEMENTS]) expect(landing.includes(from), from).toBe(true);
+    });
+
+    it('ex output names only 전남친 as the target', () => {
+        expect(landing).not.toContain('전남친');
+        const html = renderCherryLanding(landing, { variant: 'ex', pixelId: null });
+        expect(html.replace('남자친구, 짝남', '').replaceAll('전남친', '')).not.toMatch(/남친|남자친구/);
+        expect(html).not.toContain('전전남친');
+        for (const text of [
+            '<html lang="ko" data-variant="ex">',
+            '<span>전남친은 나랑 헤어지고</span>',
+            '인스타 아이디 하나면 돼요',
+            '전남친에게는 비밀로 할게요.',
+            '/cherry/og-ex.jpg',
+            'class="fallback-count">전남친 팔로잉',
+        ]) expect(html).toContain(text);
+    });
+
+    it.each([
+        ['?v=ex&utm_source=meta&fbclid=abc', 'ad'],
+        ['', 'organic'],
+        ['?v=bf', 'organic'],
+        ['?v=ex&utm_source=threads', 'organic'],
+    ])('serves the 전남친 page at /ex%s as %s', async (query, arm) => {
+        const { GET } = await import('@/app/cherry-public-landing/ex/route');
+        const response = await GET(new NextRequest('https://cherry.yeosachin.com/cherry-public-landing/ex' + query));
+        const html = await response.text();
+        expect(html).toContain('data-variant="ex"');
+        expect(html.includes('data-organic-concept')).toBe(arm === 'organic');
+        expect(html).toContain('<title>체리 · 인스타 전남친 맞팔 알리미</title>');
+        expect(html).toContain('<link rel="canonical" href="https://cherry.yeosachin.com/ex">');
+        expect(html).toContain('<meta property="og:url" content="https://cherry.yeosachin.com/ex">');
+        expect(html).not.toContain('"https://yeosachin.com/cherry"');
     });
 
     it('crush output has no boyfriend wording', () => {
@@ -142,8 +175,9 @@ describe('cherry landing variant', () => {
         }
     });
 
-    it('ships the crush share image', () => {
+    it('ships the crush and ex share images', () => {
         expect(readFileSync(path.join(process.cwd(), 'public/cherry/og-crush.jpg')).length).toBeGreaterThan(10_000);
+        expect(readFileSync(path.join(process.cwd(), 'public/cherry/og-ex.jpg')).length).toBeGreaterThan(10_000);
     });
 });
 
@@ -234,6 +268,13 @@ describe('cherry reservation variant', () => {
         const response = await reserve({ variant: 'bf' });
         expect(response.status).toBe(200);
         expect(db.insert).toHaveBeenCalledTimes(2);
+        expect(db.insert).toHaveBeenLastCalledWith({ email: 'me@example.com', phone: '+821012345678' });
+    });
+
+    it('keeps an ex reservation when the database does not allow the arm yet', async () => {
+        db.insert.mockResolvedValueOnce({ error: { code: '23514' } }).mockResolvedValueOnce({ error: null });
+        expect((await reserve({ variant: 'ex' })).status).toBe(200);
+        expect(db.insert).toHaveBeenNthCalledWith(1, { email: 'me@example.com', phone: '+821012345678', variant: 'ex' });
         expect(db.insert).toHaveBeenLastCalledWith({ email: 'me@example.com', phone: '+821012345678' });
     });
 

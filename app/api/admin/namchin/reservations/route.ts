@@ -34,10 +34,11 @@ export async function POST(request: Request) {
         };
         // Whole-table totals per Meta A/B arm, independent of the search filter.
         const arm = () => supabaseAdmin.from('namchin_launch_reservations').select('email', { count: 'exact', head: true });
-        const [withSource, bf, crush, none] = await Promise.all([
+        const [withSource, bf, crush, ex, none] = await Promise.all([
             listPage('email, phone, consented_at, variant, source'),
             arm().eq('variant', 'bf'),
             arm().eq('variant', 'crush'),
+            arm().eq('variant', 'ex'),
             arm().is('variant', null),
         ]);
         // The roster also works before either attribution migration is applied.
@@ -50,7 +51,7 @@ export async function POST(request: Request) {
                 email: string;
                 phone: string;
                 consented_at: string;
-                variant?: 'bf' | 'crush' | null;
+                variant?: 'bf' | 'crush' | 'ex' | null;
                 source?: string | null;
             }[];
             return privateJson({
@@ -59,9 +60,9 @@ export async function POST(request: Request) {
                 })),
                 count,
                 hasNext: start + pageSize < count,
-                variantCounts: bf.error || crush.error || none.error
+                variantCounts: bf.error || crush.error || ex.error || none.error
                     ? null
-                    : { bf: bf.count ?? 0, crush: crush.count ?? 0, none: none.count ?? 0 },
+                    : { bf: bf.count ?? 0, crush: crush.count ?? 0, ex: ex.count ?? 0, none: none.count ?? 0 },
             });
         }
     } catch {

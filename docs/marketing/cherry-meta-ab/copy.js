@@ -15,6 +15,16 @@ window.COPY = {
     c3Label: '짝남 팔로잉',
     c4Friend: '야 너 짝남 어제 어떤 여자랑 맞팔했던데?',
   },
+  // Arm C (2026-11-27): no pre-reservation or deadline wording, so the ad keeps running after 12/1.
+  ex: {
+    brand: '전남친 맞팔 알리미 체리',
+    c1Lead: '전남친은 나랑 헤어지고 요즘',
+    c2Lead: '전남친이 딴 여자랑 맞팔하면',
+    c3Label: '전남친 팔로잉',
+    c4Friend: '야 너 전남친 어제 어떤 여자랑 맞팔했던데?',
+    // A reassurance line with a lock icon replaces the offer chip.
+    assure: '전남친에게 완전 비밀 보장',
+  },
 };
 
 // Shared by both variants.

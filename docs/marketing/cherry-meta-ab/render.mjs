@@ -19,7 +19,7 @@ const profile = mkdtempSync(path.join(tmpdir(), 'cherry-ad-'));
 try {
   for (const [c, slug] of Object.entries(concepts)) {
     if (filter.c && filter.c !== c) continue;
-    for (const v of ['bf', 'crush']) {
+    for (const v of ['bf', 'crush', 'ex']) {
       if (filter.v && filter.v !== v) continue;
       for (const [s, [ratio, width, height]] of Object.entries(sizes)) {
         const url = new URL(pathToFileURL(path.join(here, 'ad.html')));

@@ -13,7 +13,7 @@ const reservationSchema = z.object({
     consent: z.literal(true),
     privateAck: z.literal(true),
     // Meta A/B arm from the landing URL (?v=); absent for visitors who did not come from a test ad.
-    variant: z.enum(['bf', 'crush']).optional(),
+    variant: z.enum(['bf', 'crush', 'ex']).optional(),
     source: z.unknown().transform(parseReservationSource),
 }).strict();
 
@@ -68,8 +68,8 @@ export async function POST(request: Request) {
     const reservations = () => supabaseAdmin.from('namchin_launch_reservations');
     try {
         let { error } = await reservations().insert({ email, phone, ...attribution });
-        // Tracking must never cost a reservation: retry if its column has not been deployed yet.
-        if ((source || variant) && (error?.code === 'PGRST204' || error?.code === '42703')) {
+        // Tracking must never cost a reservation: retry if its column, or a newer arm value, is not deployed yet.
+        if ((source || variant) && (error?.code === 'PGRST204' || error?.code === '42703' || error?.code === '23514')) {
             ({ error } = await reservations().insert({ email, phone }));
         }
         // Keep the original consent and make retries indistinguishable from new submissions.

@@ -23,7 +23,7 @@ void (async () => {
         // Tracking is best-effort and must not affect reservations.
     }
 })();
-// The Meta A/B arm the server rendered (?v=bf|crush); absent for visitors without one.
+// The Meta A/B arm the server rendered (?v=bf|crush|ex); absent for visitors without one.
 const taggedSource = parseReservationSource(new URLSearchParams(window.location.search).get('utm_source'));
 const variant = taggedSource || document.documentElement.hasAttribute('data-organic-concept')
     ? undefined

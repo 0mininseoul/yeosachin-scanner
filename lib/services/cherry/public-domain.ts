@@ -21,7 +21,8 @@ export function cherryDomainResponse(request: NextRequest): NextResponse | undef
     const { pathname, search } = request.nextUrl;
     const hostname = cherryRequestHostname(request);
     const reads = request.method === 'GET' || request.method === 'HEAD';
-    if (pathname.replace(/%[\da-f]{2}/gi, (escape) => String.fromCharCode(parseInt(escape.slice(1), 16))) === CHERRY_LANDING_PATH) {
+    const decoded = pathname.replace(/%[\da-f]{2}/gi, (escape) => String.fromCharCode(parseInt(escape.slice(1), 16)));
+    if (decoded === CHERRY_LANDING_PATH || decoded.startsWith(`${CHERRY_LANDING_PATH}/`)) {
         return new NextResponse(null, { status: 404 });
     }
     const live = isCherryDomainLive();
@@ -32,7 +33,7 @@ export function cherryDomainResponse(request: NextRequest): NextResponse | undef
         });
     }
     if (hostname !== CHERRY_PUBLIC_HOST) return;
-    if (reads && (pathname === '/' || pathname === '/cherry')) {
+    if (reads && (pathname === '/' || pathname === '/ex' || pathname === '/cherry')) {
         if (pathname === '/cherry') return NextResponse.redirect(CHERRY_PUBLIC_URL + search, 308);
         return NextResponse.next();
     }
@@ -46,11 +47,11 @@ export function cherryDomainResponse(request: NextRequest): NextResponse | undef
     }
     if (reads && pathname === '/robots.txt') {
         return new NextResponse(live
-            ? `User-agent: *\nAllow: /$\nAllow: /?\nAllow: /cherry/\nAllow: /sitemap.xml$\nDisallow: /\nSitemap: ${CHERRY_PUBLIC_URL}sitemap.xml\n`
+            ? `User-agent: *\nAllow: /$\nAllow: /?\nAllow: /ex$\nAllow: /ex?\nAllow: /cherry/\nAllow: /sitemap.xml$\nDisallow: /\nSitemap: ${CHERRY_PUBLIC_URL}sitemap.xml\n`
             : 'User-agent: *\nDisallow: /\n', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
     }
     if (reads && pathname === '/sitemap.xml' && live) {
-        return new NextResponse(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${CHERRY_PUBLIC_URL}</loc></url></urlset>`, {
+        return new NextResponse(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${CHERRY_PUBLIC_URL}</loc></url><url><loc>${CHERRY_PUBLIC_URL}ex</loc></url></urlset>`, {
             headers: { 'Content-Type': 'application/xml; charset=utf-8' },
         });
     }

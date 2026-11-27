@@ -14,14 +14,14 @@ type Roster = {
         email: string;
         phone: string;
         consentedAt: string;
-        variant: 'bf' | 'crush' | null;
+        variant: 'bf' | 'crush' | 'ex' | null;
         source: keyof typeof reservationSourceLabels | null;
     }[];
     count: number;
     hasNext: boolean;
-    variantCounts: { bf: number; crush: number; none: number } | null;
+    variantCounts: { bf: number; crush: number; ex: number; none: number } | null;
 };
-const VARIANT_LABEL = { bf: 'A 남친', crush: 'B 짝남' } as const;
+const VARIANT_LABEL = { bf: 'A 남친', crush: 'B 짝남', ex: 'C 전남친' } as const;
 const DATE_TIME = new Intl.DateTimeFormat('ko-KR', {
     timeZone: 'Asia/Seoul', dateStyle: 'medium', timeStyle: 'short', hour12: false,
 });
@@ -83,7 +83,7 @@ export function NamchinWaitlistConsole() {
             <Card className="ac-namchin-roster">
                 <div className="ac-tools-bar">
                     <span role="status">{roster ? `${filter.query ? '검색 결과' : '전체 신청'} ${roster.count}건` : ''}</span>
-                    {roster?.variantCounts ? <span>메타 A/B 전체: A 남친 {roster.variantCounts.bf}건, B 짝남 {roster.variantCounts.crush}건, 변형 없음 {roster.variantCounts.none}건</span> : null}
+                    {roster?.variantCounts ? <span>메타 광고 전체: A 남친 {roster.variantCounts.bf}건, B 짝남 {roster.variantCounts.crush}건, C 전남친 {roster.variantCounts.ex}건, 변형 없음 {roster.variantCounts.none}건</span> : null}
                     <form className="ac-search" role="search" onSubmit={event => {
                         event.preventDefault();
                         setFilter({ query: search.trim(), page: 1 });

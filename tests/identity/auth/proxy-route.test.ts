@@ -88,6 +88,15 @@ describe('Cherry public domain', () => {
         expect(rules).toContain(`Sitemap: ${newUrl}/sitemap.xml`);
         const sitemap = await proxy(new NextRequest(newUrl + '/sitemap.xml'));
         expect(await sitemap.text()).toContain(`<loc>${newUrl}/</loc>`);
+        expect(rules).toContain('Allow: /ex$');
+        expect(await (await proxy(new NextRequest(newUrl + '/sitemap.xml'))).text()).toContain(`<loc>${newUrl}/ex</loc>`);
+    });
+
+    it('serves the 전남친 page only at /ex on the Cherry host', async () => {
+        expect((await proxy(new NextRequest(newUrl + '/ex?v=ex&fbclid=abc'))).headers.get('x-middleware-next')).toBe('1');
+        expect((await proxy(new NextRequest(newUrl + '/cherry-public-landing/ex'))).status).toBe(404);
+        expect((await proxy(new NextRequest(oldUrl + '/cherry-public-landing/ex'))).status).toBe(404);
+        expect((await proxy(new NextRequest(newUrl + '/ex/other'))).status).toBe(404);
     });
 
     it('preserves the reservation POST, keeps account pages on the main host and rejects unrelated APIs', async () => {

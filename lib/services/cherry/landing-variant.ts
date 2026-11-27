@@ -1,11 +1,11 @@
 /**
  * Meta A/B test variants of the Cherry pre-reservation landing page.
- * `bf` keeps the original boyfriend copy; `crush` swaps the target to 짝남 (design §6).
+ * `bf` keeps the original boyfriend copy; `crush` swaps the target to 짝남 (design §6) and `ex` to 전남친.
  */
-export type CherryVariant = 'bf' | 'crush';
+export type CherryVariant = 'bf' | 'crush' | 'ex';
 
 export function parseCherryVariant(value: string | null): CherryVariant | null {
-    return value === 'bf' || value === 'crush' ? value : null;
+    return value === 'bf' || value === 'crush' || value === 'ex' ? value : null;
 }
 
 /**
@@ -23,11 +23,28 @@ export const CRUSH_REPLACEMENTS: readonly (readonly [from: string, to: string])[
     ['남친', '짝남'],
 ];
 
-const crushTargets = new Map(CRUSH_REPLACEMENTS);
-const crushPattern = new RegExp(
-    CRUSH_REPLACEMENTS.map(([from]) => from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'),
-    'g',
-);
+/** Same single-pass rules for the 전남친 arm. */
+export const EX_REPLACEMENTS: readonly (readonly [from: string, to: string])[] = [
+    ['<span>내 남친은 나 몰래</span>', '<span>전남친은 나랑 헤어지고</span>'],
+    ['내 남친은 나 몰래 누구랑', '전남친은 나랑 헤어지고 누구랑'],
+    ['<h3>남자친구 비밀번호는 필요 없어요</h3>', '<h3>인스타 아이디 하나면 돼요</h3>'],
+    ['짝남, 짝녀, 썸남, 썸녀, 여자친구', '남자친구, 짝남, 썸남, 짝녀, 썸녀, 여자친구'],
+    ['https://yeosachin.com/cherry/og.jpg', 'https://yeosachin.com/cherry/og-ex.jpg'],
+    ['남자친구가', '전남친이'],
+    ['남자친구', '전남친'],
+    ['남친', '전남친'],
+];
+
+function replacer(rules: readonly (readonly [string, string])[]) {
+    const targets = new Map(rules);
+    const pattern = new RegExp(rules.map(([from]) => from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g');
+    return (html: string) => html.replace(pattern, (match) => targets.get(match) ?? match);
+}
+
+const swapTarget: Record<Exclude<CherryVariant, 'bf'>, (html: string) => string> = {
+    crush: replacer(CRUSH_REPLACEMENTS),
+    ex: replacer(EX_REPLACEMENTS),
+};
 
 /**
  * Meta's base pixel code. autoConfig is off so the pixel does not collect page and button metadata on
@@ -44,7 +61,7 @@ export function renderCherryLanding(
 ): string {
     const { variant, concept = null, pixelId } = options;
     const pageVariant = variant ?? concept;
-    let page = pageVariant === 'crush' ? html.replace(crushPattern, (match) => crushTargets.get(match) ?? match) : html;
+    let page = pageVariant && pageVariant !== 'bf' ? swapTarget[pageVariant](html) : html;
     if (pageVariant) {
         const organicAttribute = variant ? '' : ' data-organic-concept';
         page = page.replace('<html lang="ko">', `<html lang="ko" data-variant="${pageVariant}"${organicAttribute}>`);
