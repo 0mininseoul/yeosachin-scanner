@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
+import { CHERRY_THREADS_CONSOLE_PATH, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
 import type { loadCherryAdminOverview, CherryAdminAction } from '@/lib/services/cherry/admin';
 import { ConsoleWorkspaceSwitch } from './console-workspace-switch';
 import { Card, Chip, EmptyRow, ErrorNotice, Loading } from './console-ui';
@@ -89,6 +89,7 @@ export function CherryServiceConsole() {
                 <div className="ac-nav-label">운영</div>
                 <Link className="ac-nav-btn is-active" href={CHERRY_SERVICE_CONSOLE_PATH} aria-current="page">서비스 운영</Link>
                 <Link className="ac-nav-btn" href={NAMCHIN_ADMIN_CONSOLE_PATH}>사전 예약 명단</Link>
+                <Link className="ac-nav-btn" href={CHERRY_THREADS_CONSOLE_PATH}>Threads</Link>
             </nav>
             <div className="ac-side-bottom"><ConsoleWorkspaceSwitch active="namchin" /></div>
         </aside>

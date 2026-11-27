@@ -36,3 +36,12 @@
 2. 교정 한 건을 저장하고, 같은 소재의 다음 초안에 교정 사례가 반영됐는지 콘솔에서 확인한다. 첫 초안 생성 경로는 Pro 연계 크레딧을 확인한 뒤 결정한다.
 3. 별도로 승인한 글 한 편을 20분 슬롯에 예약하고, 저장한 문안과 실제 올라간 게시물을 대조한다. 승인한 첫 답글이 있으면 원글에 한 번만 달렸는지 확인한다.
 4. 같은 슬롯과 작업을 중복 실행해도 원글은 한 번만 게시된다. 답글만 실패하면 원글을 유지하고 답글만 복구한다. 작업이 없는 시각에는 Vercel 워커를 호출하지 않는 것을 확인한다.
+
+## 운영 연결과 실제 계정 검증
+
+1. Pro 혜택을 연결한 API 조직의 프로젝트 키를 Vercel Production `CHERRY_OPENAI_API_KEY`에 저장한다. `CHERRY_OPENAI_MODEL`은 선택값이며 기본 모델은 `gpt-5-mini`다.
+2. Meta Developers에서 Threads 사용 사례가 있는 앱을 준비한다. 체리 계정을 테스터로 연결하거나 운영에 필요한 권한을 승인받는다. Vercel Production에 `CHERRY_THREADS_APP_ID`, `CHERRY_THREADS_APP_SECRET`, `CHERRY_THREADS_REDIRECT_URI`를 저장한다. 리디렉션 URI는 운영 콘솔과 같은 HTTPS 호스트의 `/api/admin/cherry/threads/oauth`이며 Meta 앱의 허용 목록과 일치해야 한다.
+3. 운영자가 관리하는 비밀 저장소를 통해 임의의 32바이트 키를 Base64로 인코딩해 `CHERRY_THREADS_TOKEN_KEY`에 저장한다. 전용 실행용 난수를 Vercel `CHERRY_THREADS_CRON_SECRET`과 Supabase Vault의 `cherry_threads_worker_secret`에 같은 값으로 저장한다. Vault의 `cherry_threads_worker_url`에는 운영 호스트의 전체 `/api/internal/cherry-threads` 주소를 저장한다.
+4. 두 migration을 검토한 뒤 운영 표준 절차로 적용한다. `cron.job`에서 `cherry-threads-20m`의 일정과 활성 여부를 확인한다. 전용 실행 URL과 인증값은 Secret으로만 관리한다.
+5. 체리 운영 콘솔의 Threads 화면에서 OAuth를 완료하고 기존 글을 가져온다. 초안을 만든 뒤 모바일 콘솔에서 문장과 교정 이유를 저장한다. 다음 회차에서 같은 관계를 골라 초안을 만들고, 생성에 전달한 교정 사례 항목과 실제 생성된 문안을 함께 검증한다.
+6. `CHERRY_THREADS_PUBLISH_ENABLED=true`를 설정한 뒤 테스트 문안 한 편의 발행을 승인한다. 실제 원글 ID와 첫 답글 여부, 같은 슬롯 재실행 시 중복 여부를 확인한다. 게시가 끝나면 24시간 측정 작업까지 확인한다.

@@ -1,6 +1,6 @@
 import Image from 'next/image';
 import Link from 'next/link';
-import { adminConsolePath, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
+import { adminConsolePath, CHERRY_THREADS_CONSOLE_PATH, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
 import { AuthButtons } from '@/components/auth-buttons';
 import { createClient } from '@/lib/supabase/server';
 import {
@@ -9,6 +9,7 @@ import {
 } from '@/lib/services/analysis/score-audit';
 import { AdminConsole } from '../admin/console/admin-console';
 import { CherryServiceConsole } from '../admin/console/cherry-service-console';
+import { CherryThreadsConsole } from '../admin/console/cherry-threads-console';
 import { NamchinWaitlistConsole } from '../admin/console/namchin-waitlist-console';
 import { buildPipelineMap } from '@/lib/services/admin/pipeline-map';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
@@ -89,10 +90,12 @@ function ConsoleAccessState({
 
 export default async function AnalysisAuditPage({
     searchParams,
-}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[]; view?: string | string[]; tab?: string | string[]; workspace?: string | string[] }> }) {
+}: { searchParams: Promise<{ requestId?: string | string[]; error?: string | string[]; view?: string | string[]; tab?: string | string[]; workspace?: string | string[]; threads?: string | string[] }> }) {
     const params = await searchParams;
     const namchinWorkspace = params.workspace === 'namchin';
-    const destination = namchinWorkspace ? NAMCHIN_ADMIN_CONSOLE_PATH : adminConsolePath(params.requestId);
+    const destination = namchinWorkspace
+        ? (params.view === 'threads' ? CHERRY_THREADS_CONSOLE_PATH : NAMCHIN_ADMIN_CONSOLE_PATH)
+        : adminConsolePath(params.requestId);
     const loginFailed = typeof params.error === 'string'
         && ['bad_oauth_state', 'no_code', 'exchange_failed'].includes(params.error);
 
@@ -136,7 +139,11 @@ export default async function AnalysisAuditPage({
     }
     if (decision !== 'authorized') return <ConsoleAccessState state={decision} destination={destination} />;
 
-    if (namchinWorkspace) return params.view === 'service' ? <CherryServiceConsole /> : <NamchinWaitlistConsole />;
+    if (namchinWorkspace) {
+        if (params.view === 'threads') return <CherryThreadsConsole authResult={params.threads === 'failed' ? 'failed' : undefined} />;
+        if (params.view === 'service') return <CherryServiceConsole />;
+        return <NamchinWaitlistConsole />;
+    }
 
     return <AdminConsole
         initialRequestId={new URL(destination, 'https://admin-console.invalid').searchParams.get('requestId') ?? ''}

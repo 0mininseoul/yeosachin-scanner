@@ -1,0 +1,35 @@
+.main { min-width: 0; }
+.wrap { display: grid; gap: 16px; max-width: 840px; }
+.status { margin: 0; }
+.status:empty { display: none; }
+.form, .posts { display: grid; gap: 12px; padding: 12px 0; min-width: 0; }
+.fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.form label { display: grid; gap: 5px; min-width: 0; font-weight: 600; }
+.form :is(textarea, input:not([type="checkbox"]), select) {
+    width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border-radius: 8px;
+    border: 1px solid var(--ac-line, #d8d2d5); background: var(--ac-panel, #fff); color: inherit;
+    font: inherit; font-size: 16px;
+}
+.form textarea { line-height: 1.55; resize: vertical; }
+.actions, .editorActions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.actions :is(a, button), .form button, .details :is(a, button) { min-height: 44px; }
+.post { min-width: 0; border-radius: 10px; border: 1px solid var(--ac-line, #d8d2d5); padding: 14px; }
+.postHeader { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.body, .reply, .details blockquote { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.56; }
+.meta, .reply, .postHeader span { font-size: 13px; }
+.details { padding: 4px 0; overflow-wrap: anywhere; }
+.details summary { padding: 10px 0; min-height: 44px; cursor: pointer; }
+.details blockquote { margin: 4px 0 12px; padding: 8px 12px; border-inline-start: 2px solid var(--ac-accent, #a93558); }
+.details small { display: block; margin-top: 6px; }
+.form .toggle, .toggle { display: flex; gap: 8px; min-height: 44px; align-items: center; font-weight: 500; }
+.toggle input { inline-size: 18px; block-size: 18px; flex: none; }
+
+@media (max-width: 600px) {
+    .wrap { gap: 12px; }
+    .fields { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    .editorActions {
+        position: sticky; bottom: 0; z-index: 2; padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
+        background: var(--ac-panel, #fff);
+    }
+    .editorActions button { flex: 1; }
+}

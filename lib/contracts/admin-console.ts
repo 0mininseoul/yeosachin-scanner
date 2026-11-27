@@ -1,6 +1,7 @@
 export const ADMIN_CONSOLE_PATH = '/admin0min';
 export const LEGACY_ADMIN_CONSOLE_PATH = '/admin/analysis-audit';
 export const NAMCHIN_ADMIN_CONSOLE_PATH = `${ADMIN_CONSOLE_PATH}?workspace=namchin`;
+export const CHERRY_THREADS_CONSOLE_PATH = `${NAMCHIN_ADMIN_CONSOLE_PATH}&view=threads`;
 
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -18,6 +19,8 @@ export function readAdminConsoleDestination(rawPath: string | null): string | nu
     const url = new URL(rawPath, 'https://admin-console.invalid');
     const workspaces = url.searchParams.getAll('workspace');
     if (pathname === ADMIN_CONSOLE_PATH && workspaces.length === 1 && workspaces[0] === 'namchin') {
+        const views = url.searchParams.getAll('view');
+        if (views.length === 1 && views[0] === 'threads') return CHERRY_THREADS_CONSOLE_PATH;
         return NAMCHIN_ADMIN_CONSOLE_PATH;
     }
     const requestIds = url.searchParams.getAll('requestId');
