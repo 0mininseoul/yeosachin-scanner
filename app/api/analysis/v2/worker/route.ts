@@ -1,3 +1,4 @@
+import { isPaidWorkerService } from '@/lib/services/analysis/paid-worker-service';
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { getApprovedDevLiveDelivery, type DevLiveApproval } from '@/lib/services/dev-ui/live-analysis';
@@ -316,7 +317,7 @@ async function handlePOST(
                     { status: 503 },
                 );
             }
-            if (!approval && process.env.NODE_ENV === 'production' && process.env.K_SERVICE === 'analysis-paid-worker'
+            if (!approval && process.env.NODE_ENV === 'production' && isPaidWorkerService(process.env)
                 && (outcome === 'ready' || outcome === 'noop')) {
                 // A redelivery after commit may observe noop. The exact delivery fence and
                 // deterministic bootstrap also recover a lost response without another collection.
@@ -417,7 +418,7 @@ async function handlePOST(
             });
             return NextResponse.json({ status: 'failed', errorCode });
         }
-        if (!approval && process.env.NODE_ENV === 'production' && process.env.K_SERVICE === 'analysis-paid-worker'
+        if (!approval && process.env.NODE_ENV === 'production' && isPaidWorkerService(process.env)
             && paidDelivery.jobKey === ANALYSIS_V2_FINALIZE_JOB_KEY
             && (outcome.status === 'completed' || outcome.status === 'already_terminal')) {
             try {

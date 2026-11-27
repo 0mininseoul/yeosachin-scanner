@@ -1,3 +1,4 @@
+import { isPaidWorkerService } from '@/lib/services/analysis/paid-worker-service';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { VertexDispatchAuthorizationError } from '@/lib/services/ai/vertex-dispatch-window';
 
@@ -24,7 +25,7 @@ function select(active: Delivery): Promise<boolean> {
 }
 
 function productionWorkerEnabled(env: Environment) {
-    return env.NODE_ENV === 'production' && env.K_SERVICE === 'analysis-paid-worker'
+    return env.NODE_ENV === 'production' && isPaidWorkerService(env)
         && env.ANALYSIS_WORKLOAD_ROLE === 'paid' && env.PAID_STANDARD_VERTEX_CAPACITY_MODE === 'expanded128'
         && env.ANALYSIS_PROVIDER_ADMISSION_ENABLED === 'true'
         && !env.DEV_LIVE_WORKLOAD && !env.CLOUD_RUN_JOB;

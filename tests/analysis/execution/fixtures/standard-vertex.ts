@@ -1,6 +1,14 @@
 import { z } from 'zod';
 import { validModelResponse } from '../../../commerce/precheckout/fixtures/blite-model';
 
+// Per-stage means of 351 timed SDK attempts in the Nov 25 paid Dev run.
+// These include some admission wait. There was no measured B-lite preview time.
+export const standardObservedModelMs: Readonly<Record<string, number | undefined>> = Object.freeze({
+    features: 30_889, resolver: 35_915, gender_triage: 12_226,
+    partner: 5_797, narrative: 21_595, private_names: 12_316,
+});
+export const standardRecoveryDelayScale = 1.25;
+
 type Generation = {
     contents: { parts: { text?: string; inlineData?: { data?: string } }[] } | { parts: { text?: string; inlineData?: { data?: string } }[] }[];
     config: { responseJsonSchema: { properties: Record<string, unknown> } };
