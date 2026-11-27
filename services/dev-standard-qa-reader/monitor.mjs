@@ -8,7 +8,7 @@ export function safeCode(error) {
 }
 
 // A failed roster read does not change an owner's original start time or a completed browser check.
-export async function readRosterUntilAvailable(poll, emit, cutoff, sleep = delay) {
+export async function readRosterUntilAvailable(poll, emit, cutoff, sleep = (ms) => delay(ms)) {
     let retry = 0;
     while (Date.now() < cutoff) {
         const result = await poll();
