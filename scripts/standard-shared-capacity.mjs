@@ -12,7 +12,7 @@ const graceByStrategy = { immediate: '0', grace8s: '8000', finish50s: '50000', c
 if (rest.length || !/^(?:[1-9]|1[0-6])$/.test(owners) || !['normal', 'recovery'].includes(scenario)
     || !/^[1-9][0-9]{0,2}$/.test(publicCount) || Number(publicCount) > 600
     || !['fixture', 'production-paid'].includes(delivery)
-    || (preset === '18i-40q-f4' && delivery !== 'production-paid')
+    || ('processFeatureSlots' in capacity && delivery !== 'production-paid')
     || (tail === 'coverage99' && (scenario !== 'recovery' || Number(publicCount) < 4))
     || (budgetProbe !== undefined && (!['held', 'spent'].includes(budgetProbe) || owners !== '1' || publicCount !== '4'
         || delivery !== 'production-paid' || timing !== 'fast'))

@@ -360,8 +360,14 @@ describe('analysis V2 worker route', () => {
         mocks.process.mockRejectedValue(new AnalysisV2JobFenceError());
         mocks.resumeCapacity.mockRejectedValueOnce(new Error('mark timeout'));
         expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(503);
+        expect(mocks.emit).toHaveBeenLastCalledWith(expect.objectContaining({
+            event: 'analysis_v2.worker_retry', fields: expect.objectContaining({ error_code: 'JOB_DISPATCH_NOT_READY' }),
+        }));
         mocks.resumeCapacity.mockResolvedValueOnce(true);
         expect((await POST(request({ ...payload, workloadRole: 'paid' }))).status).toBe(200);
+        expect(mocks.emit).toHaveBeenLastCalledWith(expect.objectContaining({
+            event: 'analysis_v2.worker_completed', fields: expect.objectContaining({ disposition: 'capacity_handoff' }),
+        }));
     });
 
     it('acknowledges a stale generation but retries early delivery and a busy lease', async () => {

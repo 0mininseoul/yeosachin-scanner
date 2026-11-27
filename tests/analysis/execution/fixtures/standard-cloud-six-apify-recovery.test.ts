@@ -79,6 +79,15 @@ native('reclaims only fenced Dev fixture admissions and disarms the periodic job
         expect((await open()).error).toBeNull();
         expect((await cronRows()).rows).toEqual([{command:"SET statement_timeout='8s'; SET lock_timeout='1s'; SELECT dev_cloud_six.apify_recovery_tick_v1()",username:'postgres'}]);
         const {job,ordinary}=await admitCloudSixFixture(db,owners[0]!,wave);
+        await insertLease(db,job,'running',{state:'running'});
+        await db.transaction(async busy => {
+            await busy.exec('LOCK TABLE auth.identities IN ACCESS EXCLUSIVE MODE');
+            const observed = await db.transaction(async cron => {
+                await cron.exec("SET LOCAL statement_timeout='500ms'");
+                return cron.query<{n:number}>('SELECT dev_cloud_six.apify_recovery_tick_v1() AS n');
+            });
+            expect(observed.rows).toEqual([{n:0}]);
+        });
         const missing=await insertLease(db,job,'expired with no provider row');
         const terminal=await insertLease(db,job,'complete synthetic cost',{state:'succeeded',settled:true});
         await insertLease(db,job,'live writer missing',{sameClaim:true});
@@ -87,7 +96,6 @@ native('reclaims only fenced Dev fixture admissions and disarms the periodic job
         await insertLease(db,job,'nonzero external charge',{state:'succeeded',settled:true,actualUsd:0.02});
         await insertLease(db,job,'real run',{state:'succeeded',settled:true,externalId:true});
         await insertLease(db,job,'ambiguous',{state:'starting'});
-        await insertLease(db,job,'running',{state:'running'});
         await insertLease(db,ordinary,'other owner');
         const original = () => db.query<{digest:string}>(`SELECT md5(jsonb_agg(to_jsonb(r) ORDER BY r.operation_key)::text) AS digest
             FROM public.analysis_v2_provider_runs r`);

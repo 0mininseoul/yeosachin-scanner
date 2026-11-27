@@ -165,6 +165,41 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
 );
 
 it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
+    'records the same provider start and terminal receipt alongside sibling readers and fences a conflicting receipt',
+    async () => {
+        const db = await createSharedStandardDatabase();
+        try {
+            const job = await prepareJob(db);
+            const reservation = randomUUID();
+            await db.query(reserveSql, [...argumentsFor(job), reservation]);
+            const args = [job.requestId, jobKey, job.jobClaimToken, operationKey, reservation, runId];
+            const started = 'SELECT public.checkpoint_analysis_v2_provider_run_started($1,$2,$3,$4,$5,$6)';
+            const terminal = 'SELECT public.checkpoint_analysis_v2_provider_run_terminal($1,$2,$3,$4,$5,$6,$7,$8)';
+            await db.transaction(async reader => {
+                await reader.query('SELECT FROM public.analysis_preflights WHERE consumed_request_id=$1 FOR SHARE', [job.requestId]);
+                await reader.query('SELECT FROM public.analysis_requests WHERE id=$1 FOR SHARE', [job.requestId]);
+                await db.transaction(async worker => {
+                    await worker.exec("SET LOCAL ROLE service_role; SET LOCAL statement_timeout='500ms'");
+                    await worker.query(started, args);
+                    await worker.query(terminal, [...args, 'succeeded', null]);
+                });
+            });
+            await expect(db.query(terminal, [...args, 'failed', null])).rejects.toThrow('TERMINAL_CONFLICT');
+            await expect(db.query(terminal, [...args.slice(0, 2), randomUUID(), ...args.slice(3), 'succeeded', 0])).rejects.toThrow('FENCE_MISMATCH');
+            await db.transaction(async writer => {
+                await writer.query('SELECT FROM public.analysis_requests WHERE id=$1 FOR UPDATE', [job.requestId]);
+                await expect(db.transaction(async worker => {
+                    await worker.exec("SET LOCAL ROLE service_role; SET LOCAL lock_timeout='200ms'");
+                    await worker.query(terminal, [...args, 'succeeded', 0.01]);
+                })).rejects.toMatchObject({ code: '55P03' });
+            });
+            const { rows } = await db.query('SELECT status, actual_usage_usd FROM public.analysis_v2_provider_runs WHERE reservation_token=$1', [reservation]);
+            expect(rows).toEqual([{ status: 'succeeded', actual_usage_usd: null }]);
+        } finally { await db.close(); }
+    }, 45_000,
+);
+
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
     'recovers one known provider start while the normal start checkpoint is blocked by a parent lock',
     async () => {
         const db = await createSharedStandardDatabase();

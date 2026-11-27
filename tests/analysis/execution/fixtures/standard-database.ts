@@ -36,6 +36,9 @@ const migrationVersions = [
     '20261126100004',
     '20261127090000',
     '20261127091000',
+    '20261127100000',
+    '20261127101000',
+    '20261127102000',
 ];
 
 export interface StandardConnection {

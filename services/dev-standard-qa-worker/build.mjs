@@ -24,6 +24,9 @@ export async function bundleQaWorker(outfile) {
             plugin.onResolve({ filter: /.*/ }, args => {
                 const key = args.path.startsWith('@/') ? path.join(root, args.path.slice(2))
                     : args.path.startsWith('.') ? path.resolve(args.resolveDir, args.path) : args.path;
+                if (key === path.join(root, 'lib/observability/server')
+                    && args.importer === path.join(root, 'app/api/analysis/v2/worker/route.ts'))
+                    return { path: local('outcome-log.ts') };
                 if (key === path.join(root, 'lib/constants/dev-ui')
                     && [path.join(root, 'lib/services/ai/gemini.ts'), path.join(root, 'lib/services/instagram/providers/apify-relationship.ts')].includes(args.importer))
                     return { path: local('provider-mode.ts') };
@@ -38,7 +41,7 @@ export async function bundleQaWorker(outfile) {
     if (imports.some(name => forbidden.test(name)) || names.some(name => /node_modules\/(?:@google\/genai|apify-client|resend)\//.test(name))
         || !['app/api/analysis/preflight/worker/route.ts', 'app/api/analysis/v2/worker/route.ts', 'lib/supabase/admin.ts',
             'lib/services/media/r2-result-image-store.ts', 'lib/services/analysis/v2-media-artifact-store.ts',
-            'services/dev-standard-qa-worker/admin.ts', 'services/dev-standard-qa-worker/profile.ts',
+            'services/dev-standard-qa-worker/admin.ts', 'services/dev-standard-qa-worker/profile.ts', 'services/dev-standard-qa-worker/outcome-log.ts',
             'services/dev-standard-qa-worker/media.ts', 'services/dev-standard-qa-worker/provider-mode.ts',
             'tests/analysis/execution/fixtures/standard-cloud-vertex.ts', 'tests/analysis/execution/fixtures/standard-cloud-apify.ts'
         ].every(name => names.includes(name)) || !imports.includes('@google-cloud/tasks')) throw new Error('DEV_STANDARD_QA_BUNDLE_REJECTED');

@@ -169,6 +169,10 @@ BEGIN
         IF signature = retry_signature THEN
             original_hash := '130b5ae08d7a7cdce89c4f7d4ce3c305';
             patched_hash := 'b7d23df4ba3afdefa07f67e5cd98f1b1';
+            IF pg_catalog.md5(base.prosrc) IN ('70e6120ed8661e86c772d7680b78379b', '686706f272053ee40afa5b0cfa296611') THEN
+                original_hash := '70e6120ed8661e86c772d7680b78379b';
+                patched_hash := '686706f272053ee40afa5b0cfa296611';
+            END IF;
         ELSE
             original_hash := 'a6bf9c3e052c880d3d5da6152cafc063';
             patched_hash := 'd574dd70c33a4344d1740b2ec9226a54';

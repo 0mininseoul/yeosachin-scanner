@@ -27,11 +27,10 @@ BEGIN
 
     FOR admission IN
         WITH cohort AS MATERIALIZED (
-            SELECT o.result_request_id
+            SELECT o.result_request_id,o.user_id,q.slot,q.preflight_id,q.order_id
             FROM dev_cloud_six.order_receipts q JOIN public.earlybird_orders o ON o.id=q.order_id
             WHERE q.wave=p_wave AND q.actual_charge_krw=0 AND o.preflight_id=q.preflight_id
-                AND o.result_request_id IS NOT NULL AND public.dev_cloud_six_scope_v1(
-                    p_wave,o.user_id,q.preflight_id,q.order_id,o.result_request_id)=q.slot
+                AND o.result_request_id IS NOT NULL
         )
         SELECT l.*
         FROM cohort c JOIN public.analysis_pipeline_jobs j ON j.request_id=c.result_request_id
@@ -44,7 +43,9 @@ BEGIN
             AND l.expires_at<=clock_timestamp()
             AND l.admission_id=public.analysis_provider_admission_expected_id(
                 'paid','apify','secondary',l.request_id,l.job_key,l.operation_key)
-            AND (
+            -- Most ticks see only running provider work. Check lineage for candidates
+            -- that can be reclaimed, before taking the job or admission lock.
+            AND CASE WHEN (
                 (r.request_id IS NULL AND (j.status='processing' AND j.lease_token=l.job_claim_token
                     AND j.lease_expires_at>clock_timestamp()) IS NOT TRUE)
                 OR (r.logical_provider='apify' AND r.credential_slot='secondary'
@@ -52,7 +53,8 @@ BEGIN
                     AND r.status IN ('succeeded','aborted','failed','timed_out') AND r.terminalized_at IS NOT NULL
                     -- Run termination frees collection capacity. Its delayed cost remains untouched.
                     AND (r.actual_usage_usd IS NULL OR r.actual_usage_usd=0))
-            )
+            ) THEN public.dev_cloud_six_scope_v1(p_wave,c.user_id,c.preflight_id,c.order_id,c.result_request_id)=c.slot
+              ELSE false END
         ORDER BY l.expires_at,l.admission_id LIMIT 8 FOR UPDATE OF j,l SKIP LOCKED
     LOOP
         ledger_state:=public.analysis_provider_admission_ledger_state(admission);
