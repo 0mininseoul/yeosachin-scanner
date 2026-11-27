@@ -67,3 +67,7 @@ body { background: #111; font-family: Paperlogy, sans-serif; }
 
 /* B, crush variant: the longer lead needs its own line. */
 .b.crush h1 { font-size: 80px; }
+
+/* B, ex variant (/ex): two long lines, so the type steps down and the cherry moves right. */
+.b.ex h1 { font-size: 66px; }
+.b.ex .cherry { width: 600px; height: 600px; right: -190px; bottom: -150px; }

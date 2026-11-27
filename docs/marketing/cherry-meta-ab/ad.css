@@ -173,3 +173,11 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 
 /* Arm C: '전남친이' is one syllable longer, so the C2 lead steps down to keep the side margin. */
 .v-ex.c2 .lead, .ad--story.v-ex.c2 .lead { font-size: 78px; }
+
+/* Arm C v2: C1 lead is longer; the story size steps down to stay inside the margin. */
+.ad--story.v-ex.c1 .lead { font-size: 70px; }
+/* Arm C v2: a lock line instead of the offer chip, like the landing's reassurance note. */
+.assure { display: flex; align-items: center; gap: 18px; font-size: 38px; font-weight: 800; letter-spacing: -0.04em; color: var(--wine); }
+.assure-icon { display: grid; place-items: center; width: 66px; height: 66px; border-radius: 50%; border: 3px solid currentColor; }
+.assure-icon svg { width: 42px; height: 42px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.c2 .assure, .c3 .assure { color: #ffd6db; }

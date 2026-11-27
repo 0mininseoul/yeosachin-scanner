@@ -32,7 +32,7 @@ describe('cherry landing variant', () => {
         expect(html).not.toContain('전전남친');
         for (const text of [
             '<html lang="ko" data-variant="ex">',
-            '<span>헤어진 전남친은 요즘</span>',
+            '<span>전남친은 나랑 헤어지고</span>',
             '인스타 아이디 하나면 돼요',
             '전남친에게는 비밀로 할게요.',
             '/cherry/og-ex.jpg',

@@ -25,8 +25,8 @@ export const CRUSH_REPLACEMENTS: readonly (readonly [from: string, to: string])[
 
 /** Same single-pass rules for the 전남친 arm. */
 export const EX_REPLACEMENTS: readonly (readonly [from: string, to: string])[] = [
-    ['<span>내 남친은 나 몰래</span>', '<span>헤어진 전남친은 요즘</span>'],
-    ['내 남친은 나 몰래 누구랑', '헤어진 전남친은 요즘 누구랑'],
+    ['<span>내 남친은 나 몰래</span>', '<span>전남친은 나랑 헤어지고</span>'],
+    ['내 남친은 나 몰래 누구랑', '전남친은 나랑 헤어지고 누구랑'],
     ['<h3>남자친구 비밀번호는 필요 없어요</h3>', '<h3>인스타 아이디 하나면 돼요</h3>'],
     ['짝남, 짝녀, 썸남, 썸녀, 여자친구', '남자친구, 짝남, 썸남, 짝녀, 썸녀, 여자친구'],
     ['https://yeosachin.com/cherry/og.jpg', 'https://yeosachin.com/cherry/og-ex.jpg'],
