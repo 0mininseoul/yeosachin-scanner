@@ -66,7 +66,8 @@ it('shares one run and terminal receipt across workers, retries and paginated re
     await expect(second.dataset(a.id).listItems()).rejects.toThrow('DATASET_PENDING');
     await vi.advanceTimersByTimeAsync(25_105);
     const terminal = await first.run(a.id).waitForFinish({ waitSecs: 30 });
-    expect(terminal).toMatchObject({ status: 'SUCCEEDED', defaultDatasetId: a.id, usageTotalUsd: 0.001 });
+    expect(terminal).toMatchObject({ status: 'SUCCEEDED', defaultDatasetId: a.id, usageTotalUsd: 0 });
+    expect(await store.getFinish(a.id)).toMatchObject({ usageUsd: 0.001 });
     await vi.advanceTimersByTimeAsync(15_000);
     expect(await worker().run(a.id).get()).toEqual(terminal);
     expect(objects.size).toBe(4);
@@ -99,7 +100,8 @@ it('reconstructs only catalogued profiles and posts while preserving fixture cha
     for (const [name, input] of requests) {
         const receipt = await client.actor(name).start(input, { maxTotalChargeUsd: 0.0005 });
         const original = await local.actor(name).start(input);
-        expect(await client.run(receipt.id).get()).toMatchObject({ usageTotalUsd: 0.0005 });
+        expect(await client.run(receipt.id).get()).toMatchObject({ usageTotalUsd: 0 });
+        expect(await store.getFinish(receipt.id)).toMatchObject({ usageUsd: 0.0005 });
         expect(await client.dataset(receipt.id).listItems()).toEqual(await local.dataset(original.id).listItems({}));
     }
     const created = (await store.invocationCounts()).runsCreated;
@@ -141,7 +143,7 @@ it('preserves the first terminal outcome, cost, and finish time even across abor
     const other = worker();
     const { id } = await first.actor(actor).start(relation, { maxTotalChargeUsd: 0.0002 });
     const aborted = await other.run(id).abort();
-    expect(aborted).toMatchObject({ status: 'ABORTED', usageTotalUsd: 0.0002 });
+    expect(aborted).toMatchObject({ status: 'ABORTED', usageTotalUsd: 0 });
     await vi.advanceTimersByTimeAsync(26_000);
     expect(await first.run(id).waitForFinish()).toEqual(aborted);
     expect(await first.run(id).get()).toEqual(aborted);

@@ -80,7 +80,8 @@ export function createCloudSyntheticApify(input: {
     const { store } = input;
     function terminal(receipt: SyntheticCloudFinish) {
         return { id: receipt.id, status: receipt.status, finishedAt: new Date(receipt.finishedAtMs),
-            usageTotalUsd: receipt.usageUsd, ...(receipt.status === 'SUCCEEDED' ? { defaultDatasetId: receipt.id } : {}) };
+            // The native Dev ledger records actual provider spend. The GCS receipt keeps the modeled price.
+            usageTotalUsd: 0, ...(receipt.status === 'SUCCEEDED' ? { defaultDatasetId: receipt.id } : {}) };
     }
     async function settle(start: SyntheticCloudStart, status: SyntheticCloudFinish['status']) {
         return terminal(await store.finishOnce({
