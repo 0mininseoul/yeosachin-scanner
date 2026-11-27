@@ -301,7 +301,7 @@ const PROPERTY_VALIDATORS: Record<PropertyName, PropertyValidator> = {
         'refunded',
     ]),
     term: enumValidator(['detector']),
-    variant: enumValidator(['bf', 'crush']),
+    variant: enumValidator(['bf', 'crush', 'ex']),
 };
 
 const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {

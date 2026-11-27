@@ -170,3 +170,6 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .c2 footer { bottom: calc(var(--bottom) + 90px); }
 .ad--story.c2 .lock { top: calc(var(--top) + 320px); }
 .ad--story.c2 footer { bottom: calc(var(--bottom) + 200px); }
+
+/* Arm C: '전남친이' is one syllable longer, so the C2 lead steps down to keep the side margin. */
+.v-ex.c2 .lead, .ad--story.v-ex.c2 .lead { font-size: 78px; }

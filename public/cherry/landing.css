@@ -212,8 +212,8 @@ section[id] { scroll-margin-top: 24px; }
 
 .hero h1 > * { display: block; }
 /* 짝남 variant: "내 짝남은 내가 모르는 사이" is longer than the boyfriend line, so the headline runs a little smaller to stay on two lines. */
-@media (min-width: 768px) { html[data-variant='crush'] .hero h1 { font-size: clamp(29px, 4.03vw, 62px); } }
-@media (max-width: 767px) { html[data-variant='crush'] .hero h1 { font-size: clamp(25px, 7.85vw, 59px); } }
+@media (min-width: 768px) { html:is([data-variant='crush'], [data-variant='ex']) .hero h1 { font-size: clamp(29px, 4.03vw, 62px); } }
+@media (max-width: 767px) { html:is([data-variant='crush'], [data-variant='ex']) .hero h1 { font-size: clamp(25px, 7.85vw, 59px); } }
 .hero h1 em { color: var(--cherry); font-style: normal; }
 .hero-lede > span { display: block; }
 .hero-lede {

@@ -9,20 +9,20 @@
   <body>
     <main class="ad" id="ad"></main>
     <script>
-      // ?c=1..4 & v=bf|crush & s=feed|story
+      // ?c=1..4 & v=bf|crush|ex & s=feed|story
       const params = new URLSearchParams(location.search);
       const concept = Number(params.get('c') ?? 1);
-      const variant = params.get('v') === 'crush' ? 'crush' : 'bf';
+      const variant = Object.hasOwn(window.COPY, params.get('v')) ? params.get('v') : 'bf';
       const size = params.get('s') === 'story' ? 'story' : 'feed';
       const copy = window.COPY[variant];
       const shared = window.SHARED;
       const asset = (path) => `../../../${path}`;
       const ad = document.getElementById('ad');
-      ad.className = `ad ad--${size} c${concept}`;
+      ad.className = `ad ad--${size} c${concept} v-${variant}`;
       document.documentElement.dataset.variant = variant;
 
       const cherry = `<img class="cherry" src="${asset('design/namchin-demand/og/cherry.png')}" alt="">`;
-      const offer = `<p class="offer"><b>${shared.offer}</b></p>`;
+      const offer = `<p class="offer"><b>${copy.offer ?? shared.offer}</b></p>`;
       const brandRow = `<p class="brand"><img src="${asset('public/cherry/logo.png')}" alt=""><span>${copy.brand}</span></p>`;
 
       const scenes = {

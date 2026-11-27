@@ -29,6 +29,22 @@ A: https://yeosachin.com/cherry?v=bf&utm_source=meta&utm_medium=paid_social&utm_
 B: https://yeosachin.com/cherry?v=crush&utm_source=meta&utm_medium=paid_social&utm_campaign=cherry_ab_1124&utm_content=c1_crush
 ```
 
+## C 전남친 세트 (2026-11-27 추가)
+
+A/B 실험 밖에서 같은 캠페인에 세트를 따로 둔다. 같은 타겟·노출 위치·전환 이벤트(Lead), 하루 ₩10,000, 12/1 이후에도 이어서 돌린다. 그래서 소재와 광고 텍스트에 사전예약·선착순·마감 문구를 넣지 않는다. 칩은 `전남친은 절대 몰라요`다. 시안은 `render.mjs v=ex c=1`, `c=2`로 만든다.
+
+랜딩은 서브도메인 전용 경로 `/ex`다. `v=ex`가 붙어야 광고 유입(C)으로 기록되고, 없으면 오가닉 전남친 페이지로 본다.
+
+```
+C: https://cherry.yeosachin.com/ex?v=ex&utm_source=meta&utm_medium=paid_social&utm_campaign=cherry_ab_1124&utm_content=c1_ex
+```
+
+| 필드 | C (전남친) |
+|---|---|
+| 기본 문구 | 전남친 인스타 팔로잉, 이제 몰래 뒤지지 마세요. 전남친이 새로 맞팔하면 누군지 카톡으로 바로 알려드려요. 전남친에게는 절대 알림이 가지 않아요. 🍒 |
+| 제목 | 전남친 맞팔 알리미 체리 |
+| 버튼 | 자세히 보기 |
+
 ## 광고 텍스트
 
 | 필드 | A (남친) | B (짝남) |
