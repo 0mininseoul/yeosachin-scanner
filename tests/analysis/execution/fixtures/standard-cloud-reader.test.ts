@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { readerAdmin, createOwnerCookies, publicKey } from '../../../../services/dev-standard-qa-reader/session.mjs';
+import { resolveDevPublicKey } from '../../../../services/dev-standard-qa-reader/public-key.mjs';
 import { monitorReaders } from '../../../../services/dev-standard-qa-reader/monitor.mjs';
 
 const wave = 'a'.repeat(64);
@@ -78,4 +79,41 @@ it('starts each published owner without waiting for the rest and measures from i
     expect(events.find(e => e.event === 'owner_positive' && e.slot === 2)).toMatchObject({ withinHour: false, allImagesMs: 3_600_001 });
     expect(events.find(e => e.event === 'analysis_failure')).toMatchObject({ slot: 6 });
     expect(JSON.stringify(events)).not.toContain(requestId);
+});
+
+it('reads the deployed public key from pinned Dev assets and validates it at Dev GoTrue', async () => {
+    const pages = 'https://dev.yeosachin.com';
+    const envKey = 'sb_publishable_fixturepublicotherproject';
+    const calls: string[] = [];
+    const mock = vi.fn(async (url: string, init: RequestInit) => {
+        calls.push(url);
+        expect(init.redirect).toBe('error');
+        expect(init.credentials).toBe('omit');
+        const apikey = new Headers(init.headers).get('apikey');
+        if (url === origin + '/auth/v1/settings') {
+            return apikey === anon ? Response.json({ external: {} }) : new Response('', { status: 401 });
+        }
+        expect(apikey).toBeNull();
+        if (url.endsWith('/login')) return new Response([
+            '<script src="https://untrusted.invalid/x.js"></script>',
+            '<script src="//untrusted.invalid/_next/static/b.js"></script>',
+            '<script src="/_next/static/../../other.js"></script>',
+            '<script src="/_next/static/chunks/a.js"></script>', envKey,
+        ].join(''));
+        expect(url).toBe(pages + '/_next/static/chunks/a.js');
+        return new Response(anon);
+    });
+    vi.stubGlobal('fetch', mock);
+    await expect(resolveDevPublicKey(undefined)).resolves.toBe(anon);
+    expect(calls).toEqual([pages + '/login', origin + '/auth/v1/settings', pages + '/_next/static/chunks/a.js', origin + '/auth/v1/settings']);
+});
+
+it('rejects authenticated, privileged and wrong-project JWTs before sending them anywhere', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    for (const payload of [{ role: 'authenticated', sub: 'fixture' }, { role: 'service_role' }, { role: 'anon', ref: 'wrong' }]) {
+        const value = 'eyJhbGciOiJIUzI1NiJ9.' + Buffer.from(JSON.stringify(payload)).toString('base64url') + '.' + 'x'.repeat(43);
+        await expect(resolveDevPublicKey(value)).rejects.toThrow('INVALID_DEV_PUBLIC_KEY');
+    }
+    expect(fetch).not.toHaveBeenCalled();
 });

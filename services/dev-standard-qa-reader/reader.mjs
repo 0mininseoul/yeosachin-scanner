@@ -2,7 +2,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { readCloudOwnerImages } from '../../tests/analysis/execution/fixtures/standard-cloud-owner-http.ts';
 import { verifyCloudOwnerPage } from '../../tests/analysis/execution/fixtures/standard-cloud-owner-browser.mjs';
-import { assertReaderRegion, contextGet, createOwnerCookies, readerAdmin, readerContext, requireReader } from './session.mjs';
+import { ReaderError, assertReaderRegion, contextGet, createOwnerCookies, readerAdmin, readerContext, requireReader } from './session.mjs';
+import { resolveDevPublicKey } from './public-key.mjs';
 import { monitorReaders, safeCode } from './monitor.mjs';
 
 function emit(event) { console.log(JSON.stringify(event)); }
@@ -11,6 +12,10 @@ async function main() {
     const admin = readerAdmin(env);
     requireReader(env.CLOUD_RUN_TASK_ATTEMPT === '0', 'RETRY_DISABLED');
     await assertReaderRegion();
+    const anon = await resolveDevPublicKey(env.NEXT_PUBLIC_SUPABASE_ANON_KEY).catch(() => {
+        throw new ReaderError('DEV_PUBLIC_KEY_UNAVAILABLE');
+    });
+    requireReader(anon !== env.SUPABASE_SERVICE_ROLE_KEY, 'INVALID_READER_CONFIG');
     const wave = env.DEV_STANDARD_QA_WAVE;
     const rows = async () => {
         const poll = () => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
@@ -36,7 +41,7 @@ async function main() {
     try {
         const anonymous = contextGet(await readerContext(browser));
         const slots = await monitorReaders(rows, async (slot, requestId) => {
-            const cookies = await createOwnerCookies(admin, wave, slot, requestId, env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
+            const cookies = await createOwnerCookies(admin, wave, slot, requestId, anon);
             const context = await readerContext(browser, cookies);
             const page = await context.newPage();
             const get = contextGet(context);

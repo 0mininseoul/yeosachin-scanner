@@ -2,18 +2,11 @@ import { createServerClient } from '@supabase/ssr';
 import { createClient } from '@supabase/supabase-js';
 import { buyerIdentity } from '../../scripts/dev-standard-cloud-six/identity.mjs';
 
-export const web = 'https://dev.yeosachin.com';
-const supabase = 'https://bgamojfpkxnnumfvkron.supabase.co';
+import { web, supabase } from './public-key.mjs';
+export { publicKey } from './public-key.mjs';
 const cookieNames = /^sb-bgamojfpkxnnumfvkron-auth-token(?:\.\d+)?$/;
 export class ReaderError extends Error {}
 export function requireReader(ok, code) { if (!ok) throw new ReaderError(code); }
-export function publicKey(key) {
-    if (typeof key !== 'string') return false;
-    if (/^sb_publishable_[A-Za-z0-9_-]+$/.test(key)) return true;
-    try { return JSON.parse(Buffer.from(key.split('.')[1], 'base64url')).role === 'anon'; }
-    catch { return false; }
-}
-
 const authFetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input);
     requireReader(url.origin === supabase && (
@@ -27,7 +20,7 @@ export function readerAdmin(env) {
     requireReader(env.CLOUD_RUN_JOB === 'dev-standard-six-reader' && env.CLOUD_RUN_TASK_INDEX === '0'
         && env.CLOUD_RUN_TASK_COUNT === '1' && env.GOOGLE_CLOUD_PROJECT === 'gen-lang-client-0311522474'
         && env.NEXT_PUBLIC_SUPABASE_URL === supabase && /^[0-9a-f]{64}$/.test(env.DEV_STANDARD_QA_WAVE ?? '')
-        && publicKey(env.NEXT_PUBLIC_SUPABASE_ANON_KEY) && !!env.SUPABASE_SERVICE_ROLE_KEY
+        && !!env.SUPABASE_SERVICE_ROLE_KEY
         && env.SUPABASE_SERVICE_ROLE_KEY !== env.NEXT_PUBLIC_SUPABASE_ANON_KEY, 'INVALID_READER_CONFIG');
     return createClient(supabase, env.SUPABASE_SERVICE_ROLE_KEY, {
         auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global,
