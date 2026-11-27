@@ -395,13 +395,12 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
         const reader = 'public.load_analysis_v2_relationship_staging';
         const read = (requestId: string) => createAnalysisV2EvidenceStore(db.client()).loadRelationshipStaging({ requestId, jobKey });
         try {
-            // Keep the comparison independent of which migrations the shared fixture already installed.
+            // Only the reference is restored from the baseline. Exercise the RPC installed by the normal fixture.
             const baseline = readFileSync('supabase/dev-ui/production-baseline.sql', 'utf8');
             const start = baseline.indexOf('CREATE FUNCTION ' + reader + '(');
             const end = baseline.indexOf('\n$_$;', start);
             expect(start).toBeGreaterThan(-1);
             expect(end).toBeGreaterThan(start);
-            await db.exec(readFileSync('supabase/migrations/20261127103000_reduce_relationship_staging_json_aggregation.sql', 'utf8'));
             const ids: string[] = [];
             for (let i = 0; i < 6; i++) {
                 const job = await seedProcessingJob(db);
@@ -441,6 +440,12 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
                 // The previous RPC exists only in this connection, with all original arrays and sort keys.
                 const original = baseline.slice(start, end + '\n$_$;'.length).replace(reader, 'pg_temp.original_relationship_read');
                 await tx.exec(original);
+                const versions = await tx.query(`SELECT
+                    (SELECT md5(prosrc) FROM pg_proc WHERE oid='pg_temp.original_relationship_read(uuid,text)'::regprocedure) AS previous,
+                    (SELECT md5(prosrc) FROM pg_proc WHERE oid=$1::regprocedure) AS installed`, [reader + '(uuid,text)']);
+                expect(versions.rows).toEqual([{
+                    previous: '49950faf19bf83282cc5a422702d6964', installed: '2ae784476f9ee92c95895c63a98eccf5',
+                }]);
                 const result = await tx.query(`SELECT bool_and(${reader}(id,$2)=pg_temp.original_relationship_read(id,$2)) AS same
                     FROM unnest($1::uuid[]) AS fixture(id)`, [ids, jobKey]);
                 expect(result.rows).toEqual([{ same: true }]);
