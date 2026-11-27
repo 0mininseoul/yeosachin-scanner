@@ -429,6 +429,25 @@ describe('provider admission checkpoint', () => {
         });
     });
 
+    it('adopts only the same expired paid slot when resuming a recorded running Actor', async () => {
+        const admission = store();
+        vi.mocked(admission.acquire).mockRejectedValueOnce(new AnalysisProviderAdmissionCapacityPendingError());
+        vi.mocked(admission.recoverExpired).mockResolvedValueOnce(true);
+        const wrapped = await withAnalysisProviderAdmissionCheckpoint({
+            checkpoint: checkpoint({ resumeRunId: 'RunAbcd1234567890', credentialSlot: 'secondary' }),
+            storedStatus: 'running', workloadRole: 'paid',
+            requestId, jobKey: 'collect', operationKey, claimToken, env: enabledEnv, store: admission,
+        });
+        const args = vi.mocked(admission.acquire).mock.calls[0][0];
+        expect(admission.recoverExpired).toHaveBeenCalledExactlyOnceWith({
+            admissionId: analysisProviderAdmissionId(args), recoveryToken: expect.any(String),
+        });
+        expect(vi.mocked(admission.acquire).mock.calls).toEqual([[args], [args]]);
+        expect(admission.resolve).not.toHaveBeenCalled();
+        expect(admission.release).not.toHaveBeenCalled();
+        await wrapped.onInvocationFinished?.();
+    });
+
     it('re-acquires an active resumed run idempotently and keeps ambiguity fenced', async () => {
         const admission = store();
         const base = checkpoint({ resumeRunId: 'RunAbcd1234567890' });

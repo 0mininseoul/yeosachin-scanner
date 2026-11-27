@@ -1,3 +1,4 @@
+import { cloudUser } from '../../ui/dev-ui/fixtures/cloud-six-owner';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
@@ -374,6 +375,30 @@ describe('Dev UI proxy boundary', () => {
     afterEach(() => {
         vi.unstubAllEnvs();
         vi.unstubAllGlobals();
+    });
+
+    it('restricts the registered cloud owner to GETs of their live result and progress', async () => {
+        const user = cloudUser(otherUserId);
+        const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+        const auth = { getUser: vi.fn().mockResolvedValue({ data: { user }, error: null }) };
+        mocks.createServerClient.mockReturnValue({ auth, rpc });
+        const read = (path: string, method = 'GET') => proxy(new NextRequest('https://dev.yeosachin.com' + path, { method }));
+        for (const page of ['result', 'progress']) {
+            expect((await read(`/${page}/${adminRequestId}?devAnalysis=live`)).headers.get('x-middleware-next')).toBe('1');
+        }
+        expect(rpc).toHaveBeenCalledTimes(2);
+        for (const path of ['/analyze','/admin0min','/api/user/me','/api/dev-ui/orders',
+            '/result/' + adminRequestId, '/result/' + adminRequestId + '?devAnalysis=live&devAnalysis=live',
+            '/api/image-proxy?token=generic&expires=1234567890']) {
+            expect((await read(path)).headers.get('x-middleware-next')).toBeNull();
+        }
+        expect((await read('/result/' + adminRequestId + '?devAnalysis=live', 'POST')).status).toBe(403);
+        auth.getUser.mockResolvedValue({ data: { user: { ...user, app_metadata: { provider: 'email' }, user_metadata: user.app_metadata } }, error: null });
+        expect((await read('/result/' + adminRequestId + '?devAnalysis=live')).headers.get('x-middleware-next')).toBeNull();
+        expect(rpc).toHaveBeenCalledTimes(2);
+        auth.getUser.mockResolvedValue({ data: { user }, error: null });
+        rpc.mockResolvedValue({ data: false, error: null });
+        expect((await read('/progress/' + adminRequestId + '?devAnalysis=live')).headers.get('x-middleware-next')).toBeNull();
     });
 
     it('recovers a logged-out Dev administrator intent at the login gate', async () => {

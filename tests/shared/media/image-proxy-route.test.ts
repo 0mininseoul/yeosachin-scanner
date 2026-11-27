@@ -1,3 +1,4 @@
+import { cloudUser, configureCloudWeb, wave } from '../../ui/dev-ui/fixtures/cloud-six-owner';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
@@ -218,6 +219,50 @@ describe('image proxy route authorization', () => {
         expect(mocks.downloadSecureImage).toHaveBeenCalledOnce();
         expect(mocks.downloadSecureImage.mock.calls[0]?.[0])
             .toBe('https://cdninstagram.com/result-photo.jpg?oe=abc');
+    });
+
+    it('serves registered Dev synthetic owners only retained R2 WebP with private no-store', async () => {
+        configureCloudWeb();
+        try {
+            const project = 'synthetic-qa';
+            const number = '1234567';
+            vi.stubEnv('DEV_LIVE_GCP_PROJECT', project);
+            vi.stubEnv('DEV_LIVE_GCP_PROJECT_NUMBER', number);
+            vi.stubEnv('GOOGLE_CLOUD_PROJECT', project);
+            for (const role of ['preflight', 'paid']) {
+                vi.stubEnv('DEV_LIVE_' + role.toUpperCase() + '_ORIGIN', `https://dev-live-${role}-${number}.asia-northeast3.run.app`);
+            }
+            vi.stubEnv('ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET', project + '-dev-live-results');
+            const id = '123e4567-e89b-42d3-a456-426614174000';
+            const owner = '123e4567-e89b-42d3-a456-426614174001';
+            const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+            mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc });
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(owner) }, error: null });
+            const url = 'https://dev.yeosachin.com' + signedResultRequest().nextUrl.pathname + signedResultRequest().nextUrl.search;
+            const read = () => GET(new NextRequest(url));
+            mocks.resolveResultImage.mockResolvedValueOnce({
+                source: 'r2', objectKey: 'synthetic', sha256: 'c'.repeat(64), byteSize: 3,
+                expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+            });
+            const success = await read();
+            expect(success.status).toBe(200);
+            expect(success.headers.get('content-type')).toBe('image/webp');
+            expect(success.headers.get('cache-control')).toBe('private, no-store');
+            expect(rpc).toHaveBeenCalledWith('dev_cloud_six_result_owner_v1', { p_wave: wave, p_request_id: id });
+            expect(mocks.resolveResultImage).toHaveBeenCalledWith(expect.objectContaining({ requestId: id, kind: 'female' }), owner);
+            expect((await read()).status).toBe(404); // Missing retained R2 object; legacy URLs cannot be followed.
+            mocks.isResultAuthoritativelyPublished.mockResolvedValue(false);
+            expect((await read()).status).toBe(403);
+            rpc.mockResolvedValue({ data: false, error: null });
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(id, 2) }, error: null });
+            expect((await read()).status).toBe(403);
+            mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+            expect((await read()).status).toBe(401);
+            expect(mocks.readResultImageObject).toHaveBeenCalledTimes(1);
+            expect(mocks.downloadSecureImage).not.toHaveBeenCalled();
+        } finally {
+            vi.unstubAllEnvs();
+        }
     });
 
     it('serves an integrity-verified owner R2 object without any remote fallback', async () => {

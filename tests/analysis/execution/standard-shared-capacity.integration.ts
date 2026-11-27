@@ -23,7 +23,7 @@ import { StandardSharedQueue } from './fixtures/standard-shared-queue';
 import { createFixtureObjects, createFixtureR2 } from './fixtures/standard-media';
 import { createSharedImageSource } from './fixtures/standard-shared-image-source';
 import { private90ModelStage } from './fixtures/private90-observations.mjs';
-import { syntheticGeneration } from './fixtures/standard-vertex';
+import { standardObservedModelMs, standardRecoveryDelayScale, syntheticGeneration } from './fixtures/standard-vertex';
 import { SyntheticApify, target, type SyntheticActorStart } from './fixtures/standard-providers';
 import {
     seedSharedStandardOwners, startSharedStandardPreflight, prepareSharedStandardOrder, admitSharedStandard,
@@ -385,15 +385,9 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const scope = requestScope.getStore();
             if (!scope) throw new Error('MISSING_MODEL_REQUEST_SCOPE');
             models.set(scope, (models.get(scope) ?? 0) + 1);
-            // Per-stage means from the 351 timed SDK attempts of the November 25 paid run.
-            // Historic SDK time includes some admission wait, so this is a stress input.
-            const observedMs: Record<string, number> = {
-                features: 30889, resolver: 35915, gender_triage: 12226,
-                partner: 5797, narrative: 21595, private_names: 12316
-            };
             const stage = private90ModelStage(input);
             budgetProbe?.observeModelCall(stage);
-            const delay = observedTiming ? observedMs[stage] : 100;
+            const delay = observedTiming ? standardObservedModelMs[stage] : 100;
             if (!delay) throw new Error('SHARED_UNCALIBRATED_MODEL_STAGE');
             activeModels++;
             peakModels = Math.max(peakModels, activeModels);
@@ -413,7 +407,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                     expect((await duplicate.json()).code).toBe('JOB_LEASE_BUSY');
                 }
                 try {
-                    await sleep(delay * (recovery ? 1.25 : 1), undefined, { signal: input.config?.abortSignal });
+                    await sleep(delay * (recovery ? standardRecoveryDelayScale : 1), undefined, { signal: input.config?.abortSignal });
                 } catch (error) {
                     resolverObservation.waitRejected(error);
                     throw error;
@@ -499,6 +493,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const stageCounts: Record<string, number> = {};
             const sample = new Map<string, Record<string, unknown>>();
             let continuations = 0;
+            let capacityHandoffs = 0;
             let queueRetries = 0;
             const retryCodes: Record<string, number> = {};
             const asUser = <T>(id: string | null, fn: () => Promise<T>) =>
@@ -528,6 +523,10 @@ it('publishes simultaneous paid Standard requests through one database and queue
                         retryCodes[result.code] = (retryCodes[result.code] ?? 0) + 1;
                         queueRetries++;
                         queue.retry(payload);
+                        return;
+                    }
+                    if (response.ok && result.status === 'capacity_handoff') {
+                        capacityHandoffs++;
                         return;
                     }
                     if (result.status === 'continuation') { continuations++; return; }
@@ -716,7 +715,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
-                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, queueRetries, peakWorkers: queue.peakWorkers,
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, capacityHandoffs, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),

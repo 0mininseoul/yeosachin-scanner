@@ -46,6 +46,7 @@ import {
 import { RevenueCostOperationStore } from '@/lib/services/analysis/revenue-cost-operation-store';
 import type { InstagramProfile } from '@/lib/types/instagram';
 import {
+    ProviderRunStartConfirmationPending,
     APIFY_CREDENTIAL_SLOTS,
     APIFY_FREE_CREDENTIAL_SLOTS,
 } from '../../../../../lib/services/instagram/providers/types';
@@ -1293,6 +1294,23 @@ describe('apifyProvider', () => {
             'reserve_analysis_v2_provider_run',
             'release_analysis_revenue_cost_operation_v2',
         ]);
+    });
+
+    it.each([true, false])('does not abort, poll or start another Actor after an uncertain job confirmation', async confirmed => {
+        const { client, call, abort, waitForFinish } = mockClient([]);
+        const onRunStartAmbiguous = vi.fn();
+        const onCostRunStarted = vi.fn();
+        await expect(startOrResumeApifyActor(client, APIFY_RELATIONSHIP_ACTOR_ID, {}, {
+            logicalProvider: 'apify', credentialSlot: 'primary', timeoutSecs: 120, maxItems: 1, maxTotalChargeUsd: 0.1,
+        }, {
+            onRunStarted: async () => { throw new ProviderRunStartConfirmationPending(confirmed); },
+            onRunStartAmbiguous, onCostRunStarted, recordUsage: vi.fn(),
+        })).rejects.toThrow('ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR');
+        expect(call).toHaveBeenCalledOnce();
+        expect(abort).not.toHaveBeenCalled();
+        expect(waitForFinish).not.toHaveBeenCalled();
+        expect(onCostRunStarted).not.toHaveBeenCalled();
+        expect(onRunStartAmbiguous).toHaveBeenCalledTimes(confirmed ? 0 : 1);
     });
 
     it('aborts a newly started run when its durable checkpoint cannot be stored', async () => {

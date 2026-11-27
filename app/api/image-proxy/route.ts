@@ -245,7 +245,7 @@ function errorResponse(error: string, status: number) {
  * 직접 접근 실패 시 weserv.nl 프록시를 통해 재시도
  * 모든 시도 실패 시 재시도 가능한 비캐시 오류 반환
  */
-async function handleGET(request: NextRequest, devOwnerId?: string) {
+async function handleGET(request: NextRequest, devOwnerId?: string, cloudOwner = false) {
     const searchParams = request.nextUrl.searchParams;
     const genericParameters = ['token', 'expires'] as const;
     const resultParameters = ['result', 'expires'] as const;
@@ -326,7 +326,7 @@ async function handleGET(request: NextRequest, devOwnerId?: string) {
         }
         if (devOwnerId) {
             const { isDevLiveRequestOwnedBy } = await import('@/lib/services/dev-ui/live-analysis');
-            if (user.id !== devOwnerId || !await isDevLiveRequestOwnedBy(user.id, locator.requestId)) {
+            if (user.id !== devOwnerId || (!cloudOwner && !await isDevLiveRequestOwnedBy(user.id, locator.requestId))) {
                 return errorResponse('Image proxy token rejected', 403);
             }
         }
@@ -334,6 +334,7 @@ async function handleGET(request: NextRequest, devOwnerId?: string) {
             locator,
             user.id
         );
+        if (cloudOwner && resolvedResult?.source !== 'r2') return errorResponse('Retained image unavailable', 404);
         authorizedUrl = resolvedResult?.source === 'legacy_url'
             ? resolvedResult.url
             : resolvedResult?.source === 'r2'
@@ -359,7 +360,10 @@ async function handleGET(request: NextRequest, devOwnerId?: string) {
                 expires,
                 resolvedResult.expiresAt
             );
-            if (response) return response;
+            if (response) {
+                if (cloudOwner) response.headers.set('Cache-Control', 'private, no-store');
+                return response;
+            }
             logImageProxyOutcome({
                 scope: 'result',
                 outcome: 'unavailable',
@@ -489,8 +493,8 @@ export async function GET(request: NextRequest) {
     if (devUiRequestBoundary(request) === 'production') return handleGET(request);
     const { withDevUiSession } = await import('@/lib/services/dev-ui/routes');
     const { assertDevLiveImageRuntime } = await import('@/lib/services/dev-ui/live-runtime');
-    return withDevUiSession(request, async user => {
+    return withDevUiSession(request, async (user, cloudOwner) => {
         assertDevLiveImageRuntime();
-        return handleGET(request, user.id);
-    });
+        return handleGET(request, user.id, cloudOwner);
+    }, { allowCloudOwnerRead: true });
 }

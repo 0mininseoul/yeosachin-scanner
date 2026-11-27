@@ -133,6 +133,7 @@ export type AnalysisV2AiAdmissionErrorCode =
 export interface AnalysisV2JobStore {
     reserveDispatch(input: AnalysisV2JobIdentity): Promise<AnalysisV2JobDispatchReservation>;
     rearmDispatch(input: AnalysisV2JobIdentity & {
+        successorToken?: string;
         expectedGeneration: number;
         expectedReservationToken: string;
     }): Promise<AnalysisV2JobDispatchReservation>;
@@ -508,7 +509,8 @@ export function createSupabaseAnalysisV2JobStore(
                 input.expectedReservationToken,
                 'expected reservation token'
             );
-            const proposedToken = randomUUID();
+            const proposedToken = input.successorToken === undefined ? randomUUID()
+                : requiredUuid(input.successorToken, 'successor reservation token');
             const { data, error } = await client.rpc(
                 ANALYSIS_V2_DATABASE_NAMES.rearmDispatchRpc,
                 {
@@ -962,6 +964,27 @@ export function createSupabaseAnalysisV2JobStore(
             return rpcRows(data, 'dispatchable list').map(dispatchableFromRow);
         },
     };
+}
+
+// Read a single successor on old-delivery replay. No open-ended job scan or new reservation.
+export async function findAnalysisV2CapacitySuccessor(delivery: AnalysisV2TaskDelivery) {
+    const { data, error } = await supabaseAdmin.from(ANALYSIS_V2_DATABASE_NAMES.table)
+        .select('status,dispatch_state,dispatch_task_name')
+        .eq('request_id', delivery.requestId).eq('job_key', delivery.jobKey)
+        .eq('dispatch_generation', delivery.generation)
+        .eq('dispatch_reservation_token', delivery.reservationToken)
+        .eq('dispatch_workload_role', 'paid').eq('dispatch_contract_version', 2)
+        .maybeSingle();
+    if (error) throwRpcError(error, 'capacity successor read');
+    if (!data) return null;
+    return reservationFromRow({
+        reserved: data.dispatch_state === 'reserved',
+        dispatch_generation: delivery.generation,
+        reservation_token: delivery.reservationToken,
+        job_status: data.status,
+        dispatch_state: data.dispatch_state,
+        task_name: data.dispatch_task_name,
+    }, delivery);
 }
 
 export const analysisV2JobStore = createSupabaseAnalysisV2JobStore(

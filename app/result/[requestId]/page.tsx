@@ -173,6 +173,7 @@ export default function ResultPage({ params }: PageProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
+    const [syntheticOwner, setSyntheticOwner] = useState(false);
     const [kakaoShareLoading, setKakaoShareLoading] = useState(false);
     // In-flight token mint, and its result once resolved, so the tap handler can
     // read the destination without awaiting anything.
@@ -270,6 +271,7 @@ export default function ResultPage({ params }: PageProps) {
                 const displayResult = isV2Result
                     ? mapV2Result(result as AnalysisResultPageV1, response.headers.get('x-external-profile-links') !== 'disabled')
                     : { ...result, pipelineVersion: 'v1' as const };
+                setSyntheticOwner(response.headers.get('x-dev-synthetic-owner') === '1');
                 setData(displayResult);
                 setPageNavigation(initialResultPageNavigation(
                     displayResult.femaleNextCursor,
@@ -686,7 +688,7 @@ export default function ResultPage({ params }: PageProps) {
                     "share this result". */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
-                    {devPresentation && <span className="text-xs text-fg-dim">{devLive ? 'Dev · 실제 데이터' : 'Dev · 합성 데이터'}</span>}
+                    {devPresentation && <span className="text-xs text-fg-dim">{devLive && !syntheticOwner ? 'Dev · 실제 데이터' : 'Dev · 합성 데이터'}</span>}
                     {!devPresentation && <ResultActions
                         onKakaoShare={handleKakaoShare}
                         onPrepare={prepareShare}

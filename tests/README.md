@@ -54,6 +54,8 @@ node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budge
 node scripts/standard-shared-capacity.mjs 1 18i-40q recovery /tmp/standard-budget-spent.json 4 fast coverage99 production-paid spent
 ```
 
+- Dev 클라우드용 합성 Vertex SDK는 QA 번들에서만 `@google/genai/node` 대신 선택한다. 실제 송신 전 예약·권한 확인을 거쳐 고정 `data:` 응답을 읽는다. 정식 분석 6개 AI 단계는 11월 25일 유료 Dev 시험 351회에서 구한 단계별 SDK 평균에 기존 복구 시험 계수 1.25를 적용한다. B-lite는 분석 시작 전 사전 점검이며 실측 지연 자료가 없어 합성 대기를 추가하지 않는다. 고정 토큰 24+12개와 응답은 회귀 입력이다.
+- Dev 클라우드용 합성 Apify 어댑터는 전용 GCS 버킷의 `standard-six/v2/<wave>/apify/`에 SDK 시작 진입과 논리 실행을 따로 기록한다. `invocationCounts()`의 `duplicateAcceptedEntries`는 같은 논리 실행으로 SDK에 다시 진입한 횟수다. 한 SDK 진입의 GCS 응답 유실과 조건부 재전송은 같은 진입 영수증을 사용한다. 시험 종료 후 `rejectedEntries`, `acceptedWithoutRun`, `runsWithoutEntry`도 확인한다. v1 영수증에는 진입 횟수가 없고 v2 집계에서 제외된다. 종료 상태·시각·합성 금액은 완료 또는 중단 중 먼저 기록된 영수증을 따른다. 실제 공급자 호출·과금 검증에는 별도 송신 근거가 필요하다.
 - 1~10명은 서명된 합성 결제 웹훅을 처리한다. 11~16명은 한정판매 재고 10건을 보존하기 위해 각 소유자의 실제 체크아웃에 합성 결제 확인과 이행 작업을 기록한다. 두 방식 모두 사전 점검, 정식 접수, 같은 DB와 큐를 사용하는 워커, 발행, 소유자 페이지와 WebP 열람을 거친다.
 - 두 번째 인자는 로컬 용량 구성이다. 숫자 8·48·56·64·80의 전체 슬롯에 대응하는 유료 워커 수는 8·16·20·24·32, 특징 슬롯은 6·32·40·48·70, 추가 판독 슬롯은 2·6·6·6·6이다. `80-r12`는 32워커·전체 80·특징 70·추가 12, `112-r40`은 32·112·70·40, `128-r48`은 40·128·80·48이다. 후보 구성은 분당 모델 시작 240회와 자격 증명별 분당 15회 한도를 공유한다. 워커 32개와 40개의 유료 큐 전달률은 모두 초당 32건이다. 워커별 프로세스 동시성 제한을 각각 적용하고, 확장 SQL은 빈 로컬 DB에서만 실행한다.
 - `18i-40q`는 인스턴스 18개에 동시 HTTP 요청 40개를 분배한다. 인스턴스 안의 요청은 Gemini·Apify·스케줄러 한도를 공유한다. 유료 워커에 각 1 vCPU·2 GiB를 배정할 때 서울 20 vCPU·40 GiB 한도 안에 들어가는 구성이다. 로컬 실행은 Cloud Run CPU 할당, 자동 확장, 콜드 스타트 또는 실제 배치 지연을 측정하지 않는다.

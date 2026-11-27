@@ -31,15 +31,7 @@ const workerEnums = {
         'terminal_duplicate','duplicate_side_effects','duplicate_ledger','private_source_hash','owner_result','profile_ready_reads','publication','vertex_ledger','image'],
     modelStage: ['none','unknown','private_names','name_only','gender_triage','features','resolver','partner','narrative','preview'],
 };
-export function private90ModelStage(input) {
-    const schema = input?.config?.responseJsonSchema;
-    const fields = schema?.properties ?? {};
-    if ('femaleScore' in (schema?.items?.properties ?? {})) return 'private_names';
-    if (schema?.type?.toLowerCase() === 'array') return 'name_only';
-    for (const [key, stage] of Object.entries({accounts:'gender_triage',gender:'features',inferredGender:'resolver',
-        companionPattern:'partner',lines:'narrative',persona:'preview'})) if (key in fields) return stage;
-    return 'unknown';
-}
+export { standardModelStage as private90ModelStage } from './standard-model-stage.mjs';
 const phases = ['reader', 'source_ledger', 'fixed_model', 'admission', 'worker', 'result', 'owner_image', 'complete'];
 
 const causes = ['none', 'reader_verification', 'source_receipts', 'source_admission', 'sealed_model_inputs',

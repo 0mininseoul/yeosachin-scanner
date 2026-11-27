@@ -10,6 +10,7 @@ import type {
     ProviderCostTerminalStatus,
 } from './types';
 import {
+    ProviderRunStartConfirmationPending,
     APIFY_CREDENTIAL_TOKEN_ENV,
     APIFY_FREE_CREDENTIAL_SLOTS,
     isApifyCredentialSlot,
@@ -515,6 +516,15 @@ export async function startOrResumeApifyActor(
             await context?.onRunStarted?.(runId);
             durablyCheckpointed = typeof context?.onRunStarted === 'function';
         } catch (error) {
+            if (error instanceof ProviderRunStartConfirmationPending) {
+                if (error.receiptConfirmed && options.requireExplicitRestrictedAccess) {
+                    // The receipt identifies our run even when the job cannot proceed.
+                    // Enforce the private ACL before relinquishing it to the next worker.
+                    await restrictApifyRunResources(client, runId, context?.invocationDeadlineAtMs);
+                }
+                if (!error.receiptConfirmed) await reportAmbiguousStart();
+                throw error;
+            }
             try {
                 await client.run(runId).abort();
             } catch {

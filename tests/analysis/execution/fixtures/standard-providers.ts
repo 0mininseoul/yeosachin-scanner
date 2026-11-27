@@ -9,7 +9,7 @@ function publicOrdinal(username: string) {
     return match ? Number(match[1]) : 0;
 }
 
-function publicUsername(ordinal: number) {
+export function publicUsername(ordinal: number) {
     return ordinal === 0 ? candidate : 'fixture_public_' + ordinal;
 }
 
@@ -64,6 +64,64 @@ type ActorInput = {
 
 export type SyntheticActorStart = { runId: string; actor: string; inputHash: string; usageUsd: number };
 
+export function syntheticActorUsageUsd(maxTotalChargeUsd = 0.001) {
+    return Math.min(0.001, maxTotalChargeUsd);
+}
+
+export function syntheticActorRows(actor: string, input: ActorInput, candidatePostCount: number, privateCount: number, publicCount: number) {
+    if (actor === 'apify/instagram-profile-scraper' && input.usernames)
+        return input.usernames.map(username => profileItem(username, candidatePostCount, publicCount + privateCount));
+    if (input.Account)
+        return [
+            ...Array.from({ length: publicCount }, (_, index) => {
+                const username = publicUsername(index);
+                return {
+                    username_scrape: target, type: input.dataToScrape,
+                    id: String(index + 2), username, full_name: username,
+                    is_private: false, is_verified: false, profile_pic_url: picture(username),
+                };
+            }),
+            ...Array.from({ length: privateCount }, (_, index) => {
+                const username = 'fixture_private_' + index;
+                return {
+                    username_scrape: target, type: input.dataToScrape,
+                    id: String(index + 1000), username, full_name: username,
+                    is_private: true, is_verified: false, profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
+                };
+            }),
+        ];
+    if (input.posts)
+        return input.posts.map((url) => {
+            const username = url.includes(postCode(target)) ? candidate : target;
+            return {
+                username,
+                full_name: username,
+                id: '2',
+                is_private: false,
+                is_verified: false,
+                profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
+                liked_post: url,
+                total_likes: 1,
+                is_new: true,
+            };
+        });
+    if (input.directUrls)
+        return input.directUrls.flatMap((url, i) =>
+            [0, 1].map((j) => ({
+                postUrl: url,
+                commentUrl: url + 'c/' + (51 + 2 * i + j) + '/',
+                id: String(51 + 2 * i + j),
+                text: '여행지에서기억에남는사진들!',
+                ownerUsername: candidate,
+                ownerProfilePicUrl: picture(candidate),
+                timestamp: '2026-10-02T09:00:00.000Z',
+                likesCount: 1,
+                replies: [],
+            })),
+        );
+    throw new Error('Unexpected synthetic actor input for ' + actor);
+}
+
 export class SyntheticApify {
     readonly starts: string[] = [];
     private readonly datasets = new Map<string, unknown[]>();
@@ -76,66 +134,13 @@ export class SyntheticApify {
             throw new Error('Synthetic Standard fixture supports 1 to 600 public candidates');
     }
 
-    private rows(actor: string, input: ActorInput) {
-        if (actor === 'apify/instagram-profile-scraper' && input.usernames)
-            return input.usernames.map(username => profileItem(username, this.candidatePostCount, this.publicCount + this.privateCount));
-        if (input.Account)
-            return [
-                ...Array.from({ length: this.publicCount }, (_, index) => {
-                    const username = publicUsername(index);
-                    return {
-                        username_scrape: target, type: input.dataToScrape,
-                        id: String(index + 2), username, full_name: username,
-                        is_private: false, is_verified: false, profile_pic_url: picture(username),
-                    };
-                }),
-                ...Array.from({ length: this.privateCount }, (_, index) => {
-                    const username = 'fixture_private_' + index;
-                    return {
-                        username_scrape: target, type: input.dataToScrape,
-                        id: String(index + 1000), username, full_name: username,
-                        is_private: true, is_verified: false, profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
-                    };
-                }),
-            ];
-        if (input.posts)
-            return input.posts.map((url) => {
-                const username = url.includes(postCode(target)) ? candidate : target;
-                return {
-                    username,
-                    full_name: username,
-                    id: '2',
-                    is_private: false,
-                    is_verified: false,
-                    profile_pic_url: picture(username) + '?z=2&a=1&utm_source=offline',
-                    liked_post: url,
-                    total_likes: 1,
-                    is_new: true,
-                };
-            });
-        if (input.directUrls)
-            return input.directUrls.flatMap((url, i) =>
-                [0, 1].map((j) => ({
-                    postUrl: url,
-                    commentUrl: url + 'c/' + (51 + 2 * i + j) + '/',
-                    id: String(51 + 2 * i + j),
-                    text: '여행지에서기억에남는사진들!',
-                    ownerUsername: candidate,
-                    ownerProfilePicUrl: picture(candidate),
-                    timestamp: '2026-10-02T09:00:00.000Z',
-                    likesCount: 1,
-                    replies: [],
-                })),
-            );
-        throw new Error('Unexpected synthetic actor input for ' + actor);
-    }
     actor(actor: string) {
         return {
             start: async (input: ActorInput, options?: { maxTotalChargeUsd?: number }) => {
                 this.starts.push(actor);
                 const id = 'Fixture' + String(this.starts.length).padStart(10, '0');
-                this.datasets.set(id, this.rows(actor, input));
-                const usageTotalUsd = this.onStart ? Math.min(0.001, options?.maxTotalChargeUsd ?? 0.001) : 0.001;
+                this.datasets.set(id, syntheticActorRows(actor, input, this.candidatePostCount, this.privateCount, this.publicCount));
+                const usageTotalUsd = this.onStart ? syntheticActorUsageUsd(options?.maxTotalChargeUsd) : 0.001;
                 this.receipts.set(id, { usageTotalUsd });
                 if (this.durationMs) this.readyAt.set(id, Date.now() + this.durationMs());
                 if (this.onStart) {

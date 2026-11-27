@@ -179,6 +179,7 @@ const PAYMENT: Record<string, NodeSpec> = {
             '결제된 주문에 Apify 자격을 연결합니다. 검증된 동시 분석 한도가 설정된 경우 빈자리가 생기는 대로 결제 순서에 따라 시작합니다.',
             '분석이 시작되면 플랜 크레딧을 예약합니다.',
             '사전 확인이 끝나면 같은 결제 주문과 배정된 자리를 확인해 분석 요청을 만들고 첫 작업을 Cloud Tasks에 등록합니다.',
+            '정식 분석 도중 수집·AI 슬롯이 차면 다음 작업을 지연 예약합니다. 큐 전달과 DB 기록이 확인된 뒤 현재 전달을 마칩니다.',
         ],
         services: 'Cloud Tasks · Apify 크레딧 풀',
         numbers: [{ label: '작업 최대 시도', value: `${n(ANALYSIS_V2_JOB_MAX_ATTEMPTS)}회` }],
@@ -222,7 +223,7 @@ const WORKER_STAGES: Record<AnalysisV2StageId, NodeSpec> = {
         ],
         services: '자체 크롤러 · Apify',
         numbers: [{ label: '배치 크기', value: people(ANALYSIS_V2_PROFILE_BATCH_LIMIT) }],
-        failure: 'Apify 종료 기록 저장이 시간 초과되면 같은 기록을 한 번 다시 저장합니다. 재전달되면 기존 실행에서 이어갑니다.',
+        failure: '시작 기록 저장이 지연되면 이미 받은 Apify 실행 ID를 원래 예약에 기록하고 작업 권한을 다시 확인합니다. 종료 기록 저장이 시간 초과돼도 같은 실행에서 이어갑니다.',
         code: ['lib/services/analysis/v2-collection-executors.ts', 'lib/services/analysis/profile-cache.ts'],
     },
     profile_ai: {
