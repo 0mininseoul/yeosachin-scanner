@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { readerAdmin, createOwnerCookies, publicKey } from '../../../../services/dev-standard-qa-reader/session.mjs';
 import { resolveDevPublicKey } from '../../../../services/dev-standard-qa-reader/public-key.mjs';
-import { monitorReaders } from '../../../../services/dev-standard-qa-reader/monitor.mjs';
+import { monitorReaders, readRosterUntilAvailable } from '../../../../services/dev-standard-qa-reader/monitor.mjs';
 
 const wave = 'a'.repeat(64);
 const origin = 'https://bgamojfpkxnnumfvkron.supabase.co';
@@ -79,6 +79,46 @@ it('starts each published owner without waiting for the rest and measures from i
     expect(events.find(e => e.event === 'owner_positive' && e.slot === 2)).toMatchObject({ withinHour: false, allImagesMs: 3_600_001 });
     expect(events.find(e => e.event === 'analysis_failure')).toMatchObject({ slot: 6 });
     expect(JSON.stringify(events)).not.toContain(requestId);
+});
+
+it('keeps polling after consecutive transient roster failures within the original window', async () => {
+    const errors = [
+        { status: 500, error: { code: '57014' } },
+        { status: 0, error: { code: '' } },
+        { status: 503, error: { code: 'unavailable' } },
+        { status: 429, error: { code: '' } },
+    ];
+    const poll = vi.fn(async () => errors.shift() ?? { status: 200, error: null, data: [1, 2, 3, 4, 5, 6] });
+    const emit = vi.fn();
+    const sleep = vi.fn(async () => {});
+    await expect(readRosterUntilAvailable(poll, emit, Date.now() + 60_000, sleep)).resolves.toEqual([1, 2, 3, 4, 5, 6]);
+    expect(emit.mock.calls.map(call => call[0].code)).toEqual(['57014', 'UPSTREAM', 'UPSTREAM', '429']);
+    expect(sleep.mock.calls).toEqual([[2_000], [4_000], [8_000], [16_000]]);
+});
+
+it('stops on revoked access and bounds transient polling by the original deadline', async () => {
+    const sleep = vi.fn();
+    for (const status of [401, 403, 400]) {
+        await expect(readRosterUntilAvailable(async () => ({ status, error: { code: 'denied' } }), vi.fn(),
+            Date.now() + 30_000, sleep)).rejects.toThrow('ROSTER_READ');
+    }
+    expect(sleep).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    try {
+        const start = Date.now();
+        const poll = vi.fn(async () => ({ status: 504, error: { code: 'timeout' } }));
+        await expect(readRosterUntilAvailable(poll, vi.fn(), start + 500,
+            async (ms: number) => { vi.setSystemTime(Date.now() + ms); })).rejects.toThrow('WAVE_EXPIRED');
+        expect(poll).toHaveBeenCalledTimes(1);
+        expect(Date.now()).toBe(start + 500);
+        const late = vi.fn(async (signal: AbortSignal) => {
+            expect(signal).toBeInstanceOf(AbortSignal);
+            vi.setSystemTime(start + 45_500);
+            return { data: [1, 2, 3, 4, 5, 6], error: null, status: 200 };
+        });
+        await expect(readRosterUntilAvailable(late, vi.fn(), start + 501)).rejects.toThrow('WAVE_EXPIRED');
+        expect(late).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
 });
 
 it('reads the deployed public key from pinned Dev assets and validates it at Dev GoTrue', async () => {

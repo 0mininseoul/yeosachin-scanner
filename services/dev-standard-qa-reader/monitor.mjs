@@ -7,6 +7,37 @@ export function safeCode(error) {
     return 'READER_UNAVAILABLE';
 }
 
+// A failed roster read does not change an owner's original start time or a completed browser check.
+export async function readRosterUntilAvailable(poll, emit, cutoff, sleep = (ms) => delay(ms)) {
+    let retry = 0;
+    while (Date.now() < cutoff) {
+        const remaining = Math.max(1, cutoff - Date.now());
+        const signal = AbortSignal.timeout(Math.min(45_000, remaining));
+        let result;
+        try {
+            result = await poll(signal);
+        } catch (error) {
+            requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
+            throw error;
+        }
+        requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
+        if (!result.error) {
+            requireReader(Array.isArray(result.data), 'ROSTER_READ');
+            return result.data;
+        }
+        const { status } = result;
+        const timeout = result.error.code === '57014';
+        requireReader(status !== 401 && status !== 403
+            && (timeout || status === 0 || status === 429 || (status >= 500 && status < 600)), 'ROSTER_READ');
+        retry++;
+        const code = timeout ? '57014' : status === 429 ? '429' : 'UPSTREAM';
+        emit({ event: 'roster_read_retry', retry, code });
+        const backoffMs = Math.min(30_000, 2_000 * 2 ** Math.min(retry - 1, 4));
+        await sleep(Math.min(backoffMs, Math.max(0, cutoff - Date.now())));
+    }
+    throw new ReaderError('WAVE_EXPIRED');
+}
+
 /** Start each owner's reads as soon as its own authoritative publication is visible. */
 export async function monitorReaders(getRows, readOwner, emit, sleep = (ms) => delay(ms)) {
     const started = new Map();
@@ -16,7 +47,7 @@ export async function monitorReaders(getRows, readOwner, emit, sleep = (ms) => d
     try {
         while (slots.size < 6) {
             requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
-            const rows = await getRows();
+            const rows = await getRows(cutoff);
             requireReader(Array.isArray(rows) && rows.length === 6 && new Set(rows.map(row => row.slot)).size === 6, 'ROSTER');
             for (const row of rows) {
                 requireReader(Number.isInteger(row.slot) && row.slot >= 1 && row.slot <= 6, 'ROSTER_SLOT');
