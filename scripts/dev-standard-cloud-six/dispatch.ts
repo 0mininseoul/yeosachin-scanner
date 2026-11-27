@@ -8,7 +8,8 @@ import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-iden
 import { enqueuePreflightTask } from '@/lib/services/analysis/preflight-tasks';
 import { admitAndAdvanceEarlybirdFulfillment } from '@/lib/services/earlybird/fulfillment-store';
 import { target } from '../../tests/analysis/execution/fixtures/standard-providers';
-import { dbOrigin, origin, project, region, service, taskPath, type QaRole } from '../../services/dev-standard-qa-worker/scope';
+import { dbOrigin, origin, project, region, taskPath, type QaRole } from '../../services/dev-standard-qa-worker/scope';
+import { queueName } from '../../services/dev-standard-qa-worker/queue-name.mjs';
 import { buyerIdentity } from './identity.mjs';
 
 const buyers = z.array(z.object({ slot: z.number().int().min(1).max(6), owner_id: z.uuid(),
@@ -19,16 +20,17 @@ const buyers = z.array(z.object({ slot: z.number().int().min(1).max(6), owner_id
 function checkEnvironment(role: QaRole) {
     const e = process.env;
     const wave = e.DEV_STANDARD_QA_WAVE;
+    if (!wave || !/^[0-9a-f]{64}$/.test(wave)) throw new Error('SIX_DRIVER_ENVIRONMENT_REJECTED');
     const prefix = role === 'paid' ? 'ANALYSIS_V2_TASKS_' : 'PREFLIGHT_TASKS_';
     const expected: Record<string,string> = {
         CLOUD_RUN_JOB: 'dev-standard-six-dispatch-' + role, GOOGLE_CLOUD_PROJECT: project,
         NEXT_PUBLIC_SUPABASE_URL: dbOrigin, CLOUD_RUN_TASK_COUNT: '1', CLOUD_RUN_TASK_INDEX: '0',
         [prefix+'ENABLED']: 'true', [prefix+'PROJECT']: project, [prefix+'LOCATION']: region,
-        [prefix+'QUEUE']: service(role), [prefix+'TARGET_URL']: origin(role)+taskPath(role),
+        [prefix+'QUEUE']: queueName(role,wave), [prefix+'TARGET_URL']: origin(role)+taskPath(role),
         [prefix+'OIDC_AUDIENCE']: origin(role),
         [prefix+'SERVICE_ACCOUNT_EMAIL']: 'dev-live-'+role+'-invoker@'+project+'.iam.gserviceaccount.com',
     };
-    if (!wave || !/^[0-9a-f]{64}$/.test(wave) || Object.entries(expected).some(([k,v])=>e[k]!==v))
+    if (Object.entries(expected).some(([k,v])=>e[k]!==v))
         throw new Error('SIX_DRIVER_ENVIRONMENT_REJECTED');
     return wave;
 }
