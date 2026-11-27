@@ -15,7 +15,7 @@ function body(name, expectedHash) {
 
 // Emit one transaction. There is no instant at which a live grant can use the extra slots.
 // The existing eight-slot public entry points remain available throughout and after the install.
-export function standardCloudSixInstallSql() {
+export function standardCloudSixInstallSql({ includeCron = true } = {}) {
     return ['BEGIN;', body('standard-cloud-six'), body('standard-cloud-six-orders'),
         `CREATE TEMP TABLE dev_six_original_provider ON COMMIT DROP AS SELECT pg_get_functiondef(
             'public.acquire_analysis_provider_admission(text,text,text,text,text,uuid,text,text,uuid,uuid,bigint,uuid,integer)'::regprocedure) AS definition;
@@ -26,6 +26,8 @@ export function standardCloudSixInstallSql() {
             THEN RAISE EXCEPTION 'DEV_CLOUD_SIX_PREEXISTING_EXPANSION'; END IF; END; $$;`,
         body('live-standard-capacity', 'cfe2c3ed45b9ef6d4ca04ae63ee714c3a118e1be130c1de54816a3fb4eb4ef16'),
         body('standard-cloud-six-capacity'), body('standard-cloud-six-vertex-budget'),
+        body('standard-cloud-six-authorization'), body('standard-cloud-six-apify-recovery'),
+        ...(includeCron ? [body('standard-cloud-six-apify-recovery-cron')] : []),
         `DO $$ BEGIN IF EXISTS(SELECT FROM pg_temp.dev_six_original_acl a LEFT JOIN pg_proc p ON p.oid=a.oid
             WHERE p.oid IS NULL OR a.proacl IS DISTINCT FROM p.proacl) OR EXISTS(
             SELECT FROM pg_temp.dev_six_original_limits l JOIN public.analysis_provider_admission_budgets b USING(budget_key)

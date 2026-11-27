@@ -1,72 +1,46 @@
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import { standardCloudSixInstallSql } from '../../../../supabase/dev-ui/standard-cloud-six-install.mjs';
 import { createSharedStandardDatabase } from './standard-shared-database';
-import { seedProcessingJob } from './standard-shared-processing-job';
+import { admitCloudSixFixture } from './standard-cloud-six-admitted-fixture';
 import { target } from './standard-providers';
 
 const native = it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1');
 const wave = 'c'.repeat(64);
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 type Db = Awaited<ReturnType<typeof createSharedStandardDatabase>>;
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
-async function admitFixture(db: Db, owner: string) {
-    const template = await seedProcessingJob(db);
-    const { rows: [preflight] } = await db.query<{ id: string }>(`INSERT INTO analysis_preflights
-        (user_id,idempotency_key,target_instagram_id,access_mode,exclusion_decision,exclusion_decided_at,status,created_at,
-         expires_at,ready_at,launch_status_snapshot,plan_catalog_snapshot,pricing_version,pricing_snapshot,policy_versions_snapshot,
-         target_followers_count,target_following_count,target_is_private,capacity_required_plan_id,required_plan_id,plan_cards_snapshot)
-        SELECT $2,$3,$4,'production','skip',now(),'ready',now(),now()+interval '30 minutes',now(),p.launch_status_snapshot,
-            p.plan_catalog_snapshot,p.pricing_version,p.pricing_snapshot,p.policy_versions_snapshot,150,110,false,'basic','basic',
-            r.plan_cards_snapshot FROM analysis_preflights p JOIN analysis_requests r ON r.preflight_id=p.id
-        WHERE r.id=$1 RETURNING id`,[template.requestId,owner,'dev-cloud-six:'+wave+':1',target]);
-    const admin = db.client();
-    const orderArgs = {p_wave:wave,p_owner_id:owner,p_preflight_id:preflight.id};
-    const create = () => admin.rpc('dev_cloud_six_create_order_v1', orderArgs);
-    const [one,two] = await Promise.all([create(),create()]);
-    expect(one.error).toBeNull();
-    expect(two).toEqual(one);
-    const order = String(one.data);
-    const {rows:[admission]}=await db.query<{fulfillment_status:string}>('SELECT * FROM public.admit_earlybird_fulfillment($1)',[order]);
-    expect(admission.fulfillment_status).toBe('admission_pending');
-    expect((await db.query('SELECT claim_paid_analysis_capacity_v1($1) AS state',[order])).rows).toEqual([{state:'ready'}]);
-    const dispatch = randomUUID();
-    await db.query(`UPDATE analysis_preflights SET admission_status='ready',admission_generation=1,admission_selected_plan_id='standard',
-        admission_entitlement_jti_hash=$2,admission_token=gen_random_uuid(),admission_requested_at=now(),admission_refreshed_at=now(),
-        admission_dispatch_generation=1,admission_dispatch_state='enqueued',admission_dispatch_token=$3,admission_dispatch_reserved_at=now(),
-        admission_dispatched_at=now(),admission_target_followers_count=150,admission_target_following_count=110,
-        admission_capacity_required_plan_id='basic',admission_required_plan_id='basic',
-        admission_plan_cards_snapshot=plan_cards_snapshot,admission_dispatch_workload_role='paid',admission_dispatch_contract_version=2 WHERE id=$1`,
-        [preflight.id,hash('earlybird-fulfillment-admission-v1\n'+order),dispatch]);
-    const handoff = () => admin.rpc('handoff_dev_cloud_six_fulfillment_v1',{
-        p_wave:wave,p_preflight_id:preflight.id,p_generation:1,p_dispatch_generation:1,p_dispatch_token:dispatch
-    });
-    const result = await handoff();
-    expect(result.error).toBeNull();
-    expect(typeof result.data).toBe('string');
-    expect(await handoff()).toEqual(result);
-    const requestId = String(result.data), jobClaimToken = randomUUID(), jobKey=template.jobKey;
-    await db.query(`INSERT INTO analysis_pipeline_jobs(request_id,job_key,track,kind,batch,input_hash,status,
-        lease_token,lease_expires_at,created_at,updated_at,recovery_not_before,dispatch_state,dispatch_generation,
-        dispatch_reservation_token,dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,attempt_count,first_started_at)
-        SELECT $2,job_key,track,kind,batch,input_hash,status,$3,lease_expires_at,created_at,updated_at,recovery_not_before,
-          dispatch_state,dispatch_generation,gen_random_uuid(),dispatch_reserved_at,dispatched_at,dispatch_task_name,delivered_at,
-          attempt_count,first_started_at FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$4`,
-        [template.requestId,requestId,jobClaimToken,jobKey]);
-    return {order,preflightId:preflight.id,ordinary:template,job:{requestId,jobKey,jobClaimToken}};
+it('the managed Dev installer emits the real periodic recovery job in its single transaction', () => {
+    const cli = fileURLToPath(new URL('../../../../supabase/dev-ui/standard-cloud-six-install.mjs', import.meta.url));
+    const sql = execFileSync(process.execPath, [cli], {encoding:'utf8'});
+    expect(sql).toBe(standardCloudSixInstallSql());
+    expect(sql.match(/^BEGIN;$/gm)).toHaveLength(1);
+    expect(sql.match(/^COMMIT;$/gm)).toHaveLength(1);
+    expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS pg_cron;');
+    expect(sql).toContain('CREATE OR REPLACE TRIGGER dev_cloud_six_apify_cron');
+    expect(standardCloudSixInstallSql({includeCron:false})).not.toContain('CREATE EXTENSION IF NOT EXISTS pg_cron;');
+});
+
+async function seedSixIdentities(db: Db) {
+    const owners = Array.from({length:6},()=>randomUUID());
+    for (const [i,owner] of owners.entries()) {
+        const email = 'dev-six-'+wave.slice(0,16)+'-'+(i+1)+'@example.invalid';
+        await db.query(`INSERT INTO auth.users(id,email,raw_app_meta_data,email_confirmed_at) VALUES($1,$2,$3,now())`,
+            [owner,email,{provider:'email', dev_cloud_six_v1:wave,dev_cloud_six_slot:i+1}]);
+        await db.query("INSERT INTO auth.identities VALUES($1,'email',jsonb_build_object('email',$2::text))",[owner,email]);
+    }
+    return owners;
 }
 
 native('fences six machine buyers, one Standard purchase each and expanded worker claims on native PostgreSQL', async () => {
     const db = await createSharedStandardDatabase(8);
     try {
-        await db.exec(standardCloudSixInstallSql());
-        const owners = Array.from({length:6},()=>randomUUID());
-        for (const [i,owner] of owners.entries()) {
-            const email = 'dev-six-'+wave.slice(0,16)+'-'+(i+1)+'@example.invalid';
-            await db.query(`INSERT INTO auth.users(id,email,raw_app_meta_data,email_confirmed_at) VALUES($1,$2,$3,now())`,
-                [owner,email,{provider:'email', dev_cloud_six_v1:wave,dev_cloud_six_slot:i+1}]);
-            await db.query("INSERT INTO auth.identities VALUES($1,'email',jsonb_build_object('email',$2::text))",[owner,email]);
-        }
+        await db.exec(standardCloudSixInstallSql({includeCron:false}));
+        const owners = await seedSixIdentities(db);
         const admin = db.client();
         const open = (w: string) => admin.rpc('dev_cloud_six_open_v1',{p_wave:w});
         await db.query("UPDATE auth.users SET email_confirmed_at=NULL WHERE id=$1",[owners[5]]);
@@ -79,7 +53,7 @@ native('fences six machine buyers, one Standard purchase each and expanded worke
         for (let i=0;i<6;i++) expect((await scope({p_owner_id:owners[i]})).data).toBe(i+1);
         expect((await scope({})).data).toBeNull();
         expect((await scope({p_owner_id:randomUUID()})).data).toBeNull();
-        const {job,order,preflightId,ordinary} = await admitFixture(db,owners[0]!);
+        const {job,order,preflightId,ordinary} = await admitCloudSixFixture(db,owners[0]!,wave);
         expect(await scope({p_owner_id:owners[0],p_preflight_id:preflightId,p_order_id:order,p_request_id:job.requestId})).toMatchObject({data:1,error:null});
         expect((await scope({p_owner_id:owners[1],p_request_id:job.requestId})).data).toBeNull();
         const resultArgs={p_wave:wave,p_request_id:job.requestId};
@@ -188,5 +162,118 @@ native('fences six machine buyers, one Standard purchase each and expanded worke
         expect((await admin.rpc('dev_cloud_six_capacity_approved_v1',args)).data).toBe(false);
         expect((await admin.rpc('dev_cloud_six_capacity_lineage_v1',resultArgs)).data).toBe(true);
         expect((await open(wave)).error?.message).toBe('DEV_CLOUD_SIX_CLOSED');
+        expect((await open(wave.slice(0,16)+'b'.repeat(48))).error?.code).toBe('23505');
     } finally { await db.close(); }
 },60_000);
+
+native('authorizes through unrelated row locks and serializes synthetic revocation with the last dispatch check', async () => {
+    const db = await createSharedStandardDatabase(8);
+    try {
+        await db.exec(standardCloudSixInstallSql({includeCron:false}));
+        const owners = await seedSixIdentities(db);
+        expect((await db.client().rpc('dev_cloud_six_open_v1', { p_wave: wave })).data).toBe(6);
+        const { job, preflightId, order, ordinary } = await admitCloudSixFixture(db, owners[0]!, wave);
+        const { requestId, jobKey, jobClaimToken } = job;
+        const upgrade = readFileSync(new URL('../../../../supabase/dev-ui/standard-cloud-six-authorization.sql', import.meta.url), 'utf8');
+        await db.exec(upgrade);
+        const check = async (connection: Pick<Tx, 'query'> = db, claim = jobClaimToken, inputHash = 'a'.repeat(64)) => {
+            const result = await connection.query<{ allowed: boolean }>(
+                'SELECT public.authorize_dev_cloud_six_vertex_dispatch_v1($1,$2,$3,$4,$5) AS allowed',
+                [wave, requestId, jobKey, claim, inputHash],
+            );
+            return result.rows[0]!.allowed;
+        };
+        expect(await check(db, jobClaimToken, hash('wrong input'))).toBe(false);
+        const attempt = {
+            p_wave: wave, p_request_id: requestId, p_job_key: jobKey, p_claim_token: jobClaimToken,
+            p_operation_key: 'feature-analysis:' + hash('authorization'), p_attempt: 1, p_reservation_token: randomUUID(),
+            p_metadata: {model_name:'fixture',location:'global',stage:'featureAnalysis',thinking_level:'MINIMAL',media_count:0,
+                media_resolution:null,prompt_version:'fixture',schema_version:1,max_output_tokens:1024,retry_count:0},
+        };
+        const reserve = (inputHash: string) => db.client().rpc('reserve_dev_cloud_six_ai_attempt_v1',
+            {...attempt,p_job_input_hash:inputHash});
+        const attemptCount = async () => (await db.query<{n:number}>(
+            'SELECT count(*)::int AS n FROM analysis_v2_ai_attempts WHERE request_id=$1', [requestId])).rows[0]!.n;
+        expect((await reserve(hash('wrong input'))).error?.message).toBe('ANALYSIS_V2_VERTEX_DISPATCH_STOPPED');
+        expect(await attemptCount()).toBe(0);
+        expect(await reserve('a'.repeat(64))).toMatchObject({error:null, data:{created:true}});
+        expect(await reserve('a'.repeat(64))).toMatchObject({error:null, data:{created:false}});
+        expect((await reserve(hash('wrong replay'))).error?.message).toBe('ANALYSIS_V2_VERTEX_DISPATCH_STOPPED');
+        expect(await attemptCount()).toBe(1);
+        // The native progress checkpoint and provider reserve acquire these rows independently.
+        // A sibling may hold all three without changing the capability used by this request.
+        await db.transaction(async tx => {
+            await tx.query('SELECT id FROM analysis_preflights WHERE id=$1 FOR UPDATE', [preflightId]);
+            await tx.query('SELECT id FROM analysis_requests WHERE id=$1 FOR UPDATE', [requestId]);
+            await tx.query('SELECT job_key FROM analysis_pipeline_jobs WHERE request_id=$1 AND job_key=$2 FOR UPDATE', [requestId, jobKey]);
+            expect(await check()).toBe(true);
+        });
+        const tentative = new Error('roll back test mutation');
+        async function rollback(mutate: (tx: Tx) => Promise<void>) {
+            await expect(db.transaction(async tx => {
+                await mutate(tx);
+                throw tentative;
+            })).rejects.toBe(tentative);
+        }
+        async function writerBusy(action: (tx: Tx) => Promise<unknown>) {
+            await expect(db.transaction(async tx => {
+                await tx.exec("SET LOCAL lock_timeout='150ms'");
+                await action(tx);
+            })).rejects.toMatchObject({ code: '55P03' });
+        }
+        const stop = (tx: Tx) => tx.query(`INSERT INTO public.analysis_v2_provider_cleanup_intents
+            (request_id,failed_job_key,failed_job_input_hash,failed_claim_token,error_code)
+            VALUES ($1,$2,$3,$4,'TEST_CLEANUP')`, [requestId, jobKey, 'a'.repeat(64), jobClaimToken]);
+        // Writes may take a row lock before their AFTER trigger. They cannot commit revocation while
+        // a positive grant is held, and a grant cannot commit against their uncommitted revocation.
+        await db.transaction(async tx => {
+            expect(await check(tx)).toBe(true);
+            await writerBusy(other => other.query("UPDATE analysis_pipeline_jobs SET lease_token=gen_random_uuid() WHERE request_id=$1 AND job_key=$2", [requestId, jobKey]));
+            await writerBusy(other => other.query('UPDATE analysis_preflights SET admission_entitlement_jti_hash=$2 WHERE id=$1', [preflightId, hash('different')]));
+            await writerBusy(stop);
+            await writerBusy(other => other.query('UPDATE dev_cloud_six.waves SET closed_at=now() WHERE digest=$1', [wave]));
+            await writerBusy(other => other.query("INSERT INTO auth.identities VALUES($1,'other','{}')", [owners[0]]));
+            await writerBusy(other => other.query("UPDATE earlybird_fulfillments SET operator_admitted_at=now() WHERE order_id=$1", [order]));
+            // Holding the would-be guard of a normal buyer must not serialize their own Auth
+            // identity or worker writes. Only a private QA receipt or roster row activates a guard.
+            await tx.query(`SELECT pg_advisory_xact_lock_shared(dev_cloud_six.authority_key('owner',user_id)),
+                pg_advisory_xact_lock_shared(dev_cloud_six.authority_key('job',id,$2))
+                FROM analysis_requests WHERE id=$1`, [ordinary.requestId,ordinary.jobKey]);
+            await db.transaction(async other => {
+                await other.exec("SET LOCAL lock_timeout='150ms'");
+                await other.query("INSERT INTO auth.identities SELECT user_id,'other','{}' FROM analysis_requests WHERE id=$1", [ordinary.requestId]);
+                await other.query("UPDATE analysis_pipeline_jobs SET lease_expires_at=lease_expires_at+interval '1 minute' WHERE request_id=$1 AND job_key=$2", [requestId, jobKey]);
+                await other.query("UPDATE analysis_requests SET progress=progress+1 WHERE id=$1", [requestId]);
+                await other.query('UPDATE analysis_pipeline_jobs SET lease_token=gen_random_uuid() WHERE request_id=$1 AND job_key=$2', [ordinary.requestId, ordinary.jobKey]);
+            });
+        });
+        for (const revoke of [
+            stop,
+            (tx: Tx) => tx.query('UPDATE analysis_requests SET selected_plan_id_snapshot=\'basic\' WHERE id=$1', [requestId]),
+            (tx: Tx) => tx.query('UPDATE analysis_pipeline_jobs SET lease_expires_at=clock_timestamp() WHERE request_id=$1 AND job_key=$2', [requestId, jobKey]),
+            (tx: Tx) => tx.query("INSERT INTO auth.identities VALUES($1,'other','{}')", [owners[0]]),
+        ]) {
+            await rollback(async tx => {
+                await revoke(tx);
+                await expect(check()).rejects.toMatchObject({ code: '55P03' });
+            });
+        }
+        expect(await check()).toBe(true);
+        await db.transaction(async tx => {
+            await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+            expect(await check(tx)).toBe(false);
+        });
+        const newClaim = randomUUID();
+        await db.query('UPDATE analysis_pipeline_jobs SET lease_token=$3 WHERE request_id=$1 AND job_key=$2', [requestId, jobKey, newClaim]);
+        expect(await check()).toBe(false);
+        expect(await check(db, newClaim)).toBe(true);
+        await stop(db);
+        expect(await check(db, newClaim)).toBe(false);
+        expect((await db.query(`SELECT has_function_privilege('service_role','dev_cloud_six.serialize_revocation()','EXECUTE') AS trigger_public,
+            has_function_privilege('authenticated','public.authorize_dev_cloud_six_vertex_dispatch_v1(text,uuid,text,uuid,text)','EXECUTE') AS owner_dispatch,
+            has_function_privilege('service_role','public.authorize_dev_cloud_six_vertex_dispatch_v1(text,uuid,text,uuid,text)','EXECUTE') AS worker_dispatch`)).rows)
+            .toEqual([{ trigger_public: false, owner_dispatch: false, worker_dispatch: true }]);
+    } finally {
+        await db.close();
+    }
+}, 60_000);
