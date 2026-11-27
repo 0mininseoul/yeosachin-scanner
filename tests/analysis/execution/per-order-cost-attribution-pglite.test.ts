@@ -171,6 +171,7 @@ describe('analysis V2 per-order cost attribution migration', () => {
             [LEGACY_REQUEST_ID, OPERATION_KEY, MODEL_NAME, MODEL_LOCATION],
         );
         await db.exec(migration);
+        await db.exec(readFileSync(new URL('../../../supabase/migrations/20261127102000_skip_nonterminal_cost_snapshot_query.sql', import.meta.url), 'utf8'));
     });
 
     afterAll(async () => {

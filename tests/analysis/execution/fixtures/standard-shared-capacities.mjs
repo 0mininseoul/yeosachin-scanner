@@ -11,6 +11,8 @@ export const sharedStandardCapacities = /** @type {const} */ ([
     { preset: '128-r48', resolvers: 48, slots: 128, workers: 40, features: 80 },
     // More than one HTTP delivery can share one instance. Its three process limiters remain shared.
     { preset: '8i-40q', resolvers: 48, slots: 128, workers: 40, instances: 8, cpu: 2, features: 80 },
+    // Seoul supplied 13 one-vCPU paid instances while preflight still occupied one vCPU.
+    { preset: '13i-32q-f4', resolvers: 48, slots: 128, workers: 32, instances: 13, cpu: 1, features: 80, processFeatureSlots: 4 },
     { preset: '18i-40q-f4', resolvers: 48, slots: 128, workers: 40, instances: 18, cpu: 1, features: 80, processFeatureSlots: 4 },
     { preset: '18i-40q', resolvers: 48, slots: 128, workers: 40, instances: 18, cpu: 1, features: 80 },
 ]);

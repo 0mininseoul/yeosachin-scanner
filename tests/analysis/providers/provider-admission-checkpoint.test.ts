@@ -348,6 +348,27 @@ describe('provider admission checkpoint', () => {
         }
     });
 
+    it('sends at most one renewal while the previous response is pending and ignores it after release', async () => {
+        vi.useFakeTimers();
+        try {
+            let rejectRenew!: (error: Error) => void;
+            const renew = vi.fn(() => new Promise<AnalysisProviderAdmissionLease>((_, reject) => { rejectRenew = reject; }));
+            const admission = store({ renew });
+            const wrapped = await withAnalysisProviderAdmissionCheckpoint({
+                checkpoint: checkpoint(), storedStatus: null, workloadRole: 'preflight',
+                requestId, jobKey: 'preflight:provider', operationKey, claimToken, env: enabledEnv, store: admission,
+            });
+            await wrapped.onBeforeRunStart?.(identity);
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(renew).toHaveBeenCalledTimes(1);
+            await wrapped.onCostRunFinished?.({ ...identity, runId: 'RunAbcd1234567890', status: 'succeeded', usageTotalUsd: null });
+            rejectRenew(new Error('late fence response'));
+            await vi.advanceTimersByTimeAsync(120_000);
+            expect(renew).toHaveBeenCalledTimes(1);
+            expect(admission.release).toHaveBeenCalledTimes(1);
+        } finally { vi.useRealTimers(); }
+    });
+
     it('stops renewing after a terminal checkpoint failure while retaining the lease', async () => {
         vi.useFakeTimers();
         try {

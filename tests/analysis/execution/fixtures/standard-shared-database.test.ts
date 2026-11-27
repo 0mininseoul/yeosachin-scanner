@@ -368,3 +368,20 @@ it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
         } finally { await db.close(); }
     }, 45_000,
 );
+it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1')(
+    'keeps an active request receipt writable when another cost source is busy', async () => {
+        const db = await createSharedStandardDatabase();
+        try {
+            const { requestId } = await seedProcessingJob(db);
+            await db.transaction(async busy => {
+                await busy.exec('LOCK TABLE public.vertex_ai_budget_reservations IN ACCESS EXCLUSIVE MODE');
+                await db.transaction(async worker => {
+                    await worker.exec("SET LOCAL statement_timeout='500ms'");
+                    await worker.query('SELECT public.analysis_v2_refresh_cost_rollup_snapshot($1)', [requestId]);
+                });
+            });
+            const unchanged = await db.query('SELECT count(*)::int AS n FROM public.analysis_v2_cost_rollup_snapshots WHERE request_id=$1', [requestId]);
+            expect(unchanged.rows).toEqual([{ n: 0 }]);
+        } finally { await db.close(); }
+    }, 45_000,
+);

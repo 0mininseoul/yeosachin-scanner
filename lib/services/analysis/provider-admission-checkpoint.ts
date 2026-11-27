@@ -133,6 +133,7 @@ export function withAnalysisProviderAdmissionCheckpoint(
     let releasePromise: Promise<void> | null = null;
     let renewalTimer: ReturnType<typeof setInterval> | undefined;
     let renewalError: Error | null = null;
+    let renewing = false;
     let beforeCompleted = input.storedStatus !== null;
 
     const stopRenewal = (): void => {
@@ -145,14 +146,17 @@ export function withAnalysisProviderAdmissionCheckpoint(
         if (renewalTimer) return;
         const intervalMs = Math.max(10_000, Math.floor(admissionInput.leaseSeconds * 1_000 / 3));
         renewalTimer = setInterval(() => {
-            if (!heldLease || renewalError) return;
-            void admission.renew(heldLease)
+            if (!heldLease || renewalError || renewing) return;
+            const current = heldLease;
+            renewing = true;
+            void admission.renew(current)
                 .then(renewed => {
-                    heldLease = renewed;
+                    if (renewalTimer && heldLease === current) heldLease = renewed;
                 })
                 .catch(() => {
-                    renewalError = new Error('ANALYSIS_PROVIDER_ADMISSION_RENEW_REQUIRED');
-                });
+                    if (renewalTimer && heldLease === current) renewalError = new Error('ANALYSIS_PROVIDER_ADMISSION_RENEW_REQUIRED');
+                })
+                .finally(() => { renewing = false; });
         }, intervalMs);
         // Timers must not keep a completed local/test process alive.
         const timer = renewalTimer as ReturnType<typeof setInterval> & {
