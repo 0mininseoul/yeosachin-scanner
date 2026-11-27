@@ -23,8 +23,24 @@ vi.mock('@/lib/services/analysis/v2-tasks', async original => ({
 }));
 import { supabaseAdmin as scopedAdmin } from '../../../services/dev-standard-qa-worker/admin';
 import { handleQaWorker } from '../../../services/dev-standard-qa-worker/handler';
+import { operationalLogger as qaLogger } from '../../../services/dev-standard-qa-worker/outcome-log';
 
 const wave = 'b'.repeat(64);
+it('writes only registered paid-route outcomes to the QA worker log', () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+        const fields = { operation: 'worker', disposition: 'capacity_handoff', analysis_request_id: randomUUID(),
+            job_key: 'coordinator:bootstrap', error_code: 'UNREGISTERED_FIXTURE', payload: 'fixture' };
+        qaLogger.emit({ severity: 'info', event: 'analysis_v2.worker_completed', fields });
+        qaLogger.emit({ severity: 'warn', event: 'analysis_v2.worker_retry',
+            fields: { ...fields, disposition: 'transient', error_code: 'JOB_DISPATCH_NOT_READY' } });
+        qaLogger.emit({ severity: 'info', event: 'result_feedback.persisted', fields });
+        expect(log.mock.calls.map(([line]) => JSON.parse(line))).toEqual([
+            { event: 'analysis_v2.worker_completed', disposition: 'capacity_handoff' },
+            { event: 'analysis_v2.worker_retry', disposition: 'transient', error_code: 'JOB_DISPATCH_NOT_READY' },
+        ]);
+    } finally { log.mockRestore(); }
+});
 function settings(role: QaRole): NodeJS.ProcessEnv {
     const { environment } = qaWorkerDeployment(role, wave);
     return { ...environment, NODE_ENV: 'production', K_SERVICE: service(role), K_REVISION: service(role) + '-00001-abc' };

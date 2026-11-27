@@ -433,8 +433,15 @@ async function handlePOST(
                 try {
                     if (await runWithApproval(() => resumeAnalysisV2CapacityHandoff(
                         paidDelivery, { config, store: analysisV2JobStore },
-                    ))) return NextResponse.json({ status: 'capacity_handoff' });
+                    ))) {
+                        emitWorkerOutcome({ context, analysisRequestId, jobKey,
+                            event: 'analysis_v2.worker_completed', disposition: 'capacity_handoff' });
+                        return NextResponse.json({ status: 'capacity_handoff' });
+                    }
                 } catch {
+                    emitWorkerOutcome({ context, analysisRequestId, jobKey,
+                        event: 'analysis_v2.worker_retry', disposition: 'transient', retryable: true,
+                        errorCode: 'JOB_DISPATCH_NOT_READY' });
                     return NextResponse.json({ code: 'JOB_DISPATCH_NOT_READY' }, { status: 503 });
                 }
             }

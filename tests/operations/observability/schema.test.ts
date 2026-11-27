@@ -27,6 +27,15 @@ afterEach(() => {
 });
 
 describe('sanitizeOperationalEvent', () => {
+    it('keeps a confirmed capacity handoff distinguishable from a finished analysis job', () => {
+        const event = sanitizeOperationalEvent({
+            event: 'analysis_v2.worker_completed',
+            severity: 'info',
+            fields: { operation: 'worker', disposition: 'capacity_handoff' },
+        });
+        expect(event.fields.disposition).toBe('capacity_handoff');
+    });
+
     it('does not register the retired checkout mode or server legacy fallback dimension', () => {
         expect(ALLOWED_FIELD_NAMES).not.toContain('checkout_mode');
         expect(OPERATIONAL_ERROR_NAMES).not.toContain('legacy_missing_target_hash');
