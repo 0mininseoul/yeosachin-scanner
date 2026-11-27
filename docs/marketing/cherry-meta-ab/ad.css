@@ -194,3 +194,10 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .ad--story.v-ex.c2 .lock { top: calc(var(--top) + 560px); }
 .ad--story .lock .assure { margin-top: 64px; }
 .lock .assure { margin-top: 48px; }
+/* Arm C v5 C2: the brand sits right above the headline instead of floating at the top edge. */
+.v-ex.c2 footer { top: calc(var(--top) + 44px); }
+.v-ex.c2 h1 { top: calc(var(--top) + 156px); }
+.v-ex.c2 .lock { top: calc(var(--top) + 456px); }
+.ad--story.v-ex.c2 footer { top: calc(var(--top) + 100px); }
+.ad--story.v-ex.c2 h1 { top: calc(var(--top) + 212px); }
+.ad--story.v-ex.c2 .lock { top: calc(var(--top) + 572px); }
