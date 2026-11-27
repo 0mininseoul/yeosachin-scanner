@@ -230,8 +230,15 @@ export function withDevLiveRead(
     resource: DevLiveResource,
     operation: (user: User) => Promise<NextResponse>,
 ): Promise<NextResponse> {
-    return withDevUiSession(request, async user => {
+    return withDevUiSession(request, async (user, cloudOwner) => {
         if (!validSelector(request)) return notFound();
+        if (cloudOwner && 'requestId' in resource) {
+            if (new URL(request.url).pathname.split('/').at(-1) !== resource.requestId) return notFound();
+            const response = privateResponse(await operation(user));
+            response.headers.set('x-dev-synthetic-owner', '1');
+            response.headers.set('x-external-profile-links', 'disabled');
+            return response;
+        }
         const preflight = await readLivePreflight(user.id, resource);
         if (!preflight) return notFound();
         const response = privateResponse(await operation(user));
@@ -240,7 +247,7 @@ export function withDevLiveRead(
                 preflight.idempotency_key.startsWith(DEV_LIVE_STANDARD_PREFLIGHT_KEY_PREFIX) ? 'standard' : 'basic');
         }
         return response;
-    });
+    }, { allowCloudOwnerRead: 'requestId' in resource });
 }
 
 export function handleDevLiveAvailability(request: Request): Promise<NextResponse> {

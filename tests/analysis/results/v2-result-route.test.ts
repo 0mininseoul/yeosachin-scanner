@@ -1,3 +1,4 @@
+import { cloudUser, configureCloudWeb, wave } from '../../ui/dev-ui/fixtures/cloud-six-owner';
 import type { User } from '@supabase/supabase-js';
 import * as devLive from '@/lib/services/dev-ui/live-analysis';
 import * as replayNotes from '@/lib/services/dev-ui/standard-replay-scope-note';
@@ -160,6 +161,29 @@ describe('analysis V2 owner result route', () => {
             method: 'GET',
         }));
         mocks.loadFixture.mockImplementation(async (version: string) => loadedFixture(version));
+    });
+
+    it('reads only the registered Dev synthetic owner request while its wave is open', async () => {
+        configureCloudWeb();
+        try {
+            const path = 'https://dev.yeosachin.com/api/analysis/v2/result/' + requestId + '?devAnalysis=live';
+            const route = () => GET(new Request(path), { params: Promise.resolve({ requestId }) });
+            const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+            mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc });
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(userId) }, error: null });
+            expect((await route()).status).toBe(200);
+            expect(rpc).toHaveBeenCalledWith('dev_cloud_six_result_owner_v1', { p_wave: wave, p_request_id: requestId });
+            expect(mocks.loadPage).toHaveBeenCalledWith(expect.objectContaining({ requestId, userId }));
+            rpc.mockResolvedValue({ data: false, error: null });
+            expect((await route()).status).toBe(403);
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(requestId, 2) }, error: null });
+            expect((await route()).status).toBe(403);
+            mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+            expect((await route()).status).toBe(401);
+            expect(mocks.loadPage).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.unstubAllEnvs();
+        }
     });
 
     it('loads a replay note only after a verified Dev owner reads a published Standard result', async () => {

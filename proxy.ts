@@ -6,6 +6,7 @@ import {
 } from '@/lib/constants/app-url';
 import { DEV_UI_ROBOTS_HEADER } from '@/lib/constants/dev-ui';
 import { devUiRequestBoundary } from '@/lib/services/dev-ui/deployment';
+import { isDevCloudSixOwnerRead } from '@/lib/services/dev-ui/standard-cloud-owner-read';
 import { assertDevUiAdministrator } from '@/lib/services/dev-ui/access';
 import { classifyOperatorAuthError, getAnalysisAuditOperatorDecision } from '@/lib/services/analysis/score-audit';
 import { devUiLoginUrl, devUiPostLoginUrl, getDevUiSiteAccess } from '@/lib/services/dev-ui/site-access';
@@ -153,9 +154,16 @@ export async function proxy(request: NextRequest) {
     const redirectWithAuthCookies = (url: URL) => withAuthCookies(NextResponse.redirect(url));
 
     if (deploymentBoundary === 'dev') {
-        const access = authError
+        let access = authError
             ? classifyOperatorAuthError(authError) === 'unauthorized' ? 'unauthenticated' : 'unavailable'
             : getDevUiSiteAccess(user, request);
+        if (access === 'denied') {
+            try {
+                if (await isDevCloudSixOwnerRead(user, request, supabase)) access = 'allowed';
+            } catch {
+                access = 'unavailable';
+            }
+        }
         const isLoginRequest = (pathname === '/login' || pathname === '/login/')
             && (request.method === 'GET' || request.method === 'HEAD');
         if (isLoginRequest) {

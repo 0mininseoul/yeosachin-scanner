@@ -1,3 +1,4 @@
+import { cloudUser, configureCloudWeb, wave } from '../../ui/dev-ui/fixtures/cloud-six-owner';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDemoFixture } from '@/lib/services/demo-analysis/demo-analysis';
 
@@ -170,6 +171,29 @@ describe('analysis V2 owner progress route', () => {
             lifecycle: 'active',
             classificationVersion: 'account-ledger-v1',
         });
+    });
+
+    it('reads only the registered Dev synthetic owner request while its wave is open', async () => {
+        configureCloudWeb();
+        try {
+            const path = 'https://dev.yeosachin.com/api/analysis/progress/' + requestId + '?devAnalysis=live';
+            const route = () => GET(new Request(path), { params: Promise.resolve({ requestId }) });
+            const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+            mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser }, rpc });
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(userId) }, error: null });
+            expect((await route()).status).toBe(200);
+            expect(rpc).toHaveBeenCalledWith('dev_cloud_six_result_owner_v1', { p_wave: wave, p_request_id: requestId });
+            expect(mocks.loadForOwner).toHaveBeenCalledWith(expect.objectContaining({ requestId, userId }));
+            rpc.mockResolvedValue({ data: false, error: null });
+            expect((await route()).status).toBe(403);
+            mocks.getUser.mockResolvedValue({ data: { user: cloudUser(requestId, 2) }, error: null });
+            expect((await route()).status).toBe(403);
+            mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
+            expect((await route()).status).toBe(401);
+            expect(mocks.loadForOwner).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.unstubAllEnvs();
+        }
     });
 
     it('requires authentication before reading malformed pagination for a valid route id', async () => {

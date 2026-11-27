@@ -11,6 +11,7 @@ import { RESULT_PAGE_SIZE_DEFAULT, RESULT_PAGE_SIZE_MAX, decodeResultCursor } fr
 import { classifyOperatorAuthError } from '@/lib/services/analysis/score-audit';
 import { assertDevUiDeployment, devUiRequestBoundary, DevUiDeploymentError } from './deployment';
 import { assertDevUiAdministrator } from './access';
+import { isDevCloudSixOwnerRead } from './standard-cloud-owner-read';
 import { getDevUiSiteAccess } from './site-access';
 import { DEV_UI_FIXTURE_SCENARIOS, DevUiStoreError, devUiTargetSchema } from './contracts';
 import { createDevUiStore } from './store';
@@ -51,8 +52,8 @@ function storeFailure(error: unknown): NextResponse {
 /** getUser verifies the Dev Auth session; request values cannot select a user. */
 export async function withDevUiSession(
     request: Request,
-    operation: (user: User) => Promise<NextResponse>,
-    options: { requireAdministrator?: boolean } = {},
+    operation: (user: User, cloudOwner: boolean) => Promise<NextResponse>,
+    options: { requireAdministrator?: boolean; allowCloudOwnerRead?: boolean } = {},
 ): Promise<NextResponse> {
     try {
         if (devUiRequestBoundary(request) !== 'dev') return failure(403, 'DEV_UI_DEPLOYMENT_REJECTED', '허용되지 않은 테스트 요청입니다.');
@@ -67,9 +68,11 @@ export async function withDevUiSession(
         if (error || !user || !uuid.safeParse(user.id).success) return failure(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
         const access = getDevUiSiteAccess(user, request);
         if (access === 'unavailable') return failure(503, 'DEV_UI_AUTH_UNAVAILABLE', '인증 서비스를 잠시 후 다시 확인해주세요.');
-        if (access !== 'allowed') return failure(403, 'DEV_UI_ACCESS_DENIED', '등록된 테스트 계정만 이용할 수 있습니다.');
+        const cloudOwner = access === 'denied' && options.allowCloudOwnerRead === true && !options.requireAdministrator
+            && await isDevCloudSixOwnerRead(user, request, supabase);
+        if (access !== 'allowed' && !cloudOwner) return failure(403, 'DEV_UI_ACCESS_DENIED', '등록된 테스트 계정만 이용할 수 있습니다.');
         if (options.requireAdministrator) assertDevUiAdministrator(user.id, request);
-        return await operation(user);
+        return await operation(user, cloudOwner);
     } catch (error) {
         return storeFailure(error);
     }
