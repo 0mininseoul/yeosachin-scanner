@@ -812,7 +812,7 @@ form[aria-busy='true'] .submit { opacity: 0.75; }
 
 .site-footer { gap: clamp(22px, 3vw, 44px); margin-top: var(--spacing); padding: 36px var(--inset); border-top: 1px solid var(--line); }
 .site-footer .text-link { white-space: nowrap; }
-.footer-links { display: flex; align-items: center; gap: clamp(22px, 3vw, 44px); margin-left: auto; }
+.footer-links { display: flex; flex-wrap: wrap; align-items: center; gap: clamp(22px, 3vw, 44px); margin-left: auto; }
 .footer-links .text-link { color: var(--muted); font-weight: 400; }
 .footer-contact > span { font-weight: 800; }
 /* Business details in English, the same as the yeosachin.com footer: a full-width row under the links. */
