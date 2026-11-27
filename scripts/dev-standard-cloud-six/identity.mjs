@@ -1,5 +1,5 @@
 // Run only in the operator's private, one-task Dev Cloud Run Job.
-// Supabase Auth generates the six user IDs. The script never prints them.
+// Supabase Auth generates the synthetic user IDs. The script never prints them.
 import assert from 'node:assert/strict';
 
 const devOrigin = 'https://bgamojfpkxnnumfvkron.supabase.co';
@@ -27,14 +27,19 @@ async function provision() {
     for (let i = 1; i <= count; i++) {
         const account = buyerIdentity(wave,i);
         const res = await fetch(devOrigin + '/auth/v1/admin/users', {
-            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(20_000),
+            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(45_000),
             headers: { apikey: admin, Authorization: 'Bearer '+admin, 'Content-Type': 'application/json' },
             body: JSON.stringify({ ...account, email_confirm: true }),
+        }).catch(error => {
+            const kind = error?.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK';
+            throw new Error('SYNTHETIC_AUTH_' + kind + '_SLOT_' + i);
         });
-        const row = await res.json();
+        const row = await res.json().catch(() => {
+            throw new Error('SYNTHETIC_AUTH_RESPONSE_' + res.status + '_SLOT_' + i);
+        });
         if (!res.ok) {
             if ((res.status === 422 || res.status === 400) && [row.error_code, row.code].some(code => code === 'email_exists' || code === 'user_already_exists')) {
-                // open_v1 independently verifies all six Auth identities before registration.
+                // The wave RPC independently verifies each Auth identity before registration.
                 alreadyPresent++; continue;
             }
             throw new Error('SYNTHETIC_AUTH_CREATE_' + res.status + '_SLOT_' + i);
