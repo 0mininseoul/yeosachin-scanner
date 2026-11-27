@@ -20,7 +20,15 @@ export function pgReviewCredential() {
 
 export function matchesPgReviewPassword(password: string, expectedHash: Buffer) {
     const actualHash = createHash('sha256').update(password, 'utf8').digest();
-    return timingSafeEqual(actualHash, expectedHash);
+    const reviewerMatches = timingSafeEqual(actualHash, expectedHash);
+    const ownerHash = process.env.PG_REVIEW_OWNER_PASSWORD_HASH?.trim() ?? '';
+    const ownerMatches = /^[a-f0-9]{64}$/.test(ownerHash)
+        && timingSafeEqual(actualHash, Buffer.from(ownerHash, 'hex'));
+    return reviewerMatches || ownerMatches;
+}
+
+export function pgReviewPath(product: FormDataEntryValue | null) {
+    return product === 'cherry' ? `${PG_REVIEW_PATH}?product=cherry` : PG_REVIEW_PATH;
 }
 
 function signExpiry(expiry: string, key: Buffer) {

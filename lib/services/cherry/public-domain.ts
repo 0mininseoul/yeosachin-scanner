@@ -14,7 +14,7 @@ export function cherryRequestHostname(request: NextRequest): string {
 }
 
 const PUBLIC_ASSET = /^\/cherry\/(?:(?:assets|3d)\/(?:[\w.-]+\/)*[\w.-]+|landing\.(?:css|js)|intro\.js|analytics\.js|campaign\.mjs|reservation-source\.mjs|logo\.png)$/;
-const MAIN_PAGE = /^\/(?:privacy|cherry\/(?:start|home|reports\/[^/]+))$/;
+const MAIN_PAGE = /^\/(?:privacy|cherry\/(?:start|home|refund|reports\/[^/]+))$/;
 const RESERVATIONS = '/api/cherry/reservations';
 
 export function cherryDomainResponse(request: NextRequest): NextResponse | undefined {

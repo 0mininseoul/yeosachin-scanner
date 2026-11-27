@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
+import { EmailLogin } from '@/components/email-login';
 import { CaseCard, TopBar } from '@/components/case-ui';
 import { CHERRY_CONSENTS, CHERRY_LIST_PRICE_KRW } from '@/lib/services/cherry/contracts';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
@@ -23,13 +23,26 @@ const cherryPaymentTerms = CHERRY_CONSENTS.find(consent => consent.id === 'price
 export default async function PgReviewPage({ searchParams }: {
     searchParams: Promise<{ product?: string | string[]; result?: string | string[] }>;
 }) {
+    const { product, result } = await searchParams;
+    const isCherry = product === 'cherry';
+    const serviceName = isCherry ? '체리 · 맞팔 알리미' : '위장여사친 판독기';
     const credential = pgReviewCredential();
     const cookieStore = await cookies();
     if (!credential || !isPgReviewSession(cookieStore.get(PG_REVIEW_COOKIE)?.value, credential.sessionKey)) {
-        redirect('/login');
+        return (
+            <>
+                <TopBar />
+                <main className="mx-auto max-w-[500px] px-5 pb-16 pt-10">
+                    <h1 className="text-[26px] font-extrabold text-fg">{serviceName} 결제 심사</h1>
+                    <CaseCard className="mt-5 p-5">
+                        {credential
+                            ? <EmailLogin product={isCherry ? 'cherry' : 'analyzer'} initiallyExpanded />
+                            : <p className="text-sm text-fg-dim">현재 심사 로그인을 사용할 수 없습니다.</p>}
+                    </CaseCard>
+                </main>
+            </>
+        );
     }
-    const { product, result } = await searchParams;
-    const isCherry = product === 'cherry';
     const paymentKey = process.env.PG_REVIEW_TOSS_PAYMENT_CLIENT_KEY?.trim() || DOCS_PAYMENT_CLIENT_KEY;
     const billingKey = process.env.PG_REVIEW_TOSS_BILLING_CLIENT_KEY?.trim();
 
@@ -50,7 +63,7 @@ export default async function PgReviewPage({ searchParams }: {
                     </Link>
                 </nav>
                 <h1 className="text-[26px] font-extrabold text-fg">
-                    {isCherry ? '체리 · 남친 맞팔 알리미' : '위장여사친 판독기'}
+                    {serviceName}
                 </h1>
                 <p className="mt-2 text-sm text-fg-dim">PG 심사용 테스트 화면입니다. 실제 청구는 발생하지 않습니다.</p>
                 {result === 'authorized' && (
@@ -72,7 +85,7 @@ export default async function PgReviewPage({ searchParams }: {
                         </CaseCard>
                         <div className="mt-6 flex gap-4 text-xs text-fg-dim">
                             <Link className="underline" href="/cherry">체리 서비스 소개</Link>
-                            <Link className="underline" href="/terms">이용약관</Link>
+                            <Link className="underline" href="/cherry/refund">구독 해지 및 환불 안내</Link>
                         </div>
                     </>
                 ) : <PurchasePreview clientKey={paymentKey.startsWith('test_gck_') ? paymentKey : null} />}
