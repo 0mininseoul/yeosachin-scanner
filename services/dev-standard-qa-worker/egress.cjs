@@ -3,6 +3,8 @@ const net = require('node:net');
 const { syncBuiltinESMExports } = require('node:module');
 const allowed = new Set(['bgamojfpkxnnumfvkron.supabase.co', 'storage.googleapis.com',
     'cloudtasks.googleapis.com', 'www.googleapis.com', 'oauth2.googleapis.com', 'www.gstatic.com']);
+const ownerKeyHost = 'dev.yeosachin.com';
+if (process.env.CLOUD_RUN_JOB === 'dev-standard-six-dispatch-paid') allowed.add(ownerKeyHost);
 const metadata = new Set(['metadata.google.internal', '169.254.169.254']);
 const endpoint = process.env.ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT || '';
 if (/^https:\/\/[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(endpoint)) {
@@ -22,6 +24,12 @@ net.Socket.prototype.connect = function (...args) {
 const actualFetch = globalThis.fetch;
 globalThis.fetch = function (input, init) {
     const url = new URL(input instanceof Request ? input.url : input);
+    if (url.hostname === ownerKeyHost) {
+        const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
+        const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+        if (method !== 'GET' || headers.has('authorization') || headers.has('cookie') || headers.has('apikey')
+            || !(url.pathname === '/login' || /^\/_next\/static\/[A-Za-z0-9_./~-]+\.js$/.test(url.pathname))) return denied();
+    }
     if (url.href !== 'data:,standard-cloud-six-vertex' && (url.username || url.password ||
         !(url.protocol === 'https:' && !url.port && allowed.has(url.hostname) ||
           url.protocol === 'http:' && !url.port && metadata.has(url.hostname)))) return denied();

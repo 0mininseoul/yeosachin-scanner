@@ -1,7 +1,9 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
+import { createClient } from '@supabase/supabase-js';
+import { resolveDevPublicKey } from '../../services/dev-standard-qa-reader/public-key.mjs';
 import { supabaseAdmin } from '@/lib/supabase/admin';
-import { preflightStore as store } from '@/lib/services/analysis/preflight';
+import { preflightStore as store, type PreflightSupabaseClient } from '@/lib/services/analysis/preflight';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 import { enqueuePreflightTask } from '@/lib/services/analysis/preflight-tasks';
 import { admitAndAdvanceEarlybirdFulfillment } from '@/lib/services/earlybird/fulfillment-store';
@@ -74,14 +76,34 @@ async function allSlots(rows: Buyer[], act:(row:Buyer)=>Promise<void>) {
     console.log(JSON.stringify({role:process.env.ANALYSIS_WORKLOAD_ROLE,completed:rows.length-failed.length,failed}));
     if (failed.length) throw new Error('SIX_DRIVER_PARTIAL');
 }
+async function storeOwnerChoice(wave: string, row: Buyer, publicKey: string) {
+    const input = { p_wave: wave, p_owner_id: row.owner_id, p_preflight_id: row.preflight_id };
+    if (await rpc('dev_cloud_six_scope_v1', input) !== row.slot) throw new Error('SIX_DRIVER_OWNER_SCOPE');
+    const { email } = buyerIdentity(wave, row.slot);
+    const link = await supabaseAdmin.auth.admin.generateLink({ type: 'magiclink', email });
+    const member = link.data.user;
+    if (link.error || member?.id !== row.owner_id || member.email !== email || !member.email_confirmed_at
+        || member.app_metadata.dev_cloud_six_v1 !== wave || member.app_metadata.dev_cloud_six_slot !== row.slot
+        || link.data.properties?.verification_type !== 'magiclink') throw new Error('SIX_DRIVER_OWNER_LINK');
+    const client = createClient(dbOrigin, publicKey, {
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
+    const session = await client.auth.verifyOtp({ type: 'magiclink', token_hash: link.data.properties.hashed_token });
+    const verified = await client.auth.getUser();
+    if (session.error || verified.error || verified.data.user?.id !== row.owner_id || verified.data.user.email !== email)
+        throw new Error('SIX_DRIVER_OWNER_SESSION');
+    await store.setExclusion({ preflightId: row.preflight_id!, userId: row.owner_id,
+        decision: 'skip', excludedInstagramId: null }, { client: client as unknown as PreflightSupabaseClient });
+}
 async function begin(wave: string) {
     const rows=await participants(wave);
     if (!rows.every(r=>r.preflight_id && (r.preflight_status==='ready' || (r.order_id && r.preflight_status==='consumed'))))
         throw new Error('SIX_DRIVER_WAITING_FOR_PREFLIGHT');
+    const publicKey = await resolveDevPublicKey(undefined);
     // Prepare all six synthetic orders before starting any of their active-analysis clocks.
     await allSlots(rows,async row=>{
         if (row.order_id) return;
-        await store.setExclusion({preflightId:row.preflight_id!,userId:row.owner_id,decision:'skip',excludedInstagramId:null});
+        await storeOwnerChoice(wave, row, publicKey);
         z.uuid().parse(await rpc('dev_cloud_six_create_order_v1',{p_wave:wave,p_owner_id:row.owner_id,p_preflight_id:row.preflight_id}));
     });
     const ordered=await participants(wave);
