@@ -17,7 +17,7 @@ const sampleDate = (index: number) => new Date(Date.now() + index * 86_400_000).
 
 beforeAll(async () => {
     db = await PGlite.create();
-    await db.exec('create role anon; create role authenticated; create role service_role;');
+    await db.exec('create role anon; create role authenticated; create role service_role bypassrls;');
     await db.exec(migration);
 });
 
@@ -136,11 +136,18 @@ describe('체리 Threads 서버 자동화', () => {
         }];
         expect(await value('public.cherry_threads_import($1)', [JSON.stringify(discovered)])).toBe(1);
         await db.exec("update public.cherry_threads_posts set views=10, measured_at=now() where media_id='main-threads-id'");
-        expect(await value('public.cherry_threads_confirm_published($1,$2)', [post, discovered[0].media_id])).toBe(true);
-        expect(await value('public.cherry_threads_confirm_published($1,$2)', [post, discovered[0].media_id])).toBe(false);
+        await db.exec('set role service_role');
+        try {
+            expect(await value('public.cherry_threads_confirm_published($1,$2)', [post, discovered[0].media_id])).toBe(true);
+            expect(await value('public.cherry_threads_confirm_published($1,$2)', [post, discovered[0].media_id])).toBe(false);
+        } finally {
+            await db.exec('reset role');
+        }
         expect(await value('public.cherry_threads_import($1)', [JSON.stringify(discovered)])).toBe(0);
         expect((await db.query('select id,state,reply_state,views::int from public.cherry_threads_posts')).rows)
             .toEqual([{ id: post, state: 'published', reply_state: 'pending', views: 10 }]);
+        expect(await value("has_function_privilege('authenticated','public.cherry_threads_confirm_published(uuid,text)','execute')"))
+            .toBe(false);
     });
 
     it('모바일에서 로그인이 필요한 경우 Threads 화면으로 돌아온다', () => {

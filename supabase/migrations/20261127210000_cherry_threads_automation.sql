@@ -206,7 +206,7 @@ end
 $$;
 
 create function public.cherry_threads_confirm_published(p_id uuid, p_media text)
-returns boolean language plpgsql set search_path = '' as $$
+returns boolean language plpgsql security definer set search_path = '' as $$
 declare post public.cherry_threads_posts%rowtype; observed public.cherry_threads_posts%rowtype;
 begin
     perform pg_advisory_xact_lock(hashtextextended(p_media, 371));
