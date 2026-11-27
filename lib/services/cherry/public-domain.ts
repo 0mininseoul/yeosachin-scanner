@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 
-import { CHERRY_LANDING_PATH, CHERRY_PUBLIC_HOST, CHERRY_PUBLIC_URL } from '@/lib/constants/cherry-public-url';
+import { CHERRY_LANDING_PATH, CHERRY_PUBLIC_HOST, CHERRY_PUBLIC_URL, CHERRY_REVIEW_CHECKOUT_PATH, CHERRY_REVIEW_CHECKOUT_URL } from '@/lib/constants/cherry-public-url';
 export const CHERRY_LEGACY_URL = `${CANONICAL_APP_ORIGIN}/cherry`;
 
 export function isCherryDomainLive(): boolean {
@@ -32,7 +32,22 @@ export function cherryDomainResponse(request: NextRequest): NextResponse | undef
             headers: { 'Cache-Control': 'no-store' },
         });
     }
+    const checkout = decoded === CHERRY_REVIEW_CHECKOUT_PATH;
+    const checkoutReturn = decoded === `${CHERRY_REVIEW_CHECKOUT_PATH}/return`;
+    if (checkout || checkoutReturn) {
+        if (pathname !== decoded) return new NextResponse(null, { status: 404 });
+        const local = process.env.NODE_ENV === 'development' && (hostname === 'localhost' || hostname === '127.0.0.1');
+        if (hostname !== CHERRY_PUBLIC_HOST && !local) {
+            return reads && checkout
+                ? NextResponse.redirect(CHERRY_REVIEW_CHECKOUT_URL, 307)
+                : new NextResponse(null, { status: 404 });
+        }
+        if (reads || (checkout && request.method === 'POST')) {
+            return NextResponse.next({ headers: { 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex, nofollow' } });
+        }
+    }
     if (hostname !== CHERRY_PUBLIC_HOST) return;
+    if (reads && /^\/_next\/static\/(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.(?:js|css|woff2?|svg|png|ico|webp|jpg)$/.test(pathname)) return NextResponse.next();
     if (reads && (pathname === '/' || pathname === '/ex' || pathname === '/cherry')) {
         if (pathname === '/cherry') return NextResponse.redirect(CHERRY_PUBLIC_URL + search, 308);
         return NextResponse.next();

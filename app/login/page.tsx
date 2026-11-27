@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useEffect } from 'react';
 import { BrandMark, Eyebrow, CaseCard } from '@/components/case-ui';
 import { AuthButtons } from '@/components/auth-buttons';
-import { EmailLogin } from '@/components/email-login';
+import { CherryReviewEmailLink, EmailLogin } from '@/components/email-login';
 import { isDevUiPresentation } from '@/lib/constants/dev-ui';
 import { CANONICAL_APP_ORIGIN } from '@/lib/constants/app-url';
 import { availableAnalyticsSessionStorage } from '@/lib/services/analytics-auth';
@@ -61,7 +61,7 @@ function LoginContent() {
 
                     <AuthButtons redirectTo={redirectTo} promptKakaoLogin={devAccessDenied}
                         kakaoLabel={isCherry ? '카카오로 로그인' : undefined} />
-                    <EmailLogin product={isCherry ? 'cherry' : 'analyzer'} />
+                    {isCherry ? <CherryReviewEmailLink /> : <EmailLogin />}
                 </CaseCard>
 
                 <p className="mt-6 text-center text-[12px] leading-relaxed text-fg-mute">
