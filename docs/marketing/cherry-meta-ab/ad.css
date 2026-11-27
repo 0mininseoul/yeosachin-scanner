@@ -181,3 +181,5 @@ footer { position: absolute; left: var(--side); right: var(--side); bottom: var(
 .assure-icon { display: grid; place-items: center; width: 66px; height: 66px; border-radius: 50%; border: 3px solid currentColor; }
 .assure-icon svg { width: 42px; height: 42px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .c2 .assure, .c3 .assure { color: #ffd6db; }
+/* Arm C v3: on C2 the lock line belongs to the alert, so it sits under the card and the brand closes the ad alone. */
+.lock .assure { justify-content: center; margin-top: 44px; }

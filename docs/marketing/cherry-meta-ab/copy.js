@@ -23,7 +23,7 @@ window.COPY = {
     c3Label: '전남친 팔로잉',
     c4Friend: '야 너 전남친 어제 어떤 여자랑 맞팔했던데?',
     // A reassurance line with a lock icon replaces the offer chip.
-    assure: '전남친에게 절대 알림이 가지 않아요',
+    assure: '전남친에게 완전 비밀 보장',
   },
 };
 

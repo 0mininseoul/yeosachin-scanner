@@ -48,8 +48,9 @@
                 <li><img src="${asset('public/cherry/assets/hero/rina-profile.jpg')}" alt=""><b>@rina.wknd_</b></li>
               </ul>
             </article>
+            ${copy.assure ? offer : ''}
           </div>
-          <footer>${brandRow}${offer}</footer>`,
+          <footer>${brandRow}${copy.assure ? '' : offer}</footer>`,
         3: () => `
           <div class="count">
             <p class="count-label">${copy.c3Label}</p>
