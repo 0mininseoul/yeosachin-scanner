@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { PrimaryButton } from '@/components/case-ui';
 import { loadToss } from '@/lib/services/toss/browser';
+import { CHERRY_REVIEW_CHECKOUT_PATH } from '@/lib/constants/cherry-public-url';
 
 type Props = { clientKey: string | null } & (
     { product: 'analyzer'; amount: number; orderName: string }
@@ -38,8 +39,8 @@ export function TossReviewButton(props: Props) {
             setBusy(false);
         }
 
-        const returnUrl = new URL('/login/pg-review/return', window.location.origin);
-        returnUrl.searchParams.set('product', props.product);
+        const returnPath = isBilling ? `${CHERRY_REVIEW_CHECKOUT_PATH}/return` : '/login/pg-review/return';
+        const returnUrl = new URL(returnPath, window.location.origin);
         returnUrl.searchParams.set('result', 'authorized');
         const successUrl = returnUrl.toString();
         returnUrl.searchParams.set('result', 'failed');
@@ -92,15 +93,17 @@ export function TossReviewButton(props: Props) {
     }
 
     if (!props.clientKey) {
-        return <p className="mt-4 text-sm text-fg-dim">테스트 클라이언트 키가 설정되면 결제창을 열 수 있습니다.</p>;
+        return <p role="status" className={isBilling ? 'ch-note' : 'mt-4 text-sm text-fg-dim'}>현재 테스트 결제창을 이용할 수 없습니다.</p>;
     }
 
     return (
         <>
-            <PrimaryButton type="button" className="mt-4" disabled={busy} onClick={open}>
-                {isBilling ? '테스트 카드 등록창 열기' : '테스트 결제창 열기'}
-            </PrimaryButton>
-            {error && <p role="alert" className="mt-3 text-sm text-fg">토스페이먼츠 창을 열 수 없습니다. 다시 시도해 주세요.</p>}
+            {isBilling
+                ? <button type="button" className="ch-button ch-checkout-cta" disabled={busy} onClick={open}>
+                    {busy ? '카드 등록창 여는 중…' : '카드 등록하기'}
+                </button>
+                : <PrimaryButton type="button" className="mt-4" disabled={busy} onClick={open}>테스트 결제창 열기</PrimaryButton>}
+            {error && <p role="alert" className={isBilling ? 'ch-error' : 'mt-3 text-sm text-fg'}>토스페이먼츠 창을 열 수 없습니다. 다시 시도해 주세요.</p>}
         </>
     );
 }

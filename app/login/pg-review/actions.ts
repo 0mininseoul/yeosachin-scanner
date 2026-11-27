@@ -2,8 +2,9 @@
 
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { CHERRY_REVIEW_CHECKOUT_PATH } from '@/lib/constants/cherry-public-url';
 import {
-    createPgReviewSession, matchesPgReviewPassword, pgReviewCredential, pgReviewPath,
+    createPgReviewSession, matchesPgReviewPassword, pgReviewCredential,
     PG_REVIEW_COOKIE, PG_REVIEW_EMAIL, PG_REVIEW_PATH, PG_REVIEW_SESSION_SECONDS,
 } from './account';
 
@@ -11,10 +12,9 @@ const cookieOptions = {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
-    path: PG_REVIEW_PATH,
 } as const;
 
-export async function signInForPgReview(form: FormData): Promise<string> {
+async function signIn(form: FormData, path: string): Promise<string> {
     const credential = pgReviewCredential();
     if (!credential) return '현재 이메일 로그인을 사용할 수 없습니다.';
 
@@ -29,13 +29,30 @@ export async function signInForPgReview(form: FormData): Promise<string> {
     const cookieStore = await cookies();
     cookieStore.set(PG_REVIEW_COOKIE, createPgReviewSession(credential.sessionKey), {
         ...cookieOptions,
+        path,
         maxAge: PG_REVIEW_SESSION_SECONDS,
     });
-    redirect(pgReviewPath(form.get('product')));
+    redirect(path);
+}
+
+export async function signInForPgReview(form: FormData) {
+    return signIn(form, PG_REVIEW_PATH);
+}
+
+export async function signInForCherryReview(form: FormData) {
+    return signIn(form, CHERRY_REVIEW_CHECKOUT_PATH);
+}
+
+async function signOut(path: string, destination: string) {
+    const cookieStore = await cookies();
+    cookieStore.set(PG_REVIEW_COOKIE, '', { ...cookieOptions, path, maxAge: 0 });
+    redirect(destination);
 }
 
 export async function signOutFromPgReview() {
-    const cookieStore = await cookies();
-    cookieStore.set(PG_REVIEW_COOKIE, '', { ...cookieOptions, maxAge: 0 });
-    redirect('/login');
+    await signOut(PG_REVIEW_PATH, '/login');
+}
+
+export async function signOutFromCherryReview() {
+    await signOut(CHERRY_REVIEW_CHECKOUT_PATH, CHERRY_REVIEW_CHECKOUT_PATH);
 }

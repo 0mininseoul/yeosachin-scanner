@@ -11,6 +11,8 @@ vi.mock('@/lib/services/admin/operator-route', async (importOriginal) => ({
 
 import { CRUSH_REPLACEMENTS, EX_REPLACEMENTS, parseCherryVariant, renderCherryLanding } from '@/lib/services/cherry/landing-variant';
 
+import { cherryDomainResponse } from '@/lib/services/cherry/public-domain';
+
 const landing = readFileSync(path.join(process.cwd(), 'public/cherry/landing.html'), 'utf8');
 
 describe('cherry landing variant', () => {
@@ -337,5 +339,29 @@ describe('cherry admin roster schema compatibility', () => {
             hasNext: false,
             variantCounts: null,
         });
+    });
+});
+
+
+describe('Cherry review checkout host routing', () => {
+    const routing = (hostname: string, pathname: string, method = 'GET') =>
+        cherryDomainResponse(new NextRequest(`https://${hostname}${pathname}`, { method, headers: { host: hostname } }));
+
+    it('serves checkout and sign-in on Cherry and redirects visits from the main host', () => {
+        expect(routing('cherry.yeosachin.com', '/checkout')?.headers.get('Cache-Control')).toBe('private, no-store');
+        expect(routing('cherry.yeosachin.com', '/checkout', 'POST')?.status).toBe(200);
+        expect(routing('cherry.yeosachin.com', '/checkout/return')?.status).toBe(200);
+        const result = routing('yeosachin.com', '/checkout?result=authorized');
+        expect(result?.status).toBe(307);
+        expect(result?.headers.get('location')).toBe('https://cherry.yeosachin.com/checkout');
+        expect(routing('yeosachin.com', '/checkout', 'POST')?.status).toBe(404);
+    });
+
+    it('serves compiled assets without exposing unrelated routes or accepting encoded paths', () => {
+        expect(routing('cherry.yeosachin.com', '/_next/static/chunks/app/checkout/page-a1.js')?.status).toBe(200);
+        expect(routing('cherry.yeosachin.com', '/_next/static/%2e%2fsecret.js')?.status).toBe(404);
+        expect(routing('cherry.yeosachin.com', '/check%6fut')?.status).toBe(404);
+        expect(routing('cherry.yeosachin.com', '/checkout/return', 'POST')?.status).toBe(404);
+        expect(routing('cherry.yeosachin.com', '/api/cherry/checkout', 'POST')?.status).toBe(404);
     });
 });

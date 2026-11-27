@@ -27,10 +27,6 @@ export function matchesPgReviewPassword(password: string, expectedHash: Buffer) 
     return reviewerMatches || ownerMatches;
 }
 
-export function pgReviewPath(product: FormDataEntryValue | null) {
-    return product === 'cherry' ? `${PG_REVIEW_PATH}?product=cherry` : PG_REVIEW_PATH;
-}
-
 function signExpiry(expiry: string, key: Buffer) {
     return createHmac('sha256', key).update(`pg-review-session-v1:${expiry}`).digest();
 }
