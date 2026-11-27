@@ -13,6 +13,7 @@ import { startSharedStandardMaintenance } from './fixtures/standard-shared-maint
 import { POST as paidWorker } from '@/app/api/analysis/v2/worker/route';
 import { ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION, ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER } from '@/lib/services/analysis/v2-worker-task-contract';
 import { databaseCounters, sharedStandardStopEvidence, sharedStandardMeasurements } from './fixtures/standard-shared-measurements';
+import { applyApifyHeadroom, measureApifyHeadroom } from './fixtures/standard-shared-apify-headroom';
 import { createSharedStandardDatabase } from './fixtures/standard-shared-database';
 import { readSharedResolverLedger, SharedResolverObservation } from './fixtures/standard-shared-resolver-observation';
 import { sharedStandardCapacity } from './fixtures/standard-shared-capacities.mjs';
@@ -190,6 +191,11 @@ it('publishes simultaneous paid Standard requests through one database and queue
     if (process.env.SHARED_STANDARD_WORKERS !== undefined) expect(Number(process.env.SHARED_STANDARD_WORKERS)).toBe(workers);
     const recovery = process.env.SHARED_STANDARD_SCENARIO === 'recovery';
     const productionPaid = process.env.SHARED_STANDARD_DELIVERY === 'production-paid';
+    const apifyHeadroom = process.env.SHARED_STANDARD_APIFY_HEADROOM;
+    if (apifyHeadroom !== undefined && (apifyHeadroom !== '7' || !productionPaid || ownersCount !== 6
+        || publicCount !== 600 || !recovery || process.env.SHARED_STANDARD_BUDGET_PROBE !== undefined)) {
+        throw new Error('SHARED_APIFY_HEADROOM_REQUIRES_SIX_LARGE_PRODUCTION_PAID_FIXTURES');
+    }
     const automaticPayments = productionPaid && ownersCount <= 10;
     const checkoutEvidence = automaticPayments ? 'signed_webhook_automatic_fulfillment'
         : ownersCount <= 10 ? 'signed_webhook_operator_admission' : 'synthetic_paid_receipt_operator_admission';
@@ -248,6 +254,7 @@ it('publishes simultaneous paid Standard requests through one database and queue
         if (productionPaid) {
             await db.exec(readFileSync('supabase/operations/20261126_expand_paid_standard_vertex.sql', 'utf8'));
         }
+        if (apifyHeadroom) await applyApifyHeadroom(db);
         if (automaticPayments) {
             await db.query(`UPDATE paid_analysis_capacity_policy SET max_active=$1, validation_ref='automatic-webhook-offline'`,
                 [ownersCount]);
@@ -708,14 +715,23 @@ it('publishes simultaneous paid Standard requests through one database and queue
                 expect(fixedExposure).toBeLessThanOrEqual(totals.limitUsd);
                 expect(fixedExposure + totals.freshReservedUsd).toBeGreaterThan(totals.limitUsd);
             }
+            const apifyHeadroomEvidence = apifyHeadroom ? await measureApifyHeadroom(db) : undefined;
+            if (apifyHeadroomEvidence) {
+                for (const scope of apifyHeadroomEvidence.scopes) {
+                    if (scope.peak < 1 || scope.peak > scope.effectiveLimit || scope.openAtStop !== 0) {
+                        sharedLedgerIssues.push('paid_apify_headroom_' + scope.scope);
+                    }
+                }
+            }
             const report = {
+                ...(apifyHeadroomEvidence ? { apifyHeadroomEvidence } : {}),
                 status: directPublicationMissing ? 'completed_without_direct_order_handoff' : ownersWithLedgerIssues || sharedLedgerIssues.length ? 'published_with_ledger_issues' : lateOwners || ownerReadOverHour ? 'completed_over_target' : coverageBelowTarget ? 'completed_below_coverage' : 'verified',
                 hourMeasurement: automaticPayments ? 'capacity_start_to_last_owner_webp' : 'payment_to_last_owner_webp',
                 productionPaid, checkoutEvidence, renderedOwners, verifiedResultEmailClaims, ...(automatic ? { automaticPayment: automatic.evidence } : {}),
                 approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
                 tokenLogEvents, cachedResolverLocal, coverage99, coverageBelowTarget, expectedEligiblePerOwner, ownersBelowCoverage, admissionEvents, continuationSetups, ownerReadOverHour, paidStartToLastReadMs,
-                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, capacityHandoffs, queueRetries, peakWorkers: queue.peakWorkers,
+                ownersWithLedgerIssues, sharedLedgerIssues, lateOwners, maintenance: maintenance.passes, retryPolicy: queue.retryPolicy, dispatchBurst: queue.burst, lifecycle: lifecycle.rows[0], pgDelta, retryCodes, owners: ownersCount, workers, slots, capacityPreset: capacity, sourceRevision: process.env.SHARED_STANDARD_SOURCE_REVISION ?? null, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0), publicCount, observedTiming, actorDelayMs, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, ...measurements, times, deliveries, continuations, capacityHandoffs, queueRetries, peakWorkers: queue.peakWorkers,
                 paidStartToDrainMs: finishedMs, periodicFulfillment, readyHandoffs: readyHandoffs.size, freshProfileReads: freshProfileReads.size, publishedHandoffs: publishedHandoffs.size, publishedHandoffCalls,
                 lostFreshHandoffResponse: Boolean(lostFreshDelivery), probedFreshHandoff, postDrainFulfillmentWaitMs, firstPreflightToVerifiedMs: Math.round(performance.now() - firstAt),
                 syntheticActorStarts: provider.starts.length, syntheticModelCalls: [...models.values()].reduce((a, b) => a + b, 0),
@@ -731,11 +747,12 @@ it('publishes simultaneous paid Standard requests through one database and queue
             const reason = error instanceof Error && /^SHARED_WORKER_[a-z0-9:.-]+:[A-Z_0-9]+$/.test(error.message)
                 ? error.message : safeCode(error);
             const failure = {
+                ...(apifyHeadroom ? { apifyHeadroomEvidence: await measureApifyHeadroom(db) } : {}),
                 status: 'failed', ownerHttpReads, verifiedRequestsBeforeStop: proofs, renderedOwners,
                 resolutionBeforeStop, emailClaimsBeforeStop, sharedLedgerIssues,
                 productionPaid, checkoutEvidence, approvedPaidOwners: approvedOwners.size, expandedPaidOwners: expandedOwners.size,
                 logicalLeaseOwners: logicalLeaseOwners.size, dispatchAuthorizedOwners: dispatchAuthorizedOwners.size,
-                tokenLogEvents, cachedResolverLocal, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
+                tokenLogEvents, cachedResolverLocal, coverage99, admissionEvents, continuationSetups, maintenance: maintenance?.passes ?? [], retryPolicy: queue.retryPolicy, reason, owners: ownersCount, workers, slots, capacityPreset: capacity, sourceRevision: process.env.SHARED_STANDARD_SOURCE_REVISION ?? null, resolverGraceMs: Number(process.env.STANDARD_SHARED_RESOLVER_GRACE_MS ?? 0),
                 publicCount, observedTiming, recovery, injectedTimeouts, resumedTimedOutRead, injectedWorker429s, elapsedMs: Math.round(performance.now() - firstAt),
                 errors, processModelPeaks, budgetTimeline: budgetTimeline.receipt(), ...await sharedStandardStopEvidence(db, resolverObservation)
             };

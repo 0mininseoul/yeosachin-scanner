@@ -1,4 +1,4 @@
-import { paidStandardFourthFeatureEnabled, withPaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
+import { paidStandardFeatureSlots, withPaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
 import { VertexAiBudgetCapacityPendingError } from '@/lib/services/ai/vertex-ai-cost-policy';
 import { DevLiveVertexBudgetReservationPendingError } from '@/lib/services/dev-ui/live-budget-signals';
 import { describe, expect, it, vi } from 'vitest';
@@ -82,18 +82,19 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4' };
         const verify = vi.fn(async () => true);
         const check = (overrides: Record<string, string | undefined>, version = policy, fence = job) =>
-            withPaidStandardCapacityJob(job, verify, () => paidStandardFourthFeatureEnabled(version, fence.requestId, fence), { ...env, ...overrides });
-        expect(await check({ PAID_STANDARD_PROCESS_FEATURE_SLOTS: undefined })).toBe(false);
-        expect(await check({ PAID_STANDARD_PROCESS_FEATURE_SLOTS: '40' })).toBe(false);
-        expect(await check({ K_SERVICE: 'other' })).toBe(false);
-        expect(await check({ DEV_LIVE_WORKLOAD: 'paid' })).toBe(false);
-        expect(await check({}, 'ai-stage-policy-v2.12')).toBe(false);
-        expect(await check({}, policy, { ...job, requestId: 'other' })).toBe(false);
-        expect(await check({}, policy, { ...job, claimToken: 'other' })).toBe(false);
-        expect(await check({}, policy, { ...job, jobKey: 'track:profile-ai:batch:1' })).toBe(false);
+            withPaidStandardCapacityJob(job, verify, () => paidStandardFeatureSlots(version, fence.requestId, fence), { ...env, ...overrides });
+        expect(await check({ PAID_STANDARD_PROCESS_FEATURE_SLOTS: undefined })).toBeUndefined();
+        expect(await check({ PAID_STANDARD_PROCESS_FEATURE_SLOTS: '40' })).toBeUndefined();
+        expect(await check({ K_SERVICE: 'other' })).toBeUndefined();
+        expect(await check({ DEV_LIVE_WORKLOAD: 'paid' })).toBeUndefined();
+        expect(await check({}, 'ai-stage-policy-v2.12')).toBeUndefined();
+        expect(await check({}, policy, { ...job, requestId: 'other' })).toBeUndefined();
+        expect(await check({}, policy, { ...job, claimToken: 'other' })).toBeUndefined();
+        expect(await check({}, policy, { ...job, jobKey: 'track:profile-ai:batch:1' })).toBeUndefined();
         expect(verify).not.toHaveBeenCalled();
-        expect(await check({})).toBe(true);
-        expect(verify).toHaveBeenCalledOnce();
+        expect(await check({})).toBe(4);
+        expect(await check({ PAID_STANDARD_PROCESS_FEATURE_SLOTS: '5' })).toBe(5);
+        expect(verify).toHaveBeenCalledTimes(2);
     });
 
     it('grants the shared fourth feature slot only to an opted-in signed job and keeps an older eligible waiter first', async () => {
@@ -128,7 +129,7 @@ describe('analysis V2 scheduler-v1 runtime', () => {
         // Let this waiter register before sending another signed wave.
         await new Promise<void>(resolve => setImmediate(resolve));
         start('paid-later', true); start('paid-next', true);
-        start('off', true, '3'); start('invalid', true, '5');
+        start('off', true, '3'); start('invalid', true, '50');
         start('wrong-claim', true, '4', { ...job, claimToken: 'different' });
         start('old-policy', true, '4', { ...job, aiStagePolicyVersion: 'ai-stage-policy-v2.10' });
         held.get('paid')!();
@@ -143,6 +144,23 @@ describe('analysis V2 scheduler-v1 runtime', () => {
             for (const release of held.values()) release();
             await vi.waitFor(() => expect(entered.length).toBeGreaterThan(count));
         }
+        for (const release of held.values()) release();
+        await Promise.all(pending);
+
+        entered.length = 0;
+        held.clear();
+        for (const key of ['a', 'b', 'c', 'd']) start(key, true, '4');
+        await vi.waitFor(() => expect(entered).toHaveLength(4));
+        start('fifth', true, '5');
+        await vi.waitFor(() => expect(entered).toHaveLength(5));
+        start('older-four', true, '4');
+        await new Promise<void>(resolve => setImmediate(resolve));
+        start('later-five', true, '5');
+        held.get('fifth')!();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(entered).toHaveLength(5);
+        held.get('a')!();
+        await vi.waitFor(() => expect(entered.slice(5)).toEqual(['older-four', 'later-five']));
         for (const release of held.values()) release();
         await Promise.all(pending);
     });

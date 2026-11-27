@@ -4,8 +4,10 @@ import { fileURLToPath } from 'node:url';
 import { sharedStandardCapacity } from '../tests/analysis/execution/fixtures/standard-shared-capacities.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const [owners = '16', preset = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', tail = 'immediate', delivery = 'fixture', budgetProbe, ...rest] =
+const [owners = '16', preset = '8', scenario = 'normal', receipt, publicCount = '1', timing = 'fast', tail = 'immediate', delivery = 'fixture', option, ...rest] =
     process.argv.slice(2);
+const apifyHeadroom = option === '--apify-headroom=7';
+const budgetProbe = apifyHeadroom ? undefined : option;
 const capacity = sharedStandardCapacity(preset);
 const graceByStrategy = { immediate: '0', grace8s: '8000', finish50s: '50000', coverage99: '0' };
 
@@ -14,12 +16,13 @@ if (rest.length || !/^(?:[1-9]|1[0-6])$/.test(owners) || !['normal', 'recovery']
     || !['fixture', 'production-paid'].includes(delivery)
     || ('processFeatureSlots' in capacity && delivery !== 'production-paid')
     || (tail === 'coverage99' && (scenario !== 'recovery' || Number(publicCount) < 4))
+    || (apifyHeadroom && (owners !== '6' || publicCount !== '600' || delivery !== 'production-paid'))
     || (budgetProbe !== undefined && (!['held', 'spent'].includes(budgetProbe) || owners !== '1' || publicCount !== '4'
         || delivery !== 'production-paid' || timing !== 'fast'))
     || (delivery === 'production-paid' && (capacity.slots !== 128 || tail !== 'coverage99'))
     || !Object.hasOwn(graceByStrategy, tail) || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
     throw new Error('Usage: node scripts/standard-shared-capacity.mjs [1..16] [capacity preset] [normal|recovery] '
-        + '[absolute-new-receipt.json] [1..600 public candidates] [fast|observed] [immediate|grace8s|finish50s|coverage99] [fixture|production-paid] [held|spent]');
+        + '[absolute-new-receipt.json] [1..600 public candidates] [fast|observed] [immediate|grace8s|finish50s|coverage99] [fixture|production-paid] [held|spent|--apify-headroom=7]');
 }
 
 const test = [process.execPath, 'node_modules/vitest/vitest.mjs', 'run', '--config',
@@ -31,7 +34,12 @@ const sandbox = {
 }[process.platform];
 if (!sandbox) throw new Error('Isolated network execution requires macOS or Linux.');
 
+// Identify the tracked code actually measured; dirty worktrees must not claim a commit's results.
+const head = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: root, encoding: 'utf8' });
+const status = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' });
+const sourceRevision = head.status === 0 && status.status === 0 && !status.stdout.trim() ? head.stdout.trim() : undefined;
 const env = {
+    ...(sourceRevision ? { SHARED_STANDARD_SOURCE_REVISION: sourceRevision } : {}),
     PATH: process.env.PATH,
     CI: 'true',
     TZ: 'UTC',
@@ -46,6 +54,7 @@ const env = {
     SHARED_STANDARD_TIMING: timing,
     STANDARD_SHARED_RESOLVER_GRACE_MS: graceByStrategy[tail],
     ...(tail === 'coverage99' && delivery === 'fixture' ? { DEV_LIVE_STANDARD_RESOLVER_MODE: 'admitted' } : {}),
+    ...(apifyHeadroom ? { SHARED_STANDARD_APIFY_HEADROOM: '7' } : {}),
     ...(budgetProbe ? { SHARED_STANDARD_BUDGET_PROBE: budgetProbe } : {}),
     ...(receipt ? { SHARED_STANDARD_RECEIPT: receipt } : {}),
 };

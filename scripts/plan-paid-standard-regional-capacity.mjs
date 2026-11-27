@@ -120,12 +120,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ];
         if (processFeatureSlots === 4) contracts.push(
             ['lib/services/analysis/paid-standard-capacity.ts', 'PAID_STANDARD_PROCESS_FEATURE_SLOTS'],
-            ['lib/services/analysis/v2-ai-scheduler-runtime.ts', 'paidStandardFourthFeatureEnabled'],
+            ['lib/services/analysis/v2-ai-scheduler-runtime.ts', ['paidStandardFourthFeatureEnabled', 'paidStandardFeatureSlots']],
             ['lib/services/ai/gemini.ts', 'runWithMixedFeatureSlot'],
         );
         for (const [path, symbol] of contracts) {
             const file = execFileSync('git', ['show', sourceSha + ':' + path], { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] });
-            requireCondition(file.includes(symbol), 'The reviewed commit lacks the paid Standard release contract.');
+            requireCondition((Array.isArray(symbol) ? symbol : [symbol]).some(name => file.includes(name)), 'The reviewed commit lacks the paid Standard release contract.');
         }
         const observe = args => JSON.parse(execFileSync('gcloud', args, { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] }));
         const cloudRun = observe(['run', 'services', 'describe', service, '--project=' + project, '--region=' + region, '--format=json']);

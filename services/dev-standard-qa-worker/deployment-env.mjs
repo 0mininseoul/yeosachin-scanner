@@ -60,7 +60,7 @@ export function qaWorkerDeployment(role, wave) {
         [p + 'PROJECT']: project, [p + 'LOCATION']: location, [p + 'QUEUE']: queueName(role, wave),
         [p + 'SERVICE_ACCOUNT_EMAIL']: invoker, [p + 'CALLER_AUTH_MODE']: 'adc', [p + 'OIDC_AUDIENCE']: origin,
         [p + 'TARGET_URL']: origin + '/api/analysis/' + (paid ? 'v2' : 'preflight') + '/worker',
-        ...(paid ? { PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' } : {}),
+        ...(paid ? { PAID_STANDARD_PROCESS_FEATURE_SLOTS: '5', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' } : {}),
     };
     return { environment, secretRefs: { ...commonRefs, ...(paid ? paidRefs : {}) } };
 }

@@ -1,13 +1,13 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { channel } from 'node:diagnostics_channel';
-import { paidStandardExpandedCapacityEnabled, type PaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
+import { paidStandardExpandedCapacityEnabled, paidStandardFeatureSlots, type PaidStandardCapacityJob } from '@/lib/services/analysis/paid-standard-capacity';
 
 export type ResolverAdmissionReason = 'worker_stage' | 'worker_shared' | 'global_resolver' | 'global_shared';
 type ResolverAdmissionOutcome = 'contended' | 'skipped' | 'admitted_after_wait';
 
 const observations = channel('yeosachin.standard.resolver-admission');
 type CachedFeatureResolver = Readonly<{ requestId: string; operationKey: string; handlerDeadlineAtMs: number }>;
-const resolverAdmission = new AsyncLocalStorage<{ signal: AbortSignal; waitDeadline?: number; cached?: CachedFeatureResolver }>();
+const resolverAdmission = new AsyncLocalStorage<{ signal: AbortSignal; waitDeadline?: number; cached?: CachedFeatureResolver & { waitMs: 15_000 | 30_000 } }>();
 const resolverWaitMs = 5_000;
 
 // Both the executor and physical lease allocator require the same Dev delivery.
@@ -29,8 +29,12 @@ export async function withStandardResolverAdmission<T>(
     signal: AbortSignal, call: () => Promise<T>,
     candidate?: CachedFeatureResolver & PaidStandardCapacityJob & { aiStagePolicyVersion: string },
 ): Promise<T> {
-    const cached = candidate && Number.isFinite(candidate.handlerDeadlineAtMs)
-        && await paidStandardExpandedCapacityEnabled(candidate.aiStagePolicyVersion, candidate) ? candidate : undefined;
+    let cached: (CachedFeatureResolver & { waitMs: 15_000 | 30_000 }) | undefined;
+    if (candidate && Number.isFinite(candidate.handlerDeadlineAtMs)
+        && await paidStandardExpandedCapacityEnabled(candidate.aiStagePolicyVersion, candidate)) {
+        const slots = await paidStandardFeatureSlots(candidate.aiStagePolicyVersion, candidate.requestId, candidate);
+        cached = { ...candidate, waitMs: slots === 5 ? 30_000 : 15_000 };
+    }
     signal.throwIfAborted();
     return resolverAdmission.run({ signal, cached }, call);
 }
