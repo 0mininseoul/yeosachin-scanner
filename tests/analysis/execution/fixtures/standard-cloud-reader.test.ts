@@ -111,6 +111,13 @@ it('stops on revoked access and bounds transient polling by the original deadlin
             async (ms: number) => { vi.setSystemTime(Date.now() + ms); })).rejects.toThrow('WAVE_EXPIRED');
         expect(poll).toHaveBeenCalledTimes(1);
         expect(Date.now()).toBe(start + 500);
+        const late = vi.fn(async (signal: AbortSignal) => {
+            expect(signal).toBeInstanceOf(AbortSignal);
+            vi.setSystemTime(start + 45_500);
+            return { data: [1, 2, 3, 4, 5, 6], error: null, status: 200 };
+        });
+        await expect(readRosterUntilAvailable(late, vi.fn(), start + 501)).rejects.toThrow('WAVE_EXPIRED');
+        expect(late).toHaveBeenCalledTimes(1);
     } finally { vi.useRealTimers(); }
 });
 

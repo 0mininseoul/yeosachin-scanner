@@ -17,8 +17,8 @@ async function main() {
     requireReader(anon !== env.SUPABASE_SERVICE_ROLE_KEY, 'INVALID_READER_CONFIG');
     const wave = env.DEV_STANDARD_QA_WAVE;
     const rows = async cutoff => {
-        const poll = () => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
-            .select('slot,request_id,request_status,preflight_status,order_status,seat_at,published_at');
+        const poll = signal => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
+            .select('slot,request_id,request_status,preflight_status,order_status,seat_at,published_at').abortSignal(signal);
         const data = await readRosterUntilAvailable(poll, emit, cutoff);
         const terminal = ['failed', 'expired', 'cancelled', 'refunded', 'upgrade_required', 'refund_required'];
         return data.map(row => ({

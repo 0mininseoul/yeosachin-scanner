@@ -11,7 +11,16 @@ export function safeCode(error) {
 export async function readRosterUntilAvailable(poll, emit, cutoff, sleep = (ms) => delay(ms)) {
     let retry = 0;
     while (Date.now() < cutoff) {
-        const result = await poll();
+        const remaining = Math.max(1, cutoff - Date.now());
+        const signal = AbortSignal.timeout(Math.min(45_000, remaining));
+        let result;
+        try {
+            result = await poll(signal);
+        } catch (error) {
+            requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
+            throw error;
+        }
+        requireReader(Date.now() < cutoff, 'WAVE_EXPIRED');
         if (!result.error) {
             requireReader(Array.isArray(result.data), 'ROSTER_READ');
             return result.data;
