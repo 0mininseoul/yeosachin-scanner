@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { isAnalysisResultAuthoritativelyPublished } from '@/lib/services/analysis/result-publication-authority';
@@ -10,6 +11,7 @@ import {
     loadCurrentEarlybirdCheckoutPhone,
 } from './checkout';
 import { earlybirdStore } from './store';
+import { isPaidResultEmailAvailableForOrder } from './result-email';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -30,7 +32,7 @@ const orderRowSchema = z.object({
     user_id: z.string().uuid(),
     preflight_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     pricing_version: z.string().min(1).max(64),
     expected_amount_krw: z.number().int().positive(),
     expected_groble_product_id: z.string().min(1).max(128),
@@ -96,14 +98,24 @@ const DISPLAY_STATUS: Readonly<Record<EarlybirdOrderSystemStatus, string>> = {
     refunded: '환불 완료',
 };
 
-const PLAN_NAMES = { basic: 'Basic', standard: 'Standard' } as const;
+const PLAN_NAMES = { basic: 'Basic', standard: 'Standard', plus: 'Plus' } as const;
+
+const capacitySchema = z.object({
+    waiting: z.boolean(),
+    startedAt: z.string().datetime({ offset: true }).nullable(),
+    expectedMaxMinutes: z.number().int().positive().nullable(),
+});
 
 export interface EarlybirdOrderStatusDto {
+    capacityWaitStatus?: 'waiting';
+    analysisStartedAt?: string;
+    expectedAnalysisMaxMinutes?: number;
+    resultEmailNotificationAvailable?: true;
     orderId: string;
     preflightId: string;
     targetInstagramId: string;
-    planId: 'basic' | 'standard';
-    planName: 'Basic' | 'Standard';
+    planId: PaidEarlybirdPlanId;
+    planName: 'Basic' | 'Standard' | 'Plus';
     actualAmountKrw: number | null;
     acceptedAt: string | null;
     dueAt: string | null;
@@ -126,13 +138,15 @@ export class EarlybirdOrderLookupError extends Error {
 
 export async function loadLatestEarlybirdOrder(
     userId: string,
-    planId?: 'basic' | 'standard'
+    planId?: PaidEarlybirdPlanId,
+    orderId?: string
 ): Promise<EarlybirdOrderStatusDto | null> {
     let query = supabaseAdmin
         .from('earlybird_orders')
         .select('id, user_id, preflight_id, target_instagram_id, plan_id, pricing_version, expected_amount_krw, expected_groble_product_id, buyer_match_policy, expected_buyer_phone_number_normalized, expected_buyer_phone_verification_source, disclosure_version, disclosure_text, disclosure_accepted_at, groble_seller_reference, seller_reference_confirmed_at, actual_groble_product_id, payment_id, actual_amount_krw, status, paid_at, due_at, plan_sequence, result_request_id, checkout_blocked_at, checkout_blocked_reason, created_at')
         .eq('user_id', userId);
     if (planId) query = query.eq('plan_id', planId);
+    if (orderId) query = query.eq('id', orderId);
     const { data, error } = await query
         .order('created_at', { ascending: false })
         .limit(1)
@@ -286,14 +300,29 @@ export async function loadLatestEarlybirdOrder(
         }
     }
 
+    let capacity: z.infer<typeof capacitySchema> | null = null;
+    if (deliveryMode === 'automatic' || effectiveStatus === 'completed') {
+        const { data, error } = await supabaseAdmin.rpc('load_paid_analysis_capacity_v1', {
+            p_order_id: order.id, p_user_id: userId,
+        });
+        const parsed = capacitySchema.safeParse(data);
+        if (!error && parsed.success) capacity = parsed.data;
+    }
+    const waiting = effectiveStatus === 'paid' && capacity?.waiting === true;
+    const emailAvailable = waiting && await isPaidResultEmailAvailableForOrder(order.id, userId).catch(() => false);
     const progressUrl = (deliveryMode === 'automatic' || publicationLag)
-        && !requiresSupport
+        && !requiresSupport && !waiting
         && (effectiveStatus === 'paid' || effectiveStatus === 'analysis_in_progress')
         && order.result_request_id
         ? `/progress/${encodeURIComponent(order.result_request_id)}`
         : null;
 
     return Object.freeze({
+        ...(waiting ? { capacityWaitStatus: 'waiting' as const } : {}),
+        ...(capacity?.startedAt ? { analysisStartedAt: capacity.startedAt } : {}),
+        ...(capacity?.startedAt && capacity.expectedMaxMinutes
+            ? { expectedAnalysisMaxMinutes: capacity.expectedMaxMinutes } : {}),
+        ...(emailAvailable ? { resultEmailNotificationAvailable: true as const } : {}),
         orderId: order.id,
         preflightId: order.preflight_id,
         targetInstagramId: order.target_instagram_id,

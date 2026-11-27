@@ -176,8 +176,8 @@ const PAYMENT: Record<string, NodeSpec> = {
     admission: {
         col: 0, row: 0, kind: 'infra', title: '실행 승인', subtitle: '크레딧 예약 · Cloud Tasks',
         does: [
-            '결제된 주문에 Apify 슬롯을 묶고 플랜 크레딧을 예약합니다.',
-            '분석 요청을 만들고 첫 작업을 Cloud Tasks에 등록합니다.',
+            '결제된 주문에 Apify 자격을 연결합니다. Basic·Standard·Plus는 같은 분석 자리 한도를 쓰며 빈자리가 나면 결제 순서대로 시작합니다.',
+            '사전 확인이 끝나면 자리를 배정받은 주문에 분석 요청을 만들고 첫 작업을 Cloud Tasks에 등록합니다.',
         ],
         services: 'Cloud Tasks · Apify 크레딧 풀',
         numbers: [{ label: '작업 최대 시도', value: `${n(ANALYSIS_V2_JOB_MAX_ATTEMPTS)}회` }],

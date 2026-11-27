@@ -346,7 +346,7 @@ describe('signed Groble webhook route', () => {
     it('mirrors signed payment evidence only when the dual-write flag is explicit', async () => {
         process.env.COMMERCE_CANONICAL_PAYMENT_WRITE = 'true';
         mocks.rpc.mockImplementation(async (name: string) => {
-            if (name === 'finalize_earlybird_groble_payment') {
+            if (name === 'finalize_automatic_paid_analysis_v1') {
                 return {
                     data: [{
                         disposition: 'accepted',
@@ -916,7 +916,8 @@ describe('signed Groble webhook route', () => {
         const response = await POST(request(body));
 
         expect(response.status).toBe(200);
-        expect(mocks.rpc).toHaveBeenCalledWith('finalize_earlybird_groble_payment', {
+        expect(mocks.rpc).toHaveBeenCalledWith('finalize_automatic_paid_analysis_v1', {
+            p_seller_reference: null,
             p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
             p_idempotency_key: 'delivery_0001',
             p_event_type: 'payment.completed',
@@ -980,7 +981,7 @@ describe('signed Groble webhook route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.rpc).toHaveBeenCalledWith(
-            'finalize_earlybird_groble_payment_by_reference',
+            'finalize_automatic_paid_analysis_v1',
             expect.objectContaining({
                 p_seller_reference: SELLER_REFERENCE,
                 p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
@@ -1010,7 +1011,7 @@ describe('signed Groble webhook route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.rpc).toHaveBeenCalledWith(
-            'finalize_earlybird_groble_payment',
+            'finalize_automatic_paid_analysis_v1',
             expect.objectContaining({
                 p_event_id: 'evt_test_a1b2c3d4e5f60718293a4b5c',
                 p_product_id: 'basic_product-01',
@@ -1047,7 +1048,7 @@ describe('signed Groble webhook route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.rpc).toHaveBeenCalledWith(
-            'finalize_earlybird_groble_payment',
+            'finalize_automatic_paid_analysis_v1',
             expect.objectContaining({ p_buyer_display_name: null })
         );
         const observedOutput = JSON.stringify({
@@ -1078,7 +1079,7 @@ describe('signed Groble webhook route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.rpc).toHaveBeenCalledWith(
-            'finalize_earlybird_groble_payment',
+            'finalize_automatic_paid_analysis_v1',
             expect.objectContaining({
                 p_buyer_phone_normalized: null,
                 p_buyer_phone_raw: null,

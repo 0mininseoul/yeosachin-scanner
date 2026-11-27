@@ -5,12 +5,14 @@ import type {
 } from '@/lib/services/instagram/providers/types';
 import type { AnalysisWorkloadRole } from './workload-role';
 import {
+    AnalysisProviderAdmissionCapacityPendingError,
     AnalysisProviderAdmissionFenceError,
     AnalysisProviderAdmissionPersistenceError,
     AnalysisProviderAdmissionResolutionPendingError,
     type AnalysisProviderAdmissionInput,
     type AnalysisProviderAdmissionLease,
     type AnalysisProviderAdmissionStore,
+    analysisProviderAdmissionId,
     analysisProviderAdmissionStore,
     isAnalysisProviderAdmissionEnabled,
 } from './provider-admission-store';
@@ -170,7 +172,23 @@ export function withAnalysisProviderAdmissionCheckpoint(
                     // was lost. Replay exactly once with the same durable identity;
                     // typed denials are never replayed and unknown failures retain
                     // the admission if the replay also fails.
-                    if (!(error instanceof AnalysisProviderAdmissionPersistenceError)) {
+                    if (error instanceof AnalysisProviderAdmissionCapacityPendingError
+                        && input.workloadRole === 'paid' && input.storedStatus === 'running'
+                        && base.resumeRunId) {
+                        // An expired but still running admission remains charged to capacity.
+                        // Rotate only this operation into recovery; acquire checks the live job
+                        // and provider ledger before transferring the same slot to this worker.
+                        const recovered = await admission.recoverExpired({
+                            admissionId: analysisProviderAdmissionId(admissionInput),
+                            recoveryToken: randomUUID(),
+                        }).catch((cause: unknown) => {
+                            // A legacy run can predate admission tracking; keep its normal
+                            // capacity wait when there is no expired slot to rotate.
+                            if (cause instanceof AnalysisProviderAdmissionFenceError) return false;
+                            throw cause;
+                        });
+                        if (!recovered) throw error;
+                    } else if (!(error instanceof AnalysisProviderAdmissionPersistenceError)) {
                         throw error;
                     }
                     return admission.acquire(admissionInput);

@@ -120,11 +120,13 @@ export function analysisV2MutualReviewProgressCopy(
     return `${mutual} 중 공개 계정 ${reviewedCount.toLocaleString('ko-KR')}명 검토 완료`;
 }
 
-export function analysisDurationProgressCopy(isDevPresentation: boolean): string {
-    // Dev's synthetic execution duration is not a production timing estimate.
-    return isDevPresentation
-        ? '테스트 분석은 약 45초 동안 진행돼요'
-        : '계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요';
+export function analysisDurationProgressCopy(isDevPresentation: boolean, expectedMaxMinutes?: number | null): string {
+    if (isDevPresentation) return '테스트 분석은 약 45초 동안 진행돼요';
+    if (expectedMaxMinutes === 60) return '분석 시작 후 완료까지 최대 1시간이 걸릴 수 있어요.';
+    if (typeof expectedMaxMinutes === 'number' && Number.isSafeInteger(expectedMaxMinutes) && expectedMaxMinutes > 0) {
+        return `분석 시작 후 완료까지 최대 ${expectedMaxMinutes}분 정도 걸릴 수 있어요.`;
+    }
+    return '계정 규모와 수집 상황에 따라 판독 시간이 달라질 수 있어요';
 }
 
 export const OWNER_RESULT_PAGE_SIZE = 50;

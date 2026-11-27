@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { analysisV2ProgressStore } from '@/lib/services/analysis/v2-progress-store';
 import { createSupabaseAnalysisV2DagStateStore } from '@/lib/services/analysis/v2-dag-state-store';
 import { hydratePersistedAnalysisDurationEstimate } from '@/lib/services/analysis/duration-estimate-store';
@@ -12,6 +13,11 @@ import {
 } from '@/lib/services/identity/account-principal-store';
 
 const requestIdSchema = z.string().uuid();
+const paidTimingSchema = z.object({
+    waiting: z.boolean(),
+    startedAt: z.string().datetime({ offset: true }).nullable(),
+    expectedMaxMinutes: z.number().int().positive().nullable(),
+}).strict();
 const PRIVATE_NO_STORE_HEADERS = {
     'Cache-Control': 'private, no-store, max-age=0',
     Vary: 'Cookie',
@@ -22,7 +28,7 @@ function json(body: unknown, status: number) {
 }
 
 export async function GET(
-    _request: Request,
+    request: Request,
     { params }: { params: Promise<{ requestId: string }> },
 ) {
     try {
@@ -40,6 +46,28 @@ export async function GET(
                 return json({ error: 'Account unavailable.' }, 403);
             }
             throw accountError;
+        }
+
+        if (new URL(request.url).searchParams.get('source') === 'paid_capacity') {
+            // The RPC joins the active account's own paid order to this request.
+            const { data, error: readError } = await supabaseAdmin.rpc('load_paid_analysis_capacity_by_request_v1', {
+                p_request_id: parsedRequestId.data,
+                p_user_id: user.id,
+            });
+            if (readError) {
+                // Installations without the optional capacity policy use the generic guidance.
+                if (readError.code === 'PGRST202' || readError.code === '42883') {
+                    return json({ expectedAnalysisMaxMinutes: null }, 200);
+                }
+                return json({ error: 'Analysis duration unavailable.' }, 503);
+            }
+            if (data === null) return json({ error: 'Analysis duration not found.' }, 404);
+            const timing = paidTimingSchema.safeParse(data);
+            if (!timing.success) return json({ error: 'Analysis duration unavailable.' }, 503);
+            return json({
+                expectedAnalysisMaxMinutes: timing.data.waiting || !timing.data.startedAt
+                    ? null : timing.data.expectedMaxMinutes,
+            }, 200);
         }
 
         const demo = await demoAnalysisStore.findForOwner(parsedRequestId.data, user.id);

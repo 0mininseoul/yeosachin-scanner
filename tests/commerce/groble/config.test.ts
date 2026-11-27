@@ -72,4 +72,19 @@ describe('Groble server configuration', () => {
         expect(() => getGrobleCheckoutUrl('basic', 'buyer@example.com', config))
             .toThrow('INVALID_GROBLE_SELLER_REFERENCE');
     });
+
+    it('enables Plus only when both dedicated Groble values are configured', () => {
+        expect(() => readGrobleConfig({ ...VALID_ENV, GROBLE_PLUS_PRODUCT_ID: 'plus-product' }))
+            .toThrow('GROBLE_PLUS_PAYMENT_ADDRESS');
+        const config = readGrobleConfig({
+            ...VALID_ENV,
+            GROBLE_PLUS_PRODUCT_ID: 'plus-product',
+            GROBLE_PLUS_PAYMENT_ADDRESS: 'plus-checkout',
+        });
+        expect(config.productIds.plus).toBe('plus-product');
+        expect(getGrobleCheckoutUrl('plus', 'ord.0123456789abcdef0123456789abcdef', config))
+            .toBe('https://groble.im/payment/plus-checkout?ref=ord.0123456789abcdef0123456789abcdef');
+        expect(() => getGrobleCheckoutUrl('plus', 'ord.0123456789abcdef0123456789abcdef', readGrobleConfig(VALID_ENV)))
+            .toThrow('GROBLE_PLUS_PAYMENT_ADDRESS');
+    });
 });

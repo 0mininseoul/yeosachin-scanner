@@ -4,7 +4,7 @@ import type { EarlybirdOrderSystemStatus } from './order-status';
 export function planViewEventKey(
     preflightId: string,
     pricingVersion: string,
-    planId: Extract<PlanId, 'basic' | 'standard'>,
+    planId: PlanId,
 ): string {
     return `amplitude:plan_viewed:${preflightId}:${pricingVersion}:${planId}`;
 }

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
+import { z } from 'zod';
 import { TopBar, CaseCard, Eyebrow } from '@/components/case-ui';
 import { NOINDEX_METADATA } from '@/lib/services/seo/discovery';
 import { createClient } from '@/lib/supabase/server';
@@ -33,15 +34,23 @@ export default async function EarlybirdPage({
 
     const params = await searchParams;
     const requestedPlan = params.plan;
-    const planId = requestedPlan === 'basic' || requestedPlan === 'standard'
+    const planId = requestedPlan === 'basic' || requestedPlan === 'standard' || requestedPlan === 'plus'
         ? requestedPlan
         : undefined;
 
     let order = null;
-    try {
-        order = await loadLatestEarlybirdOrder(user.id, planId);
-    } catch {
-        order = null;
+    if (params.orderId !== undefined) {
+        const selected = z.string().uuid().safeParse(params.orderId);
+        if (!selected.success || !planId) notFound();
+        const orderId = selected.data.toLowerCase();
+        order = await loadLatestEarlybirdOrder(user.id, planId, orderId);
+        if (!order || order.orderId !== orderId || order.planId !== planId) notFound();
+    } else {
+        try {
+            order = await loadLatestEarlybirdOrder(user.id, planId);
+        } catch {
+            order = null;
+        }
     }
 
     // A paid return with a durable request id already has an owner-scoped

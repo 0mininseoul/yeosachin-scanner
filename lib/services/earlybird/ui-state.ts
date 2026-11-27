@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import {
     PLAN_PRICING_VERSION,
     type PlanId,
@@ -179,7 +180,7 @@ export function applyEarlybirdPricingRefreshBoundary(
 
 export async function recoverOrRefreshStaleEarlybirdPricing(
     stalePricingPreflightId: string,
-    planId: 'basic' | 'standard',
+    planId: PaidEarlybirdPlanId,
     dependencies: StaleEarlybirdRecoveryDependencies
 ): Promise<'checkout_recovered' | 'pricing_refresh_required'> {
     try {
@@ -227,7 +228,7 @@ function pendingCheckoutRecoveryErrorMessage(code: string | null): string {
 
 export async function recoverPendingEarlybirdCheckout(
     preflightId: string,
-    planId: 'basic' | 'standard',
+    planId: PaidEarlybirdPlanId,
     guard: EarlybirdCheckoutRecoveryGuard,
     dependencies: PendingEarlybirdRecoveryDependencies
 ): Promise<'checkout_recovered' | 'already_in_progress' | 'recovery_failed'> {
@@ -341,14 +342,6 @@ export function canSubmitEarlybirdSelection(
 
 export function buildEarlybirdPlanPresentation(planId: PlanId) {
     const plan = EARLYBIRD_PLAN_CATALOG[planId];
-    if (plan.fulfillment === 'waitlist') {
-        return Object.freeze({
-            referencePriceLabel: null,
-            priceLabel: '대기 신청',
-            discountLabel: null,
-            actionLabel: 'Plus 대기 신청하기',
-        });
-    }
     return Object.freeze({
         referencePriceLabel: formatKrw(plan.referenceAmountKrw),
         priceLabel: formatKrw(plan.earlybirdAmountKrw),

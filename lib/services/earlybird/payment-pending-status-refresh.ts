@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import type { EarlybirdOrderStatusDto } from './order-status';
 
 const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
@@ -9,7 +10,7 @@ export type EarlybirdStatusRefreshMode = 'payment_pending' | 'automatic';
 
 type StatusRefreshOrder = Pick<
     EarlybirdOrderStatusDto,
-    'systemStatus' | 'requiresSupport' | 'deliveryMode' | 'progressUrl' | 'resultUrl'
+    'systemStatus' | 'requiresSupport' | 'deliveryMode' | 'progressUrl' | 'resultUrl' | 'capacityWaitStatus'
 >;
 
 const OWNER_STATUS_SYSTEM_STATUSES = new Set([
@@ -37,8 +38,8 @@ function isOwnerStatusSnapshot(value: unknown): value is EarlybirdOrderStatusDto
     return typeof order.orderId === 'string'
         && typeof order.preflightId === 'string'
         && typeof order.targetInstagramId === 'string'
-        && (order.planId === 'basic' || order.planId === 'standard')
-        && (order.planName === 'Basic' || order.planName === 'Standard')
+        && (order.planId === 'basic' || order.planId === 'standard' || order.planId === 'plus')
+        && (order.planName === 'Basic' || order.planName === 'Standard' || order.planName === 'Plus')
         && (order.actualAmountKrw === null || typeof order.actualAmountKrw === 'number')
         && (order.acceptedAt === null || typeof order.acceptedAt === 'string')
         && (order.dueAt === null || typeof order.dueAt === 'string')
@@ -50,6 +51,10 @@ function isOwnerStatusSnapshot(value: unknown): value is EarlybirdOrderStatusDto
         && typeof order.deliveryMode === 'string'
         && OWNER_STATUS_DELIVERY_MODES.has(order.deliveryMode)
         && typeof order.checkoutRecoverable === 'boolean'
+        && (order.resultEmailNotificationAvailable === undefined || order.resultEmailNotificationAvailable === true)
+        && (order.capacityWaitStatus === undefined || (order.capacityWaitStatus === 'waiting'
+            && order.systemStatus === 'paid' && order.deliveryMode === 'automatic' && !order.requiresSupport
+            && order.progressUrl === null && order.resultUrl === null))
         && (order.progressUrl === null || typeof order.progressUrl === 'string')
         && (order.resultUrl === null || typeof order.resultUrl === 'string');
 }
@@ -65,9 +70,10 @@ export interface SingleFlightEarlybirdStatusRefresh {
  * replaces the local DTO and never starts or mutates fulfillment.
  */
 export function createSingleFlightEarlybirdStatusRefresh(
-    planId: 'basic' | 'standard',
+    planId: PaidEarlybirdPlanId,
     onSnapshot: OwnerStatusSnapshotHandler,
     request: OwnerStatusRequest = (input, init) => fetch(input, init),
+    orderId?: string,
 ): SingleFlightEarlybirdStatusRefresh {
     let stopped = false;
     let controller: AbortController | null = null;
@@ -80,13 +86,14 @@ export function createSingleFlightEarlybirdStatusRefresh(
         const requestController = new AbortController();
         controller = requestController;
         const promise = request(
-            `/api/earlybird/orders/latest?plan=${encodeURIComponent(planId)}`,
+            `/api/earlybird/orders/latest?plan=${encodeURIComponent(planId)}`
+                + (orderId ? `&orderId=${encodeURIComponent(orderId)}` : ''),
             { cache: 'no-store', signal: requestController.signal },
         ).then(async response => {
             if (!response.ok) return;
             const payload = await response.json() as { order?: unknown };
             if (stopped || requestController.signal.aborted) return;
-            if (isOwnerStatusSnapshot(payload.order)) onSnapshot(payload.order);
+            if (isOwnerStatusSnapshot(payload.order) && payload.order.planId === planId) onSnapshot(payload.order);
         }).catch(() => {
             // Preserve the current truthful snapshot on transient read errors;
             // the bounded scheduler will try again.
@@ -127,7 +134,7 @@ function validatedOwnerPath(value: string | null, kind: 'progress' | 'result'): 
 export function earlybirdStatusNavigationTarget(
     order: StatusRefreshOrder
 ): string | null {
-    if (order.requiresSupport) return null;
+    if (order.requiresSupport || order.capacityWaitStatus === 'waiting') return null;
 
     if (order.systemStatus === 'completed') {
         return validatedOwnerPath(order.resultUrl, 'result');

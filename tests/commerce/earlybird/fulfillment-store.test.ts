@@ -43,6 +43,8 @@ function store(
     overrides: Partial<EarlybirdFulfillmentStore> = {}
 ): EarlybirdFulfillmentStore {
     return {
+        recoverSignedAdmissions: vi.fn(async () => {}),
+        claimCapacity: vi.fn(async () => 'ready' as const),
         admit: vi.fn(async () => identity()),
         autoAdmitEligible: vi.fn(async () => []),
         listRecoverable: vi.fn(async () => [identity()]),
@@ -81,6 +83,20 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it.each(['waiting', 'ineligible'] as const)('keeps a %s payment out of fresh admission and billing', async capacity => {
+        const orderStore = store({ claimCapacity: vi.fn(async () => capacity) });
+        const deps = {
+            store: orderStore, rebindExpiredPaidPreflight: vi.fn(), reserveFreshAdmission: vi.fn(),
+            enqueueFreshAdmission: vi.fn(), markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(), dispatchAnalysisJob: vi.fn(),
+        };
+        const advanced = await advanceAdmittedEarlybirdFulfillment(identity(), deps);
+        expect(advanced.nextAction).toBe(capacity === 'waiting' ? 'wait_for_capacity' : 'no_longer_eligible');
+        expect(deps.reserveFreshAdmission).not.toHaveBeenCalled();
+        expect(orderStore.claim).not.toHaveBeenCalled();
+        expect(deps.enqueueFreshAdmission).not.toHaveBeenCalled();
+    });
+
     it('preserves a safe admission boundary diagnostic without the RPC message', async () => {
         const secret = 'Bearer service-role-secret-do-not-print';
         const orderStore = store({
@@ -684,6 +700,7 @@ describe('earlybird fulfillment store', () => {
         // which the recovery route turns into a bare 500. A paid order then retries
         // for hours with no signal saying why.
         const orderStore = {
+            recoverSignedAdmissions: vi.fn().mockResolvedValue(undefined),
             listRecoverable: vi.fn().mockResolvedValue([identity()]),
             reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
             autoAdmitEligible: vi.fn().mockResolvedValue([]),
@@ -716,6 +733,7 @@ describe('earlybird fulfillment store', () => {
 
     it('still names a failure that carries no error code', async () => {
         const orderStore = {
+            recoverSignedAdmissions: vi.fn().mockResolvedValue(undefined),
             listRecoverable: vi.fn().mockResolvedValue([identity()]),
             reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
             autoAdmitEligible: vi.fn().mockResolvedValue([]),

@@ -318,7 +318,7 @@ async function handlePOST(
             orderId: result.orderId,
             nextUrl: buildEarlybirdCheckoutContinuationUrl({
                 orderId: result.orderId,
-                planId: parsed.data.planId as 'basic' | 'standard',
+                planId: parsed.data.planId,
             }),
         }, { status: result.created ? 201 : 200 });
     } catch (error) {
