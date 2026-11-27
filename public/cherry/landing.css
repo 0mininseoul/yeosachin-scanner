@@ -126,8 +126,9 @@ section[id] { scroll-margin-top: 24px; }
 
 .brand-icon--small { width: 27px; height: 27px; }
 .main-nav { display: flex; align-items: center; gap: clamp(16px, 2.2vw, 32px); font-size: 14px; }
-.nav-detail, .text-link { transition: color 150ms ease; }
-.nav-detail:hover, .text-link:hover { color: var(--cherry); }
+.header-login { flex-shrink: 0; font-weight: 700; white-space: nowrap; }
+.nav-detail, .text-link, .header-login { transition: color 150ms ease; }
+.nav-detail:hover, .text-link:hover, .header-login:hover { color: var(--cherry); }
 
 /* Buttons */
 
@@ -811,7 +812,7 @@ form[aria-busy='true'] .submit { opacity: 0.75; }
 
 .site-footer { gap: clamp(22px, 3vw, 44px); margin-top: var(--spacing); padding: 36px var(--inset); border-top: 1px solid var(--line); }
 .site-footer .text-link { white-space: nowrap; }
-.footer-links { display: flex; align-items: center; gap: clamp(22px, 3vw, 44px); margin-left: auto; }
+.footer-links { display: flex; flex-wrap: wrap; align-items: center; gap: clamp(22px, 3vw, 44px); margin-left: auto; }
 .footer-links .text-link { color: var(--muted); font-weight: 400; }
 .footer-contact > span { font-weight: 800; }
 /* Business details in English, the same as the yeosachin.com footer: a full-width row under the links. */
@@ -1010,6 +1011,7 @@ form[aria-busy='true'] .submit { opacity: 0.75; }
   h2 { font-size: clamp(22px, 7.2vw, 48px); }
   .site-header { min-height: 54px; }
   .nav-detail { display: none; }
+  .main-nav { gap: 10px; }
   .site-header .button--small { min-height: 38px; padding-inline: 14px; }
   .hero, .demo, .how, .missed, .waitlist { grid-template-columns: minmax(0, 1fr); }
   .missed { gap: 22px; }
@@ -1105,6 +1107,7 @@ form[aria-busy='true'] .submit { opacity: 0.75; }
 @media (max-width: 355px) {
   .wordmark { font-size: 13px; gap: 5px; }
   .site-header .brand-icon { width: 26px; height: 26px; }
+  .site-header .brand-tag { display: none; }
   .hero-actions { gap: 6px; }
   .hero-actions .button { min-height: 44px; padding-inline: 4px; font-size: 12.5px; }
 }

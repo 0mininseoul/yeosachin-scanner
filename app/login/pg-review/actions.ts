@@ -3,7 +3,7 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import {
-    createPgReviewSession, matchesPgReviewPassword, pgReviewCredential,
+    createPgReviewSession, matchesPgReviewPassword, pgReviewCredential, pgReviewPath,
     PG_REVIEW_COOKIE, PG_REVIEW_EMAIL, PG_REVIEW_PATH, PG_REVIEW_SESSION_SECONDS,
 } from './account';
 
@@ -31,7 +31,7 @@ export async function signInForPgReview(form: FormData): Promise<string> {
         ...cookieOptions,
         maxAge: PG_REVIEW_SESSION_SECONDS,
     });
-    redirect(PG_REVIEW_PATH);
+    redirect(pgReviewPath(form.get('product')));
 }
 
 export async function signOutFromPgReview() {

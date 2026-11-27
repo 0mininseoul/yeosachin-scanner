@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import { AnalysisPlanCards, AnalysisPlanSection } from '@/components/analysis-plan-selection';
-import { CaseCard, PrimaryButton } from '@/components/case-ui';
+import { CaseCard } from '@/components/case-ui';
 import { ANALYSIS_PLAN_CATALOG, buildPlanSelectionCards, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { EARLYBIRD_DISCLOSURE_TEXT, EARLYBIRD_PLAN_CATALOG, isPaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { buildEarlybirdPlanPresentation } from '@/lib/services/earlybird/ui-state';
@@ -16,7 +16,6 @@ const plans = buildPlanSelectionCards({ followers: 100, following: 100 }).map(ca
 
 export function PurchasePreview({ clientKey }: { clientKey: string | null }) {
     const [plan, setPlan] = useState<PlanId>('basic');
-    const [showOrder, setShowOrder] = useState(false);
     const presentation = buildEarlybirdPlanPresentation(plan);
     const paidPlan = isPaidEarlybirdPlanId(plan);
     const orderName = `위장여사친 판독기 AI 판독 리포트 · ${plan === 'basic' ? 'Basic' : 'Standard'}`;
@@ -31,18 +30,10 @@ export function PurchasePreview({ clientKey }: { clientKey: string | null }) {
                     onPlanSelection={nextPlan => {
                         if (!isPaidEarlybirdPlanId(nextPlan)) return;
                         setPlan(nextPlan);
-                        setShowOrder(false);
                     }} />
+                <p className="mt-4 text-xs leading-relaxed text-fg-dim">{EARLYBIRD_DISCLOSURE_TEXT}</p>
                 {paidPlan && (
-                    <>
-                        <p className="mt-4 text-xs leading-relaxed text-fg-dim">{EARLYBIRD_DISCLOSURE_TEXT}</p>
-                        <PrimaryButton type="button" className="mt-5" onClick={() => setShowOrder(true)}>
-                            구매 내용 확인
-                        </PrimaryButton>
-                    </>
-                )}
-                {showOrder && paidPlan && (
-                    <CaseCard className="mt-5 p-5" role="status">
+                    <CaseCard className="mt-5 p-5">
                         <h3 className="font-bold text-fg">주문 내용</h3>
                         <dl className="mt-3 space-y-2 text-sm text-fg">
                             <div className="flex justify-between">
@@ -54,7 +45,7 @@ export function PurchasePreview({ clientKey }: { clientKey: string | null }) {
                                 <dd className="font-bold">{presentation.priceLabel}</dd>
                             </div>
                         </dl>
-                        <TossReviewButton product="analyzer" clientKey={clientKey}
+                        <TossReviewButton key={plan} product="analyzer" clientKey={clientKey}
                             amount={EARLYBIRD_PLAN_CATALOG[plan].earlybirdAmountKrw} orderName={orderName} />
                     </CaseCard>
                 )}

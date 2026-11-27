@@ -11,9 +11,12 @@ export function EmailLoginAvailability({ enabled, children }: { enabled: boolean
     return <EmailLoginContext.Provider value={enabled}>{children}</EmailLoginContext.Provider>;
 }
 
-export function EmailLogin() {
+export function EmailLogin({ product = 'analyzer', initiallyExpanded = false }: {
+    product?: 'analyzer' | 'cherry';
+    initiallyExpanded?: boolean;
+} = {}) {
     const enabled = useContext(EmailLoginContext);
-    const [expanded, setExpanded] = useState(false);
+    const [expanded, setExpanded] = useState(initiallyExpanded);
     const formId = useId();
     const [error, signIn, pending] = useActionState(
         (_previous: string | null, form: FormData) => signInForPgReview(form),
@@ -24,7 +27,7 @@ export function EmailLogin() {
 
     return (
         <div className="mt-2.5">
-            <button
+            {!initiallyExpanded && <button
                 type="button"
                 aria-expanded={expanded}
                 aria-controls={formId}
@@ -33,8 +36,9 @@ export function EmailLogin() {
                 className="min-h-12 w-full border border-line bg-ink px-4 py-3.5 text-sm font-bold text-fg transition-colors hover:border-fg-dim"
             >
                 이메일로 로그인
-            </button>
+            </button>}
             <form id={formId} action={signIn} hidden={!expanded} data-amp-mask className="mt-4 space-y-3">
+                <input type="hidden" name="product" value={product} />
                 <label className="block text-sm text-fg">
                     이메일
                     <input name="email" type="email" autoComplete="username" maxLength={254}

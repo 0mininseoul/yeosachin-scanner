@@ -14,6 +14,7 @@ import { clearLoginTerminalState } from '@/lib/services/auth/login-terminal-stat
 function LoginContent() {
     const searchParams = useSearchParams();
     const redirectTo = searchParams.get('redirectTo') || '/analyze';
+    const isCherry = redirectTo === '/cherry/home';
     const error = searchParams.get('error');
     const isDev = isDevUiPresentation();
     const devAccessDenied = isDev && error === 'dev_access_denied';
@@ -39,10 +40,10 @@ function LoginContent() {
                     </div>
                     <Eyebrow className="justify-center">접근 인증</Eyebrow>
                     <h1 className="mt-4 text-[22px] font-extrabold tracking-tight text-fg">
-                        AI 위장 여사친 판독기
+                        {isCherry ? '체리 · 맞팔 알리미' : 'AI 위장 여사친 판독기'}
                     </h1>
                     <p className="mt-2 text-[13px] text-fg-dim">
-                        {isDev ? '개발 환경은 허용된 카카오 계정으로 로그인해 주세요.' : '인증 후 판독을 시작하세요.'}
+                        {isDev ? '개발 환경은 허용된 카카오 계정으로 로그인해 주세요.' : isCherry ? '로그인하고 체리 이용 내역을 확인하세요.' : '인증 후 판독을 시작하세요.'}
                     </p>
                 </div>
 
@@ -58,8 +59,9 @@ function LoginContent() {
                         </div>
                     )}
 
-                    <AuthButtons redirectTo={redirectTo} promptKakaoLogin={devAccessDenied} />
-                    <EmailLogin />
+                    <AuthButtons redirectTo={redirectTo} promptKakaoLogin={devAccessDenied}
+                        kakaoLabel={isCherry ? '카카오로 로그인' : undefined} />
+                    <EmailLogin product={isCherry ? 'cherry' : 'analyzer'} />
                 </CaseCard>
 
                 <p className="mt-6 text-center text-[12px] leading-relaxed text-fg-mute">
