@@ -1,3 +1,4 @@
+import { queueName } from './queue-name.mjs';
 import { pathToFileURL } from 'node:url';
 
 const project = 'gen-lang-client-0311522474';
@@ -56,7 +57,7 @@ export function qaWorkerDeployment(role, wave) {
         ANALYSIS_V2_VERTEX_AI_COST_OPTIMIZATION_V212_ROLLOUT: 'off', ANALYSIS_V2_GENDER_RESOLUTION_ROLLOUT: 'production',
         ANALYSIS_V2_NARRATIVE_V28_ROLLOUT: 'production', ANALYSIS_V2_AI_MICROBATCH_V29_ROLLOUT: 'production',
         ANALYSIS_V2_GENDER_SUMMARY_QUALITY_V211_ROLLOUT: 'production', ANALYSIS_V2_AI_SCHEDULER_ROLLOUT: 'production',
-        [p + 'PROJECT']: project, [p + 'LOCATION']: location, [p + 'QUEUE']: name,
+        [p + 'PROJECT']: project, [p + 'LOCATION']: location, [p + 'QUEUE']: queueName(role, wave),
         [p + 'SERVICE_ACCOUNT_EMAIL']: invoker, [p + 'CALLER_AUTH_MODE']: 'adc', [p + 'OIDC_AUDIENCE']: origin,
         [p + 'TARGET_URL']: origin + '/api/analysis/' + (paid ? 'v2' : 'preflight') + '/worker',
         ...(paid ? { PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' } : {}),

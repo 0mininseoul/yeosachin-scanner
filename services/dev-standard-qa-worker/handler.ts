@@ -5,7 +5,8 @@ import { parseAnalysisV2WorkerTaskPayload, verifyAnalysisV2TaskAuthorization } f
 import { verifyPreflightTaskAuthorization } from '@/lib/services/analysis/preflight-tasks';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { qaWorkerConfig } from './config';
-import { origin, runQaDelivery, service, taskPath, type QaRole } from './scope';
+import { queueName } from './queue-name.mjs';
+import { origin, runQaDelivery, taskPath, type QaRole } from './scope';
 
 const preflight = z.object({
     workloadRole: z.literal('preflight'), preflightId: z.uuid(), kind: z.literal('precheckout_blite').optional(),
@@ -29,7 +30,7 @@ export async function handleQaWorker(request: Request) {
     const { role, wave } = qaWorkerConfig();
     if (request.method !== 'POST' || request.url !== origin(role) + taskPath(role)
         || request.headers.get('host') !== new URL(origin(role)).host
-        || request.headers.get('x-cloudtasks-queuename') !== service(role)) return new Response(null, { status: 403 });
+        || request.headers.get('x-cloudtasks-queuename') !== queueName(role, wave)) return new Response(null, { status: 403 });
     const verify = role === 'paid' ? verifyAnalysisV2TaskAuthorization : verifyPreflightTaskAuthorization;
     if (!await verify(request.headers.get('authorization'))) return new Response(null, { status: 403 });
     let selected;

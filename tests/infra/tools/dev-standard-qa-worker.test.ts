@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { qaWorkerConfig, assertQaCloudIdentity } from '../../../services/dev-standard-qa-worker/config';
 import { number, origin, project, runQaDelivery, service, taskPath, type QaRole } from '../../../services/dev-standard-qa-worker/scope';
 import { bundleQaWorker } from '../../../services/dev-standard-qa-worker/build.mjs';
+import { queueName } from '../../../services/dev-standard-qa-worker/queue-name.mjs';
 import { qaWorkerDeployment } from '../../../services/dev-standard-qa-worker/deployment-env.mjs';
 import { getPreflightTasksConfig } from '@/lib/services/analysis/preflight-tasks';
 import { getAnalysisV2TasksConfig } from '@/lib/services/analysis/v2-tasks';
@@ -35,7 +36,7 @@ it('pins each role to the Dev project, queue, OIDC audience, resource buckets an
         const env = settings(role);
         expect(qaWorkerConfig(env).role).toBe(role);
         const config = role === 'paid' ? getAnalysisV2TasksConfig(env) : getPreflightTasksConfig(env);
-        expect(config?.queue).toBe(service(role));
+        expect(config?.queue).toBe(queueName(role, wave));
         expect(env).toMatchObject({ PRECHECKOUT_BLITE_ENABLED: 'false', PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
             VERTEX_AI_PER_ORDER_BUDGET_USD: '2', VERTEX_AI_DAILY_BUDGET_USD: '2' });
         expect(env).not.toHaveProperty('PREFLIGHT_PROFILE_PROVIDER');
@@ -63,10 +64,12 @@ it('requires the canonical queue, OIDC and DB wave membership before passing a f
     for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'GOOGLE_APPLICATION_CREDENTIALS']) vi.stubEnv(key, undefined);
     const id = randomUUID();
     const payload = { workloadRole: role, preflightId: id, generation: 1, reservationToken: randomUUID() };
-    const req = (data: unknown, queue = service(role)) => new Request(origin(role) + taskPath(role), {
+    const req = (data: unknown, queue = queueName(role, wave)) => new Request(origin(role) + taskPath(role), {
         method: 'POST', headers: { host: new URL(origin(role)).host, 'x-cloudtasks-queuename': queue }, body: JSON.stringify(data),
     });
     expect((await handleQaWorker(req(payload, 'other-queue'))).status).toBe(403);
+    expect((await handleQaWorker(req(payload, service(role)))).status).toBe(403);
+    expect((await handleQaWorker(req(payload, queueName(role, 'a'.repeat(64))))).status).toBe(403);
     expect(mocks.verify).not.toHaveBeenCalled();
     mocks.verify.mockResolvedValue(false);
     expect((await handleQaWorker(req(payload))).status).toBe(403);

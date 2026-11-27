@@ -1,3 +1,4 @@
+import { queueName } from './queue-name.mjs';
 import { dbOrigin, number, origin, project, region, service, taskPath, type QaRole } from './scope';
 import { APIFY_CREDENTIAL_TOKEN_ENV } from '@/lib/services/instagram/providers/types';
 
@@ -28,7 +29,7 @@ export function qaWorkerConfig(env: NodeJS.ProcessEnv = process.env) {
         const p = r === 'paid' ? 'ANALYSIS_V2_TASKS_' : 'PREFLIGHT_TASKS_';
         if (r !== role && env[p + 'ENABLED'] !== 'true') continue;
         for (const [key, value] of Object.entries({
-            PROJECT: project, LOCATION: region, QUEUE: service(r), SERVICE_ACCOUNT_EMAIL: 'dev-live-' + r + '-invoker@' + project + '.iam.gserviceaccount.com',
+            PROJECT: project, LOCATION: region, QUEUE: queueName(r, env.DEV_STANDARD_QA_WAVE), SERVICE_ACCOUNT_EMAIL: 'dev-live-' + r + '-invoker@' + project + '.iam.gserviceaccount.com',
             CALLER_AUTH_MODE: 'adc', TARGET_URL: origin(r) + taskPath(r), OIDC_AUDIENCE: origin(r),
         })) envFlags[p + key] = value;
     }
