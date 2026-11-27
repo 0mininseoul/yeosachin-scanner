@@ -1,10 +1,9 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright-core';
 import { readCloudOwnerImages } from '../../tests/analysis/execution/fixtures/standard-cloud-owner-http.ts';
 import { verifyCloudOwnerPage } from '../../tests/analysis/execution/fixtures/standard-cloud-owner-browser.mjs';
 import { ReaderError, assertReaderRegion, contextGet, createOwnerCookies, readerAdmin, readerContext, requireReader } from './session.mjs';
 import { resolveDevPublicKey } from './public-key.mjs';
-import { monitorReaders, safeCode } from './monitor.mjs';
+import { monitorReaders, readRosterUntilAvailable, safeCode } from './monitor.mjs';
 
 function emit(event) { console.log(JSON.stringify(event)); }
 async function main() {
@@ -17,20 +16,12 @@ async function main() {
     });
     requireReader(anon !== env.SUPABASE_SERVICE_ROLE_KEY, 'INVALID_READER_CONFIG');
     const wave = env.DEV_STANDARD_QA_WAVE;
-    const rows = async () => {
+    const rows = async cutoff => {
         const poll = () => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
             .select('slot,request_id,request_status,preflight_status,order_status,seat_at,published_at');
-        let result = await poll();
-        for (let retry = 1; retry <= 2 && result.error; retry++) {
-            const timeout = result.error.code === '57014';
-            if (!timeout && result.status !== 0 && result.status < 500) break;
-            emit({ event: 'roster_read_retry', retry, code: timeout ? '57014' : 'UPSTREAM' });
-            await delay(retry * 2_000);
-            result = await poll();
-        }
-        requireReader(!result.error && Array.isArray(result.data), 'ROSTER_READ');
+        const data = await readRosterUntilAvailable(poll, emit, cutoff);
         const terminal = ['failed', 'expired', 'cancelled', 'refunded', 'upgrade_required', 'refund_required'];
-        return result.data.map(row => ({
+        return data.map(row => ({
             slot: row.slot, requestId: row.request_id, startedAt: row.seat_at, publishedAt: row.published_at,
             status: [row.preflight_status, row.request_status, row.order_status].some(s => terminal.includes(s))
                 ? 'failed' : 'open',
