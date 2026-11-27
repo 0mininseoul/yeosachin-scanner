@@ -3,7 +3,7 @@
 import Image from 'next/image';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
+import { CHERRY_THREADS_CONSOLE_PATH, NAMCHIN_ADMIN_CONSOLE_PATH } from '@/lib/contracts/admin-console';
 import { reservationSourceLabels } from '@/public/cherry/reservation-source.mjs';
 import { ConsoleWorkspaceSwitch } from './console-workspace-switch';
 import { Card, EmptyRow, ErrorNotice } from './console-ui';
@@ -68,6 +68,7 @@ export function NamchinWaitlistConsole() {
                 <div className="ac-nav-label">운영</div>
                 <Link className="ac-nav-btn" href={`${NAMCHIN_ADMIN_CONSOLE_PATH}&view=service`}>서비스 운영</Link>
                 <Link className="ac-nav-btn is-active" href={NAMCHIN_ADMIN_CONSOLE_PATH} aria-current="page">사전 예약 명단</Link>
+                <Link className="ac-nav-btn" href={CHERRY_THREADS_CONSOLE_PATH}>Threads</Link>
             </nav>
             <div className="ac-side-bottom"><ConsoleWorkspaceSwitch active="namchin" /></div>
         </aside>
