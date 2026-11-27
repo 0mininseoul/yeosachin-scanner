@@ -4,8 +4,11 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { qaWorkerConfig, assertQaCloudIdentity } from '../../../services/dev-standard-qa-worker/config';
-import { dbOrigin, number, origin, project, region, service, taskPath, type QaRole } from '../../../services/dev-standard-qa-worker/scope';
+import { number, origin, project, runQaDelivery, service, taskPath, type QaRole } from '../../../services/dev-standard-qa-worker/scope';
 import { bundleQaWorker } from '../../../services/dev-standard-qa-worker/build.mjs';
+import { qaWorkerDeployment } from '../../../services/dev-standard-qa-worker/deployment-env.mjs';
+import { getPreflightTasksConfig } from '@/lib/services/analysis/preflight-tasks';
+import { getAnalysisV2TasksConfig } from '@/lib/services/analysis/v2-tasks';
 
 const mocks = vi.hoisted(() => ({ verify: vi.fn(), rpc: vi.fn(), paid: vi.fn(), preflight: vi.fn() }));
 vi.mock('@/app/api/analysis/v2/worker/route', () => ({ POST: mocks.paid }));
@@ -17,28 +20,13 @@ vi.mock('@/lib/services/analysis/preflight-tasks', async original => ({
 vi.mock('@/lib/services/analysis/v2-tasks', async original => ({
     ...await original<typeof import('@/lib/services/analysis/v2-tasks')>(), verifyAnalysisV2TaskAuthorization: mocks.verify,
 }));
+import { supabaseAdmin as scopedAdmin } from '../../../services/dev-standard-qa-worker/admin';
 import { handleQaWorker } from '../../../services/dev-standard-qa-worker/handler';
 
 const wave = 'b'.repeat(64);
-function settings(role: QaRole) {
-    const env: NodeJS.ProcessEnv = {
-        ANALYSIS_WORKLOAD_ROLE: role, NODE_ENV: 'production', K_SERVICE: service(role), K_REVISION: service(role) + '-00001-abc',
-        GOOGLE_CLOUD_PROJECT: project, DEV_STANDARD_QA_PROJECT_NUMBER: number, DEV_STANDARD_QA_WAVE: wave,
-        NEXT_PUBLIC_SUPABASE_URL: dbOrigin, ANALYSIS_V2_INSTAGRAM_ROUTE: 'apify_v1',
-        SCRAPER_PROFILE: 'apify', SCRAPER_PROFILES_BATCH: 'apify', SCRAPER_FOLLOWERS: 'apify', SCRAPER_FOLLOWING: 'apify',
-        SCRAPER_FALLBACK: 'false', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true', VERTEX_AI_BUDGET_GUARD_ENABLED: 'true', VERTEX_AI_BUDGET_STORE: 'supabase',
-        ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: project + '-dev-live-media', ANALYSIS_V2_RESULT_IMAGE_R2_BUCKET: project + '-dev-live-results',
-        ANALYSIS_V2_RESULT_IMAGE_R2_ENDPOINT: 'https://' + 'a'.repeat(32) + '.r2.cloudflarestorage.com',
-        PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', PAID_STANDARD_PROCESS_FEATURE_SLOTS: '4',
-        ANALYSIS_V2_WORKER_ENABLED: 'true', ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
-    };
-    const prefix = role === 'paid' ? 'ANALYSIS_V2_TASKS_' : 'PREFLIGHT_TASKS_';
-    for (const [key, value] of Object.entries({
-        ENABLED: 'true', PROJECT: project, LOCATION: region, QUEUE: service(role),
-        SERVICE_ACCOUNT_EMAIL: 'dev-live-' + role + '-invoker@' + project + '.iam.gserviceaccount.com',
-        CALLER_AUTH_MODE: 'adc', TARGET_URL: origin(role) + taskPath(role), OIDC_AUDIENCE: origin(role),
-    })) env[prefix + key] = value;
-    return env;
+function settings(role: QaRole): NodeJS.ProcessEnv {
+    const { environment } = qaWorkerDeployment(role, wave);
+    return { ...environment, NODE_ENV: 'production', K_SERVICE: service(role), K_REVISION: service(role) + '-00001-abc' };
 }
 afterEach(() => { vi.unstubAllEnvs(); vi.resetAllMocks(); });
 
@@ -46,6 +34,12 @@ it('pins each role to the Dev project, queue, OIDC audience, resource buckets an
     for (const role of ['preflight', 'paid'] as const) {
         const env = settings(role);
         expect(qaWorkerConfig(env).role).toBe(role);
+        const config = role === 'paid' ? getAnalysisV2TasksConfig(env) : getPreflightTasksConfig(env);
+        expect(config?.queue).toBe(service(role));
+        expect(env).toMatchObject({ PRECHECKOUT_BLITE_ENABLED: 'false', PRECHECKOUT_BLITE_ROLLOUT_PERCENT: '0',
+            VERTEX_AI_PER_ORDER_BUDGET_USD: '2', VERTEX_AI_DAILY_BUDGET_USD: '2' });
+        expect(env).not.toHaveProperty('PREFLIGHT_PROFILE_PROVIDER');
+        expect(Object.keys(qaWorkerDeployment(role, wave).secretRefs)).toHaveLength(role === 'paid' ? 7 : 2);
         for (const override of [{ K_SERVICE: 'analysis-paid-worker' }, { APIFY_API_TOKEN: 'not-an-inert-placeholder' },
             { NEXT_PUBLIC_SUPABASE_URL: 'https://wrong.invalid' }, { SCRAPER_FALLBACK: 'true' },
             { [(role === 'paid' ? 'ANALYSIS_V2' : 'PREFLIGHT') + '_TASKS_QUEUE']: 'other-queue' }]) {
@@ -87,6 +81,22 @@ it('requires the canonical queue, OIDC and DB wave membership before passing a f
     expect((await handleQaWorker(req(payload))).status).toBe(200);
     expect(mocks.rpc).toHaveBeenLastCalledWith('dev_cloud_six_scope_v1', { p_wave: wave, p_preflight_id: id });
     expect(mocks.paid).not.toHaveBeenCalled();
+});
+
+it('sends all model cost transitions only to the private six-seat ledger for the active request', async () => {
+    const requestId = randomUUID();
+    await runQaDelivery({ role: 'paid', wave, slot: 1, requestId, logicalStage: 'featureAnalysis' }, async () => {
+        for (const action of ['reserve', 'settle', 'cancel']) {
+            const key = { p_reservation_key: requestId + ':feature:1' };
+            const args = action === 'reserve' ? { ...key, p_run_id: requestId } : key;
+            await scopedAdmin.rpc(action + '_vertex_ai_budget', args);
+            expect(mocks.rpc).toHaveBeenLastCalledWith(action + '_dev_cloud_six_vertex_budget_v1', { ...args, p_wave: wave }, undefined);
+            expect(() => scopedAdmin.rpc(action + '_vertex_ai_budget', { ...args, p_reservation_key: randomUUID() + ':feature:1' }))
+                .toThrow('SCOPE_REJECTED');
+        }
+        expect(() => scopedAdmin.rpc('snapshot_vertex_ai_budget')).toThrow('SCOPE_REJECTED');
+    });
+    expect(mocks.rpc).toHaveBeenCalledTimes(3);
 });
 
 it('bundles both actual routes and storage clients with the QA providers and enforces egress before module loading', async () => {
