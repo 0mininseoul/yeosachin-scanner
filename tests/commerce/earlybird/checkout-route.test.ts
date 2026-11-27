@@ -399,6 +399,32 @@ describe('earlybird checkout and waitlist routes', () => {
         expect(mocks.suppressOperationalObservation).not.toHaveBeenCalled();
     });
 
+    it('routes a configured Plus checkout at the server-owned sale price', async () => {
+        vi.stubEnv('GROBLE_PLUS_PRODUCT_ID', 'plus_product-03');
+        vi.stubEnv('GROBLE_PLUS_PAYMENT_ADDRESS', 'plus-checkout-c3');
+        try {
+            mockCheckoutRecord(true);
+            const response = await checkout(request('/api/earlybird/checkout', {
+                preflightId: PREFLIGHT_ID,
+                planId: 'plus',
+                disclosureAccepted: true,
+            }));
+            expect(response.status).toBe(201);
+            await expect(response.json()).resolves.toEqual({
+                orderId: ORDER_ID,
+                nextUrl: `/api/earlybird/checkout/redirect?orderId=${ORDER_ID}&planId=plus`,
+            });
+            expect(mocks.rpc).toHaveBeenCalledWith('create_earlybird_checkout_with_lineage_marker', expect.objectContaining({
+                p_plan_id: 'plus',
+                p_expected_product_id: 'plus_product-03',
+                p_expected_amount_krw: 10_900,
+                p_pricing_version: 'earlybird-2026-11-v6',
+            }));
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
     it('restores the same pending order on idempotent checkout replay', async () => {
         mockCheckoutRecord(false);
         const response = await checkout(request('/api/earlybird/checkout', {
