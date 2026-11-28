@@ -441,10 +441,12 @@ export function createEarlybirdFulfillmentStore(
         },
 
         async admit(orderId) {
-            const { data, error } = await dependencies.rpc(
-                'admit_earlybird_fulfillment',
-                { p_order_id: validatedOrderId(orderId) }
-            );
+            const params = { p_order_id: validatedOrderId(orderId) };
+            const admit = () => dependencies.rpc('admit_earlybird_fulfillment', params);
+            const firstAttempt = await admit();
+            const { data, error } = isPostgresStatementTimeout(firstAttempt.error)
+                ? await admit()
+                : firstAttempt;
             if (error) persistenceError(error);
             const identity = identityFromRow(oneRow(data, identityRowSchema));
             return identity;

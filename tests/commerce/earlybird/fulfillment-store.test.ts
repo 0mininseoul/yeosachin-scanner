@@ -83,6 +83,36 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it('repeats the same admission once after PostgreSQL cancels the statement on timeout', async () => {
+        const rpc = vi.fn()
+            .mockImplementationOnce(() => rpcResult(null, {
+                code: '57014', message: 'canceling statement due to statement timeout',
+            }))
+            .mockImplementationOnce(() => rpcResult([{
+                order_id: ORDER, fulfillment_status: 'admission_pending',
+                preflight_id: PREFLIGHT, user_id: USER, plan_id: 'plus', request_id: null,
+            }]));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.admit(ORDER)).resolves.toEqual(identity({ planId: 'plus' }));
+        expect(rpc.mock.calls).toEqual([
+            ['admit_earlybird_fulfillment', { p_order_id: ORDER }],
+            ['admit_earlybird_fulfillment', { p_order_id: ORDER }],
+        ]);
+    });
+
+    it('does not repeat an admission cancelled by the caller', async () => {
+        const rpc = vi.fn(() => rpcResult(null, {
+            code: '57014', message: 'canceling statement due to user request',
+        }));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.admit(ORDER)).rejects.toMatchObject({
+            code: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('returns the existing retry outcome after a confirmed capacity claim timeout', async () => {
         const rpc = vi.fn()
             .mockImplementationOnce(() => rpcResult(null, {
