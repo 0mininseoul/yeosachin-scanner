@@ -22,6 +22,7 @@ import {
 import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
+import { paidResultEmailEnabled, sealResultEmailRecipient } from '@/lib/services/earlybird/result-email-recipient';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
@@ -410,9 +411,21 @@ async function handlePOST(
                 payment.sellerReference
             );
             if (autoAdmissionEligible) {
-                persistence = await supabaseAdmin.rpc('finalize_automatic_paid_analysis_v1', {
-                    ...params, p_seller_reference: internalSellerReference,
-                });
+                let sealed: string | null = null;
+                if (internalSellerReference && process.env.VERCEL_ENV === 'production'
+                    && paidResultEmailEnabled(process.env)) {
+                    try {
+                        sealed = sealResultEmailRecipient(payment.buyerEmail, internalSellerReference, process.env);
+                    } catch {
+                        console.error('Paid result delivery encryption is unavailable.');
+                    }
+                }
+                const automaticParams = { ...params, p_seller_reference: internalSellerReference };
+                persistence = sealed
+                    ? await supabaseAdmin.rpc('finalize_paid_analysis_with_result_email_v1', {
+                        ...automaticParams, p_sealed_recipient: sealed,
+                    })
+                    : await supabaseAdmin.rpc('finalize_automatic_paid_analysis_v1', automaticParams);
             } else {
                 persistence = internalSellerReference
                     ? await supabaseAdmin.rpc(

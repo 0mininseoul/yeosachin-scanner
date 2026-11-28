@@ -19,17 +19,22 @@ interface SendEmailParams {
   to: string;
   subject: string;
   html: string;
+  text?: string;
+  replyTo?: string;
+  from?: string;
   idempotencyKey?: string;
 }
 
-export async function sendEmail({ to, subject, html, idempotencyKey }: SendEmailParams) {
+export async function sendEmail({ to, subject, html, text, replyTo, from, idempotencyKey }: SendEmailParams) {
   try {
     const resend = getResendClient();
     const { data, error } = await resend.emails.send({
-      from: process.env.RESEND_FROM_EMAIL || 'AI 바람감지기 <noreply@baram-detector.com>',
+      from: from || process.env.RESEND_FROM_EMAIL || 'AI 바람감지기 <noreply@baram-detector.com>',
       to,
       subject,
       html,
+      ...(text ? { text } : {}),
+      ...(replyTo ? { replyTo } : {}),
     }, idempotencyKey ? { idempotencyKey } : undefined);
 
     if (error) {

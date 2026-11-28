@@ -2,26 +2,24 @@ import 'server-only';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDevUiDeploymentContext } from '@/lib/constants/dev-ui';
-import { sendAnalysisCompleteEmail } from '@/lib/services/email';
+import { sendEmail } from '@/lib/services/email';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { openResultEmailRecipient, paidResultEmailEnabled, readResultEmailKey } from './result-email-recipient';
+import { PAID_RESULT_EMAIL_REPLY_TO, renderPaidResultEmail } from './result-email-template';
 
-type Environment = Readonly<Record<string, string | undefined>>;
 const claimSchema = z.array(z.object({
     order_id: z.string().uuid(),
     request_id: z.string().uuid(),
-    recipient: z.string().max(254).regex(/^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/),
+    recipient: z.string().regex(/^ord\.[a-f0-9]{32}:[A-Za-z0-9_-]{40,1400}$/),
     target: z.string().regex(/^[a-z0-9._]{1,30}$/),
     send_before: z.string().datetime({ offset: true }),
 })).max(1);
-
-function enabled(env: Environment): boolean {
-    return env.PAID_RESULT_EMAIL_ENABLED === 'true' && env.NODE_ENV === 'production'
-        && !isDevUiDeploymentContext(env) && !env.DEV_LIVE_WORKLOAD && !env.CLOUD_RUN_JOB;
-}
+const senderAddress = /^[a-z0-9._+-]{1,64}@notify\.yeosachin\.com$/i;
+const deadlineSchema = z.string().datetime({ offset: true });
 
 /** Caller already authenticated this order owner. The UI receives only a boolean. */
 export async function isPaidResultEmailAvailableForOrder(orderId: string, userId: string): Promise<boolean> {
-    if (!enabled(process.env) || process.env.VERCEL_ENV !== 'production') return false;
+    if (!paidResultEmailEnabled(process.env) || process.env.VERCEL_ENV !== 'production') return false;
     try {
         const { data, error } = await supabaseAdmin.rpc('paid_result_email_available', {
             p_order_id: orderId, p_owner_id: userId,
@@ -34,10 +32,24 @@ export async function isPaidResultEmailAvailableForOrder(orderId: string, userId
 
 export async function deliverPaidResultEmails() {
     const summary = { accepted: 0, failed: 0, enabled: false };
-    if (!enabled(process.env) || process.env.K_SERVICE !== 'analysis-paid-worker'
-        || process.env.ANALYSIS_WORKLOAD_ROLE !== 'paid') return summary;
+    if (process.env.NODE_ENV !== 'production' || isDevUiDeploymentContext(process.env)
+        || process.env.DEV_LIVE_WORKLOAD || process.env.CLOUD_RUN_JOB
+        || process.env.K_SERVICE !== 'analysis-paid-worker' || process.env.ANALYSIS_WORKLOAD_ROLE !== 'paid') {
+        return summary;
+    }
+    const purge = await supabaseAdmin.rpc('purge_paid_result_email_recipients_v1');
+    if (purge.error) summary.failed++;
+    if (!paidResultEmailEnabled(process.env)) return summary;
     summary.enabled = true;
-    if (!process.env.RESEND_API_KEY?.trim() || !process.env.RESEND_FROM_EMAIL?.trim()) {
+    const fromAddress = process.env.PAID_RESULT_EMAIL_FROM?.trim();
+    if (!process.env.RESEND_API_KEY?.trim() || !fromAddress || !senderAddress.test(fromAddress)) {
+        summary.failed++;
+        return summary;
+    }
+    let key: Buffer;
+    try {
+        key = readResultEmailKey(process.env);
+    } catch {
         summary.failed++;
         return summary;
     }
@@ -55,9 +67,29 @@ export async function deliverPaidResultEmails() {
             summary.failed++;
             continue;
         }
-        const receipt = await sendAnalysisCompleteEmail(
-            task.recipient, task.target, task.request_id, `paid-result/${task.request_id}`,
-        );
+        const [sellerReference, sealed] = task.recipient.split(':');
+        const delivery = await supabaseAdmin.rpc('paid_result_email_send_deadline_v1', {
+            p_order_id: task.order_id, p_token: token,
+        });
+        if (delivery.error) {
+            summary.failed++;
+            break;
+        }
+        let receipt: Awaited<ReturnType<typeof sendEmail>> = null;
+        const deadline = deadlineSchema.safeParse(delivery.data);
+        if (deadline.success && Date.now() < Date.parse(deadline.data)) {
+            try {
+                receipt = await sendEmail({
+                    ...renderPaidResultEmail(task.target, task.request_id),
+                    to: openResultEmailRecipient(sealed, sellerReference, key),
+                    replyTo: PAID_RESULT_EMAIL_REPLY_TO,
+                    from: `위장여사친판독기 <${fromAddress}>`,
+                    idempotencyKey: `paid-result/${task.request_id}`,
+                });
+            } catch {
+                // Retry under the same claim identity without logging recipient data.
+            }
+        }
         const accepted = Boolean(receipt?.id);
         const finish = await supabaseAdmin.rpc('finish_paid_result_email', {
             p_order_id: task.order_id, p_token: token, p_accepted: accepted,

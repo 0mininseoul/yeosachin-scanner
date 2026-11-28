@@ -33,8 +33,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     );
 }
 
-const CONCIERGE_ANALYSIS_COPY =
-    '판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.';
 const SUPPORT_COPY =
     '결제 확인이 지연되고 있어요. 같은 화면이 계속되면 고객센터로 문의해주세요.';
 
@@ -322,7 +320,9 @@ export function EarlybirdStatus({
                         결제가 완료되었어요
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        {CONCIERGE_ANALYSIS_COPY}
+                        {currentOrder.resultEmailNotificationAvailable === true
+                            ? '판독 결과가 준비되면 결제할 때 입력한 이메일로 결과 링크를 보내드릴게요.'
+                            : '판독 결과가 준비되면 이 화면에서 확인하실 수 있어요.'}
                     </p>
                 </CaseCard>
             </div>

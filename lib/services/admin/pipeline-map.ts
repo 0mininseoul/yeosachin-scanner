@@ -166,6 +166,7 @@ const PAYMENT: Record<string, NodeSpec> = {
         col: 1, row: 0, kind: 'infra', title: '결제 웹훅 확정', subtitle: 'paid · 결제 증거',
         does: [
             'Groble 웹훅으로 결제를 확정하고 결제 증거를 기록합니다.',
+            '결과 안내를 켠 운영 결제는 발송용 이메일 주소를 암호화해 별도로 보관합니다.',
             '취소·환불 이벤트도 여기서 처리하고 Discord로 알립니다.',
         ],
         services: 'Groble · Discord',
@@ -341,11 +342,12 @@ const RESULT: Record<string, NodeSpec> = {
         does: [
             'DB가 주문·이행의 발행 조건을 확인한 뒤에만 유료 결과를 읽을 수 있게 합니다.',
             '주문을 완료로 바꿉니다.',
+            '결과 안내 메일은 발행이 확인된 뒤 예약된 복구 작업에서 보냅니다.',
         ],
-        services: '없음',
+        services: 'Resend (결과 안내 메일)',
         numbers: [{ label: '발행 확인', value: 'isAnalysisResultAuthoritativelyPublished' }],
         failure: '발행 전에는 결과 화면이 대기 상태로 보입니다.',
-        code: ['lib/services/analysis/result-publication-authority.ts'],
+        code: ['lib/services/analysis/result-publication-authority.ts', 'lib/services/earlybird/result-email.ts'],
     },
     result: {
         col: 1, row: 0, kind: 'infra', title: '결과 화면', subtitle: '/result · 이미지 보관',

@@ -49,6 +49,7 @@ vi.mock('@/lib/observability/server', () => ({
 }));
 
 import { POST } from '@/app/api/webhooks/groble/route';
+import { openResultEmailRecipient, readResultEmailKey } from '@/lib/services/earlybird/result-email-recipient';
 
 const SECRET = 'webhook-secret';
 const SELLER_REFERENCE = 'ord.0123456789abcdef0123456789abcdef';
@@ -181,6 +182,7 @@ describe('signed Groble webhook route', () => {
     });
 
     afterEach(() => {
+        vi.unstubAllEnvs();
         delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED;
         delete process.env.EARLYBIRD_WEBHOOK_AUTO_ADMISSION_NOT_BEFORE;
         delete process.env.COMMERCE_CANONICAL_DUAL_WRITE;
@@ -902,6 +904,33 @@ describe('signed Groble webhook route', () => {
             disposition: 'ignored',
         });
         expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it.each(['production', 'preview'])('captures the checkout email only on %s', async environment => {
+        vi.stubEnv('NODE_ENV', 'production');
+        vi.stubEnv('VERCEL_ENV', environment);
+        vi.stubEnv('PAID_RESULT_EMAIL_ENABLED', 'true');
+        vi.stubEnv('PAID_RESULT_EMAIL_KEY', Buffer.alloc(32, 19).toString('base64url'));
+        const buyerEmail = 'checkout-address@example.test';
+        const body = JSON.stringify(payload({
+            sellerReference: SELLER_REFERENCE,
+            buyer: { ...payload().data.object.buyer, email: buyerEmail },
+        }));
+        const response = await POST(request(body));
+        expect(response.status).toBe(200);
+        const call = mocks.rpc.mock.calls.find(([name]) => name === 'finalize_paid_analysis_with_result_email_v1');
+        if (environment === 'preview') {
+            expect(call).toBeUndefined();
+            expect(mocks.rpc).toHaveBeenCalledWith('finalize_automatic_paid_analysis_v1', expect.anything());
+            return;
+        }
+        expect(call).toBeDefined();
+        const sealed = call?.[1].p_sealed_recipient;
+        const key = readResultEmailKey(process.env);
+        expect(sealed).not.toContain(buyerEmail);
+        expect(openResultEmailRecipient(sealed, SELLER_REFERENCE, key)).toBe(buyerEmail);
+        expect(() => openResultEmailRecipient(sealed, `ord.${'b'.repeat(32)}`, key)).toThrow();
+        expect(await response.text()).not.toContain(buyerEmail);
     });
 
     it('matches with normalized contact inputs without forwarding raw buyer evidence', async () => {
