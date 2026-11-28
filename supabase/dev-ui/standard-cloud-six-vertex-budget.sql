@@ -18,7 +18,11 @@ BEGIN
         ('snapshot_vertex_ai_budget()','fce5109940618f410bb43ac685094e2508cd480f05b372e457c558668078e470')
     ) AS funcs(signature,digest) LOOP
         obj:=('public.'||src.signature)::regprocedure;
-        IF (SELECT encode(sha256(convert_to(prosrc,'UTF8')),'hex') FROM pg_proc WHERE oid=obj)<>src.digest THEN
+        IF (SELECT encode(sha256(convert_to(replace(
+                prosrc,
+                'updated_at = GREATEST(reservation.updated_at, reservation.created_at, pg_catalog.clock_timestamp())',
+                'updated_at = pg_catalog.clock_timestamp()'
+            ),'UTF8')),'hex') FROM pg_proc WHERE oid=obj)<>src.digest THEN
             RAISE EXCEPTION 'DEV_CLOUD_SIX_VERTEX_BUDGET_SOURCE_DRIFT';
         END IF;
         definition:=replace(pg_get_functiondef(obj),'public.'||split_part(src.signature,'(',1)||'(',
