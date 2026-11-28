@@ -1,5 +1,7 @@
-export function isPostgresStatementTimeout(error: { code?: string; message?: string } | null): boolean {
-    return error?.code === '57014' && error.message === 'canceling statement due to statement timeout';
+export function isPostgresStatementTimeout(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && 'code' in error && error.code === '57014'
+        && 'message' in error && error.message === 'canceling statement due to statement timeout';
 }
 
 export function isPostgresLockTimeout(error: { code?: string; message?: string } | null): boolean {

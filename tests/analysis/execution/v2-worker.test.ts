@@ -2322,6 +2322,31 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.releaseClaim).toHaveBeenCalledOnce();
     });
 
+    it('releases the target-evidence claim after an adoption lookup statement timeout', async () => {
+        const initial = { ...baseState(), relationships: relationshipManifest() };
+        const targetClaim = claimFor(initial, ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY);
+        const jobStore = store(targetClaim);
+        const terminalFailureFinalizer = vi.fn();
+        const code = 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR';
+
+        await expect(processAnalysisV2TaskDelivery({ ...delivery, jobKey: targetClaim.jobKey }, {
+            store: jobStore,
+            stateStore: stateStore(initial),
+            executors: {
+                target_evidence: async () => {
+                    throw new Error(`${code}: resolve failed (57014).`);
+                },
+            },
+            terminalFailureFinalizer,
+        })).resolves.toMatchObject({ status: 'retry', errorCode: code });
+        expect(jobStore.releaseClaim).toHaveBeenCalledWith(targetClaim, {
+            errorCode: code, retryable: true, maxAttempts: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        });
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+        expect(classifyAnalysisV2JobFailure(new Error(`${code}: resolve failed (42501).`)))
+            .toMatchObject({ code, disposition: 'permanent', retryable: false });
+    });
+
     it('does not retry ambiguous starts or truly terminal Actor failures', () => {
         expect(classifyAnalysisV2JobFailure(
             new Error('SCRAPING_AMBIGUOUS_START_ERROR: start response was not confirmed.')

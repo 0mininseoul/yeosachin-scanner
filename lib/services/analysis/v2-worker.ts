@@ -919,6 +919,9 @@ function failureDispositionForCode(
     error: Error
 ): AnalysisV2JobFailureDisposition {
     if (isFenceFailureCode(code)) return 'fence';
+    if (code === 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR') {
+        return error.message === `${code}: resolve failed (57014).` ? 'transient' : 'permanent';
+    }
     if (
         code === 'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR'
         && isTransientProfileCheckpointFailure(error)
@@ -1098,6 +1101,7 @@ const DATABASE_WORKER_FAILURE_CODES = new Set([
     'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR',
     'ANALYSIS_V2_AI_SCORING_STAGE_PERSISTENCE_ERROR',
     'ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR',
+    'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR',
 ]);
 
 function emitAnalysisV2ExecutorFailure(

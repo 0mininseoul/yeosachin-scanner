@@ -16,6 +16,7 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
+import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const fulfillmentStatusSchema = z.enum([
@@ -434,6 +435,7 @@ export function createEarlybirdFulfillmentStore(
             const { data, error } = await dependencies.rpc('claim_paid_analysis_capacity_v1', {
                 p_order_id: validatedOrderId(orderId),
             });
+            if (isPostgresStatementTimeout(error)) return 'retry';
             if (error || (data !== 'ready' && data !== 'waiting' && data !== 'ineligible' && data !== 'retry')) persistenceError(error);
             return data;
         },
