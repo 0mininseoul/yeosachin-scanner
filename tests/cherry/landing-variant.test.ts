@@ -242,7 +242,7 @@ describe('cherry reservation variant', () => {
         expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678' });
     });
 
-    it.each(['threads', 'everytime', 'x'])('stores %s as the reservation source', async (source) => {
+    it.each(['threads', 'everytime', 'x', 'ig'])('stores %s as the reservation source', async (source) => {
         db.insert.mockResolvedValue({ error: null });
         expect((await reserve({ source })).status).toBe(200);
         expect(db.insert).toHaveBeenCalledWith({ email: 'me@example.com', phone: '+821012345678', source });

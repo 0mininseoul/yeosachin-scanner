@@ -93,3 +93,24 @@ it('does not remember completion after a failed submission', async () => {
     await openPage('?utm_source=everytime');
     expect(document.querySelector<HTMLElement>('#form-success')?.hidden).toBe(true);
 });
+
+it.each([
+    ['the Instagram link in bio', '?utm_source=ig&utm_medium=social&utm_content=link_in_bio&fbclid=abc', ''],
+    ['an untagged link opened from Instagram', '', 'https://l.instagram.com/'],
+])('records %s as the Instagram source', async (_case, query, referrer) => {
+    await openPage(query, 'open', referrer);
+    submitForm();
+    await vi.waitFor(() => expect(document.querySelector<HTMLElement>('#form-success')?.hidden).toBe(false));
+    const submission = fetchReservation.mock.calls.find(([, init]) => init?.method === 'POST');
+    const payload = JSON.parse(String(submission?.[1]?.body));
+    expect(payload.source).toBe('ig');
+    expect(payload.variant).toBeUndefined();
+});
+
+it('keeps a Meta ad visit on its ad arm even inside Instagram', async () => {
+    await openPage('?v=ex&utm_source=meta', 'open', 'https://l.instagram.com/');
+    submitForm();
+    await vi.waitFor(() => expect(document.querySelector<HTMLElement>('#form-success')?.hidden).toBe(false));
+    const submission = fetchReservation.mock.calls.find(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(String(submission?.[1]?.body)).source).toBeUndefined();
+});
