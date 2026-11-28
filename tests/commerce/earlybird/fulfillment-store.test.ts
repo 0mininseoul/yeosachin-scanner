@@ -83,7 +83,40 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
-    it.each(['waiting', 'ineligible'] as const)('keeps a %s payment out of fresh admission and billing', async capacity => {
+    it('returns the existing retry outcome after a confirmed capacity claim timeout', async () => {
+        const rpc = vi.fn()
+            .mockImplementationOnce(() => rpcResult(null, {
+                code: '57014', message: 'canceling statement due to statement timeout',
+            }))
+            .mockImplementationOnce(() => rpcResult('waiting'));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.claimCapacity(ORDER)).resolves.toBe('retry');
+        expect(rpc).toHaveBeenCalledTimes(1);
+        await expect(fulfillmentStore.claimCapacity(ORDER)).resolves.toBe('waiting');
+        expect(rpc.mock.calls).toEqual([
+            ['claim_paid_analysis_capacity_v1', { p_order_id: ORDER }],
+            ['claim_paid_analysis_capacity_v1', { p_order_id: ORDER }],
+        ]);
+    });
+
+    it('surfaces a different cancellation of the capacity claim without repeating it', async () => {
+        const rpc = vi.fn(() => rpcResult(null, {
+            code: '57014', message: 'canceling statement due to user request',
+        }));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.claimCapacity(ORDER)).rejects.toMatchObject({
+            code: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['waiting', 'wait_for_capacity'],
+        ['ineligible', 'no_longer_eligible'],
+        ['retry', 'retry_handoff'],
+    ] as const)('keeps a %s payment out of fresh admission and billing', async (capacity, action) => {
         const orderStore = store({ claimCapacity: vi.fn(async () => capacity) });
         const deps = {
             store: orderStore, rebindExpiredPaidPreflight: vi.fn(), reserveFreshAdmission: vi.fn(),
@@ -91,7 +124,7 @@ describe('earlybird fulfillment store', () => {
             releaseFreshAdmissionDispatch: vi.fn(), dispatchAnalysisJob: vi.fn(),
         };
         const advanced = await advanceAdmittedEarlybirdFulfillment(identity(), deps);
-        expect(advanced.nextAction).toBe(capacity === 'waiting' ? 'wait_for_capacity' : 'no_longer_eligible');
+        expect(advanced.nextAction).toBe(action);
         expect(deps.reserveFreshAdmission).not.toHaveBeenCalled();
         expect(orderStore.claim).not.toHaveBeenCalled();
         expect(deps.enqueueFreshAdmission).not.toHaveBeenCalled();
