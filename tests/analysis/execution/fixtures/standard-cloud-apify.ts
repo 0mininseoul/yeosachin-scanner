@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
-import { privateCandidate, profileItem, publicUsername, syntheticActorRows, syntheticActorUsageUsd, target } from './standard-providers';
+import { cloudSyntheticPublicCount as publicCount, privateCandidate, profileItem, publicUsername, syntheticActorRows, syntheticActorUsageUsd, target } from './standard-providers';
 import type { SyntheticCloudFinish, SyntheticCloudSelector, SyntheticCloudStart, SyntheticCloudStore } from './standard-cloud-apify-store';
 
 const actors = {
@@ -11,8 +11,6 @@ const actors = {
     comments: 'apify/instagram-comment-scraper',
 } as const;
 
-// Exactly the 600 public and one private candidates of the six-order load fixture.
-const publicCount = process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 900 : 600;
 const publicNames = Array.from({ length: publicCount }, (_, index) => publicUsername(index));
 const names = [target, ...publicNames, privateCandidate];
 const postUrls = [target, ...publicNames].flatMap(name => profileItem(name).latestPosts.map(post => post.url));
