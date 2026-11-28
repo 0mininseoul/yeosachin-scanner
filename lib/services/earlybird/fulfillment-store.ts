@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
@@ -15,6 +16,7 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
+import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const fulfillmentStatusSchema = z.enum([
@@ -30,7 +32,7 @@ const identityRowSchema = z.object({
     fulfillment_status: fulfillmentStatusSchema,
     preflight_id: uuidSchema,
     user_id: uuidSchema,
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     request_id: uuidSchema.nullable(),
 }).strict();
 const identityRowsSchema = z.array(identityRowSchema).max(100);
@@ -94,7 +96,7 @@ export type EarlybirdFulfillmentIdentity = Readonly<{
     status: EarlybirdFulfillmentStatus;
     preflightId: string;
     userId: string;
-    planId: 'basic' | 'standard';
+    planId: PaidEarlybirdPlanId;
     requestId: string | null;
 }>;
 
@@ -433,15 +435,18 @@ export function createEarlybirdFulfillmentStore(
             const { data, error } = await dependencies.rpc('claim_paid_analysis_capacity_v1', {
                 p_order_id: validatedOrderId(orderId),
             });
+            if (isPostgresStatementTimeout(error)) return 'retry';
             if (error || (data !== 'ready' && data !== 'waiting' && data !== 'ineligible' && data !== 'retry')) persistenceError(error);
             return data;
         },
 
         async admit(orderId) {
-            const { data, error } = await dependencies.rpc(
-                'admit_earlybird_fulfillment',
-                { p_order_id: validatedOrderId(orderId) }
-            );
+            const params = { p_order_id: validatedOrderId(orderId) };
+            const admit = () => dependencies.rpc('admit_earlybird_fulfillment', params);
+            const firstAttempt = await admit();
+            const { data, error } = isPostgresStatementTimeout(firstAttempt.error)
+                ? await admit()
+                : firstAttempt;
             if (error) persistenceError(error);
             const identity = identityFromRow(oneRow(data, identityRowSchema));
             return identity;
@@ -687,7 +692,7 @@ export interface EarlybirdFulfillmentAdvanceDependencies {
         input: {
             preflightId: string;
             userId: string;
-            selectedPlanId: 'basic' | 'standard';
+            selectedPlanId: PaidEarlybirdPlanId;
             entitlementJtiHash: string;
         }
     ): Promise<AnalysisV2FreshAdmissionReservation>;

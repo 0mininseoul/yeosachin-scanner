@@ -126,4 +126,29 @@ describe('Supabase Vertex AI budget store adapter', () => {
         await expect(run).rejects.toBeInstanceOf(pending ? VertexAiBudgetCapacityPendingError : VertexAiBudgetExceededError);
         if (pending) await expect(run).rejects.toThrow(/^VERTEX_AI_BUDGET_CAPACITY_PENDING$/);
     });
+
+    it.each(['exact', 'generic-lock', 'different-run'] as const)(
+        'defers only the explicit Dev budget contention receipt (%s)', async mode => {
+            const store = createSupabaseVertexAiBudgetStore({
+                rpc: async () => ({
+                    data: null,
+                    error: {
+                        code: '55P03',
+                        message: mode === 'generic-lock'
+                            ? 'could not obtain lock'
+                            : 'DEV_CLOUD_SIX_VERTEX_BUDGET_BUSY',
+                    },
+                }),
+            });
+            const reservation = withPaidStandardCapacityJob(
+                { requestId: mode === 'different-run' ? 'another-run' : input.runId, jobKey: 'job', claimToken: 'test-claim' },
+                async () => true,
+                () => store.reserve(input),
+                { NODE_ENV: 'production', K_SERVICE: 'analysis-paid-worker', ANALYSIS_WORKLOAD_ROLE: 'paid',
+                    PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128', ANALYSIS_PROVIDER_ADMISSION_ENABLED: 'true' },
+            );
+            if (mode === 'exact') await expect(reservation).rejects.toBeInstanceOf(VertexAiBudgetCapacityPendingError);
+            else await expect(reservation).rejects.toThrow(/^VERTEX_AI_BUDGET_RPC_FAILED:/);
+        },
+    );
 });

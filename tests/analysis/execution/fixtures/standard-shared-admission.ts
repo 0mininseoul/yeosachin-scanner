@@ -19,12 +19,15 @@ import type { StandardDatabase } from './standard-database';
 
 const origin = 'https://shared-standard.example.invalid';
 const standardProduct = 'shared-standard-fixture';
+const plusProduct = 'shared-plus-fixture';
+export const sharedPaidPlan = process.env.SHARED_STANDARD_PLAN === 'plus' ? 'plus' : 'standard';
 const webhookSecret = 'synthetic-groble-webhook-shared-standard';
 export const sharedStandardAdmissionEnv = {
     NEXT_PUBLIC_APP_URL: origin,
     ANALYSIS_V2_ADMISSION_ENABLED: 'true', PREFLIGHT_ACCESS_MODE: 'production',
     GROBLE_BASIC_PRODUCT_ID: 'shared-basic-fixture', GROBLE_STANDARD_PRODUCT_ID: standardProduct,
     GROBLE_BASIC_PAYMENT_ADDRESS: 'shared-basic-checkout', GROBLE_STANDARD_PAYMENT_ADDRESS: 'shared-standard-checkout',
+    GROBLE_PLUS_PRODUCT_ID: plusProduct, GROBLE_PLUS_PAYMENT_ADDRESS: 'shared-plus-checkout',
     GROBLE_WEBHOOK_SECRET: webhookSecret, EARLYBIRD_WEBHOOK_AUTO_ADMISSION_ENABLED: 'false',
 };
 
@@ -148,7 +151,7 @@ async function checkoutSharedOrder(run: Preflight, asOwner: AsOwner) {
     return asOwner(owner, async () => {
         const patch = await setExclusion(request('/api/analysis/preflight/' + preflightId, { decision: 'skip' }, 'PATCH'), { params: Promise.resolve({ preflightId }) });
         assert.equal(patch.status, 204, 'Expected a persisted exclusion decision');
-        const order = await checkout(request('/api/earlybird/checkout', { preflightId, planId: 'standard', disclosureAccepted: true }));
+        const order = await checkout(request('/api/earlybird/checkout', { preflightId, planId: sharedPaidPlan, disclosureAccepted: true }));
         if (order.status !== 200 && order.status !== 201) await responseJson(order, 201, 'checkout');
         return z.string().uuid().parse((await order.json()).orderId);
     });
@@ -158,11 +161,12 @@ async function confirmPayment(run: Preflight, orderId: string, db: StandardDatab
     const paidAt = new Date().toISOString();
     const paymentId = 'fixture-payment-' + orderId;
     const eventId = 'fixture-event-' + orderId;
-    const expectedAmount = EARLYBIRD_PLAN_CATALOG.standard.earlybirdAmountKrw;
+    const expectedAmount = EARLYBIRD_PLAN_CATALOG[sharedPaidPlan].earlybirdAmountKrw;
+    const product = sharedPaidPlan === 'plus' ? plusProduct : standardProduct;
     const { rows: [order] } = await db.query<{ reference: string }>(
         `SELECT groble_seller_reference AS reference FROM earlybird_orders WHERE id=$1 AND preflight_id=$2 AND user_id=$3
-        AND status='payment_pending' AND plan_id='standard' AND expected_amount_krw=$4 AND expected_groble_product_id=$5`,
-        [orderId, run.preflightId, run.owner.id, expectedAmount, standardProduct],
+        AND status='payment_pending' AND plan_id=$6 AND expected_amount_krw=$4 AND expected_groble_product_id=$5`,
+        [orderId, run.preflightId, run.owner.id, expectedAmount, product, sharedPaidPlan],
     );
     assert.ok(order && /^ord\.[a-f0-9]{32}$/.test(order.reference), 'Expected owned pending checkout with a seller reference');
     if (mode === 'fixture') {
@@ -185,7 +189,7 @@ async function confirmPayment(run: Preflight, orderId: string, db: StandardDatab
             data: {
                 object: {
                     merchantUid: paymentId, sellerReference: order.reference, buyer: { email: run.owner.email, phoneNumber: run.owner.phone },
-                    content: { id: standardProduct, paymentType: 'ONE_TIME', inputMode: 'PAYMENT_WINDOW' },
+                    content: { id: product, paymentType: 'ONE_TIME', inputMode: 'PAYMENT_WINDOW' },
                     pricing: { currency: 'KRW', finalAmount: expectedAmount }, payment: { purchasedAt: paidAt }
                 }
             },

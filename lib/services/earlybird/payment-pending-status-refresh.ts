@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import type { EarlybirdOrderStatusDto } from './order-status';
 
 const PAYMENT_PENDING_REFRESH_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000] as const;
@@ -37,8 +38,8 @@ function isOwnerStatusSnapshot(value: unknown): value is EarlybirdOrderStatusDto
     return typeof order.orderId === 'string'
         && typeof order.preflightId === 'string'
         && typeof order.targetInstagramId === 'string'
-        && (order.planId === 'basic' || order.planId === 'standard')
-        && (order.planName === 'Basic' || order.planName === 'Standard')
+        && (order.planId === 'basic' || order.planId === 'standard' || order.planId === 'plus')
+        && (order.planName === 'Basic' || order.planName === 'Standard' || order.planName === 'Plus')
         && (order.actualAmountKrw === null || typeof order.actualAmountKrw === 'number')
         && (order.acceptedAt === null || typeof order.acceptedAt === 'string')
         && (order.dueAt === null || typeof order.dueAt === 'string')
@@ -69,7 +70,7 @@ export interface SingleFlightEarlybirdStatusRefresh {
  * replaces the local DTO and never starts or mutates fulfillment.
  */
 export function createSingleFlightEarlybirdStatusRefresh(
-    planId: 'basic' | 'standard',
+    planId: PaidEarlybirdPlanId,
     onSnapshot: OwnerStatusSnapshotHandler,
     request: OwnerStatusRequest = (input, init) => fetch(input, init),
     orderId?: string,

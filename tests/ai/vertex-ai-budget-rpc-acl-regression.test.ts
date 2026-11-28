@@ -10,6 +10,10 @@ const aclCorrectionMigration = readFileSync(new URL(
     '../../supabase/migrations/20260902091001_revoke_vertex_ai_budget_rpc_api_execute.sql',
     import.meta.url,
 ), 'utf8');
+const clockMigration = readFileSync(new URL(
+    '../../supabase/migrations/20261128095000_preserve_vertex_ai_budget_clock.sql',
+    import.meta.url,
+), 'utf8');
 
 const budgetRpcSignatures = {
     reserve: 'public.reserve_vertex_ai_budget(text,text,text,text,integer,text,text,text,bigint,integer,numeric,date,numeric,numeric,numeric)',
@@ -43,6 +47,7 @@ describe('Vertex AI budget RPC ACL regression', () => {
         await db.exec(budgetMigration);
         await db.exec(aclCorrectionMigration);
         await db.exec(aclCorrectionMigration);
+        await db.exec(clockMigration);
     }, 30_000);
 
     afterAll(async () => {
@@ -86,6 +91,39 @@ describe('Vertex AI budget RPC ACL regression', () => {
             { rpc: 'reserve', anon_execute: false, authenticated_execute: false, service_role_execute: true },
             { rpc: 'settle', anon_execute: false, authenticated_execute: false, service_role_execute: true },
             { rpc: 'snapshot', anon_execute: false, authenticated_execute: false, service_role_execute: true },
+        ]);
+    });
+
+    it('preserves the timestamp floor during settlement, replay, and cancellation', async () => {
+        await db.exec(`
+            INSERT INTO public.vertex_ai_budget_reservations (
+                reservation_key, reservation_id, run_id, order_id, day_key, operation_key, attempt,
+                route, model_name, model_location, input_tokens, max_output_tokens,
+                estimated_cost_usd, created_at, updated_at
+            )
+            SELECT key, identity::uuid, 'run', 'order', current_date, key, 1, 'default', 'gemini', 'global', 1, 1,
+                0.01, statement_timestamp() + interval '1 minute', statement_timestamp() + interval '2 minutes'
+            FROM (VALUES
+                ('settle-clock', '11111111-1111-4111-8111-111111111111'),
+                ('cancel-clock', '22222222-2222-4222-8222-222222222222')
+            ) AS reservations(key, identity);
+
+            SELECT public.settle_vertex_ai_budget(reservation_key, reservation_id)
+            FROM public.vertex_ai_budget_reservations WHERE reservation_key = 'settle-clock';
+            SELECT public.settle_vertex_ai_budget(reservation_key, reservation_id, 0.005)
+            FROM public.vertex_ai_budget_reservations WHERE reservation_key = 'settle-clock';
+            SELECT public.settle_vertex_ai_budget(reservation_key, reservation_id, 0.005)
+            FROM public.vertex_ai_budget_reservations WHERE reservation_key = 'settle-clock';
+            SELECT public.cancel_vertex_ai_budget(reservation_key, reservation_id)
+            FROM public.vertex_ai_budget_reservations WHERE reservation_key = 'cancel-clock';
+        `);
+        const { rows } = await db.query(`
+            SELECT state, actual_cost_usd::float8 AS cost, updated_at = created_at + interval '1 minute' AS preserved
+            FROM public.vertex_ai_budget_reservations ORDER BY reservation_key
+        `);
+        expect(rows).toEqual([
+            { state: 'cancelled', cost: null, preserved: true },
+            { state: 'settled', cost: 0.005, preserved: true },
         ]);
     });
 });

@@ -101,7 +101,7 @@ async function handleGET(
         const requestedPlanId = url.searchParams.get('planId');
         const queryEntries = Array.from(url.searchParams.keys());
         if (url.searchParams.getAll('planId').length === 1) {
-            validatedPlanId = requestedPlanId === 'basic' || requestedPlanId === 'standard'
+            validatedPlanId = requestedPlanId === 'basic' || requestedPlanId === 'standard' || requestedPlanId === 'plus'
                 ? requestedPlanId
                 : undefined;
         }

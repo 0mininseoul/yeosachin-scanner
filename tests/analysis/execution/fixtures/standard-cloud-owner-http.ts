@@ -29,13 +29,13 @@ function resultImagePath(value: string | null): string {
 }
 
 /** Verify the published response and decoded images. The caller separately measures the hydrated UI. */
-export function readCloudOwnerImages(requestId: string, get: Get, publicCount: number) {
-    return safeEvidence(() => verifyImages(requestId, get, publicCount));
+export function readCloudOwnerImages(requestId: string, get: Get, publicCount: number, plan: 'standard' | 'plus' = 'standard') {
+    return safeEvidence(() => verifyImages(requestId, get, publicCount, plan));
 }
 
-async function verifyImages(requestId: string, get: Get, publicCount: number) {
+async function verifyImages(requestId: string, get: Get, publicCount: number, plan: 'standard' | 'plus' = 'standard') {
     requireCheck(/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/.test(requestId), 'REQUEST');
-    requireCheck(Number.isInteger(publicCount) && publicCount >= 1 && publicCount <= 600, 'PUBLIC_COUNT');
+    requireCheck(Number.isInteger(publicCount) && publicCount >= 1 && publicCount <= (plan === 'plus' ? 900 : 600), 'PUBLIC_COUNT');
     const result = new URL('/api/analysis/v2/result/' + requestId, DEV_UI_APP_ORIGIN);
     result.searchParams.set('devAnalysis', 'live');
     result.searchParams.set('pageSize', '50');
@@ -58,7 +58,7 @@ async function verifyImages(requestId: string, get: Get, publicCount: number) {
         const parsed = storedAnalysisResultPageV1Schema.safeParse(await response.json());
         requireCheck(parsed.success, 'RESULT_CONTRACT');
         const body = parsed.data;
-        requireCheck(body.requestId === requestId && body.summary.planId === 'standard' && body.summary.targetInstagramId === target, 'RESULT_SCOPE');
+        requireCheck(body.requestId === requestId && body.summary.planId === plan && body.summary.targetInstagramId === target, 'RESULT_SCOPE');
         const images: { url: string; username: string }[] = [];
         if (pages === 0) images.push({ url: resultImagePath(body.summary.targetProfileImage), username: target });
         if (pages === 0 || femaleCursor) {

@@ -10,9 +10,11 @@ const productIdSchema = z.string()
 
 const secretSchema = z.string().min(1).max(1_024);
 
+type GrobleItems = Readonly<Record<Exclude<PaidEarlybirdPlanId, 'plus'>, string> & { plus?: string }>;
+
 export type GrobleConfig = Readonly<{
-    productIds: Readonly<Record<PaidEarlybirdPlanId, string>>;
-    paymentAddresses: Readonly<Record<PaidEarlybirdPlanId, string>>;
+    productIds: GrobleItems;
+    paymentAddresses: GrobleItems;
     webhookSecret: string;
     webhookPreviousSecret: string | null;
 }>;
@@ -39,7 +41,9 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
 
     const basicProductId = requiredValue(env, 'GROBLE_BASIC_PRODUCT_ID', productIdSchema);
     const standardProductId = requiredValue(env, 'GROBLE_STANDARD_PRODUCT_ID', productIdSchema);
-    if (basicProductId === standardProductId) {
+    const plusConfigured = Boolean(env.GROBLE_PLUS_PRODUCT_ID?.trim() || env.GROBLE_PLUS_PAYMENT_ADDRESS?.trim());
+    const plusProductId = plusConfigured ? requiredValue(env, 'GROBLE_PLUS_PRODUCT_ID', productIdSchema) : undefined;
+    if (basicProductId === standardProductId || plusProductId === basicProductId || plusProductId === standardProductId) {
         throw new Error('GROBLE_PRODUCT_IDS_MUST_BE_DISTINCT');
     }
     const basicPaymentAddress = requiredValue(
@@ -52,7 +56,8 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
         'GROBLE_STANDARD_PAYMENT_ADDRESS',
         productIdSchema
     );
-    if (basicPaymentAddress === standardPaymentAddress) {
+    const plusPaymentAddress = plusConfigured ? requiredValue(env, 'GROBLE_PLUS_PAYMENT_ADDRESS', productIdSchema) : undefined;
+    if (basicPaymentAddress === standardPaymentAddress || plusPaymentAddress === basicPaymentAddress || plusPaymentAddress === standardPaymentAddress) {
         throw new Error('GROBLE_PAYMENT_ADDRESSES_MUST_BE_DISTINCT');
     }
 
@@ -60,10 +65,12 @@ export function readGrobleConfig(env: Environment = process.env): GrobleConfig {
         productIds: Object.freeze({
             basic: basicProductId,
             standard: standardProductId,
+            ...(plusProductId ? { plus: plusProductId } : {}),
         }),
         paymentAddresses: Object.freeze({
             basic: basicPaymentAddress,
             standard: standardPaymentAddress,
+            ...(plusPaymentAddress ? { plus: plusPaymentAddress } : {}),
         }),
         webhookSecret: requiredValue(env, 'GROBLE_WEBHOOK_SECRET', secretSchema),
         webhookPreviousSecret: previousSecret,
@@ -79,9 +86,9 @@ export function getGrobleCheckoutUrl(
     if (!parsedReference) {
         throw new Error('INVALID_GROBLE_SELLER_REFERENCE');
     }
-    const url = new URL(
-        `https://groble.im/payment/${encodeURIComponent(config.paymentAddresses[planId])}`
-    );
+    const paymentAddress = config.paymentAddresses[planId];
+    if (!paymentAddress) throw new Error('GROBLE_PLUS_PAYMENT_ADDRESS missing');
+    const url = new URL(`https://groble.im/payment/${encodeURIComponent(paymentAddress)}`);
     url.searchParams.set('ref', parsedReference);
     return url.toString();
 }

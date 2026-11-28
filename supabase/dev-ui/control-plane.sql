@@ -24,6 +24,20 @@ LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
     }'::jsonb;
 $$;
 
+-- Preserve the v5 snapshots of all previously created Dev UI fixtures.
+CREATE OR REPLACE FUNCTION dev_ui.plan_snapshot(p_version text) RETURNS jsonb
+LANGUAGE sql IMMUTABLE SET search_path='' AS $$
+    SELECT CASE p_version
+      WHEN 'earlybird-2026-08-v5' THEN dev_ui.plan_snapshot()
+      WHEN 'earlybird-2026-11-v6' THEN (
+          SELECT jsonb_object_agg(key, value || jsonb_build_object('pricingVersion',p_version,
+              'price',jsonb_build_object('currency','KRW','status','quoted','amountKrw',
+                  CASE key WHEN 'basic' THEN 3900 WHEN 'standard' THEN 6900 WHEN 'plus' THEN 10900 END)))
+          FROM jsonb_each(dev_ui.plan_snapshot())
+      )
+    END
+$$;
+REVOKE ALL ON FUNCTION dev_ui.plan_snapshot(text) FROM PUBLIC,anon,authenticated,service_role;
 CREATE TABLE IF NOT EXISTS dev_ui.preflights (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES auth.users(id),
@@ -32,14 +46,17 @@ CREATE TABLE IF NOT EXISTS dev_ui.preflights (
     fixture_version text NOT NULL DEFAULT 'dev-ui-synthetic-v1' CHECK (fixture_version = 'dev-ui-synthetic-v1'),
     fixture_scenario text NOT NULL CHECK (fixture_scenario IN ('complete', 'partial', 'failed', 'empty')),
     duration_seconds integer NOT NULL DEFAULT 45 CHECK (duration_seconds = 45),
-    pricing_version text NOT NULL DEFAULT 'earlybird-2026-08-v5',
-    plan_snapshot jsonb NOT NULL DEFAULT dev_ui.plan_snapshot() CHECK (jsonb_typeof(plan_snapshot) = 'object'),
+    pricing_version text NOT NULL DEFAULT 'earlybird-2026-11-v6',
+    plan_snapshot jsonb NOT NULL DEFAULT dev_ui.plan_snapshot('earlybird-2026-11-v6') CHECK (jsonb_typeof(plan_snapshot) = 'object'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     expires_at timestamptz NOT NULL,
     consumed_at timestamptz,
     UNIQUE (user_id, idempotency_key),
     UNIQUE (id, user_id)
 );
+
+ALTER TABLE dev_ui.preflights ALTER COLUMN pricing_version SET DEFAULT 'earlybird-2026-11-v6',
+    ALTER COLUMN plan_snapshot SET DEFAULT dev_ui.plan_snapshot('earlybird-2026-11-v6');
 
 CREATE TABLE IF NOT EXISTS dev_ui.orders (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -159,8 +176,7 @@ BEGIN
     instant := clock_timestamp();
     IF prepared.expires_at <= instant THEN RAISE EXCEPTION 'DEV_UI_EXPIRED'; END IF;
     IF prepared.consumed_at IS NOT NULL THEN RAISE EXCEPTION 'DEV_UI_SNAPSHOT_MISMATCH'; END IF;
-    IF prepared.plan_snapshot IS DISTINCT FROM dev_ui.plan_snapshot()
-        OR prepared.pricing_version <> 'earlybird-2026-08-v5' THEN RAISE EXCEPTION 'DEV_UI_SNAPSHOT_MISMATCH'; END IF;
+    IF prepared.plan_snapshot IS DISTINCT FROM dev_ui.plan_snapshot(prepared.pricing_version) THEN RAISE EXCEPTION 'DEV_UI_SNAPSHOT_MISMATCH'; END IF;
     INSERT INTO dev_ui.orders (user_id, preflight_id, target_instagram_id, plan_id, pricing_version, plan_snapshot,
         fixture_version, fixture_scenario, duration_seconds, disclosure_accepted_at, created_at, expires_at)
         VALUES (p_user_id, prepared.id, prepared.target_instagram_id, p_plan_id, prepared.pricing_version,
@@ -192,8 +208,7 @@ BEGIN
         OR checkout.fixture_version IS DISTINCT FROM prepared.fixture_version
         OR checkout.fixture_scenario IS DISTINCT FROM prepared.fixture_scenario
         OR checkout.duration_seconds IS DISTINCT FROM prepared.duration_seconds
-        OR prepared.plan_snapshot IS DISTINCT FROM dev_ui.plan_snapshot()
-        OR prepared.pricing_version <> 'earlybird-2026-08-v5' THEN RAISE EXCEPTION 'DEV_UI_SNAPSHOT_MISMATCH'; END IF;
+        OR prepared.plan_snapshot IS DISTINCT FROM dev_ui.plan_snapshot(prepared.pricing_version) THEN RAISE EXCEPTION 'DEV_UI_SNAPSHOT_MISMATCH'; END IF;
     instant := clock_timestamp();
     IF checkout.status <> 'pending' THEN
         IF checkout.status <> p_outcome THEN RAISE EXCEPTION 'DEV_UI_COMPLETION_CONFLICT'; END IF;

@@ -81,6 +81,28 @@ it('starts each published owner without waiting for the rest and measures from i
     expect(JSON.stringify(events)).not.toContain(requestId);
 });
 
+it('finishes both Plus owner results while the third registered order still waits', async () => {
+    const startedAt = '2026-11-27T00:00:00Z';
+    const publishedAt = '2026-11-27T00:40:00Z';
+    const completedAt = '2026-11-27T00:45:00Z';
+    const read = vi.fn(async () => ({
+        get: () => {},
+        browser: { completedAt, hydrated: true, candidateImageDecoded: true },
+        http: { completedAt, pages: 19, images: 902 },
+    }));
+    const sleep = vi.fn(async () => { throw new Error('Waiting order cannot hold the owner results'); });
+    const slots = await monitorReaders(async () => [
+        { slot: 1, startedAt, publishedAt, requestId, status: 'open' },
+        { slot: 2, startedAt, publishedAt, requestId, status: 'open' },
+        { slot: 3, startedAt: null, publishedAt: null, requestId: null, status: 'open' },
+    ], read, vi.fn(), sleep, 3, 2);
+
+    expect(slots.map(slot => [slot.slot, slot.evidence?.images, slot.evidence?.withinHour]))
+        .toEqual([[1, 902, true], [2, 902, true]]);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(sleep).not.toHaveBeenCalled();
+});
+
 it('reads the deployed public key from pinned Dev assets and validates it at Dev GoTrue', async () => {
     const pages = 'https://dev.yeosachin.com';
     const envKey = 'sb_publishable_fixturepublicotherproject';

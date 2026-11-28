@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createCloudSyntheticApify } from './standard-cloud-apify';
 import { createGcsSyntheticApifyStore, syntheticCloudBucket, type SyntheticCloudStorageRequester } from './standard-cloud-apify-store';
-import { SyntheticApify, candidate, target } from './standard-providers';
+import { SyntheticApify, candidate, privateCandidate, profileItem, publicUsername, target } from './standard-providers';
 
 const waveDigest = 'e'.repeat(64);
 const actor = 'scraping_solutions/instagram-scraper-followers-following-no-cookies';
@@ -48,7 +48,7 @@ function harness() {
         operationKey: () => createHash('sha256').update(owner).digest('hex'), durationMs: () => delayMs,
     });
     const store = createGcsSyntheticApifyStore({ bucket: syntheticCloudBucket, waveDigest, requester });
-    return { worker, store, objects, history, beforeUpload, loseResponse: () => { ambiguousUpload = true; } };
+    return { worker, store, requester, objects, history, beforeUpload, loseResponse: () => { ambiguousUpload = true; } };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -117,6 +117,41 @@ it('reconstructs only catalogued profiles and posts while preserving fixture cha
         rejectedEntries: rejected.length, duplicateAcceptedEntries: 0, runsCreated: created });
     expect(() => createGcsSyntheticApifyStore({ bucket: 'unrelated-bucket', waveDigest })).toThrow();
     expect(() => createGcsSyntheticApifyStore({ bucket: syntheticCloudBucket, waveDigest: '../wrong' })).toThrow();
+});
+
+it('writes and reads Plus receipts for the last public profile, private profile and post', async () => {
+    vi.stubEnv('DEV_STANDARD_QA_PLAN', 'plus');
+    vi.resetModules();
+    try {
+        const { createCloudSyntheticApify: createPlusClient } = await import('./standard-cloud-apify');
+        const { createGcsSyntheticApifyStore: createPlusStore } = await import('./standard-cloud-apify-store');
+        const { requester } = harness();
+        const store = createPlusStore({ bucket: syntheticCloudBucket, waveDigest, requester });
+        const lastPublic = publicUsername(899);
+        const lastPost = profileItem(lastPublic).latestPosts[0]!.url;
+        const profileClient = createPlusClient({ store, operationKey: () => '1'.repeat(64), durationMs: () => 0 });
+        const profiles = await profileClient.actor('apify/instagram-profile-scraper').start({
+            usernames: [lastPublic, privateCandidate],
+        });
+        await profileClient.run(profiles.id).get();
+        const local = new SyntheticApify(1, 1, 900);
+        const expectedProfiles = await local.actor('apify/instagram-profile-scraper').start({
+            usernames: [lastPublic, privateCandidate],
+        });
+        await expect(profileClient.dataset(profiles.id).listItems())
+            .resolves.toEqual(await local.dataset(expectedProfiles.id).listItems({}));
+
+        const postClient = createPlusClient({ store, operationKey: () => '2'.repeat(64), durationMs: () => 0 });
+        const posts = await postClient.actor('datadoping/instagram-likes-scraper').start({ posts: [lastPost], max_count: 50 });
+        await postClient.run(posts.id).get();
+        const expectedPosts = await local.actor('datadoping/instagram-likes-scraper').start({ posts: [lastPost] });
+        await expect(postClient.dataset(posts.id).listItems())
+            .resolves.toEqual(await local.dataset(expectedPosts.id).listItems({}));
+        expect(await store.invocationCounts()).toMatchObject({ sdkEntries: 2, runsCreated: 2, acceptedWithoutRun: 0 });
+    } finally {
+        vi.unstubAllEnvs();
+        vi.resetModules();
+    }
 });
 
 it('counts one SDK entry when the create acknowledgement is lost and its transport retries', async () => {

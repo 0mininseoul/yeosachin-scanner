@@ -44,9 +44,19 @@ export function buildDevUiPlanSnapshot(): Record<'basic' | 'standard' | 'plus', 
 }
 
 const expectedPlans = buildDevUiPlanSnapshot();
+const legacyPricingVersion = 'earlybird-2026-08-v5';
+const legacyPlans = {
+    basic: { ...expectedPlans.basic, pricingVersion: legacyPricingVersion, price: { currency: 'KRW', status: 'quoted', amountKrw: 9900 } },
+    standard: { ...expectedPlans.standard, pricingVersion: legacyPricingVersion, price: { currency: 'KRW', status: 'quoted', amountKrw: 19900 } },
+    plus: { ...expectedPlans.plus, pricingVersion: legacyPricingVersion, price: { currency: 'KRW', status: 'deferred', amountKrw: null } },
+} satisfies Record<'basic' | 'standard' | 'plus', PlanQuoteV1>;
 function sameQuote(actual: PlanQuoteV1, expected: PlanQuoteV1): boolean {
     // Parsing canonicalizes key order, including JSONB's reordered price keys.
     return JSON.stringify(actual) === JSON.stringify(planQuoteV1Schema.parse(expected));
+}
+
+function expectedQuote(planId: keyof typeof expectedPlans, version: string): PlanQuoteV1 {
+    return (version === legacyPricingVersion ? legacyPlans : expectedPlans)[planId];
 }
 
 const uuid = z.string().uuid().transform(value => value.toLowerCase());
@@ -54,11 +64,11 @@ const timestamp = z.string().datetime({ offset: true });
 export const devUiTargetSchema = z.string().trim().min(1).max(30).regex(/^[A-Za-z0-9._]+$/).transform(value => value.toLowerCase());
 const scenario = z.enum(DEV_UI_FIXTURE_SCENARIOS);
 const plan = z.enum(['basic', 'standard']);
+const pricingVersion = z.enum([PLAN_PRICING_VERSION, legacyPricingVersion]);
 const selectedPlanSnapshot = planQuoteV1Schema.refine(quote => (
-    (quote.planId === 'basic' || quote.planId === 'standard') && sameQuote(quote, expectedPlans[quote.planId])
+    (quote.planId === 'basic' || quote.planId === 'standard') && sameQuote(quote, expectedQuote(quote.planId, quote.pricingVersion))
 ));
-const allPlanSnapshots = z.object({ basic: planQuoteV1Schema, standard: planQuoteV1Schema, plus: planQuoteV1Schema }).strict()
-    .refine(snapshot => PLAN_IDS.every(id => sameQuote(snapshot[id], expectedPlans[id])));
+const allPlanSnapshots = z.object({ basic: planQuoteV1Schema, standard: planQuoteV1Schema, plus: planQuoteV1Schema }).strict();
 const fixtureFields = {
     fixture_version: z.literal(DEV_UI_FIXTURE_VERSION),
     fixture_scenario: scenario,
@@ -71,18 +81,20 @@ const identityFields = { id: uuid, user_id: uuid, target_instagram_id: devUiTarg
 export const devUiPreflightRowSchema = z.object({
     ...identityFields, ...fixtureFields,
     idempotency_key: z.string().regex(/^[A-Za-z0-9._:-]{16,128}$/),
-    pricing_version: z.literal(PLAN_PRICING_VERSION), plan_snapshot: allPlanSnapshots,
+    pricing_version: pricingVersion, plan_snapshot: allPlanSnapshots,
     consumed_at: timestamp.nullable(),
     request_id: uuid.nullable().optional(),
-}).refine(row => Date.parse(row.expires_at) > Date.parse(row.created_at));
+}).refine(row => Date.parse(row.expires_at) > Date.parse(row.created_at)
+    && PLAN_IDS.every(id => sameQuote(row.plan_snapshot[id], expectedQuote(id, row.pricing_version))));
 export const devUiOrderRowSchema = z.object({
     ...identityFields, ...fixtureFields,
     preflight_id: uuid, plan_id: plan,
-    pricing_version: z.literal(PLAN_PRICING_VERSION), plan_snapshot: selectedPlanSnapshot,
+    pricing_version: pricingVersion, plan_snapshot: selectedPlanSnapshot,
     disclosure_accepted_at: timestamp,
     status: z.enum(['pending', 'success', 'cancel', 'failure']),
     completed_at: timestamp.nullable(), run_id: uuid.nullable(),
 }).refine(row => row.plan_id === row.plan_snapshot.planId
+    && row.pricing_version === row.plan_snapshot.pricingVersion
     && Date.parse(row.expires_at) >= Date.parse(row.created_at)
     && (row.status === 'pending'
         ? row.completed_at === null && row.run_id === null
@@ -91,9 +103,10 @@ export const devUiOrderRowSchema = z.object({
 export const devUiRunRowSchema = z.object({
     ...identityFields, ...fixtureFields,
     order_id: uuid, preflight_id: uuid, plan_id: plan,
-    pricing_version: z.literal(PLAN_PRICING_VERSION), plan_snapshot: selectedPlanSnapshot,
+    pricing_version: pricingVersion, plan_snapshot: selectedPlanSnapshot,
     started_at: timestamp,
 }).refine(row => row.plan_id === row.plan_snapshot.planId
+    && row.pricing_version === row.plan_snapshot.pricingVersion
     && Date.parse(row.started_at) === Date.parse(row.created_at)
     && Date.parse(row.expires_at) - Date.parse(row.started_at) === DEV_UI_RUN_RETENTION_MS);
 

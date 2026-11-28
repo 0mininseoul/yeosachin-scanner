@@ -107,13 +107,15 @@ async function callRpc(
     reservationRunId?: string,
 ): Promise<unknown> {
     const response = await client.rpc(functionName, args);
-    if (reservationRunId && response.error?.code === 'P0001'
-        && response.error.hint === 'VERTEX_AI_BUDGET_CAPACITY_PENDING'
-        && /^VERTEX_AI_BUDGET_EXCEEDED:(run|order|day):/.test(response.error.message ?? '')
-        && await paidStandardBudgetWaitEnabled(reservationRunId)) {
+    const error = response.error;
+    const pendingHold = error?.code === 'P0001'
+        && error.hint === 'VERTEX_AI_BUDGET_CAPACITY_PENDING'
+        && /^VERTEX_AI_BUDGET_EXCEEDED:(run|order|day):/.test(error.message ?? '');
+    const pendingDevLock = error?.code === '55P03' && error.message === 'DEV_CLOUD_SIX_VERTEX_BUDGET_BUSY';
+    if (reservationRunId && (pendingHold || pendingDevLock) && await paidStandardBudgetWaitEnabled(reservationRunId)) {
         throw new VertexAiBudgetCapacityPendingError();
     }
-    if (response.error) throwRpcError(response.error);
+    if (error) throwRpcError(error);
     return response.data;
 }
 

@@ -9,6 +9,7 @@ import { seedProcessingJob } from './standard-shared-processing-job';
 const pgTest = it.runIf(process.env.RUN_SHARED_STANDARD_POSTGRES_TEST === '1');
 const markSql = 'SELECT * FROM public.mark_analysis_v2_job_dispatched_v2($1,$2,$3,$4,$5,$6,$7::smallint)';
 const migration = 'supabase/migrations/20261127101000_share_active_paid_dispatch_mark_locks.sql';
+const plusMigration = 'supabase/migrations/20261128100000_share_active_plus_dispatch_mark_locks.sql';
 type Database = Awaited<ReturnType<typeof createSharedStandardDatabase>>;
 
 async function reserve(db: StandardConnection, requestId: string, batch: number) {
@@ -23,11 +24,12 @@ async function reserve(db: StandardConnection, requestId: string, batch: number)
     return [requestId, key, 1, token, name, 'paid', 2];
 }
 
-async function prepare(db: Database) {
+async function prepare(db: Database, plan: 'standard' | 'plus' = 'standard') {
     const { requestId } = await seedProcessingJob(db);
     await db.query(`UPDATE public.analysis_requests SET plan_access_mode_snapshot='production',
+        selected_plan_id_snapshot=$2,
         test_entitlement_jti_hash=NULL, background_processing=true, progress_step='V2 analysis queued', current_step='v2_pipeline'
-        WHERE id=$1`, [requestId]);
+        WHERE id=$1`, [requestId, plan]);
     await db.query(`UPDATE public.analysis_preflights AS p SET access_mode='production', status='consumed', consumed_at=now(),
         consumed_request_id=r.id, exclusion_decision='skip', target_followers_count=1, target_following_count=0,
         target_is_private=false, ready_at=now(), capacity_required_plan_id='basic', required_plan_id='basic',
@@ -37,13 +39,14 @@ async function prepare(db: Database) {
 
 const enqueued = { marked: true, dispatch_state: 'enqueued' };
 
-for (const schema of ['Dev', 'production']) {
-    pgTest(`marks sibling jobs concurrently, keeps cancellation fenced and maintains the ${schema} audit projection`, async () => {
+for (const [schema, plan] of [['Dev', 'standard'], ['production', 'standard'], ['production', 'plus']] as const) {
+    pgTest(`marks sibling ${plan} jobs concurrently, keeps cancellation fenced and maintains the ${schema} audit projection`, async () => {
         const db = await createSharedStandardDatabase(8, { production: schema === 'production' });
         try {
             // The shared fixture installed this migration once. It must also accept the installed body.
             await db.exec(readFileSync(migration, 'utf8'));
-            const id = await prepare(db);
+            await db.exec(readFileSync(plusMigration, 'utf8'));
+            const id = await prepare(db, plan);
             const first = await reserve(db, id, 0);
             const second = await reserve(db, id, 1);
             await db.transaction(async held => {
@@ -92,6 +95,7 @@ for (const schema of ['Dev', 'production']) {
 pgTest('keeps strict approvals, recovery locks, legacy task names and service-only execution', async () => {
     const db = await createSharedStandardDatabase();
     try {
+        await db.exec(readFileSync(plusMigration, 'utf8'));
         const id = await prepare(db);
         const recovery = await reserve(db, id, 0);
         await db.query(`INSERT INTO public.analysis_v2_provider_cleanup_intents

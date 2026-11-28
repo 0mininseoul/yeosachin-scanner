@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 export const target = 'target7'.padStart(30, 't');
 export const candidate = 'sample2'.padStart(30, 's');
 export const privateCandidate = 'fixture_private_0';
+export const cloudSyntheticPublicCount = process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 900 : 600;
+export const syntheticTargetPostCount = 4;
 function publicOrdinal(username: string) {
     const match = /^fixture_public_([1-9][0-9]*)$/.exec(username);
     return match ? Number(match[1]) : 0;
@@ -23,7 +25,7 @@ const picture = (username: string) => 'https://scontent.cdninstagram.com/' + use
 export function profileItem(username: string, candidatePostCount = 1, mutualCount = 1) {
     const ordinal = publicOrdinal(username);
     const code = postCode(username);
-    const postCount = username === target ? 4 : candidatePostCount;
+    const postCount = username === target ? syntheticTargetPostCount : candidatePostCount;
     return {
         username,
         fullName: username,
@@ -130,8 +132,8 @@ export class SyntheticApify {
     constructor(private readonly candidatePostCount = 1, private readonly privateCount = 0, private readonly publicCount = 1,
         private readonly onStart?: (start: SyntheticActorStart) => void,
         private readonly durationMs?: () => number) {
-        if (!Number.isInteger(publicCount) || publicCount < 1 || publicCount > 600)
-            throw new Error('Synthetic Standard fixture supports 1 to 600 public candidates');
+        if (!Number.isInteger(publicCount) || publicCount < 1 || publicCount > 900)
+            throw new Error('Synthetic Standard fixture supports 1 to 900 public candidates');
     }
 
     actor(actor: string) {

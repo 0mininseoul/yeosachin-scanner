@@ -6,7 +6,7 @@ import { qaDelivery } from './scope';
 
 const source = createSharedImageSource();
 const catalog = new Set<string>();
-for (const name of [target, privateCandidate, ...Array.from({ length: 600 }, (_, i) => publicUsername(i))]) {
+for (const name of [target, privateCandidate, ...Array.from({ length: process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 900 : 600 }, (_, i) => publicUsername(i))]) {
     const item = profileItem(name);
     for (const uri of [item.profilePicUrl, ...item.latestPosts.map(p => p.displayUrl)]) catalog.add(new URL(uri).pathname);
 }

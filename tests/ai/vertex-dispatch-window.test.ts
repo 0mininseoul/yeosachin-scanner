@@ -120,6 +120,18 @@ describe('Dev cloud synthetic Vertex SDK', () => {
         expect(vi.mocked(sdkSleep).mock.calls.slice(-2).map(call => call[0])).toEqual([30_889 * 1.25, 12_226 * 1.25]);
         await expect(client.models.generateContent(sample('unsupported'))).rejects.toThrow('UNCALIBRATED_STAGE');
     });
+    it('uses provider-side time for the nominal Plus rehearsal', () => {
+        const feature = { ...sample('gender'), model: 'gemini-3.7-flash' };
+        const triage = { ...sample('accounts'), model: 'gemini-3.1-flash-lite' };
+        const narrative = { ...sample('lines'), model: 'gemini-3-flash-preview' };
+        expect(cloudStandardVertexDelayMs(feature, 'plus')).toBe(23_878);
+        expect(cloudStandardVertexDelayMs(triage, 'plus')).toBe(3_510);
+        expect(cloudStandardVertexDelayMs(narrative, 'plus')).toBe(5_523);
+        expect(cloudStandardVertexDelayMs(feature, 'standard')).toBe(30_889 * 1.25);
+        expect(cloudStandardVertexDelayMs(sample('persona'), 'plus')).toBe(0);
+        expect(() => cloudStandardVertexDelayMs({ ...feature, model: 'other' }, 'plus'))
+            .toThrow('UNCALIBRATED_MODEL');
+    });
     it('honors refusal before send and cancellation after the simulated send', async () => {
         const wire = vi.fn<typeof fetch>(async () => new Response(''));
         vi.stubGlobal('fetch', wire);

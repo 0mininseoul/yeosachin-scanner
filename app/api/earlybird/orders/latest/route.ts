@@ -48,7 +48,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     if (selectedOrder !== null && !z.string().uuid().safeParse(selectedOrder).success) {
         return response(400, { code: 'INVALID_ORDER', error: '주문을 확인해주세요.' });
     }
-    if (requestedPlan !== null && requestedPlan !== 'basic' && requestedPlan !== 'standard') {
+    if (requestedPlan !== null && requestedPlan !== 'basic' && requestedPlan !== 'standard' && requestedPlan !== 'plus') {
         return response(400, { code: 'INVALID_PLAN', error: '플랜을 확인해주세요.' });
     }
 

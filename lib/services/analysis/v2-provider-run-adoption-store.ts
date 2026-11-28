@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
 import {
     APIFY_CREDENTIAL_SLOTS,
     type ApifyCredentialSlot,
@@ -98,9 +99,10 @@ export function createAnalysisV2ProviderRunAdoptionStore(
                 ) {
                     throw new Error('ADOPTION_DATASET_UNAVAILABLE');
                 }
-                throw new Error(
-                    `ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR: resolve failed (${safeCode(error.code)}).`
-                );
+                const code = isPostgresStatementTimeout(error)
+                    ? 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_STATEMENT_TIMEOUT'
+                    : 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR';
+                throw new Error(`${code}: resolve failed (${safeCode(error.code)}).`);
             }
             return data === null ? null : adoptedRunSchema.parse(data);
         },

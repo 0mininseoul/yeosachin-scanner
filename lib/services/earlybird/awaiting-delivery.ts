@@ -1,3 +1,4 @@
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 
@@ -10,7 +11,7 @@ const awaitingOrderRowSchema = z.object({
     id: z.string().uuid(),
     user_id: z.string().uuid(),
     target_instagram_id: z.string().min(1).max(30),
-    plan_id: z.enum(['basic', 'standard']),
+    plan_id: z.enum(['basic', 'standard', 'plus']),
     result_request_id: z.string().uuid().nullable(),
     paid_at: z.string().datetime({ offset: true }).nullable(),
     created_at: z.string().datetime({ offset: true }),
@@ -19,7 +20,7 @@ const awaitingOrderRowSchema = z.object({
 export interface AwaitingEarlybirdDelivery {
     orderId: string;
     targetInstagramId: string;
-    planId: 'basic' | 'standard';
+    planId: PaidEarlybirdPlanId;
     createdAt: string | null;
     resultRequestId: string | null;
 }

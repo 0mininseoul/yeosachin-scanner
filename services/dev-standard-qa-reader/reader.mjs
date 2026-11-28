@@ -17,6 +17,10 @@ async function main() {
     });
     requireReader(anon !== env.SUPABASE_SERVICE_ROLE_KEY, 'INVALID_READER_CONFIG');
     const wave = env.DEV_STANDARD_QA_WAVE;
+    const plus = env.DEV_STANDARD_QA_PLAN === 'plus';
+    const plusTwoSeats = plus && env.DEV_STANDARD_QA_PAID_SEATS === '2';
+    const participantCount = plusTwoSeats ? 3 : plus ? 4 : 6;
+    const ownerResultCount = plusTwoSeats ? 2 : participantCount;
     const rows = async () => {
         const poll = () => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
             .select('slot,request_id,request_status,preflight_status,order_status,seat_at,published_at');
@@ -46,13 +50,14 @@ async function main() {
             const page = await context.newPage();
             const get = contextGet(context);
             const [render, images] = await Promise.allSettled([
-                verifyCloudOwnerPage(page, requestId), readCloudOwnerImages(requestId, get, 600),
+                verifyCloudOwnerPage(page, requestId, plus ? 'plus' : 'standard'),
+                readCloudOwnerImages(requestId, get, plus ? 900 : 600, plus ? 'plus' : 'standard'),
             ]);
             await page.close();
             if (render.status === 'rejected') throw render.reason;
             if (images.status === 'rejected') throw images.reason;
             return { get, browser: render.value, http: images.value };
-        }, emit);
+        }, emit, undefined, participantCount, ownerResultCount);
         await Promise.all(slots.map(async slot => {
             if (!slot.http) return;
             try {
@@ -67,7 +72,7 @@ async function main() {
         }));
         const successes = slots.filter(slot => !slot.failure && slot.evidence?.withinHour === true).length;
         emit({ event: 'complete', tested: slots.length, withinHourAndControls: successes });
-        if (successes !== 6) process.exitCode = 1;
+        if (successes !== ownerResultCount) process.exitCode = 1;
     } finally { await browser.close(); }
 }
 main().catch(error => { emit({ event: 'reader_failure', code: safeCode(error) }); process.exitCode = 1; });

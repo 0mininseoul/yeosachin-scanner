@@ -113,7 +113,10 @@ describe('Dev UI persisted control plane', () => {
         expect(await checkout(prepared.preflight.id, 'standard')).toEqual({ order: first.order, replayed: true });
         await expect(checkout(prepared.preflight.id, 'basic')).rejects.toThrow('DEV_UI_PLAN_CONFLICT');
         await expect(checkout(prepared.preflight.id, 'plus')).rejects.toThrow('DEV_UI_INVALID_INPUT');
-        expect(first.order.plan_snapshot).toMatchObject({ planId: 'standard', pricingVersion: 'earlybird-2026-08-v5', price: { amountKrw: 19_900, currency: 'KRW', status: 'quoted' } });
+        expect(first.order.plan_snapshot).toMatchObject({
+            planId: 'standard', pricingVersion: 'earlybird-2026-11-v6',
+            price: { amountKrw: 6_900, currency: 'KRW', status: 'quoted' },
+        });
         const invalid = await rpc<unknown>('dev_ui_create_checkout', [owner, prepared.preflight.id, 'standard', false]).catch(error => error);
         expect(invalid).toBeInstanceOf(Error);
     });
@@ -208,7 +211,8 @@ describe('Dev UI persisted control plane', () => {
         const ready = (await subject.readPreflight({ userId: owner, preflightId: prepared.preflightId }))!;
         expect(ready.status).toBe('ready');
         expect(ready.snapshot).not.toHaveProperty('demo');
-        const databaseSnapshot = await db.query<{ snapshot: unknown }>('SELECT dev_ui.plan_snapshot() AS snapshot');
+        const databaseSnapshot = await db.query<{ snapshot: unknown }>(
+            'SELECT dev_ui.plan_snapshot($1) AS snapshot', [buildDevUiPlanSnapshot().basic.pricingVersion]);
         expect(databaseSnapshot.rows[0]!.snapshot).toEqual(buildDevUiPlanSnapshot());
         const order = await subject.createOrReplayCheckout({ userId: owner, preflightId: prepared.preflightId, planId: 'standard', disclosureAccepted: true });
         const paid = await subject.completeCheckout({ userId: owner, orderId: order.orderId, outcome: 'success' });
@@ -240,7 +244,7 @@ describe('Dev UI persisted control plane', () => {
                     SELECT has_function_privilege($1, p.oid, 'EXECUTE') AS allowed
                     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'dev_ui'
                 `, [role]);
-                expect(internal.rows).toHaveLength(1);
+                expect(internal.rows).toHaveLength(2);
                 expect(internal.rows.every(row => !row.allowed)).toBe(true);
             }
             const tables = await db.query<{ allowed: boolean; rls: boolean }>(`

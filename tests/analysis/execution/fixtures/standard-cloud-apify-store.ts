@@ -1,19 +1,22 @@
 import { GoogleAuth } from 'google-auth-library';
 import { z } from 'zod';
+import { cloudSyntheticPublicCount, syntheticTargetPostCount } from './standard-providers';
 
 const runId = z.string().regex(/^CloudQa[a-f0-9]{48}$/);
 const nonce = z.uuidv4();
 const wave = z.string().regex(/^[a-f0-9]{64}$/);
 const timestamp = z.number().int().positive().max(8_640_000_000_000_000);
 const count = z.number().int().min(1).max(20_000);
-const indexes = (maximum: number) => z.array(z.number().int().min(0).max(maximum)).min(1).max(602);
+const profileCount = cloudSyntheticPublicCount + 2; // Target and one private candidate.
+const postCount = cloudSyntheticPublicCount + syntheticTargetPostCount;
+const indexes = (count: number) => z.array(z.number().int().min(0).max(count - 1)).min(1).max(profileCount);
 const cost = z.number().min(0).max(0.001);
 export const syntheticCloudBucket = 'gen-lang-client-0311522474-dev-standard-cloud-qa';
 
 const selector = z.discriminatedUnion('kind', [
-    z.strictObject({ kind: z.literal('profiles'), indexes: indexes(601) }),
+    z.strictObject({ kind: z.literal('profiles'), indexes: indexes(profileCount) }),
     z.strictObject({ kind: z.enum(['followers', 'followings']), limit: count }),
-    z.strictObject({ kind: z.enum(['likes', 'comments']), indexes: indexes(603), limit: count }),
+    z.strictObject({ kind: z.enum(['likes', 'comments']), indexes: indexes(postCount), limit: count }),
 ]);
 const start = z.strictObject({
     version: z.literal(2), id: runId, selector, startedAtMs: timestamp,
