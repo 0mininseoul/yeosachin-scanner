@@ -43,6 +43,8 @@ function store(
     overrides: Partial<EarlybirdFulfillmentStore> = {}
 ): EarlybirdFulfillmentStore {
     return {
+        recoverSignedAdmissions: vi.fn(async () => {}),
+        claimCapacity: vi.fn(async () => 'ready' as const),
         admit: vi.fn(async () => identity()),
         autoAdmitEligible: vi.fn(async () => []),
         listRecoverable: vi.fn(async () => [identity()]),
@@ -81,6 +83,83 @@ function store(
 }
 
 describe('earlybird fulfillment store', () => {
+    it('repeats the same admission once after PostgreSQL cancels the statement on timeout', async () => {
+        const rpc = vi.fn()
+            .mockImplementationOnce(() => rpcResult(null, {
+                code: '57014', message: 'canceling statement due to statement timeout',
+            }))
+            .mockImplementationOnce(() => rpcResult([{
+                order_id: ORDER, fulfillment_status: 'admission_pending',
+                preflight_id: PREFLIGHT, user_id: USER, plan_id: 'plus', request_id: null,
+            }]));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.admit(ORDER)).resolves.toEqual(identity({ planId: 'plus' }));
+        expect(rpc.mock.calls).toEqual([
+            ['admit_earlybird_fulfillment', { p_order_id: ORDER }],
+            ['admit_earlybird_fulfillment', { p_order_id: ORDER }],
+        ]);
+    });
+
+    it('does not repeat an admission cancelled by the caller', async () => {
+        const rpc = vi.fn(() => rpcResult(null, {
+            code: '57014', message: 'canceling statement due to user request',
+        }));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.admit(ORDER)).rejects.toMatchObject({
+            code: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns the existing retry outcome after a confirmed capacity claim timeout', async () => {
+        const rpc = vi.fn()
+            .mockImplementationOnce(() => rpcResult(null, {
+                code: '57014', message: 'canceling statement due to statement timeout',
+            }))
+            .mockImplementationOnce(() => rpcResult('waiting'));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.claimCapacity(ORDER)).resolves.toBe('retry');
+        expect(rpc).toHaveBeenCalledTimes(1);
+        await expect(fulfillmentStore.claimCapacity(ORDER)).resolves.toBe('waiting');
+        expect(rpc.mock.calls).toEqual([
+            ['claim_paid_analysis_capacity_v1', { p_order_id: ORDER }],
+            ['claim_paid_analysis_capacity_v1', { p_order_id: ORDER }],
+        ]);
+    });
+
+    it('surfaces a different cancellation of the capacity claim without repeating it', async () => {
+        const rpc = vi.fn(() => rpcResult(null, {
+            code: '57014', message: 'canceling statement due to user request',
+        }));
+        const fulfillmentStore = createEarlybirdFulfillmentStore({ rpc, randomUuid: () => CLAIM });
+
+        await expect(fulfillmentStore.claimCapacity(ORDER)).rejects.toMatchObject({
+            code: 'EARLYBIRD_FULFILLMENT_FAILED',
+        });
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+        ['waiting', 'wait_for_capacity'],
+        ['ineligible', 'no_longer_eligible'],
+        ['retry', 'retry_handoff'],
+    ] as const)('keeps a %s payment out of fresh admission and billing', async (capacity, action) => {
+        const orderStore = store({ claimCapacity: vi.fn(async () => capacity) });
+        const deps = {
+            store: orderStore, rebindExpiredPaidPreflight: vi.fn(), reserveFreshAdmission: vi.fn(),
+            enqueueFreshAdmission: vi.fn(), markFreshAdmissionDispatched: vi.fn(),
+            releaseFreshAdmissionDispatch: vi.fn(), dispatchAnalysisJob: vi.fn(),
+        };
+        const advanced = await advanceAdmittedEarlybirdFulfillment(identity(), deps);
+        expect(advanced.nextAction).toBe(action);
+        expect(deps.reserveFreshAdmission).not.toHaveBeenCalled();
+        expect(orderStore.claim).not.toHaveBeenCalled();
+        expect(deps.enqueueFreshAdmission).not.toHaveBeenCalled();
+    });
+
     it('preserves a safe admission boundary diagnostic without the RPC message', async () => {
         const secret = 'Bearer service-role-secret-do-not-print';
         const orderStore = store({
@@ -684,6 +763,7 @@ describe('earlybird fulfillment store', () => {
         // which the recovery route turns into a bare 500. A paid order then retries
         // for hours with no signal saying why.
         const orderStore = {
+            recoverSignedAdmissions: vi.fn().mockResolvedValue(undefined),
             listRecoverable: vi.fn().mockResolvedValue([identity()]),
             reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
             autoAdmitEligible: vi.fn().mockResolvedValue([]),
@@ -716,6 +796,7 @@ describe('earlybird fulfillment store', () => {
 
     it('still names a failure that carries no error code', async () => {
         const orderStore = {
+            recoverSignedAdmissions: vi.fn().mockResolvedValue(undefined),
             listRecoverable: vi.fn().mockResolvedValue([identity()]),
             reconcile: vi.fn().mockResolvedValue({ completed: 0, manualReview: 0 }),
             autoAdmitEligible: vi.fn().mockResolvedValue([]),

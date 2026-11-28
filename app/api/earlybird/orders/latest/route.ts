@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 import { createClient } from '@/lib/supabase/server';
 import {
     EarlybirdOrderLookupError,
@@ -41,13 +42,18 @@ export async function GET(request: Request): Promise<NextResponse> {
         });
     }
 
-    const requestedPlan = new URL(request.url).searchParams.get('plan');
-    if (requestedPlan !== null && requestedPlan !== 'basic' && requestedPlan !== 'standard') {
+    const params = new URL(request.url).searchParams;
+    const requestedPlan = params.get('plan');
+    const selectedOrder = params.get('orderId');
+    if (selectedOrder !== null && !z.string().uuid().safeParse(selectedOrder).success) {
+        return response(400, { code: 'INVALID_ORDER', error: '주문을 확인해주세요.' });
+    }
+    if (requestedPlan !== null && requestedPlan !== 'basic' && requestedPlan !== 'standard' && requestedPlan !== 'plus') {
         return response(400, { code: 'INVALID_PLAN', error: '플랜을 확인해주세요.' });
     }
 
     try {
-        const order = await loadLatestEarlybirdOrder(user.id, requestedPlan ?? undefined);
+        const order = await loadLatestEarlybirdOrder(user.id, requestedPlan ?? undefined, selectedOrder ?? undefined);
         if (!order) {
             return response(404, { code: 'ORDER_NOT_FOUND', error: '사전 구매 내역이 없습니다.' });
         }

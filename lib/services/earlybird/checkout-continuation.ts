@@ -1,13 +1,13 @@
-import type { PlanId } from '@/lib/domain/analysis/plan-catalog';
+import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 
 export const EARLYBIRD_CHECKOUT_REDIRECT_PATH =
     '/api/earlybird/checkout/redirect';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const CHECKOUT_PLAN_PATTERN = /^(?:basic|standard)$/;
+const CHECKOUT_PLAN_PATTERN = /^(?:basic|standard|plus)$/;
 const ANALYSIS_PROGRESS_PATH_PATTERN = /^\/progress\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export type EarlybirdCheckoutPlanId = Extract<PlanId, 'basic' | 'standard'>;
+export type EarlybirdCheckoutPlanId = PaidEarlybirdPlanId;
 
 function isCheckoutPlanId(value: unknown): value is EarlybirdCheckoutPlanId {
     return typeof value === 'string' && CHECKOUT_PLAN_PATTERN.test(value);
@@ -37,7 +37,7 @@ export function isSafeEarlybirdCheckoutContinuationUrl(value: string): boolean {
         ) return false;
         const query = url.search;
         const match = query.match(
-            /^\?orderId=([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})&planId=(basic|standard)$/
+            /^\?orderId=([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})&planId=(basic|standard|plus)$/
         );
         return Boolean(match)
             && match?.[1] === match?.[1].toLowerCase()

@@ -13,30 +13,30 @@ import {
 
 describe('earlybird presale catalog', () => {
     it('owns immutable prices and independent plan limits on the server', () => {
-        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-08-v5');
+        expect(EARLYBIRD_PRICING_VERSION).toBe('earlybird-2026-11-v6');
         expect(EARLYBIRD_PLAN_CATALOG.basic).toEqual({
             planId: 'basic',
-            referenceAmountKrw: 19_900,
-            earlybirdAmountKrw: 9_900,
-            displayDiscountPercent: 50,
+            referenceAmountKrw: 10_900,
+            earlybirdAmountKrw: 3_900,
+            displayDiscountPercent: 64,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });
         expect(EARLYBIRD_PLAN_CATALOG.standard).toEqual({
             planId: 'standard',
-            referenceAmountKrw: 39_900,
-            earlybirdAmountKrw: 19_900,
-            displayDiscountPercent: 50,
+            referenceAmountKrw: 20_900,
+            earlybirdAmountKrw: 6_900,
+            displayDiscountPercent: 67,
             serverLimit: 10,
             fulfillment: 'groble_payment',
         });
         expect(EARLYBIRD_PLAN_CATALOG.plus).toEqual({
             planId: 'plus',
-            referenceAmountKrw: null,
-            earlybirdAmountKrw: null,
-            displayDiscountPercent: null,
-            serverLimit: null,
-            fulfillment: 'waitlist',
+            referenceAmountKrw: 34_900,
+            earlybirdAmountKrw: 10_900,
+            displayDiscountPercent: 69,
+            serverLimit: 10,
+            fulfillment: 'groble_payment',
         });
     });
 
@@ -55,11 +55,14 @@ describe('earlybird presale catalog', () => {
         expect(EARLYBIRD_PLAN_CATALOG.standard.earlybirdAmountKrw).toBe(
             ANALYSIS_PLAN_CATALOG.standard.price.amountKrw
         );
+        expect(EARLYBIRD_PLAN_CATALOG.plus.earlybirdAmountKrw).toBe(
+            ANALYSIS_PLAN_CATALOG.plus.price.amountKrw
+        );
     });
 
-    it('treats Plus as waitlist-only', () => {
+    it('recognizes all three checkout plan IDs', () => {
         expect(isPaidEarlybirdPlanId('basic')).toBe(true);
         expect(isPaidEarlybirdPlanId('standard')).toBe(true);
-        expect(isPaidEarlybirdPlanId('plus')).toBe(false);
+        expect(isPaidEarlybirdPlanId('plus')).toBe(true);
     });
 });

@@ -22,6 +22,7 @@ import {
 import type { PaidEarlybirdPlanId } from '@/lib/domain/earlybird/catalog';
 import { normalizeKoreanMobileNumber } from '@/lib/services/identity/phone-number';
 import { parseGrobleSellerReference } from '@/lib/services/earlybird/seller-reference';
+import { paidResultEmailEnabled, sealResultEmailRecipient } from '@/lib/services/earlybird/result-email-recipient';
 import {
     parseGrobleEventEnvelope,
     parseGroblePaymentCancelRequestedEvent,
@@ -148,6 +149,7 @@ function safeWebhookEventType(value: string): WebhookEventType {
 function planForProduct(productId: string, config: GrobleConfig): PaidEarlybirdPlanId | undefined {
     if (productId === config.productIds.basic) return 'basic';
     if (productId === config.productIds.standard) return 'standard';
+    if (productId === config.productIds.plus) return 'plus';
     return undefined;
 }
 
@@ -408,18 +410,36 @@ async function handlePOST(
             const internalSellerReference = parseGrobleSellerReference(
                 payment.sellerReference
             );
-            persistence = internalSellerReference
-                ? await supabaseAdmin.rpc(
-                    'finalize_earlybird_groble_payment_by_reference',
-                    {
-                        p_seller_reference: internalSellerReference,
-                        ...params,
+            if (autoAdmissionEligible) {
+                let sealed: string | null = null;
+                if (internalSellerReference && process.env.VERCEL_ENV === 'production'
+                    && paidResultEmailEnabled(process.env)) {
+                    try {
+                        sealed = sealResultEmailRecipient(payment.buyerEmail, internalSellerReference, process.env);
+                    } catch {
+                        console.error('Paid result delivery encryption is unavailable.');
                     }
-                )
-                : await supabaseAdmin.rpc(
-                    'finalize_earlybird_groble_payment',
-                    params
-                );
+                }
+                const automaticParams = { ...params, p_seller_reference: internalSellerReference };
+                persistence = sealed
+                    ? await supabaseAdmin.rpc('finalize_paid_analysis_with_result_email_v1', {
+                        ...automaticParams, p_sealed_recipient: sealed,
+                    })
+                    : await supabaseAdmin.rpc('finalize_automatic_paid_analysis_v1', automaticParams);
+            } else {
+                persistence = internalSellerReference
+                    ? await supabaseAdmin.rpc(
+                        'finalize_earlybird_groble_payment_by_reference',
+                        {
+                            p_seller_reference: internalSellerReference,
+                            ...params,
+                        }
+                    )
+                    : await supabaseAdmin.rpc(
+                        'finalize_earlybird_groble_payment',
+                        params
+                    );
+            }
         } catch {
             return reject(
                 500,

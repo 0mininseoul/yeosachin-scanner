@@ -33,8 +33,6 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     );
 }
 
-const CONCIERGE_ANALYSIS_COPY =
-    '판독 결과가 완성되면 2일 이내에 가입하신 이메일로 결과 링크를 보내드릴게요.';
 const SUPPORT_COPY =
     '결제 확인이 지연되고 있어요. 같은 화면이 계속되면 고객센터로 문의해주세요.';
 
@@ -72,7 +70,6 @@ function AutomaticFulfillmentProgressShell() {
                     </span>
                 </div>
             </div>
-            <p className="mt-2.5 text-center text-[11px] text-fg-mute">약 5~10분</p>
             <p className="mt-3.5 text-center text-[12px] leading-relaxed text-fg-dim" aria-live="polite">
                 판독을 자동으로 준비하고 있습니다.
             </p>
@@ -129,10 +126,22 @@ export function EarlybirdStatus({
     }, [order]);
 
     useEffect(() => {
+        const url = new URL(window.location.href);
+        if (url.pathname !== '/earlybird' || url.searchParams.has('orderId')) return;
+        url.searchParams.set('plan', order.planId);
+        url.searchParams.set('orderId', order.orderId);
+        window.history.replaceState(window.history.state, '', url);
+    }, [order.planId, order.orderId]);
+
+    useEffect(() => {
         if (!refreshMode) return;
         const ownerStatus = createSingleFlightEarlybirdStatusRefresh(
             currentOrder.planId,
-            setOwnerOrder,
+            updated => {
+                if (updated.orderId === currentOrder.orderId) setOwnerOrder(updated);
+            },
+            undefined,
+            currentOrder.orderId,
         );
         const stopSchedule = scheduleEarlybirdStatusSnapshotRefresh(
             () => { void ownerStatus.refresh(); },
@@ -146,7 +155,7 @@ export function EarlybirdStatus({
             stopSchedule();
             ownerStatus.stop();
         };
-    }, [currentOrder.planId, refreshMode]);
+    }, [currentOrder.orderId, currentOrder.planId, refreshMode]);
 
     useEffect(() => {
         if (!notifyModalOpen) return;
@@ -160,6 +169,7 @@ export function EarlybirdStatus({
         // event during that gap: a later setUserId cannot repair an already sent
         // event's identity.
         if (authLoading || !user?.id) return;
+        if (currentOrder.capacityWaitStatus === 'waiting') return;
         const properties = {
             order_id: currentOrder.orderId,
             plan_id: currentOrder.planId,
@@ -259,17 +269,41 @@ export function EarlybirdStatus({
                 <CaseCard className="mt-8 p-7 text-center">
                     <Eyebrow className="justify-center">결제 확인</Eyebrow>
                     <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
-                        {isAutomaticFulfillmentBridge
-                            ? '판독을 자동으로 시작하고 있어요'
-                            : isResultNavigation
-                                ? '판독 결과로 이동하고 있어요'
+                        {isResultNavigation
+                            ? '판독 결과로 이동하고 있어요'
+                            : isAutomaticFulfillmentBridge
+                                ? '판독을 자동으로 시작하고 있어요'
                                 : '판독 진행 화면으로 이동하고 있어요'}
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        잠시만 기다리면 진행 화면으로 이어집니다.
+                        {isResultNavigation ? '분석이 완료되었어요.' : '잠시만 기다리면 진행 화면으로 이어집니다.'}
                     </p>
                 </CaseCard>
             </div>
+        );
+    }
+
+    if (isAutomaticPendingBridge && currentOrder.systemStatus === 'paid') {
+        const waiting = currentOrder.capacityWaitStatus === 'waiting';
+        return (
+            <CaseCard className="mt-8 p-7 text-center">
+                <div role="status" aria-live="polite">
+                    <Eyebrow className="justify-center">결제 완료</Eyebrow>
+                    <h1 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">
+                        {waiting ? '지금은 분석 대기 중이에요' : '판독 접수를 확인하고 있어요'}
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
+                        {waiting
+                            ? '화면을 나가도 순서가 되면 자동으로 분석을 시작해요.'
+                            : '접수가 끝나면 이 화면에 진행 상태가 표시돼요.'}
+                    </p>
+                    {waiting && currentOrder.resultEmailNotificationAvailable === true && (
+                        <p className="mt-2 text-[13px] leading-relaxed text-fg-dim">
+                            분석이 끝나면 이메일로 알려드릴게요.
+                        </p>
+                    )}
+                </div>
+            </CaseCard>
         );
     }
 
@@ -286,7 +320,9 @@ export function EarlybirdStatus({
                         결제가 완료되었어요
                     </h1>
                     <p className="mt-3 text-[13px] leading-relaxed text-fg-dim">
-                        {CONCIERGE_ANALYSIS_COPY}
+                        {currentOrder.resultEmailNotificationAvailable === true
+                            ? '판독 결과가 준비되면 결제할 때 입력한 이메일로 결과 링크를 보내드릴게요.'
+                            : '판독 결과가 준비되면 이 화면에서 확인하실 수 있어요.'}
                     </p>
                 </CaseCard>
             </div>

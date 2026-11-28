@@ -10,7 +10,7 @@ export const earlybirdCheckoutRequestSchema = z.object({
 
 export const earlybirdCheckoutRecoveryRequestSchema = z.object({
     preflightId: uuidSchema,
-    planId: z.enum(['basic', 'standard']),
+    planId: z.enum(['basic', 'standard', 'plus']),
 }).strict();
 
 export const earlybirdWaitlistRequestSchema = z.object({

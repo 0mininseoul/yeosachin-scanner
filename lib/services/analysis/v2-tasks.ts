@@ -10,6 +10,7 @@ import { createCloudTasksClient } from './background-tasks';
 import { getAnalysisWorkloadRole } from './workload-role';
 import {
     analysisV2JobStore,
+    findAnalysisV2CapacitySuccessor,
     assertAnalysisV2JobIdentity,
     type AnalysisV2JobDispatchReservation,
     type AnalysisV2JobStore,
@@ -612,25 +613,99 @@ export async function dispatchReservedAnalysisV2Job(
     return enqueued.outcome;
 }
 
-/**
- * Capacity waits are durable job deferrals, not transport retries. Rotate the exact dispatch
- * generation before creating a successor task so Cloud Tasks' finite delivery budget cannot
- * strand a pending job after repeated provider-capacity responses.
- */
-export async function rearmAnalysisV2JobAfterCapacity(
-    delivery: AnalysisV2TaskDelivery,
-    options: DispatchOptions & { store: AnalysisV2JobStore },
-): Promise<AnalysisV2TaskEnqueueOutcome> {
-    const config = requireConfig(
-        options.config === undefined ? getAnalysisV2TasksConfig() : options.config
-    );
-    const reservation = await options.store.rearmDispatch({
-        requestId: delivery.requestId,
-        jobKey: delivery.jobKey,
-        expectedGeneration: delivery.generation,
-        expectedReservationToken: delivery.reservationToken,
+// An expired delivery can repair its own successor even if the first rearm response was lost.
+// The input dispatch token has 122 random bits. Domain-separate and format the digest as a UUID.
+function capacitySuccessor(previous: AnalysisV2TaskDelivery): AnalysisV2TaskDelivery {
+    const digest = createHash('sha256').update(JSON.stringify([
+        'analysis-v2-paid-capacity-handoff/1', previous.requestId, previous.jobKey,
+        previous.generation, previous.reservationToken,
+    ])).digest();
+    digest[6] = (digest[6] & 0x0f) | 0x40;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    const token = digest.toString('hex', 0, 16);
+    return {
+        requestId: previous.requestId, jobKey: previous.jobKey, workloadRole: 'paid',
+        generation: previous.generation + 1,
+        reservationToken: [token.slice(0, 8), token.slice(8, 12), token.slice(12, 16),
+            token.slice(16, 20), token.slice(20)].join('-'),
+    };
+}
+
+type CapacityDispatchOptions = DispatchOptions & {
+    client?: CloudTasksClientLike & {
+        getTask(request: { name: string; responseView: 'FULL' }): PromiseLike<unknown>;
+    };
+};
+
+async function confirmCapacityTask(name: string, expected: AnalysisV2TaskDelivery,
+    config: AnalysisV2TasksConfig, options: CapacityDispatchOptions) {
+    const client = options.client ?? await getSharedTasksClient(config);
+    const response = await client.getTask({ name, responseView: 'FULL' });
+    const task = Array.isArray(response) ? response[0] : null;
+    const http = task?.httpRequest;
+    if (task?.name !== name || (http?.httpMethod !== 'POST' && http?.httpMethod !== 1)
+        || new Headers(http.headers).get(ANALYSIS_V2_WORKER_TASK_CONTRACT_HEADER) !== String(ANALYSIS_V2_CURRENT_WORKER_TASK_CONTRACT_VERSION)
+        || http.url !== config.targetUrl || http.oidcToken?.audience !== config.oidcAudience
+        || http.oidcToken?.serviceAccountEmail !== config.serviceAccountEmail
+        || !(typeof http.body === 'string' || http.body instanceof Uint8Array)) {
+        throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: unexpected capacity task.');
+    }
+    // Both gRPC and REST clients may return a protobuf bytes field.
+    const body = typeof http.body === 'string' ? Buffer.from(http.body, 'base64') : Buffer.from(http.body);
+    const payload = parseAnalysisV2TaskPayload(JSON.parse(body.toString('utf8')));
+    if (payload.workloadRole !== 'paid' || payload.requestId !== expected.requestId
+        || payload.jobKey !== expected.jobKey || payload.generation !== expected.generation
+        || payload.reservationToken !== expected.reservationToken) {
+        throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: capacity task fence mismatch.');
+    }
+}
+
+async function dispatchCapacitySuccessor(next: AnalysisV2TaskDelivery,
+    reservation: AnalysisV2JobDispatchReservation, options: CapacityDispatchOptions) {
+    if (reservation.requestId !== next.requestId || reservation.jobKey !== next.jobKey
+        || reservation.generation !== next.generation || reservation.reservationToken !== next.reservationToken) {
+        throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: invalid capacity successor.');
+    }
+    if (reservation.dispatchState === 'delivered' || ['completed', 'cancelled', 'failed'].includes(reservation.status)) return;
+    const config = requireConfig(options.config === undefined ? getAnalysisV2TasksConfig() : options.config);
+    if (reservation.dispatchState === 'enqueued' && reservation.taskName) {
+        const client = options.client ?? await getSharedTasksClient(config);
+        const name = configuredTaskName(config, client, next.requestId, next.jobKey, next.generation);
+        if (name !== reservation.taskName) throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: capacity task name mismatch.');
+        await confirmCapacityTask(name, next, config, options);
+        return;
+    }
+    if (!reservation.reserved || reservation.dispatchState !== 'reserved' || reservation.status !== 'pending') {
+        throw new Error('ANALYSIS_V2_TASKS_DISPATCH_ERROR: capacity successor is not pending.');
+    }
+    // Spread the due times of simultaneously released jobs without ever immediately redelivering.
+    const delaySeconds = 10 + Number.parseInt(next.reservationToken.slice(0, 2), 16) % 11;
+    const enqueued = await enqueueAnalysisV2Task(next, { ...options, config, delaySeconds });
+    if (enqueued.outcome === 'exists') await confirmCapacityTask(enqueued.taskName, next, config, options);
+    await (options.store ?? analysisV2JobStore).markDispatched({
+        ...reservation, reservationToken: next.reservationToken, taskName: enqueued.taskName,
     });
-    return dispatchReservedAnalysisV2Job(reservation, { ...options, config });
+}
+
+export async function rearmAnalysisV2JobAfterCapacity(delivery: AnalysisV2TaskDelivery,
+    options: CapacityDispatchOptions): Promise<void> {
+    const next = capacitySuccessor(delivery);
+    const reservation = await (options.store ?? analysisV2JobStore).rearmDispatch({
+        requestId: delivery.requestId, jobKey: delivery.jobKey,
+        expectedGeneration: delivery.generation, expectedReservationToken: delivery.reservationToken,
+        successorToken: next.reservationToken,
+    });
+    await dispatchCapacitySuccessor(next, reservation, options);
+}
+
+export async function resumeAnalysisV2CapacityHandoff(delivery: AnalysisV2TaskDelivery,
+    options: CapacityDispatchOptions): Promise<boolean> {
+    if (delivery.generation >= 1_000) return false;
+    const next = capacitySuccessor(delivery);
+    const reservation = await findAnalysisV2CapacitySuccessor(next);
+    if (!reservation) return false;
+    await dispatchCapacitySuccessor(next, reservation, options);
+    return true;
 }
 
 export async function verifyAnalysisV2TaskAuthorization(

@@ -332,6 +332,7 @@ export const OPERATIONAL_PHASES = [
 ] as const;
 
 export const OPERATIONAL_DISPOSITIONS = [
+    'capacity_handoff',
     'success',
     'failure',
     'retry',

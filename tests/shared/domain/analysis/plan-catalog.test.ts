@@ -32,13 +32,13 @@ describe('analysis plan catalog', () => {
             expect(plan.pricingVersion).toBe(PLAN_PRICING_VERSION);
         }
         expect(ANALYSIS_PLAN_CATALOG.basic.price).toEqual({
-            currency: 'KRW', status: 'quoted', amountKrw: 9_900,
+            currency: 'KRW', status: 'quoted', amountKrw: 3_900,
         });
         expect(ANALYSIS_PLAN_CATALOG.standard.price).toEqual({
-            currency: 'KRW', status: 'quoted', amountKrw: 19_900,
+            currency: 'KRW', status: 'quoted', amountKrw: 6_900,
         });
         expect(ANALYSIS_PLAN_CATALOG.plus.price).toEqual({
-            currency: 'KRW', status: 'deferred', amountKrw: null,
+            currency: 'KRW', status: 'quoted', amountKrw: 10_900,
         });
     });
 

@@ -1,3 +1,5 @@
+import { EARLYBIRD_PLAN_CATALOG, EARLYBIRD_PRICING_VERSION } from '../earlybird/catalog';
+
 export const PLAN_IDS = ['basic', 'standard', 'plus'] as const;
 
 export type PlanId = (typeof PLAN_IDS)[number];
@@ -23,7 +25,7 @@ export interface PlanEligibilityOptions {
     catalog?: PlanEligibilityCatalog;
 }
 
-export const PLAN_PRICING_VERSION = 'earlybird-2026-08-v5' as const;
+export const PLAN_PRICING_VERSION = EARLYBIRD_PRICING_VERSION;
 
 export type DeferredKrwPrice = Readonly<{
     currency: 'KRW';
@@ -51,12 +53,6 @@ export interface AnalysisPlan {
     price: KrwPrice;
 }
 
-const DEFERRED_KRW_PRICE: DeferredKrwPrice = Object.freeze({
-    currency: 'KRW',
-    status: 'deferred',
-    amountKrw: null,
-});
-
 function quotedKrwPrice(amountKrw: number): QuotedKrwPrice {
     return Object.freeze({ currency: 'KRW', status: 'quoted', amountKrw });
 }
@@ -68,7 +64,7 @@ export const ANALYSIS_PLAN_CATALOG = Object.freeze({
         relationshipCapacity: Object.freeze({ followers: 400, following: 400 }),
         detailedMutualLimit: 300,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: quotedKrwPrice(9_900),
+        price: quotedKrwPrice(EARLYBIRD_PLAN_CATALOG.basic.earlybirdAmountKrw),
     }),
     standard: Object.freeze({
         id: 'standard',
@@ -76,7 +72,7 @@ export const ANALYSIS_PLAN_CATALOG = Object.freeze({
         relationshipCapacity: Object.freeze({ followers: 800, following: 800 }),
         detailedMutualLimit: 600,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: quotedKrwPrice(19_900),
+        price: quotedKrwPrice(EARLYBIRD_PLAN_CATALOG.standard.earlybirdAmountKrw),
     }),
     plus: Object.freeze({
         id: 'plus',
@@ -84,7 +80,7 @@ export const ANALYSIS_PLAN_CATALOG = Object.freeze({
         relationshipCapacity: Object.freeze({ followers: 1_200, following: 1_200 }),
         detailedMutualLimit: 900,
         pricingVersion: PLAN_PRICING_VERSION,
-        price: DEFERRED_KRW_PRICE,
+        price: quotedKrwPrice(EARLYBIRD_PLAN_CATALOG.plus.earlybirdAmountKrw),
     }),
 } satisfies Readonly<Record<PlanId, AnalysisPlan>>);
 
