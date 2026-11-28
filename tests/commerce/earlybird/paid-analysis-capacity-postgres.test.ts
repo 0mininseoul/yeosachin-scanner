@@ -149,22 +149,27 @@ native('serializes simultaneous paid claims, preserves FIFO and releases only te
         expect((await db.client(source.owner).rpc('claim_paid_analysis_capacity_v1',{p_order_id:d.id})).error).toBeTruthy();
         expect((await db.client(null).rpc('load_paid_analysis_capacity_v1',{p_order_id:d.id,p_user_id:source.owner})).error).toBeTruthy();
 
-        await db.exec(`UPDATE analysis_requests SET status='failed' WHERE status IN ('pending','processing');
-            UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now();
-            UPDATE paid_analysis_capacity_policy SET max_active=3, validation_ref='three-shared-seats'`);
-        const plusOrders = await Promise.all([0, 1, 2].map(async i => order(8 + i, new Date(Date.UTC(2026,0,1,1,i)), 'plus')));
-        const fourth = await order(11, new Date(Date.UTC(2026,0,1,1,3)), 'standard');
-        for (const p of plusOrders) expect(await claim(p.id)).toBe('ready');
-        expect(await claim(fourth.id)).toBe('waiting');
-        expect(await info(fourth)).toMatchObject({waiting:true,startedAt:null});
-        await expect(db.query(`UPDATE earlybird_fulfillments SET lease_token=gen_random_uuid(),lease_expires_at=now()+interval '1 minute'
-            WHERE order_id=$1`,[fourth.id])).rejects.toThrow('EARLYBIRD_ANALYSIS_CAPACITY_WAITING');
-        await db.query("UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now() WHERE order_id=$1",[plusOrders[0].id]);
-        expect(await claim(fourth.id)).toBe('ready');
-        const started = await info(fourth);
-        expect(started).toMatchObject({waiting:false,startedAt:expect.any(String)});
-        expect(await claim(fourth.id)).toBe('ready');
-        expect(await info(fourth)).toEqual(started);
+        let nextOrderIndex = 8;
+        for (const capacity of [2, 3]) {
+            await db.exec(`UPDATE analysis_requests SET status='failed' WHERE status IN ('pending','processing');
+                UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now();`);
+            await db.query("UPDATE paid_analysis_capacity_policy SET max_active=$1, validation_ref='plus-shared-seats'", [capacity]);
+            const paidAt = (offset: number) => new Date(Date.UTC(2026, 0, 1, capacity, offset));
+            const plusOrders = await Promise.all(Array.from({ length: capacity },
+                (_, offset) => order(nextOrderIndex++, paidAt(offset), 'plus')));
+            const waiter = await order(nextOrderIndex++, paidAt(capacity), 'standard');
+            for (const plusOrder of plusOrders) expect(await claim(plusOrder.id)).toBe('ready');
+            expect(await claim(waiter.id)).toBe('waiting');
+            expect(await info(waiter)).toMatchObject({ waiting: true, startedAt: null });
+            await expect(db.query(`UPDATE earlybird_fulfillments SET lease_token=gen_random_uuid(),lease_expires_at=now()+interval '1 minute'
+                WHERE order_id=$1`, [waiter.id])).rejects.toThrow('EARLYBIRD_ANALYSIS_CAPACITY_WAITING');
+            await db.query("UPDATE earlybird_fulfillments SET status='manual_review',manual_review_at=now() WHERE order_id=$1", [plusOrders[0].id]);
+            expect(await claim(waiter.id)).toBe('ready');
+            const started = await info(waiter);
+            expect(started).toMatchObject({ waiting: false, startedAt: expect.any(String) });
+            expect(await claim(waiter.id)).toBe('ready');
+            expect(await info(waiter)).toEqual(started);
+        }
     } finally {
         await db.close();
     }

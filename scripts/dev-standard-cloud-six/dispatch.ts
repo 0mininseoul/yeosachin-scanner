@@ -13,7 +13,8 @@ import { queueName } from '../../services/dev-standard-qa-worker/queue-name.mjs'
 import { buyerIdentity } from './identity.mjs';
 
 const plusRehearsal = process.env.DEV_STANDARD_QA_PLAN === 'plus';
-const participantCount = plusRehearsal ? 4 : 6;
+const plusTwoSeats = plusRehearsal && process.env.DEV_STANDARD_QA_PAID_SEATS === '2';
+const participantCount = plusTwoSeats ? 3 : plusRehearsal ? 4 : 6;
 const buyers = z.array(z.object({ slot: z.number().int().min(1).max(6), owner_id: z.uuid(),
     preflight_id: z.uuid().nullable(), order_id: z.uuid().nullable(), request_id: z.uuid().nullable(),
     preflight_status: z.string().nullable(), request_status: z.string().nullable(), order_status: z.string().nullable(),
@@ -49,7 +50,9 @@ async function participants(wave: string) {
     return rows;
 }
 async function prepare(wave: string) {
-    const enrolled = await rpc(plusRehearsal ? 'dev_cloud_six_open_plus_v1' : 'dev_cloud_six_open_v1', {p_wave:wave});
+    const openWaveRpc = plusTwoSeats ? 'dev_cloud_six_open_plus_two_v1'
+        : plusRehearsal ? 'dev_cloud_six_open_plus_v1' : 'dev_cloud_six_open_v1';
+    const enrolled = await rpc(openWaveRpc, { p_wave: wave });
     if (enrolled!==participantCount) throw new Error('SIX_DRIVER_ENROLLMENT_FAILED');
     const rows = await participants(wave);
     await allSlots(rows,async row=>{

@@ -21,7 +21,7 @@ if (rest.length || !['standard', 'plus'].includes(paidPlan) || !/^(?:[1-9]|1[0-6
     || (budgetProbe !== undefined && (!['held', 'spent'].includes(budgetProbe) || owners !== '1' || publicCount !== '4'
         || delivery !== 'production-paid' || timing !== 'fast'))
     || (delivery === 'production-paid' && paidPlan === 'standard' && (capacity.slots !== 128 || tail !== 'coverage99'))
-    || (paidPlan === 'plus' && (delivery !== 'production-paid' || capacity.slots !== 8 || owners !== '3' || publicCount !== '900' || Boolean(option)))
+    || (paidPlan === 'plus' && (delivery !== 'production-paid' || capacity.slots !== 8 || !['2', '3'].includes(owners) || publicCount !== '900' || Boolean(option)))
     || !Object.hasOwn(graceByStrategy, tail) || !['fast', 'observed'].includes(timing) || (receipt && !path.isAbsolute(receipt))) {
     throw new Error('Usage: node scripts/standard-shared-capacity.mjs [1..16] [capacity preset] [normal|recovery] '
         + '[absolute-new-receipt.json] [1..600 public candidates] [fast|observed] [immediate|grace8s|finish50s|coverage99] [fixture|production-paid] [held|spent|--apify-headroom=7]');

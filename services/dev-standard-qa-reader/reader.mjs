@@ -18,7 +18,9 @@ async function main() {
     requireReader(anon !== env.SUPABASE_SERVICE_ROLE_KEY, 'INVALID_READER_CONFIG');
     const wave = env.DEV_STANDARD_QA_WAVE;
     const plus = env.DEV_STANDARD_QA_PLAN === 'plus';
-    const participantCount = plus ? 4 : 6;
+    const plusTwoSeats = plus && env.DEV_STANDARD_QA_PAID_SEATS === '2';
+    const participantCount = plusTwoSeats ? 3 : plus ? 4 : 6;
+    const ownerResultCount = plusTwoSeats ? 2 : participantCount;
     const rows = async () => {
         const poll = () => admin.rpc('dev_cloud_six_order_state_v1', { p_wave: wave })
             .select('slot,request_id,request_status,preflight_status,order_status,seat_at,published_at');
@@ -55,7 +57,7 @@ async function main() {
             if (render.status === 'rejected') throw render.reason;
             if (images.status === 'rejected') throw images.reason;
             return { get, browser: render.value, http: images.value };
-        }, emit, undefined, participantCount);
+        }, emit, undefined, participantCount, ownerResultCount);
         await Promise.all(slots.map(async slot => {
             if (!slot.http) return;
             try {
@@ -70,7 +72,7 @@ async function main() {
         }));
         const successes = slots.filter(slot => !slot.failure && slot.evidence?.withinHour === true).length;
         emit({ event: 'complete', tested: slots.length, withinHourAndControls: successes });
-        if (successes !== participantCount) process.exitCode = 1;
+        if (successes !== ownerResultCount) process.exitCode = 1;
     } finally { await browser.close(); }
 }
 main().catch(error => { emit({ event: 'reader_failure', code: safeCode(error) }); process.exitCode = 1; });

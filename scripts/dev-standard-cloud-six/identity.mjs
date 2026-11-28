@@ -23,7 +23,8 @@ async function provision() {
     assert.match(wave ?? '', /^[0-9a-f]{64}$/);
     assert.ok(admin && Number(process.env.CLOUD_RUN_TASK_INDEX) === 0 && Number(process.env.CLOUD_RUN_TASK_COUNT) === 1);
     let created = 0, alreadyPresent = 0;
-    const count = process.env.DEV_STANDARD_QA_PLAN === 'plus' ? 4 : 6;
+    const plus = process.env.DEV_STANDARD_QA_PLAN === 'plus';
+    const count = plus ? (process.env.DEV_STANDARD_QA_PAID_SEATS === '2' ? 3 : 4) : 6;
     for (let i = 1; i <= count; i++) {
         const account = buyerIdentity(wave,i);
         const res = await fetch(devOrigin + '/auth/v1/admin/users', {
