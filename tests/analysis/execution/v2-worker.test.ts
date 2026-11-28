@@ -2259,7 +2259,7 @@ describe('analysis V2 durable DAG worker', () => {
         const targetClaim = claimFor(initial, ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY);
         const jobStore = store(targetClaim);
         const terminalFailureFinalizer = vi.fn();
-        const code = 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR';
+        const code = 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_STATEMENT_TIMEOUT';
 
         await expect(processAnalysisV2TaskDelivery({ ...delivery, jobKey: targetClaim.jobKey }, {
             store: jobStore,
@@ -2275,8 +2275,9 @@ describe('analysis V2 durable DAG worker', () => {
             errorCode: code, retryable: true, maxAttempts: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
         });
         expect(terminalFailureFinalizer).not.toHaveBeenCalled();
-        expect(classifyAnalysisV2JobFailure(new Error(`${code}: resolve failed (42501).`)))
-            .toMatchObject({ code, disposition: 'permanent', retryable: false });
+        const nonTimeoutCode = 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR';
+        expect(classifyAnalysisV2JobFailure(new Error(`${nonTimeoutCode}: resolve failed (57014).`)))
+            .toMatchObject({ code: nonTimeoutCode, disposition: 'permanent', retryable: false });
     });
 
     it('does not retry ambiguous starts or truly terminal Actor failures', () => {
