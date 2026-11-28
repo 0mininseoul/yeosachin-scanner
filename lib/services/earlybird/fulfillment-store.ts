@@ -16,7 +16,7 @@ import {
 } from '@/lib/services/analysis/v2-tasks';
 import { operationalLogger } from '@/lib/observability/server';
 import type { OperationalEvent } from '@/lib/observability/schema';
-import { isPostgresStatementTimeout, retryPostgresAbortedRpc } from '@/lib/supabase/rpc-retry';
+import { isPostgresStatementTimeout } from '@/lib/supabase/rpc-retry';
 
 const uuidSchema = z.string().uuid().transform(value => value.toLowerCase());
 const fulfillmentStatusSchema = z.enum([
@@ -442,10 +442,11 @@ export function createEarlybirdFulfillmentStore(
 
         async admit(orderId) {
             const params = { p_order_id: validatedOrderId(orderId) };
-            const { data, error } = await retryPostgresAbortedRpc(
-                () => dependencies.rpc('admit_earlybird_fulfillment', params),
-                { retryDeadlock: false }
-            );
+            const admit = () => dependencies.rpc('admit_earlybird_fulfillment', params);
+            const firstAttempt = await admit();
+            const { data, error } = isPostgresStatementTimeout(firstAttempt.error)
+                ? await admit()
+                : firstAttempt;
             if (error) persistenceError(error);
             const identity = identityFromRow(oneRow(data, identityRowSchema));
             return identity;
