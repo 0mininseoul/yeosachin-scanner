@@ -9,7 +9,10 @@ export function qaWorkerConfig(env: NodeJS.ProcessEnv = process.env) {
     if (role !== 'paid' && role !== 'preflight') return fail();
     const plan = env.DEV_STANDARD_QA_PLAN ?? 'standard';
     if (plan !== 'standard' && plan !== 'plus') return fail();
-    if (plan === 'plus' && (env.PAID_STANDARD_VERTEX_CAPACITY_MODE || env.PAID_STANDARD_PROCESS_FEATURE_SLOTS)) return fail();
+    const expandPlus = env.DEV_STANDARD_QA_PLUS_EXPANDED === 'true' && role === 'paid' && plan === 'plus';
+    if (env.DEV_STANDARD_QA_PLUS_EXPANDED !== undefined && !expandPlus) return fail();
+    const expanded = role === 'paid' && (plan === 'standard' || expandPlus);
+    if (!expanded && (env.PAID_STANDARD_VERTEX_CAPACITY_MODE || env.PAID_STANDARD_PROCESS_FEATURE_SLOTS)) return fail();
     if (env.K_SERVICE !== service(role) || !env.K_REVISION?.startsWith(service(role) + '-') || env.NODE_ENV !== 'production'
         || env.GOOGLE_CLOUD_PROJECT !== project || env.DEV_STANDARD_QA_PROJECT_NUMBER !== number || env.CLOUD_RUN_JOB
         || env.VERCEL_PROJECT_ID || env.DEV_LIVE_WORKLOAD || env.DEPLOYMENT_ROLE === 'production'
@@ -27,9 +30,9 @@ export function qaWorkerConfig(env: NodeJS.ProcessEnv = process.env) {
     if (role === 'paid') Object.assign(envFlags, {
         ANALYSIS_V2_WORKER_ENABLED: 'true', ANALYSIS_V2_RESULT_IMAGES_ENABLED: 'true',
     });
-    if (role === 'paid' && plan === 'standard') Object.assign(envFlags, {
+    if (expanded) Object.assign(envFlags, {
         PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128',
-        PAID_STANDARD_PROCESS_FEATURE_SLOTS: env.PAID_STANDARD_PROCESS_FEATURE_SLOTS === '4' ? '4' : '5',
+        PAID_STANDARD_PROCESS_FEATURE_SLOTS: plan === 'standard' && env.PAID_STANDARD_PROCESS_FEATURE_SLOTS === '4' ? '4' : '5',
     });
     for (const r of ['preflight', 'paid'] as const) {
         const p = r === 'paid' ? 'ANALYSIS_V2_TASKS_' : 'PREFLIGHT_TASKS_';

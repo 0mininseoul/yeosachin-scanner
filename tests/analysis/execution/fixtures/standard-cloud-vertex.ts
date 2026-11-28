@@ -21,15 +21,29 @@ export class ApiError extends Error {
     readonly status: number;
     constructor(info: ApiErrorInfo) { super(info.message); this.name = 'ApiError'; this.status = info.status; }
 }
-type Generation = Parameters<typeof syntheticGeneration>[0] & { config: { abortSignal?: AbortSignal } };
+type Generation = Parameters<typeof syntheticGeneration>[0] & { model?: string; config: { abortSignal?: AbortSignal } };
 
-export function cloudStandardVertexDelayMs(input: Generation): number {
+// PublisherModel model_invocation_latencies (total, global), 2026-11-25
+// 03:07:30–04:16:10 KST. The QA transport already executes the application
+// reservations and authorization, so Plus models only the provider-side mean.
+const plusProviderMeanMs: Readonly<Record<string, number | undefined>> = Object.freeze({
+    'gemini-3.7-flash': 23_878,
+    'gemini-3.1-flash-lite': 3_510,
+    'gemini-3-flash-preview': 5_523,
+});
+
+export function cloudStandardVertexDelayMs(input: Generation, plan = process.env.DEV_STANDARD_QA_PLAN): number {
     const stage = standardModelStage(input);
     // B-lite is precheckout, before the analysis seat is acquired. Its measured
     // latency is unknown; the fixture runs the real preflight work with no artificial delay.
     if (stage === 'preview') return 0;
     const observed = standardObservedModelMs[stage];
     if (observed === undefined) throw new Error('CLOUD_SYNTHETIC_VERTEX_UNCALIBRATED_STAGE');
+    if (plan === 'plus') {
+        const providerMean = plusProviderMeanMs[input.model ?? ''];
+        if (typeof providerMean !== 'number') throw new Error('CLOUD_SYNTHETIC_VERTEX_UNCALIBRATED_MODEL');
+        return providerMean;
+    }
     // The six-order launch candidate used the same recovery-stress multiplier.
     return observed * standardRecoveryDelayScale;
 }

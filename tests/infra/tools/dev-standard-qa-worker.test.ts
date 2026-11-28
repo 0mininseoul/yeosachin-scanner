@@ -55,6 +55,18 @@ it('runs the Plus rehearsal with the unexpanded paid worker limits', () => {
     }
 });
 
+it('limits the Plus expansion comparison to an explicitly scoped paid QA worker', () => {
+    const { environment } = qaWorkerDeployment('paid', wave, 'plus', true);
+    const env = { ...settings('paid', 'plus'), ...environment };
+    expect(qaWorkerConfig(env).role).toBe('paid');
+    expect(env.PAID_STANDARD_VERTEX_CAPACITY_MODE).toBe('expanded128');
+    expect(env.PAID_STANDARD_PROCESS_FEATURE_SLOTS).toBe('5');
+    expect(() => qaWorkerConfig({ ...env, DEV_STANDARD_QA_PLUS_EXPANDED: undefined })).toThrow('CONFIG_REJECTED');
+    expect(() => qaWorkerConfig({ ...env, K_SERVICE: 'analysis-paid-worker' })).toThrow('CONFIG_REJECTED');
+    expect(() => qaWorkerDeployment('preflight', wave, 'plus', true)).toThrow();
+    expect(() => qaWorkerDeployment('paid', wave, 'standard', true)).toThrow();
+});
+
 it('pins each role to the Dev project, queue, OIDC audience, resource buckets and existing machine identity', async () => {
     for (const role of ['preflight', 'paid'] as const) {
         const env = settings(role);

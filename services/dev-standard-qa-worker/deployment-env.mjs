@@ -19,11 +19,12 @@ const paidRefs = {
     ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY: 'dev-live-r2-writer-secret-access-key:1',
 };
 
-export function qaWorkerDeployment(role, wave, plan = 'standard') {
+export function qaWorkerDeployment(role, wave, plan = 'standard', expandPlus = false) {
     if (!['paid', 'preflight'].includes(role) || typeof wave !== 'string' || !/^[a-f0-9]{64}$/.test(wave))
         throw new Error('Expected a QA worker role and 64-character lowercase wave digest.');
     if (!['standard', 'plus'].includes(plan)) throw new Error('Unknown QA plan.');
     const paid = role === 'paid';
+    if (expandPlus && (!paid || plan !== 'plus')) throw new Error('Expected the paid Plus QA worker.');
     const name = 'dev-standard-qa-' + role;
     const origin = 'https://' + name + '-' + projectNumber + '.' + location + '.run.app';
     const invoker = 'dev-live-' + role + '-invoker@' + project + '.iam.gserviceaccount.com';
@@ -32,6 +33,7 @@ export function qaWorkerDeployment(role, wave, plan = 'standard') {
         GOOGLE_CLOUD_PROJECT: project, GOOGLE_CLOUD_LOCATION: 'global',
         DEV_STANDARD_QA_PROJECT_NUMBER: projectNumber, DEV_STANDARD_QA_WAVE: wave, ANALYSIS_WORKLOAD_ROLE: role,
         ...(plan === 'plus' ? { DEV_STANDARD_QA_PLAN: plan } : {}),
+        ...(expandPlus ? { DEV_STANDARD_QA_PLUS_EXPANDED: 'true' } : {}),
         NEXT_PUBLIC_SUPABASE_URL: 'https://bgamojfpkxnnumfvkron.supabase.co', NEXT_PUBLIC_APP_URL: 'https://dev.yeosachin.com',
         ANALYSIS_V2_ADMISSION_ENABLED: 'true', PREFLIGHT_ACCESS_MODE: 'production',
         ANALYSIS_V2_WORKER_ENABLED: String(paid), ANALYSIS_V2_TASKS_ENABLED: String(paid), PREFLIGHT_TASKS_ENABLED: String(!paid),
@@ -62,7 +64,8 @@ export function qaWorkerDeployment(role, wave, plan = 'standard') {
         [p + 'PROJECT']: project, [p + 'LOCATION']: location, [p + 'QUEUE']: queueName(role, wave),
         [p + 'SERVICE_ACCOUNT_EMAIL']: invoker, [p + 'CALLER_AUTH_MODE']: 'adc', [p + 'OIDC_AUDIENCE']: origin,
         [p + 'TARGET_URL']: origin + '/api/analysis/' + (paid ? 'v2' : 'preflight') + '/worker',
-        ...(paid && plan === 'standard' ? { PAID_STANDARD_PROCESS_FEATURE_SLOTS: '5', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' } : {}),
+        ...(paid && (plan === 'standard' || expandPlus)
+            ? { PAID_STANDARD_PROCESS_FEATURE_SLOTS: '5', PAID_STANDARD_VERTEX_CAPACITY_MODE: 'expanded128' } : {}),
     };
     return { environment, secretRefs: { ...commonRefs, ...(paid ? paidRefs : {}) } };
 }
@@ -71,5 +74,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const [role, section] = process.argv.slice(2);
     if (process.argv.length !== 4 || !['environment', 'secretRefs'].includes(section))
         throw new Error('Usage: deployment-env.mjs paid|preflight environment|secretRefs');
-    console.log(JSON.stringify(qaWorkerDeployment(role, process.env.DEV_STANDARD_QA_WAVE, process.env.DEV_STANDARD_QA_PLAN)[section], null, 2));
+    console.log(JSON.stringify(qaWorkerDeployment(role, process.env.DEV_STANDARD_QA_WAVE, process.env.DEV_STANDARD_QA_PLAN,
+        process.env.DEV_STANDARD_QA_PLUS_EXPANDED === 'true')[section], null, 2));
 }
