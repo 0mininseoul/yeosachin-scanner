@@ -119,6 +119,22 @@ it('carries the source count only for a cross-count adopted relationship run', a
 });
 
 describe('fail closed', () => {
+    it.each([
+        ['57014', 'canceling statement due to statement timeout', 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_STATEMENT_TIMEOUT'],
+        ['57014', 'canceling statement due to user request', 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR'],
+        ['42501', 'permission denied', 'ANALYSIS_V2_PROVIDER_RUN_ADOPTION_PERSISTENCE_ERROR'],
+    ])('classifies lookup failure %s without opening the fallback', async (code, message, expected) => {
+        const rpc = vi.fn().mockResolvedValue({ data: null, error: { code, message } });
+        const fallback = vi.fn();
+        await expect(bindAdoptedProviderRunOrFallback({
+            adoptionStore: createAnalysisV2ProviderRunAdoptionStore({ rpc }),
+            identity,
+            fallback,
+        })).rejects.toThrow(`${expected}: resolve failed (${code}).`);
+        expect(rpc).toHaveBeenCalledOnce();
+        expect(fallback).not.toHaveBeenCalled();
+    });
+
     it('returns null instead of opening a global cache lookup', async () => {
         const rpc = vi.fn().mockResolvedValue({ data: null, error: null });
         await expect(
