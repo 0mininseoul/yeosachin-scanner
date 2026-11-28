@@ -569,12 +569,15 @@ it('publishes simultaneous paid Standard requests through one database and queue
             await maintenance.stop();
             const ownerReads = await observer.finish();
             if (productionPaid) {
-                expect(approvedOwners.size).toBe(admitted.length);
-                for (const owners of [expandedOwners, logicalLeaseOwners, dispatchAuthorizedOwners]) {
-                    expect(owners.size).toBe(admitted.length);
-                    expect(admitted.every(({ requestId }) => owners.has(requestId))).toBe(true);
+                const standardCapacityOwners = [approvedOwners, expandedOwners, logicalLeaseOwners, dispatchAuthorizedOwners];
+                for (const owners of standardCapacityOwners) {
+                    if (sharedPaidPlan === 'standard') {
+                        expect(owners.size).toBe(admitted.length);
+                        expect(admitted.every(({ requestId }) => owners.has(requestId))).toBe(true);
+                    } else {
+                        expect(owners.size).toBe(0);
+                    }
                 }
-                expect(admitted.every(({ requestId }) => approvedOwners.has(requestId))).toBe(true);
                 // Owner page rendering uses the test React bundle.
                 vi.stubEnv('NODE_ENV', 'test');
             }
