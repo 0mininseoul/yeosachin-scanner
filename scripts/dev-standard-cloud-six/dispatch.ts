@@ -6,7 +6,11 @@ import { supabaseAdmin } from '@/lib/supabase/admin';
 import { preflightStore as store, type PreflightSupabaseClient } from '@/lib/services/analysis/preflight';
 import { preflightTargetInputHash } from '@/lib/services/analysis/preflight-identity';
 import { enqueuePreflightTask } from '@/lib/services/analysis/preflight-tasks';
-import { admitAndAdvanceEarlybirdFulfillment } from '@/lib/services/earlybird/fulfillment-store';
+import {
+    admitAndAdvanceEarlybirdFulfillment,
+    advanceAdmittedEarlybirdFulfillment,
+    earlybirdFulfillmentStore,
+} from '@/lib/services/earlybird/fulfillment-store';
 import { target } from '../../tests/analysis/execution/fixtures/standard-providers';
 import { dbOrigin, origin, project, region, taskPath, type QaRole } from '../../services/dev-standard-qa-worker/scope';
 import { queueName } from '../../services/dev-standard-qa-worker/queue-name.mjs';
@@ -102,6 +106,42 @@ async function storeOwnerChoice(wave: string, row: Buyer, publicKey: string) {
     await store.setExclusion({ preflightId: row.preflight_id!, userId: row.owner_id,
         decision: 'skip', excludedInstagramId: null }, { client: client as unknown as PreflightSupabaseClient });
 }
+async function advanceOrder(wave: string, row: Buyer) {
+    if (!row.order_id) throw new Error('SIX_DRIVER_ORDERS_INCOMPLETE');
+    const scope = await rpc('dev_cloud_six_scope_v1', { p_wave: wave, p_owner_id: row.owner_id, p_order_id: row.order_id });
+    if (scope !== row.slot) throw new Error('SIX_DRIVER_ORDER_SCOPE');
+    // Recovery advances an already-admitted order. Do not reacquire its admission locks on every capacity check.
+    const identity = plusTwoSeats ? await earlybirdFulfillmentStore.admit(row.order_id) : null;
+    const maxAttempts = plusRehearsal ? 226 : 8;
+    let observedWaiting = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const { nextAction: action } = identity
+            ? await advanceAdmittedEarlybirdFulfillment(identity)
+            : await admitAndAdvanceEarlybirdFulfillment(row.order_id);
+        if (attempt === 1 || action !== 'wait_for_capacity' || !observedWaiting) {
+            console.log(JSON.stringify({ slot: row.slot, admission: action, attempt }));
+        }
+        if (action === 'wait_for_capacity') observedWaiting = true;
+        if (['wait_for_fresh_admission', 'monitor_analysis', 'completed'].includes(action)) return;
+        if (action !== 'retry_handoff' && action !== 'wait_for_capacity') {
+            throw new Error('SIX_DRIVER_ADMISSION_' + action.toUpperCase());
+        }
+        if (attempt === maxAttempts) throw new Error('SIX_DRIVER_PENDING_' + action.toUpperCase());
+        await sleep(action === 'wait_for_capacity' ? (plusRehearsal ? 20_000 : 5_000) : Math.min(500 * attempt, 5_000));
+    }
+}
+
+async function resumeWaitingOrder(wave: string) {
+    const rows = await participants(wave);
+    const waiting = rows.find(row => row.slot === 3);
+    if (!rows.every(row => row.order_id)
+        || !rows.filter(row => row.slot !== 3).every(row => row.request_id && ['processing', 'completed'].includes(row.request_status ?? ''))
+        || !waiting || waiting.order_status !== 'paid' || waiting.preflight_status !== 'ready' || waiting.request_id) {
+        throw new Error('SIX_DRIVER_WAITING_RESUME_SCOPE');
+    }
+    await allSlots([waiting], row => advanceOrder(wave, row));
+}
+
 async function begin(wave: string) {
     const rows=await participants(wave);
     if (!rows.every(r=>r.preflight_id && (r.preflight_status==='ready' || (r.order_id && r.preflight_status==='consumed'))))
@@ -118,32 +158,17 @@ async function begin(wave: string) {
     } else await allSlots(rows, recordOrder);
     const ordered=await participants(wave);
     if (!ordered.every(r=>r.order_id)) throw new Error('SIX_DRIVER_ORDERS_INCOMPLETE');
-    await allSlots(ordered,async row=>{
-        let observedWaiting = false;
-        const scope=await rpc('dev_cloud_six_scope_v1',{p_wave:wave,p_owner_id:row.owner_id,p_order_id:row.order_id});
-        if (scope!==row.slot) throw new Error('SIX_DRIVER_ORDER_SCOPE');
-        const maxAttempts = plusRehearsal ? 226 : 8;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const admitted = await admitAndAdvanceEarlybirdFulfillment(row.order_id!);
-            const action = admitted.nextAction;
-            if (attempt === 1 || action !== 'wait_for_capacity' || !observedWaiting) {
-                console.log(JSON.stringify({ slot: row.slot, admission: action, attempt }));
-            }
-            if (action === 'wait_for_capacity') observedWaiting = true;
-            if (['wait_for_fresh_admission', 'monitor_analysis', 'completed'].includes(action)) return;
-            if (action !== 'retry_handoff' && action !== 'wait_for_capacity') {
-                throw new Error('SIX_DRIVER_ADMISSION_' + action.toUpperCase());
-            }
-            if (attempt === maxAttempts) throw new Error('SIX_DRIVER_PENDING_' + action.toUpperCase());
-            await sleep(action === 'wait_for_capacity' ? (plusRehearsal ? 20_000 : 5_000) : Math.min(500 * attempt, 5_000));
-        }
-    });
+    await allSlots(ordered, row => advanceOrder(wave, row));
 }
 async function run() {
     const role=process.env.ANALYSIS_WORKLOAD_ROLE;
     if (role!=='preflight' && role!=='paid') throw new Error('SIX_DRIVER_ROLE_REJECTED');
     const wave=checkEnvironment(role);
-    if (role==='preflight') await prepare(wave);
+    const resumeSlot = process.env.DEV_STANDARD_QA_RESUME_WAITING_SLOT;
+    if (resumeSlot !== undefined) {
+        if (role !== 'paid' || !plusTwoSeats || resumeSlot !== '3') throw new Error('SIX_DRIVER_WAITING_RESUME_SCOPE');
+        await resumeWaitingOrder(wave);
+    } else if (role==='preflight') await prepare(wave);
     else await begin(wave);
 }
 void run().catch(e=>{console.error(reason(e));process.exitCode=1;});
