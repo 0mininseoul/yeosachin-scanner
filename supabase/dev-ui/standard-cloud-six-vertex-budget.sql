@@ -47,6 +47,11 @@ BEGIN
        OR public.dev_cloud_six_scope_v1(p_wave,NULL,NULL,p_order_id::uuid,p_run_id::uuid) IS NULL
        OR NOT EXISTS(SELECT FROM public.analysis_pipeline_jobs j WHERE j.request_id=p_run_id::uuid AND j.status='processing'
             AND j.lease_expires_at>clock_timestamp()) THEN RAISE EXCEPTION 'DEV_CLOUD_SIX_CLAIM_REQUIRED'; END IF;
+    IF NOT pg_catalog.pg_try_advisory_xact_lock(
+        pg_catalog.hashtextextended('dev-cloud-six:vertex-budget:'||p_wave,0)
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE='55P03', MESSAGE='DEV_CLOUD_SIX_VERTEX_BUDGET_BUSY';
+    END IF;
     PERFORM set_config('dev_cloud_six.budget_wave',p_wave,true);
     RETURN QUERY SELECT * FROM dev_cloud_six.reserve_vertex_ai_budget(p_reservation_key,p_run_id,p_order_id,p_operation_key,p_attempt,
         p_route,p_model_name,p_location,p_input_tokens,p_max_output_tokens,p_estimated_cost_usd,p_day_key,

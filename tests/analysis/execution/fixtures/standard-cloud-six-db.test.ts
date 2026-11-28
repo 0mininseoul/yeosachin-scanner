@@ -76,6 +76,17 @@ native('fences six machine buyers, one Standard purchase each and expanded worke
             p_input_tokens:100,p_max_output_tokens:512,p_estimated_cost_usd:0.1,p_day_key:null,p_per_run_limit_usd:1,
             p_per_order_limit_usd:1,p_daily_limit_usd:0.15};
         const reserve=()=>admin.rpc('reserve_dev_cloud_six_vertex_budget_v1',budgetArgs);
+        const busy = await db.transaction(async (tx) => {
+            await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('dev-cloud-six:vertex-budget:'||$1,0))", [wave]);
+            const result = await Promise.race([
+                reserve(),
+                new Promise<null>(resolve => setTimeout(() => resolve(null), 500)),
+            ]);
+            expect((await tx.query('SELECT count(*)::int AS n FROM dev_cloud_six.simulated_vertex_reservations')).rows)
+                .toEqual([{ n: 0 }]);
+            return result;
+        });
+        expect(busy?.error).toMatchObject({ code: '55P03', message: 'DEV_CLOUD_SIX_VERTEX_BUDGET_BUSY' });
         const first=await reserve();
         expect(first.error).toBeNull();
         expect(await reserve()).toEqual(first);
